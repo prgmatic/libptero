@@ -24,7 +24,12 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
     debug.init();
 
     print("Libptero", .{});
-    print("Mips Ver:", .{n64.io.mips.getVersion()});
+    print("Mips Ver:", .{n64.cpu.getVersion()});
+
+    n64.cpu.cp0.init();
+    const mem_size = n64.io.rdram.init();
+    
+    print("Mem Size:", .{mem_size});
     
     while(true) { }
     unreachable;
