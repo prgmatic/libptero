@@ -35,8 +35,8 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
     // DMA loader program into RDRAM
     const dram_addr = 0x80000000 + 0x4000;
     const cart_addr = @intFromPtr(&loader) - 0xA0000000;
-    n64.io.pi.start_dma(dram_addr, cart_addr, loader.len);
-    n64.io.pi.wait();
+    n64.io.pi.startDmaWrite(dram_addr, cart_addr, loader.len);
+    n64.io.pi.waitDma();
     
     // Loader is a PIC program. update the values in got section
     const got_len: *u32 = @ptrFromInt(dram_addr + loader.len - 4);

@@ -1,7 +1,7 @@
 const pi = @import("pi.zig");
 
-pub var write_len: *volatile u32 = @ptrFromInt(0xb3ff0014);
-pub var buffer: *[0x80]u32 = @ptrFromInt(0xb3ff0020);
+pub var write_len: *volatile u32 = @ptrFromInt(0xB3FF0014);
+pub var buffer:       *[0x80]u32 = @ptrFromInt(0xB3FF0020);
 
 pub fn print(fmt: []const u8) void {
     const len = fmt.len;
@@ -16,8 +16,8 @@ pub fn print(fmt: []const u8) void {
         val |= @as(u32, ptr[i * 4 + 2]) << 8;
         val |= @as(u32, ptr[i * 4 + 3]);
         buffer[i] = val;
-        pi.wait();
+        pi.waitIo();
     }
     write_len.* = fmt.len;
-    pi.wait();
+    pi.waitIo();
 }
