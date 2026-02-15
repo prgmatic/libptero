@@ -19,11 +19,21 @@ SECTIONS {
 	_dmem_start = .;
 	KEEP(*(.stage1.pre))
 	KEEP(*(.stage1))
+	*(.text*)
+	*(.rodata*)
         . = ALIGN(8);
 	_dmem_end = .;
     } > DMEM
 
     .text.rom 0xB0001040 + SIZEOF ( .text.dmem ) : {
-
+	KEEP(*(.loader))
     } > ROM
+
+    /DISCARD/ :
+    {
+	*(.eh_frame*)
+	*(.reginfo)
+	*(.MIPS.abiflags)
+	*(.got)
+    }
 }
