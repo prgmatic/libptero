@@ -32,15 +32,21 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
 
     print("Mem Size:", .{mem_size});
 
-    const dram_addr = 0x80000000 + 0x2000;
+    // DMA loader program into RDRAM
+    const dram_addr = 0x80000000 + 0x4000;
     const cart_addr = @intFromPtr(&loader) - 0xA0000000;
     n64.io.pi.start_dma(dram_addr, cart_addr, loader.len);
     n64.io.pi.wait();
-    const reloc_addr = dram_addr + loader.len - 8;
-    const reloc_ptr: *u32 = @ptrFromInt(reloc_addr + 0x20000000);
-    reloc_ptr.* = dram_addr;
+    
+    // Loader is a PIC program. update the values in got section
+    const got_len: *u32 = @ptrFromInt(dram_addr + loader.len - 4);
+    const reloc_addr = dram_addr + loader.len - got_len.*;
+    const reloc_ptr: [*]u32 = @ptrFromInt(reloc_addr + 0x20000000);
+    const count = got_len.* / 4;
+    for(0..count) |i| {
+        reloc_ptr[i] += 0x4000;
+    }
 
-    // asm volatile ("" ::: .{.memory = true});
     asm volatile (
         \\ move $t9, %[addr]
         \\ move $sp, $t9

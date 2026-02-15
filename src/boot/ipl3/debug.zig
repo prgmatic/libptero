@@ -16,7 +16,7 @@ pub fn dmemPrint(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
-fn dmemFormat(buffer: []u32, fmt: []const u8, args: anytype) []u32 {
+fn dmemFormat(buffer: []u32, comptime fmt: []const u8, args: anytype) []u32 {
     var buf_index: usize = 0;
 
     // Write string in 4-byte aligned chunks, pad with spaces if needed

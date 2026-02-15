@@ -10,20 +10,24 @@ SECTIONS {
 
     .text : {
         KEEP(*(.loader))
-	*(.text)
-    } > RAM
-
-    .data : {
+	*(.text*)
 	*(.data*)
-    } > RAM
-
-    .rodata : {
 	*(.rodata*)
     } > RAM
 
-    .got : {
-	_gp = . + 0x7ff0;
+    .got : ALIGN(8) {
+	__got_start = .;
 	*(.got)
+	. = ALIGN(8);
+
+	_gp = . + 0x7ff0;
+    } > RAM
+
+    .got_idx : {
+
+	LONG(0);
+	__got_end = .;
+	LONG(__got_end - __got_start);
     } > RAM
 
     /DISCARD/ :

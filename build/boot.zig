@@ -6,7 +6,7 @@ pub fn build(b: *std.Build, target: ?std.Build.ResolvedTarget, n64_module: *std.
     options.addOption([]const u8, "title", title);
 
     const ipl3 = b.addExecutable(.{
-        .name = "stage1.elf",
+        .name = "ipl3.elf",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/boot/ipl3/ipl3.zig"),
             .optimize = optimization,
