@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
     const target = b.resolveTargetQuery(target_query);
     
     const n64_module = b.createModule(.{
-        .root_source_file = b.path("src/n64/root.zig"),
+        .root_source_file = b.path("src/n64/n64.zig"),
     });
 
     @import("build/boot.zig").build(b, target, n64_module, title);
