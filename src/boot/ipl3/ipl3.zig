@@ -47,6 +47,10 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
         reloc_ptr[i] += 0x4000;
     }
 
+    // Clear Data/Inst Cache
+    n64.cpu.cache.invadidateDataAll();
+    n64.cpu.cache.invadidateDataAll();
+
     asm volatile (
         \\ move $t9, %[addr]
         \\ move $sp, $t9

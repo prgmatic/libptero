@@ -1,4 +1,5 @@
 pub const cp0 = @import("cpu/cp0.zig");
+pub const cache = @import("cpu/cache.zig");
 
 var version: *volatile u32 = @ptrFromInt(0xA4300004);
 
