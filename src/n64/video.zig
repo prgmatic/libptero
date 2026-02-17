@@ -25,19 +25,19 @@ const ScanMode = enum(u1) {
 };
 
 pub const Control = packed struct(u32){
-    unused0: u15 = 0,
-    deDitherEnable: bool = false,
-    pixelAdvance: u4 = 0b011,
-    killWe: bool = false,
-    unused1: bool = false,
-    antiAliasMode: AntiAliasMode = .Always,
-    testMode: bool = false,
+    color_depth: ColorDepth = .RGBA5551,
+    gamma_dither_enable: bool = false,
+    gamma_enable: bool = false,
+    divot_enable: bool = false,
+    vbus_clock_enable: bool = false, // WARNING: Don't enable, can damage console
     serrate: bool = false,
-    vbusClockEnable: bool = false, // WARNING: Don't enable, can damage console
-    divonEnable: bool = false,
-    gammaEnable: bool = true,
-    gammaDitherEnable: bool = true,
-    colorDepth: ColorDepth = .RGBA5553,
+    test_mode: bool = false,
+    anti_alias_mode: AntiAliasMode = .Resample,
+    unused1: bool = false,
+    kill_we: bool = false,
+    pixel_advance: u4 = 0b011,
+    de_dither_enable: bool = false,
+    unused0: u15 = 0,
 };
 
 pub const AntiAliasMode = enum(u2) {
@@ -50,10 +50,32 @@ pub const AntiAliasMode = enum(u2) {
 pub const ColorDepth = enum(u2) {
     Off,
     Unused,
-    RGBA5553,
+    RGBA5551,
     RGBA8888,
 };
 
+
+pub const VideoInitOptions = struct {
+    tv: TvType = .Ntsc,
+    scan: ScanMode = .Progressive,
+    width: u12 = 320,
+    anti_alias_mode: AntiAliasMode = .Resample,
+    de_dither_enabled: bool = false,
+    x_scale: u32 = 0x200,
+    y_scale: u32 = 0x400,
+};
+
+pub fn init(options: VideoInitOptions) void {
+    setTvType(options.tv, options.scan);
+    vi_width.* = options.width;
+    vi_x_scale.* = options.x_scale;
+    vi_y_scale.* = options.y_scale;
+
+    control.* = .{
+        .anti_alias_mode = options.anti_alias_mode,
+        .de_dither_enable = options.de_dither_enabled,
+    };
+}
 
 pub fn setTvType(tv: TvType, scan: ScanMode) void {
     vi_v_int.* = 2;
