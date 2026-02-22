@@ -20,12 +20,17 @@ pub const Rgba5551 = packed struct(u16) {
 
     pub fn fromU8s(r: u8, g: u8, b: u8, a: u8) Rgba5551 {
         return .{
-            .r = r >> 3,
-            .g = g >> 3,
-            .b = b >> 3,
-            .a = a >> 7,
+            .r = @intCast(r >> 3),
+            .g = @intCast(g >> 3),
+            .b = @intCast(b >> 3),
+            .a = @intCast(a >> 7),
         };
     }
 };
 
-
+pub const Rgba32 = packed struct(u32) {
+    a: u8,
+    b: u8,
+    g: u8,
+    r: u8,
+};

@@ -63,6 +63,8 @@ pub const VideoInitOptions = struct {
     de_dither_enabled: bool = false,
     x_scale: u32 = 0x200,
     y_scale: u32 = 0x400,
+    color_depth: ColorDepth = .RGBA5551,
+    gamma_enabled: bool = false,
 };
 
 pub fn init(options: VideoInitOptions) void {
@@ -74,6 +76,8 @@ pub fn init(options: VideoInitOptions) void {
     control.* = .{
         .anti_alias_mode = options.anti_alias_mode,
         .de_dither_enable = options.de_dither_enabled,
+        .color_depth = options.color_depth,
+        .gamma_enable = options.gamma_enabled,
     };
 }
 
