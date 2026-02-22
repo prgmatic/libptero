@@ -51,3 +51,22 @@ fn joybusTest() void {
         print("U: {} D: {} L: {} R: {}\n", .{s.d_up, s.d_down, s.d_left, s.d_right});
     }
 }
+
+fn showColors() void {
+    const width: u32 = 640 / 2;
+    const height: u32 = 480 / 2;
+
+    n64.video.init(.{
+        .tv = .Ntsc,
+        .width = width,
+        .color_depth = .RGBA8888,
+        .gamma_enabled = true,
+    });
+    // n64.video.vi_x_scale.* = 0x800;
+    // n64.video.vi_y_scale.* = 0x800;
+    
+    const frame_buffer: *[width * height]Rgba32 = @ptrFromInt(0xA0100000);
+    n64.video.frame_buffer_addr.* = @intFromPtr(frame_buffer);
+
+    @import("simple-scene.zig").render(frame_buffer, width, height);
+}

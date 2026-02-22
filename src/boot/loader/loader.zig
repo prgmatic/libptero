@@ -96,5 +96,15 @@ fn loadElf(b: [] u8) void {
     }
 
     print(b, "Elf Loaded\n", .{});
-}
 
+    n64.serial.pifTerminateBoot();
+    n64.cpu.cache.clear();
+
+    asm volatile (
+        \\ li $sp, 0x803FFFF0
+        \\ li $t9, 0x80000400
+        \\ jr $t9
+    );
+
+    unreachable;
+}
