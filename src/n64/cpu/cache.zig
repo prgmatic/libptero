@@ -40,8 +40,13 @@ inline fn cacheOp(op: CacheOp, cache_type: CacheType, addr: u32, length: usize) 
     }
 }
 
+pub fn clear() void {
+    invadidateDataAll();
+    invadidateInstAll();
+}
+
 pub fn invalidateDataRange(addr: u32, len: u32) void {
-    cacheOp(.HitWriteback, .Data, addr, len);
+    cacheOp(.HitInvalidate, .Data, addr, len);
 }
 pub fn invadidateDataAll() void {
     cacheOp(.IndexInvalidate, .Data, io.kseg0_addr, 0x2000);

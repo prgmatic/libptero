@@ -35,6 +35,7 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
     // DMA loader program into RDRAM
     const dram_addr = 0x80000000 + 0x4000;
     const cart_addr = @intFromPtr(&loader) - 0xA0000000;
+    print("DMA: ", .{dram_addr, cart_addr, loader.len});
     n64.io.pi.startDmaWrite(dram_addr, cart_addr, loader.len);
     n64.io.pi.waitDma();
     
@@ -54,7 +55,7 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
     asm volatile (
         \\ move $t9, %[addr]
         \\ move $sp, $t9
-        \\ addiu $sp, $t9, 0x2000
+        \\ addiu $sp, $t9, 0x4000
         \\ li $gp, 0x80D8
         \\ jr $t9
         \\ nop

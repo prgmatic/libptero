@@ -3,3 +3,4 @@ pub const io = @import("io.zig");
 pub const cpu = @import("cpu.zig");
 pub const video = @import("video.zig");
 pub const color = @import("color.zig");
+pub const serial = @import("serial.zig");
