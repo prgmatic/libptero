@@ -5,23 +5,29 @@ const n64 = @import("n64");
 const loader align(8) linksection(".loader") = @embedFile("loader.bin").*;
 comptime { _ = @import("header.zig"); }
 
-export fn prestage() linksection(".stage1.pre") callconv(.naked) noreturn {
+const dmem_ptr: [*]volatile u32 = @ptrFromInt(0xA4000000);
+
+export fn prestage() linksection(".stage1.pre") callconv(.c) noreturn {
   asm volatile (
         \\ .set noreorder
-        \\ .word 0x3044d236
+        \\ .word 0x3044D236
 
-        // sp = 0xa4000ff0
-        \\ lui $sp, 0xa400
-        \\ ori $sp, $sp, 0x0ff0
+        // Compile boot flags into single
+        // 32bit register
+        \\ sll $s3, $s3, 24
+        \\ sll $s4, $s4, 16
+        \\ sll $s5, $s5, 8
 
-        // LLVM wants to pad this inline asm
-        // Add a nop so we fall through to stage1
-        \\ nop
-    );
-    unreachable;
-}
+        \\ or $s3, $s3, $s4
+        \\ or $s3, $s3, $s5
 
-export fn stage1() linksection(".stage1") callconv(.c) noreturn {
+        // Save boot flags to DMEM
+        \\ li $t0, 0xA4000008
+        \\ sw $s3, 0($t0)
+
+        \\ li $sp, 0xA4000FF0
+    ); 
+    
     debug.init();
 
     print("Libptero", .{});
@@ -29,11 +35,13 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
 
     n64.cpu.cp0.init();
     const mem_size = n64.io.rdram.init();
+    dmem_ptr[0] = mem_size;
+    dmem_ptr[2] |= if(n64.cpu.isIQue()) 1 else 0;
 
     print("Mem Size:", .{mem_size});
 
     // DMA loader program into RDRAM
-    const dram_addr = 0x80000000 + 0x4000;
+    const dram_addr = 0x80000000 + mem_size - loader.len;
     const cart_addr = @intFromPtr(&loader) - 0xA0000000;
     print("DMA: ", .{dram_addr, cart_addr, loader.len});
     n64.io.pi.startDmaWrite(dram_addr, cart_addr, loader.len);
@@ -45,7 +53,7 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
     const reloc_ptr: [*]u32 = @ptrFromInt(reloc_addr + 0x20000000);
     const count = got_len.* / 4;
     for(0..count) |i| {
-        reloc_ptr[i] += 0x4000;
+        reloc_ptr[i] += mem_size - loader.len;
     }
 
     // Clear Data/Inst Cache
@@ -55,7 +63,7 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
     asm volatile (
         \\ move $t9, %[addr]
         \\ move $sp, $t9
-        \\ addiu $sp, $t9, 0x4000
+        \\ addiu $sp, $t9, -0x10
         \\ li $gp, 0x80D8
         \\ jr $t9
         \\ nop
@@ -63,6 +71,6 @@ export fn stage1() linksection(".stage1") callconv(.c) noreturn {
         : [addr] "r" (dram_addr)
         : .{.r28 = true, .r29 = true, .r25 = true }
     );
-    
     unreachable;
 }
+

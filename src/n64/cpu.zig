@@ -7,7 +7,7 @@ pub fn getVersion() u32 {
     return version.*;
 }
 
-pub fn isIQue() u32 {
+pub fn isIQue() bool {
     return (version.* & 0xF0) == 0xB0;
 }
 

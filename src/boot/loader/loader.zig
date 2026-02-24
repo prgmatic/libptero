@@ -1,7 +1,6 @@
 const std = @import("std");
 const n64 = @import("n64");
 const elf = @import("elf.zig");
-const Rgba5551 = n64.color.Rgba5551;
 
 
 export fn __start() linksection(".loader") callconv(.c) noreturn {
@@ -9,11 +8,17 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
     print(&b, "We can now format strings\n", .{});
     print(&b, "CPU Cycle Count: {d}\n", .{n64.cpu.cp0.regRead(.Count)});
 
-    showColors();
     loadElf(&b);
 
-    while (true) { }
-    undefined;
+    n64.serial.pifTerminateBoot();
+    n64.cpu.cache.clear();
+
+    asm volatile (
+        \\ li $t9, 0x8000400
+        \\ jr $t9
+    );
+
+    unreachable;
 }
 
 fn print(buf: []u8, comptime fmt: []const u8, args: anytype) void {
@@ -91,35 +96,5 @@ fn loadElf(b: [] u8) void {
     }
 
     print(b, "Elf Loaded\n", .{});
-
-    n64.serial.pifTerminateBoot();
-    n64.cpu.cache.clear();
-
-    asm volatile (
-        \\ li $t9, 0x8000400
-        \\ jr $t9
-    );
-
-    unreachable;
 }
 
-fn showColors() void {
-    const width: u32 = 320;
-    const height: u32 = 240;
-
-    n64.video.init(.{
-        .tv = .Ntsc,
-        .width = width
-    });
-    
-    const frame_buffer: *[width * height]Rgba5551 = @ptrFromInt(0xA0100000);
-    n64.video.frame_buffer_addr.* = @intFromPtr(frame_buffer);
-
-    for(0..height) |y| {
-        for(0..width) |x| {
-            const idx = y * width + x;
-            const r: u32 = @intCast((x * 255) / width - 1);
-            frame_buffer[idx] = Rgba5551.fromU32(r << 16 | 0x2B40);
-        }
-    }
-}
