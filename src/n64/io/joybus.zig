@@ -1,5 +1,5 @@
 const JoypadState = @import("joypad.zig").JoypadState;
-const serial = @import("../serial.zig");
+const serial = @import("serial.zig");
 
 const pif_ram_size = 64;
 

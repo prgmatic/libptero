@@ -10,7 +10,7 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
 
     loadElf(&b);
 
-    n64.serial.pifTerminateBoot();
+    n64.io.serial.pifTerminateBoot();
     n64.cpu.cache.clear();
 
     asm volatile (

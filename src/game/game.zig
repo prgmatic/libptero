@@ -51,11 +51,11 @@ fn joybusTest() void {
     
 
     n64.cpu.cache.writebackData(&joybus_buffer);
-    n64.serial.waitDmaIo();
+    n64.io.serial.waitDmaIo();
     joybus_buffer.sendCommand();
-    n64.serial.waitDmaIo();
+    n64.io.serial.waitDmaIo();
     joybus_buffer.readFromPif();
-    n64.serial.waitDmaIo();
+    n64.io.serial.waitDmaIo();
     n64.cpu.cache.invalidateData(&joybus_buffer);
     
     print("port 0 {x}\n", .{t.port0.response});
