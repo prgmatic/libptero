@@ -42,7 +42,7 @@ pub fn clear() void {
     invadidateInstAll();
 }
 
-pub fn invalidateData(comptime data: anytype) void {
+pub fn invalidateData(data: anytype) void {
     const len = @sizeOf(@TypeOf(data.*));
     cacheOp(.HitInvalidate, .Data, @intFromPtr(data), len);
 }
@@ -53,7 +53,7 @@ pub fn invalidateDataRange(addr: u32, len: u32) void {
 pub fn invadidateDataAll() void {
     cacheOp(.IndexInvalidate, .Data, io.kseg0_addr, 0x2000);
 }
-pub fn writebackData(comptime data: anytype) void {
+pub fn writebackData(data: anytype) void {
     const len = @sizeOf(@TypeOf(data.*));
     cacheOp(.HitWriteback, .Data, @intFromPtr(data), len);
 }
