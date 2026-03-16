@@ -17,24 +17,21 @@ const CacheType = enum(u8) {
 
 const instruction_cache_size = 16 * 1024;
 const instruction_cache_linesize = 32;
-const cache_data_size = 8 * 1024;
-const cache_data_linesize = 16;
+const data_cache_size = 8 * 1024;
+const data_cache_linesize = 16;
 
 inline fn cacheOp(op: CacheOp, cache_type: CacheType, addr: u32, length: usize) void {
-    const line_size: u32 = if(cache_type == .Instruction) instruction_cache_linesize else instruction_cache_linesize;
+    const line_size: u32 = if(cache_type == .Instruction) instruction_cache_linesize else data_cache_linesize;
     const op_code = (@intFromEnum(op) << 2) | @intFromEnum(cache_type);
     
-    const aligned_int = addr & ~(line_size - 1);
-    // Extend length to include initial misalignment
-    const count = length + (addr - aligned_int);
-
-    var i: usize = 0;
-    while (i < count) : (i += line_size) {
+    var currentAddr = addr;
+    const targetAddr = addr + length;
+    while (currentAddr <= targetAddr) : (currentAddr += line_size) {
         asm volatile (
             \\ cache %[op], 0(%[addr])
             :
             : [op] "i" (op_code),
-              [addr] "r" (addr + i),
+              [addr] "r" (currentAddr),
             : .{ .memory = true }
         );
     }
@@ -45,11 +42,20 @@ pub fn clear() void {
     invadidateInstAll();
 }
 
+pub fn invalidateData(comptime data: anytype) void {
+    const len = @sizeOf(@TypeOf(data.*));
+    cacheOp(.HitInvalidate, .Data, @intFromPtr(data), len);
+}
+
 pub fn invalidateDataRange(addr: u32, len: u32) void {
     cacheOp(.HitInvalidate, .Data, addr, len);
 }
 pub fn invadidateDataAll() void {
     cacheOp(.IndexInvalidate, .Data, io.kseg0_addr, 0x2000);
+}
+pub fn writebackData(comptime data: anytype) void {
+    const len = @sizeOf(@TypeOf(data.*));
+    cacheOp(.HitWriteback, .Data, @intFromPtr(data), len);
 }
 pub fn writebackDataRange(addr: u32, len: u32) void {
     cacheOp(.HitWriteback, .Data, addr, len);
