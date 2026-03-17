@@ -17,6 +17,12 @@ pub fn pifTerminateBoot() void {
     ptr.* = 0x8;
 }
 
+pub fn setPifJoybusMode() void {
+    waitDmaIo();
+    const ptr: *volatile u32 = @ptrFromInt(0xBFC00000 + 0x7FC);
+    ptr.* = 0x1;
+}
+
 
 pub fn waitDmaIo() void {
     while(registers.status.is_dma_busy or registers.status.is_io_busy) { }

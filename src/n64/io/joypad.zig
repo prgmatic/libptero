@@ -1,6 +1,58 @@
+const std = @import("std");
+const JoybusBuffer = @import("joybus.zig").JoybusBuffer;
+const Commands = @import("joybus.zig").Commands;
+const serial = @import("serial.zig");
+const cache = @import("../cpu/cache.zig");
+
+
+var joybus_buffer: *JoybusBuffer = undefined;
+pub var joypads: []Joypad = undefined;
+
+pub fn init(allocator: std.mem.Allocator) void {
+    // TODO: catch this?
+    joybus_buffer = allocator.create(JoybusBuffer) catch undefined;
+    joypads = allocator.alloc(Joypad, 4) catch undefined;
+
+    serial.setPifJoybusMode();
+    updateJoypadStatus();
+}
+
+pub fn updateJoypadStatus() void {
+    const cmd = joybus_buffer.roundTripCommand(Commands.CommandIdentifyAll);
+    
+    joypads[0].style = getJoypadStyle(cmd.port0.response.id);
+    joypads[1].style = getJoypadStyle(cmd.port1.response.id);
+    joypads[2].style = getJoypadStyle(cmd.port2.response.id);
+    joypads[3].style = getJoypadStyle(cmd.port3.response.id);
+}
+
+fn getJoypadStyle(deviceId: u16) JoypadStyle {
+    return switch (deviceId) {
+        0x0 => .None,
+        0x500 => .N64,
+        0x200 => .Mouse,
+        0x900 => .GameCube,
+        else => .Unknown
+    };
+}
+
+pub fn pollJoypadState() void {
+    const cmd = joybus_buffer.roundTripCommand(Commands.CommandJoypadStateAll);
+
+    joypads[0].state = cmd.port0.response;
+    joypads[1].state = cmd.port1.response;
+    joypads[2].state = cmd.port2.response;
+    joypads[3].state = cmd.port3.response;
+}
+
+pub const Joypad = struct {
+    style: JoypadStyle,
+    state: JoypadState,
+};
 
 pub const JoypadStyle = enum(u8) {
     None,
+    Unknown,
     N64,
     GameCube,
     Mouse
@@ -17,22 +69,22 @@ pub const JoypadAccessory = enum(u8) {
 };
 
 pub const JoypadState = packed struct {
-    y_axis: i8,
-    x_axis: i8,
-    c_right: bool,
-    c_left: bool,
-    c_down: bool,
-    c_up: bool,
-    rt: bool,
-    lt: bool, 
-    unused : bool,
-    reset : bool,
-    d_right : bool,
-    d_left : bool,
-    d_down : bool,
-    d_up : bool,
-    start : bool,
-    z : bool,
-    b : bool,
-    a : bool,
+    y_axis: i8 = 0,
+    x_axis: i8 = 0,
+    c_right: bool = false,
+    c_left: bool = false,
+    c_down: bool = false,
+    c_up: bool = false,
+    rt: bool = false,
+    lt: bool = false, 
+    unused : bool = false,
+    reset : bool = false,
+    d_right : bool = false,
+    d_left : bool = false,
+    d_down : bool = false,
+    d_up : bool = false,
+    start : bool = false,
+    z : bool = false,
+    b : bool = false,
+    a : bool = false,
 };

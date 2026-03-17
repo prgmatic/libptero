@@ -1,13 +1,20 @@
 const JoypadState = @import("joypad.zig").JoypadState;
 const serial = @import("serial.zig");
+const cache = @import("../cpu/cache.zig");
 
 const pif_ram_size = 64;
 
+
 pub const Commands = struct {
 
-    pub const CommandIdentify = JoybusCommand(u24, @as(u8, 0));
+    pub const CommandIdentify = JoybusCommand(packed struct {
+        extra: u8,
+        id: u16,
+    }, @as(u8, 0));
     pub const CommandJoypadState = JoybusCommand(JoypadState, @as(u8, 1));
+
     pub const CommandIdentifyAll = JoybusCommandAllPorts(CommandIdentify);
+    pub const CommandJoypadStateAll = JoybusCommandAllPorts(CommandJoypadState);
 
     fn JoybusCommand(comptime Response: type, comptime commandValue: anytype) type {
         const Command = @TypeOf(commandValue);
@@ -43,6 +50,21 @@ pub const JoybusBuffer = struct {
 
     pub fn readFromPif(b: *JoybusBuffer) void {
         serial.dmaPifToDram(@intFromPtr(b));
+    }
+
+    pub fn roundTripCommand(b: *JoybusBuffer, CmdType: type) *CmdType {
+        const cmd = b.as(CmdType);
+        cmd.* = .{};
+        // TODO: remove this
+        b.memory[15] = 1;
+        
+        cache.writebackData(b);
+        b.sendCommand();
+        serial.waitDmaIo();
+        b.readFromPif();
+        serial.waitDmaIo();
+        cache.invalidateData(b);
+        return cmd;
     }
 
     pub inline fn as(b: *JoybusBuffer, comptime t: type) *t {
