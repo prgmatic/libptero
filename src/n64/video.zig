@@ -1,17 +1,17 @@
-pub const control:           *volatile Control = @ptrFromInt(0xA4400000);
-pub const frame_buffer_addr: *volatile u32     = @ptrFromInt(0xA4400004);
-pub const vi_width:          *volatile u32     = @ptrFromInt(0xA4400008);
-pub const vi_v_int:          *volatile u32     = @ptrFromInt(0xA440000C);
-pub const vi_v_current:      *volatile u32     = @ptrFromInt(0xA4400010);
-pub const vi_burst:          *volatile u32     = @ptrFromInt(0xA4400014);
-pub const vi_v_total:        *volatile u32     = @ptrFromInt(0xA4400018);
-pub const vi_h_total:        *volatile u32     = @ptrFromInt(0xA440001C);
-pub const vi_h_total_leap:   *volatile u32     = @ptrFromInt(0xA4400020);
-pub const vi_h_video:        *volatile u32     = @ptrFromInt(0xA4400024);
-pub const vi_v_video:        *volatile u32     = @ptrFromInt(0xA4400028);
-pub const vi_v_burst:        *volatile u32     = @ptrFromInt(0xA440002C);
-pub const vi_x_scale:        *volatile u32     = @ptrFromInt(0xA4400030);
-pub const vi_y_scale:        *volatile u32     = @ptrFromInt(0xA4400034);
+const control:           *volatile Control = @ptrFromInt(0xA4400000);
+const frame_buffer_addr: *volatile u32     = @ptrFromInt(0xA4400004);
+const vi_width:          *volatile u32     = @ptrFromInt(0xA4400008);
+const vi_v_int:          *volatile u32     = @ptrFromInt(0xA440000C);
+const vi_v_current:      *volatile u32     = @ptrFromInt(0xA4400010);
+const vi_burst:          *volatile u32     = @ptrFromInt(0xA4400014);
+const vi_v_total:        *volatile u32     = @ptrFromInt(0xA4400018);
+const vi_h_total:        *volatile u32     = @ptrFromInt(0xA440001C);
+const vi_h_total_leap:   *volatile u32     = @ptrFromInt(0xA4400020);
+const vi_h_video:        *volatile u32     = @ptrFromInt(0xA4400024);
+const vi_v_video:        *volatile u32     = @ptrFromInt(0xA4400028);
+const vi_v_burst:        *volatile u32     = @ptrFromInt(0xA440002C);
+const vi_x_scale:        *volatile u32     = @ptrFromInt(0xA4400030);
+const vi_y_scale:        *volatile u32     = @ptrFromInt(0xA4400034);
 
 var detected_tv_type: TvType = .Ntsc;
 
@@ -27,7 +27,7 @@ const ScanMode = enum(u1) {
 };
 
 pub const Control = packed struct(u32){
-    color_depth: ColorDepth = .RGBA5551,
+    color_depth: ColorDepth = .Rgba5551,
     gamma_dither_enable: bool = false,
     gamma_enable: bool = false,
     divot_enable: bool = false,
@@ -52,29 +52,29 @@ pub const AntiAliasMode = enum(u2) {
 pub const ColorDepth = enum(u2) {
     Off,
     Unused,
-    RGBA5551,
-    RGBA8888,
+    Rgba5551,
+    Rgba32,
 };
 
 
 pub const VideoInitOptions = struct {
     tv: TvType = .Ntsc,
     scan: ScanMode = .Progressive,
-    width: u12 = 320,
+    width: u32 = 320,
+    height: u32 = 240,
     anti_alias_mode: AntiAliasMode = .Resample,
     de_dither_enabled: bool = false,
-    x_scale: u32 = 0x200,
-    y_scale: u32 = 0x400,
-    color_depth: ColorDepth = .RGBA5551,
+    color_depth: ColorDepth = .Rgba5551,
     gamma_enabled: bool = false,
 };
+
 
 pub fn init(options: VideoInitOptions) void {
     setTvType(options.tv, options.scan);
     vi_width.* = options.width;
-    vi_x_scale.* = options.x_scale;
-    vi_y_scale.* = options.y_scale;
-
+    vi_x_scale.* = (1024 * options.width + 320) / 640;
+    vi_y_scale.* = (1024 * options.height + 120) / 240;
+    
     control.* = .{
         .anti_alias_mode = options.anti_alias_mode,
         .de_dither_enable = options.de_dither_enabled,
@@ -121,3 +121,6 @@ pub fn setTvType(tv: TvType, scan: ScanMode) void {
     };
 }
 
+pub fn setFrameBuffer(buffer_addr: u32) void {
+    frame_buffer_addr.* = buffer_addr;
+}

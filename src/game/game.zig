@@ -1,8 +1,7 @@
 const n64 = @import("n64");
 const std = @import("std");
-const Rgba5551 = n64.color.Rgba5551;
+const Rgba32 = n64.color.Rgba32;
 const print = n64.debug.print;
-var str_buffer: [256]u8 = undefined;
 var sys_buffer: [1024]u8 = undefined;
 var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&sys_buffer);
 const allocator = fixed_buffer_allocator.allocator();
@@ -12,7 +11,7 @@ export fn __start() linksection(".text.startup") void {
     n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
     showColors();
-    joybusTest();
+    // joybusTest();
 
     while(true){}
 }
@@ -24,17 +23,19 @@ fn showColors() void {
 
     n64.video.init(.{
         .tv = .Ntsc,
-        .width = width
+        .width = width,
+        .height = height,
+        .color_depth = .Rgba32,
     });
     
-    const frame_buffer: *[width * height]Rgba5551 = @ptrFromInt(0xA0100000);
-    n64.video.frame_buffer_addr.* = @intFromPtr(frame_buffer);
+    const frame_buffer: *[width * height]Rgba32 = @ptrFromInt(0xA0100000);
+    n64.video.setFrameBuffer(@intFromPtr(frame_buffer));
 
     for(0..height) |y| {
         for(0..width) |x| {
             const idx = y * width + x;
-            const r: u32 = @intCast((x * 255) / width - 1);
-            frame_buffer[idx] = Rgba5551.fromU32(r << 16 | 0x2B40);
+            const r: u8 = @intCast((x * 255) / width - 1);
+            frame_buffer[idx] = .{ .r = r, .g = 0x2B, .b = 0x40, .a = 0xFF };
         }
     }
 }
