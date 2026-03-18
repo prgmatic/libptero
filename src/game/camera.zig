@@ -53,6 +53,7 @@ pub const Camera = struct {
         
         // update aspectRatio
         c.aspectRatio = fWidth / fHeight;
+        c.aspectRatio /= 2;
         c.viewportWidth = c.viewportHeight * c.aspectRatio;
 
         const viewportU = Vector3.init(c.viewportWidth, 0, 0);

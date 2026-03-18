@@ -33,6 +33,5 @@ pub fn render(frameBuffer: []Rgba32, width: u32, height: u32) void {
     cameraOptions.aspectRatio = aspect;
     const cam = Camera.init(Vector3.init(-2, 2, 2), cameraOptions);
     renderer.renderImage(&cam, &spheres, frameBuffer);
-    
 }
 

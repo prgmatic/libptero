@@ -11,14 +11,14 @@ export fn __start() linksection(".text.startup") void {
     n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
     showColors();
-    // joybusTest();
 
     while(true){}
 }
 
 
+
 fn showColors() void {
-    const width: u32 = 320;
+    const width: u32 = 640;
     const height: u32 = 240;
 
     n64.video.init(.{
@@ -26,47 +26,11 @@ fn showColors() void {
         .width = width,
         .height = height,
         .color_depth = .Rgba32,
+        .scan = .Progressive,
+        .gamma_enabled = true,
     });
     
     const frame_buffer: *[width * height]Rgba32 = @ptrFromInt(0xA0100000);
     n64.video.setFrameBuffer(@intFromPtr(frame_buffer));
-
-    for(0..height) |y| {
-        for(0..width) |x| {
-            const idx = y * width + x;
-            const r: u8 = @intCast((x * 255) / width - 1);
-            frame_buffer[idx] = .{ .r = r, .g = 0x2B, .b = 0x40, .a = 0xFF };
-        }
-    }
-}
-
-fn joybusTest() void {
-    n64.io.joypad.init(allocator);
-    n64.io.joypad.updateJoypadStatus();
-    
-    print("Joypad status {s}\n", .{@tagName(n64.io.joypad.joypads[0].style)});
-    while(true){
-        n64.io.joypad.pollJoypadState();
-        const s = n64.io.joypad.joypads[0].state;
-        print("U: {} D: {} L: {} R: {}\n", .{s.d_up, s.d_down, s.d_left, s.d_right});
-    }
-}
-
-fn showColors() void {
-    const width: u32 = 640 / 2;
-    const height: u32 = 480 / 2;
-
-    n64.video.init(.{
-        .tv = .Ntsc,
-        .width = width,
-        .color_depth = .RGBA8888,
-        .gamma_enabled = true,
-    });
-    // n64.video.vi_x_scale.* = 0x800;
-    // n64.video.vi_y_scale.* = 0x800;
-    
-    const frame_buffer: *[width * height]Rgba32 = @ptrFromInt(0xA0100000);
-    n64.video.frame_buffer_addr.* = @intFromPtr(frame_buffer);
-
     @import("simple-scene.zig").render(frame_buffer, width, height);
 }
