@@ -1,8 +1,9 @@
 const n64 = @import("n64");
 const std = @import("std");
-const Rgba32 = n64.color.Rgba32;
+const Rgba32 = n64.graphics.Rgba32;
+const Img32 = n64.graphics.Img32;
 const print = n64.debug.print;
-var sys_buffer: [1024]u8 = undefined;
+var sys_buffer: [1024 * 512]u8 = undefined;
 var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&sys_buffer);
 const allocator = fixed_buffer_allocator.allocator();
 
@@ -28,16 +29,17 @@ fn showColors() void {
         .color_depth = .Rgba32,
     });
     
-    const frame_buffer: *[width * height]Rgba32 = @ptrFromInt(0xA0100000);
-    n64.video.setFrameBuffer(@intFromPtr(frame_buffer));
+    var frame_buffer = Img32.init(allocator, width, height) catch undefined;
+    n64.video.setFrameBuffer(@intFromPtr(frame_buffer.pixel_data.ptr));
 
     for(0..height) |y| {
         for(0..width) |x| {
             const idx = y * width + x;
             const r: u8 = @intCast((x * 255) / width - 1);
-            frame_buffer[idx] = .{ .r = r, .g = 0x2B, .b = 0x40, .a = 0xFF };
+            frame_buffer.pixel_data[idx] = .{ .r = r, .g = 0x2B, .b = 0x40, .a = 0xFF };
         }
     }
+    n64.cpu.cache.writebackData(frame_buffer.pixel_data);
 }
 
 fn joybusTest() void {
