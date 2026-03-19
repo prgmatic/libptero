@@ -13,6 +13,7 @@ SECTIONS {
 	*(.text*)
 	*(.data*)
 	*(.rodata*)
+	*(.bss*)
     } > RAM
 
     .got : ALIGN(8) {

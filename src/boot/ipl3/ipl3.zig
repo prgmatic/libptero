@@ -29,16 +29,18 @@ export fn prestage() linksection(".stage1.pre") callconv(.c) noreturn {
     ); 
     
     debug.init();
-
+    
     print("Libptero", .{});
     print("Mips Ver:", .{n64.cpu.getVersion()});
 
     n64.cpu.cp0.init();
+
     const mem_size = n64.io.rdram.init();
+    print("Mem Size:", .{mem_size});
+    while (true) {}
     dmem_ptr[0] = mem_size;
     dmem_ptr[2] |= if(n64.cpu.isIQue()) 1 else 0;
 
-    print("Mem Size:", .{mem_size});
 
     // DMA loader program into RDRAM
     const dram_addr = 0x80000000 + mem_size - loader.len;

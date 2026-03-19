@@ -3,12 +3,12 @@ const std = @import("std");
 const Rgba32 = n64.graphics.Rgba32;
 const Img32 = n64.graphics.Img32;
 const print = n64.debug.print;
-var sys_buffer: [1024 * 512]u8 = undefined;
+var sys_buffer: [1024 * 2]u8 = undefined;
 var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&sys_buffer);
 const allocator = fixed_buffer_allocator.allocator();
 
 export fn __start() linksection(".text.startup") void {
-    n64.debug.init(.IsViewer);
+    n64.debug.init();
     n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
     showColors();
