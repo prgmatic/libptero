@@ -14,7 +14,7 @@ pub fn Image(comptime PixelFormat: type) type {
             return .{
                 .width = width,
                 .height = height,
-                .pixel_data = try allocator.alloc(PixelFormat, width * height)
+                .pixel_data = try allocator.alignedAlloc(PixelFormat, std.mem.Alignment.@"8", width * height)
             };
         }
 

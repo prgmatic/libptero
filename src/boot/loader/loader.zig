@@ -9,24 +9,27 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
     var fixed_buffer_alloc = std.heap.FixedBufferAllocator.init(&sys_buffer);
     n64.debug.init();
     n64.debug.initFmtBuffer(fixed_buffer_alloc.allocator());
-
-    print("We can now format strings\n", .{});
-    print("CPU Cycle Count: {d}\n", .{n64.cpu.cp0.regRead(.Count)});
-
-    loadElf();
+    
+    const entry = loadElf();
 
     n64.io.serial.pifTerminateBoot();
     n64.cpu.cache.clear();
+    print("Entry {x}\n", .{entry});
+    while (entry == 0) {}
 
     asm volatile (
-        \\ li $t9, 0x8000400
+        \\ move $t9, %[addr]
         \\ jr $t9
+        \\ nop
+        :
+        : [addr] "r" (entry)
+        : .{.r25 = true }
     );
 
     unreachable;
 }
 
-fn loadElf() void {
+fn loadElf() u32 {
     const elf_magic: u32 = 0x7F454C46;
     var elf_addr: u32 = 0xB0001000;
     var elf_found: bool = false;
@@ -42,18 +45,18 @@ fn loadElf() void {
     }
     if(!elf_found){
         print("No elf found :( \n)", .{});
-        return;
+        return 0;
     }
 
     const elf_type: *u32 = @ptrFromInt(elf_addr + 0x4);
     const elf64: bool = (elf_type.* >> 24) == 2;
     if(elf64) {
         print("64 bit currently supported\n", .{});
-        return;
+        return 0;
     }
     if(((elf_type.* >> 16) & 0xFF) == 1) {
         print("Little endian not supported\n", .{});
-        return;
+        return 0;
     }
 
     var elf_header: elf.ElfHeader32 align(8) = undefined;
@@ -66,7 +69,7 @@ fn loadElf() void {
     if(hdr_size & 1 == 1) hdr_size += 1;
     if(hdr_size > 1024) {
         print("Header was larger than 1024 bytes", .{});
-        return;
+        return 0;
     }
 
     var hdr: [1024]u8 = undefined;
@@ -96,5 +99,6 @@ fn loadElf() void {
     }
 
     print("Elf Loaded\n", .{});
+    return elf_header.entry_point;
 }
 

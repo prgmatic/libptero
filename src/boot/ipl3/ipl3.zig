@@ -52,23 +52,24 @@ export fn prestage() linksection(".stage1.pre") callconv(.c) noreturn {
     n64.io.pi.waitDma();
     
     // Loader is a PIC program. update the values in got section
-    const got_len: *u32 = @ptrFromInt(dram_addr + loader.len - 4);
+    pi.waitIo();
+    const got_len: *u32 = @ptrFromInt(dram_addr + 0x20000000 + loader.len - 4);
     const reloc_addr = dram_addr + loader.len - got_len.*;
-    const reloc_ptr: [*]u32 = @ptrFromInt(reloc_addr + 0x20000000);
     const count = got_len.* / 4;
+    const reloc_ptr: [*]u32 = @ptrFromInt(reloc_addr + 0x20000000);
     for(0..count) |i| {
+        pi.waitIo();
         reloc_ptr[i] += mem_size - loader.len;
     }
 
     // Clear Data/Inst Cache
     n64.cpu.cache.invadidateDataAll();
-    n64.cpu.cache.invadidateDataAll();
+    n64.cpu.cache.invadidateInstAll();
 
     asm volatile (
         \\ move $t9, %[addr]
-        \\ move $sp, $t9
         \\ addiu $sp, $t9, -0x10
-        \\ li $gp, 0x80D8
+        \\ li $gp, (_gp)
         \\ jr $t9
         \\ nop
         :

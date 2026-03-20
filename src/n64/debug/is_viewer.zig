@@ -5,7 +5,7 @@ var write_len: *volatile u32 = @ptrFromInt(0xB3FF0014);
 
 pub fn detect() bool {
     pi.waitIo();
-    buffer[0] = 0x1234678;
+    buffer[0] = 0x12345678;
     pi.waitIo();
     return buffer[0] == 0x12345678;
 }
