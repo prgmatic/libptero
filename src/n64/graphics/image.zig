@@ -25,5 +25,13 @@ pub fn Image(comptime PixelFormat: type) type {
         pub fn fill(self: *Self, color: PixelFormat) void {
             @memset(self.pixel_data, color);
         }
+        pub fn fillRegion(self: *Self, color: PixelFormat, x: u32, y: u32, width: u32, height: u32) void {
+            for(y..y+height) |yi| {
+                for(x..x+width) |xi| {
+                    const idx = yi * self.width + xi;
+                    self.pixel_data[idx] = color;
+                }
+            }
+        }
     };
 }
