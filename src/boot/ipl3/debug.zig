@@ -7,7 +7,7 @@ pub fn init() void {
 
 
 // For printing from ipl3 when in DMEM. DMEM can only do 32 bit writes.
-pub fn dmemPrint(comptime fmt: []const u8, args: anytype) void {
+pub fn dmemPrint(fmt: []const u8, args: []const u32) void {
     switch (n64.debug.current_backend) {
         .IsViewer => {
             const s = dmemFormat(n64.debug.is_viewer.buffer, fmt, args);
@@ -23,7 +23,7 @@ pub fn dmemPrint(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
-fn dmemFormat(buffer: []u32, comptime fmt: []const u8, args: anytype) []u32 {
+fn dmemFormat(buffer: []u32, fmt: []const u8, args: []const u32) []u32 {
     var buf_index: usize = 0;
 
     // Write string in 4-byte aligned chunks, pad with spaces if needed
@@ -43,7 +43,7 @@ fn dmemFormat(buffer: []u32, comptime fmt: []const u8, args: anytype) []u32 {
     }
 
     // Iterate over args tuple
-    inline for (args, 0..args.len) |x, arg_idx| {
+    for (args, 0..args.len) |x, arg_idx| {
         const val: u32 = x;
         var hex_high: u32 = 0;
         var hex_low: u32 = 0;
@@ -69,7 +69,7 @@ fn dmemFormat(buffer: []u32, comptime fmt: []const u8, args: anytype) []u32 {
         buffer[buf_index] = hex_low;
         buf_index += 1;
 
-        if (arg_idx < @typeInfo(@TypeOf(args)).@"struct".fields.len - 1) {
+        if (arg_idx < args.len - 1) {
             pi.waitIo();
             buffer[buf_index] = 0x20202020; // space separator
             buf_index += 1;

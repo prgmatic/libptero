@@ -1,6 +1,8 @@
 const debug = @import("debug.zig");
+const rdram = @import("rdram.zig");
 const print = debug.dmemPrint;
 const n64 = @import("n64");
+const pi = n64.io.pi;
 
 const loader align(8) linksection(".loader") = @embedFile("loader.bin").*;
 comptime { _ = @import("header.zig"); }
@@ -30,14 +32,14 @@ export fn prestage() linksection(".stage1.pre") callconv(.c) noreturn {
     
     debug.init();
     
-    print("Libptero", .{});
-    print("Mips Ver:", .{n64.cpu.getVersion()});
+    print("Libptero", &.{});
+    print("Mips Ver:", &.{n64.cpu.getVersion()});
 
     n64.cpu.cp0.init();
 
-    const mem_size = n64.io.rdram.init();
-    print("Mem Size:", .{mem_size});
-    while (true) {}
+    const mem_size = rdram.init();
+    print("Mem Size:", &.{mem_size});
+    
     dmem_ptr[0] = mem_size;
     dmem_ptr[2] |= if(n64.cpu.isIQue()) 1 else 0;
 
@@ -45,7 +47,7 @@ export fn prestage() linksection(".stage1.pre") callconv(.c) noreturn {
     // DMA loader program into RDRAM
     const dram_addr = 0x80000000 + mem_size - loader.len;
     const cart_addr = @intFromPtr(&loader) - 0xA0000000;
-    print("DMA: ", .{dram_addr, cart_addr, loader.len});
+    print("DMA: ", &.{dram_addr, cart_addr, loader.len});
     n64.io.pi.startDmaWrite(dram_addr, cart_addr, loader.len);
     n64.io.pi.waitDma();
     

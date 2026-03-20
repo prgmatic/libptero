@@ -1,5 +1,4 @@
 pub const pi = @import("io/pi.zig");
-pub const rdram = @import("io/rdram.zig");
 pub const joybus = @import("io/joybus.zig");
 pub const joypad = @import("io/joypad.zig");
 pub const serial = @import("io/serial.zig");
