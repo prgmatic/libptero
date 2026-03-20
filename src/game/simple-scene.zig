@@ -6,7 +6,7 @@ const objects = @import("objects.zig");
 const renderer = @import("renderer.zig");
 const MaterialType = @import("material.zig").MaterialType;
 const s = @import("objects.zig").Sphere.init;
-const Rgba32 = @import("n64").color.Rgba32;
+const Rgba32 = @import("n64").graphics.Rgba32;
 
 
 var cameraOptions = CameraOptions{

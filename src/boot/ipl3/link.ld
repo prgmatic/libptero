@@ -21,11 +21,12 @@ SECTIONS {
 	KEEP(*(.stage1))
 	*(.text*)
 	*(.rodata*)
+	*(.bss)
         . = ALIGN(8);
 	_dmem_end = .;
     } > DMEM
 
-    .text.rom 0xB0001040 + SIZEOF ( .text.dmem ) : {
+    .data.rom 0xB0001040 + SIZEOF ( .text.dmem ) : {
 	KEEP(*(.loader))
     } > ROM
 

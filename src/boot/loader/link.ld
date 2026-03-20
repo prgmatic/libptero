@@ -13,14 +13,13 @@ SECTIONS {
 	*(.text*)
 	*(.data*)
 	*(.rodata*)
+	*(.bss*)
     } > RAM
 
     .got : ALIGN(8) {
 	__got_start = .;
 	*(.got)
 	. = ALIGN(8);
-
-	_gp = . + 0x7ff0;
     } > RAM
 
     .got_idx : {

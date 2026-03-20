@@ -1,6 +1,8 @@
 const debug = @import("debug.zig");
+const rdram = @import("rdram.zig");
 const print = debug.dmemPrint;
 const n64 = @import("n64");
+const pi = n64.io.pi;
 
 const loader align(8) linksection(".loader") = @embedFile("loader.bin").*;
 comptime { _ = @import("header.zig"); }
@@ -29,42 +31,45 @@ export fn prestage() linksection(".stage1.pre") callconv(.c) noreturn {
     ); 
     
     debug.init();
-
-    print("Libptero", .{});
-    print("Mips Ver:", .{n64.cpu.getVersion()});
+    
+    print("Libptero", &.{});
+    print("Mips Ver:", &.{n64.cpu.getVersion()});
 
     n64.cpu.cp0.init();
-    const mem_size = n64.io.rdram.init();
+
+    const mem_size = rdram.init();
+    print("Mem Size:", &.{mem_size});
+    
     dmem_ptr[0] = mem_size;
     dmem_ptr[2] |= if(n64.cpu.isIQue()) 1 else 0;
 
-    print("Mem Size:", .{mem_size});
 
     // DMA loader program into RDRAM
     const dram_addr = 0x80000000 + mem_size - loader.len;
     const cart_addr = @intFromPtr(&loader) - 0xA0000000;
-    print("DMA: ", .{dram_addr, cart_addr, loader.len});
+    print("DMA: ", &.{dram_addr, cart_addr, loader.len});
     n64.io.pi.startDmaWrite(dram_addr, cart_addr, loader.len);
     n64.io.pi.waitDma();
     
     // Loader is a PIC program. update the values in got section
-    const got_len: *u32 = @ptrFromInt(dram_addr + loader.len - 4);
+    pi.waitIo();
+    const got_len: *u32 = @ptrFromInt(dram_addr + 0x20000000 + loader.len - 4);
     const reloc_addr = dram_addr + loader.len - got_len.*;
-    const reloc_ptr: [*]u32 = @ptrFromInt(reloc_addr + 0x20000000);
     const count = got_len.* / 4;
+    const reloc_ptr: [*]u32 = @ptrFromInt(reloc_addr + 0x20000000);
     for(0..count) |i| {
+        pi.waitIo();
         reloc_ptr[i] += mem_size - loader.len;
     }
 
     // Clear Data/Inst Cache
     n64.cpu.cache.invadidateDataAll();
-    n64.cpu.cache.invadidateDataAll();
+    n64.cpu.cache.invadidateInstAll();
 
     asm volatile (
         \\ move $t9, %[addr]
-        \\ move $sp, $t9
         \\ addiu $sp, $t9, -0x10
-        \\ li $gp, 0x80D8
+        \\ li $gp, (_gp)
         \\ jr $t9
         \\ nop
         :

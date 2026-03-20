@@ -22,8 +22,11 @@ SECTIONS {
 	*(.data*)
 	*(.sdata*)
 	*(.rodata*)
-	*(.bss*)
     } > RAM_BANK_0 AT > ROM
+
+    .bank0.bss : ALIGN(8) {
+	*(.bss*)
+    } > RAM_BANK_0
 
     /DISCARD/ :
     {

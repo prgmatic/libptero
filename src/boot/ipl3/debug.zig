@@ -1,22 +1,29 @@
 const n64 = @import("n64");
+const pi = n64.io.pi;
 
 pub fn init() void {
-    n64.debug.init(.IsViewer);
+    n64.debug.init();
 }
 
 
 // For printing from ipl3 when in DMEM. DMEM can only do 32 bit writes.
-pub fn dmemPrint(comptime fmt: []const u8, args: anytype) void {
+pub fn dmemPrint(fmt: []const u8, args: []const u32) void {
     switch (n64.debug.current_backend) {
         .IsViewer => {
-            const s = dmemFormat(n64.io.is_viewer.buffer, fmt, args);
-            n64.io.is_viewer.write_len.* = s.len * 4;
+            const s = dmemFormat(n64.debug.is_viewer.buffer, fmt, args);
+            n64.debug.is_viewer.flushBuffer(s.len * 4);
         },
+        .Sc64 => {
+            @memset(n64.debug.sc64.data_buffer, 0);
+            const s = dmemFormat(n64.debug.sc64.data_buffer, fmt, args);
+            n64.debug.sc64.flushBuffer(s.len * 4);
+        },
+        
         else => {},
     }
 }
 
-fn dmemFormat(buffer: []u32, comptime fmt: []const u8, args: anytype) []u32 {
+fn dmemFormat(buffer: []u32, fmt: []const u8, args: []const u32) []u32 {
     var buf_index: usize = 0;
 
     // Write string in 4-byte aligned chunks, pad with spaces if needed
@@ -28,13 +35,15 @@ fn dmemFormat(buffer: []u32, comptime fmt: []const u8, args: anytype) []u32 {
                 const c: u32 = if (idx < fmt.len) @intCast(fmt[idx]) else 0x20; // pad with space
                 chunk |= c << @intCast((3 - j) * 8);
             }
+            
+            pi.waitIo();
             buffer[buf_index] = chunk;
             buf_index += 1;
         }
     }
 
     // Iterate over args tuple
-    inline for (args, 0..args.len) |x, arg_idx| {
+    for (args, 0..args.len) |x, arg_idx| {
         const val: u32 = x;
         var hex_high: u32 = 0;
         var hex_low: u32 = 0;
@@ -53,18 +62,22 @@ fn dmemFormat(buffer: []u32, comptime fmt: []const u8, args: anytype) []u32 {
             hex_low |= c << @intCast((3 - i) * 8); // pack into 4 bytes
         }
 
+        pi.waitIo();
         buffer[buf_index] = hex_high;
         buf_index += 1;
+        pi.waitIo();
         buffer[buf_index] = hex_low;
         buf_index += 1;
 
-        if (arg_idx < @typeInfo(@TypeOf(args)).@"struct".fields.len - 1) {
+        if (arg_idx < args.len - 1) {
+            pi.waitIo();
             buffer[buf_index] = 0x20202020; // space separator
             buf_index += 1;
         }
     }
 
     // Append newline at the end
+    pi.waitIo();
     buffer[buf_index] = 0x2020200A;
     buf_index += 1;
     return buffer[0..buf_index];

@@ -3,7 +3,7 @@ const Camera = @import("camera.zig").Camera;
 const Vector3 = @import("vector3.zig");
 const Ray = @import("ray.zig");
 const objects = @import("objects.zig");
-const Rgba32 = @import("n64").color.Rgba32;
+const Rgba32 = @import("n64").graphics.Rgba32;
 
 var objs: []objects.Sphere = undefined;
 

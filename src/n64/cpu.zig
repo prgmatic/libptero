@@ -1,6 +1,8 @@
 pub const cp0 = @import("cpu/cp0.zig");
 pub const cache = @import("cpu/cache.zig");
+pub const pi = @import("io/pi.zig");
 
+const mode:    *volatile u32 = @ptrFromInt(0xA4300000);
 var version: *volatile u32 = @ptrFromInt(0xA4300004);
 
 pub fn getVersion() u32 {
@@ -14,4 +16,16 @@ pub fn isIQue() bool {
 pub fn waitCycles(cycles: u32) void {
     const start = cp0.regRead(.Count);
     while (cp0.regRead(.Count) - start < cycles) {}
+}
+
+pub fn enableRepeatMode(repeatCount: u7) void {
+    mode.* = 0x100 | @as(u32 ,@intCast(repeatCount - 1));
+}
+
+pub fn setUpperMode() void {
+    mode.* = 0x2000;
+}
+
+pub fn clearUpperMode() void {
+    mode.* = 0x1000;
 }

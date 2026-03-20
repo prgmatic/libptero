@@ -12,13 +12,13 @@ const pif_ram_addr = 0x1FC007C0;
 pub fn pifTerminateBoot() void {
     // Notify the PIF that the boot process is finished. If this is not written,
     // the PIF will halt the CPU after 5 seconds.
-    waitDmaIo();
+    waitIo();
     const ptr: *volatile u32 = @ptrFromInt(0xBFC00000 + 0x7FC);
     ptr.* = 0x8;
 }
 
 pub fn setPifJoybusMode() void {
-    waitDmaIo();
+    waitIo();
     const ptr: *volatile u32 = @ptrFromInt(0xBFC00000 + 0x7FC);
     ptr.* = 0x1;
 }

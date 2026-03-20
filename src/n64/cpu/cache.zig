@@ -43,8 +43,20 @@ pub fn clear() void {
 }
 
 pub fn invalidateData(data: anytype) void {
-    const len = @sizeOf(@TypeOf(data.*));
-    cacheOp(.HitInvalidate, .Data, @intFromPtr(data), len);
+    switch (@typeInfo(@TypeOf(data))) {
+        .pointer => |ptr| {
+            if (ptr.size == .one) {
+                const len = @sizeOf(ptr.child);
+                cacheOp(.HitInvalidate, .Data, @intFromPtr(data), len);
+            } else if (ptr.size == .slice) {
+                const len = data.len * @sizeOf(ptr.child);
+                cacheOp(.HitInvalidate, .Data, @intFromPtr(data.ptr), len);
+            } else {
+                @compileError("Unsupported pointer type (expected *T or []T)");
+            }
+        },
+        else => @compileError("Expected pointer or slice"),
+    }
 }
 
 pub fn invalidateDataRange(addr: u32, len: u32) void {
@@ -54,8 +66,20 @@ pub fn invadidateDataAll() void {
     cacheOp(.IndexInvalidate, .Data, io.kseg0_addr, 0x2000);
 }
 pub fn writebackData(data: anytype) void {
-    const len = @sizeOf(@TypeOf(data.*));
-    cacheOp(.HitWriteback, .Data, @intFromPtr(data), len);
+    switch (@typeInfo(@TypeOf(data))) {
+        .pointer => |ptr| {
+            if (ptr.size == .one) {
+                const len = @sizeOf(ptr.child);
+                cacheOp(.HitWriteback, .Data, @intFromPtr(data), len);
+            } else if (ptr.size == .slice) {
+                const len = data.len * @sizeOf(ptr.child);
+                cacheOp(.HitWriteback, .Data, @intFromPtr(data.ptr), len);
+            } else {
+                @compileError("Unsupported pointer type (expected *T or []T)");
+            }
+        },
+        else => @compileError("Expected pointer or slice"),
+    }
 }
 pub fn writebackDataRange(addr: u32, len: u32) void {
     cacheOp(.HitWriteback, .Data, addr, len);
