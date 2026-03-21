@@ -6,13 +6,18 @@ const print = n64.debug.print;
 var sys_buffer: [1024 * 512]u8 = undefined;
 var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&sys_buffer);
 const allocator = fixed_buffer_allocator.allocator();
+pub const panic = std.debug.FullPanic(n64.crash);
+
+export fn interruptHandler(frame: *n64.debug.TrapFrame) callconv(.c) noreturn {
+    n64.debug.exepction.exceptionHandler(frame);
+}
 
 export fn __start() linksection(".text.startup") void {
     n64.debug.init();
     n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
     showColors();
-    // joybusTest();
+    forceCrash();
 
     while(true){}
 }
@@ -42,14 +47,8 @@ fn showColors() void {
     n64.cpu.cache.writebackData(frame_buffer.pixel_data);
 }
 
-fn joybusTest() void {
-    n64.io.joypad.init(allocator);
-    n64.io.joypad.updateJoypadStatus();
-    
-    print("Joypad status {s}\n", .{@tagName(n64.io.joypad.joypads[0].style)});
-    while(true){
-        n64.io.joypad.pollJoypadState();
-        const s = n64.io.joypad.joypads[0].state;
-        print("U: {} D: {} L: {} R: {}\n", .{s.d_up, s.d_down, s.d_left, s.d_right});
-    }
+fn forceCrash() void {
+    print("Force a crash?\n", .{});
+    const null_ptr: *volatile u32 = @ptrFromInt(4);
+    _ = null_ptr.*;
 }

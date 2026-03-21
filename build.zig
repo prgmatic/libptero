@@ -36,6 +36,7 @@ pub fn build(b: *std.Build) void {
     });
 
     elf.setLinkerScript(b.path("src/game/link.ld"));
+    elf.addAssemblyFile(b.path("src/game/interrupt.S"));
 
     // Save elf atrifact at prefix (no bin sub directory)
     const elf_install = b.addInstallArtifact(elf, .{

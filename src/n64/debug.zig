@@ -1,5 +1,7 @@
 pub const sc64 = @import("debug/sc64.zig");
 pub const is_viewer = @import("debug/is_viewer.zig");
+pub const exepction = @import("debug/exception.zig");
+pub const TrapFrame = @import("debug/cpu_state.zig").TrapFrame;
 
 const std = @import("std");
 const io = @import("io.zig");
