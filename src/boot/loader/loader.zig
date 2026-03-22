@@ -13,7 +13,7 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
     const entry = loadElf();
 
     n64.io.serial.pifTerminateBoot();
-    n64.cpu.cache.clear();
+    n64.cache.clear();
     print("Entry {x}\n", .{entry});
     while (entry == 0) {}
 

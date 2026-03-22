@@ -63,8 +63,7 @@ export fn prestage() linksection(".stage1.pre") callconv(.c) noreturn {
     }
 
     // Clear Data/Inst Cache
-    n64.cpu.cache.invadidateDataAll();
-    n64.cpu.cache.invadidateInstAll();
+    n64.cache.clear();
 
     asm volatile (
         \\ move $t9, %[addr]

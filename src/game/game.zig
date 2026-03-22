@@ -44,7 +44,7 @@ fn showColors() void {
             frame_buffer.pixel_data[idx] = .{ .r = r, .g = 0x2B, .b = 0x40, .a = 0xFF };
         }
     }
-    n64.cpu.cache.writebackData(frame_buffer.pixel_data);
+    n64.cache.writebackData(frame_buffer.pixel_data);
 }
 
 fn forceCrash() void {

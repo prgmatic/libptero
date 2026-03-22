@@ -1,5 +1,4 @@
 pub const cp0 = @import("cpu/cp0.zig");
-pub const cache = @import("cpu/cache.zig");
 pub const pi = @import("io/pi.zig");
 
 const mode:    *volatile u32 = @ptrFromInt(0xA4300000);
