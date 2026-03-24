@@ -12,7 +12,7 @@ pub fn isIQue() bool {
     return (version.* & 0xF0) == 0xB0;
 }
 
-pub fn waitCycles(cycles: u32) void {
+pub fn waitCycles(cycles: u64) void {
     const start = cp0.regRead(.Count);
     while (cp0.regRead(.Count) - start < cycles) {}
 }

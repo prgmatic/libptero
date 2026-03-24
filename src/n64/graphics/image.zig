@@ -6,15 +6,19 @@ pub fn Image(comptime PixelFormat: type) type {
     return struct{
         const Self = @This();
 
-        width: u32,
-        height: u32,
+        width: u16,
+        height: u16,
         pixel_data: []PixelFormat,
 
-        pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) !Self {
+        pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Self {
+            const w: u32 = width;
+            const h: u32 = height;
+            const buffer_len = w * h;
             return .{
                 .width = width,
                 .height = height,
-                .pixel_data = try allocator.alignedAlloc(PixelFormat, std.mem.Alignment.@"8", width * height)
+                // TODO: Configurable alignment
+                .pixel_data = try allocator.alignedAlloc(PixelFormat, std.mem.Alignment.@"32", buffer_len)
             };
         }
 

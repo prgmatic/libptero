@@ -11,10 +11,10 @@ pub const Rgba5551 = packed struct(u16) {
 
     pub fn fromU32(value: u32) Rgba5551 {
         return .{
-            .r = @intCast((value >> 19) & 0x1F), 
-            .g = @intCast((value >> 11) & 0x1F),
-            .b = @intCast((value >> 3)  & 0x1F), 
-            .a = @intCast((value >> 31) & 1),
+            .r = @intCast((value >> 27) & 0x1F), 
+            .g = @intCast((value >> 19) & 0x1F),
+            .b = @intCast((value >> 11)  & 0x1F), 
+            .a = @intCast((value >> 7) & 1),
         };
     }
 
