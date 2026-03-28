@@ -11,8 +11,6 @@
 #define STACK_FPR    (STACK_FC31+4)
 
 .section .interrupt.text, "ax"
-.set noreorder
-.set noat
 
     .org 0
     j interrupt_handler
@@ -25,13 +23,14 @@
 
 .org 0x180
 interrupt_handler: 
+    .set noreorder
+    .set noat
     addiu sp, -EXC_STACK_SIZE
 
     # Save caller-saved GPRs only. These are the only
     # ones required to call a C function from assembly, as the
     # others (callee-saved) would be preserved by the function 
     # itself, if modified.
-    li t0, 0x11111111
     sd $1, (STACK_GPR+ 1*8)(sp) # AT
     .set at
     sd $2, (STACK_GPR+ 2*8)(sp) # V0
@@ -71,10 +70,70 @@ interrupt_handler:
     and t1, ~(SR_IE | SR_EXL | SR_KSU)
     mtc0 t1, C0_SR
 
-    mfc0 t7, C0_CAUSE
-    sw t7, STACK_CR(sp)
+    # WARNING: after clearing the EXL bit, it is now possible to trigger
+    # reentrant exceptions (and not only crashing ones).
+    # Avoid using k0/k1 from now on,
+    # as they would get corrupted by a reentrant exception.
 
+#define cause t8
 
+    mfc0 cause, C0_CAUSE
+    sw cause, STACK_CR(sp)
+
+    andi t0, cause, 0xff
+    beqz t0, interrupt
+    nop
+
+exception:
+    move a0, sp
+    jal finalize_exception_frame
+    nop
+    j interruptHandler
+
+interrupt:
+    # Enable FPU
+    mfc0 t0, C0_SR
+    or t0, SR_CU1
+    mtc0 t0, C0_SR
+
+    jal __MI_handler
+    nop
+    
+end_interrupt_gpr:
+    .set noat
+    lw t0, STACK_SR(sp)
+    mtc0 t0, C0_SR
+
+    ld t0, STACK_LO(sp)
+    ld t1, STACK_HI(sp)
+    lw t2, STACK_EPC(sp)
+    mtlo t0
+    mthi t1
+    mtc0 t2, C0_EPC
+
+    /* restore GPRs */
+    ld $1,(STACK_GPR + 1*8)(sp)
+    ld $2,(STACK_GPR + 2*8)(sp)
+    ld $3,(STACK_GPR + 3*8)(sp)
+    ld $4,(STACK_GPR + 4*8)(sp)
+    ld $5,(STACK_GPR + 5*8)(sp)
+    ld $6,(STACK_GPR + 6*8)(sp)
+    ld $7,(STACK_GPR + 7*8)(sp)
+    ld $8,(STACK_GPR + 8*8)(sp)
+    ld $9,(STACK_GPR + 9*8)(sp)
+    ld $10,(STACK_GPR+10*8)(sp)
+    ld $11,(STACK_GPR+11*8)(sp)
+    ld $12,(STACK_GPR+12*8)(sp)
+    ld $13,(STACK_GPR+13*8)(sp)
+    ld $14,(STACK_GPR+14*8)(sp)
+    ld $15,(STACK_GPR+15*8)(sp)
+    ld $24,(STACK_GPR+24*8)(sp)
+    ld $25,(STACK_GPR+25*8)(sp)
+    ld $31,(STACK_GPR+31*8)(sp)
+    addiu sp, EXC_STACK_SIZE
+    eret
+
+finalize_exception_frame:
     sd $0, (STACK_GPR+ 0*8)(sp)   # ZR (this is mostly for register dumps)
     sd $16,(STACK_GPR+16*8)(sp)   # S0
     sd $17,(STACK_GPR+17*8)(sp)   # S1
@@ -102,9 +161,9 @@ interrupt_handler:
     sdc1 $f29,(STACK_FPR+29*8)(sp)
     sdc1 $f30,(STACK_FPR+30*8)(sp)
     sdc1 $f31,(STACK_FPR+31*8)(sp)
+    jr ra
+    nop
 
-    move a0, sp
-    j interruptHandler
 
 
 # Pad out section so main program starts at 0x400

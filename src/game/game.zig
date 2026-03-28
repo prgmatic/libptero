@@ -9,23 +9,77 @@ const allocator = fixed_buffer_allocator.allocator();
 pub const panic = std.debug.FullPanic(n64.crash);
 const rdp = n64.graphics.rdp;
 
+const width: u16 = 320;
+const height: u16 = 240;
+var frame_buffer0: Img16 = undefined;
+var frame_buffer1: Img16 = undefined;
+var current_frame_buffer: *Img16 = undefined;
+
+var queue_buffer: []u64 = undefined;
+var queue: rdp.FixedQueue = undefined;
+var cq: rdp.FixedCommandQueue = undefined;
+var frame_count: u32 = 0;
+
+
 export fn interruptHandler(frame: *n64.debug.TrapFrame) callconv(.c) noreturn {
     n64.debug.exepction.exceptionHandler(frame);
+}
+
+export fn __MI_handler() callconv(.c) void {
+
+    n64.interrupt.interruptHandler();
 }
 
 export fn __start() linksection(".text.startup") void {
     n64.debug.init();
     n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
-    showColors();
+    
 
-    while(true){}
+    initVideo();
+
+    while(true) {
+        n64.interrupt.waitForInterrupt();
+        n64.cpu.waitCycles(0x10);
+        swapBuffer();
+        update();
+    }
 }
 
+fn swapBuffer() void {
 
-fn showColors() void {
-    const width: u16 = 320;
-    const height: u16 = 240;
+    n64.video.setFrameBuffer(@intFromPtr(current_frame_buffer.pixel_data.ptr));
+    if (current_frame_buffer == &frame_buffer0) {
+        current_frame_buffer = &frame_buffer1;
+    }
+    else {
+        current_frame_buffer = &frame_buffer0;
+    }
+}
+
+fn update() void {
+    const fb = current_frame_buffer;
+    var t:f64 = @floatFromInt(frame_count);
+    t /= 60;
+    const a = @sin(t) * 60;
+    const y: u16 = fb.height / 2 + @as(u16, @intFromFloat(a));
+
+    cq.clear();
+    cq.setColorFrame(fb.*);
+    cq.setOtherModes(.{.cycle_type = .Fill});
+    cq.setFillColor(Rgba5551.fromU32(0x404040FF));
+    cq.setScissor(0, 0, (fb.width - 1) << 2, (fb.height - 1) << 2);
+    cq.fillRect(0, 0, (fb.width - 1) << 2, (fb.height - 1) << 2);
+    cq.setFillColor(Rgba5551.fromU32(0xAB5C0EFF));
+    cq.fillRect((fb.width / 2 - 20) << 2, (y - 20) << 2, 
+                (fb.width / 2 + 20) << 2, (y + 20) << 2);
+    cq.fullSync();
+    n64.cache.writebackData(queue_buffer);
+    cq.execute();
+    frame_count += 1;
+}
+
+fn initVideo() void {
 
     n64.video.init(.{
         .tv = .Ntsc,
@@ -34,52 +88,22 @@ fn showColors() void {
         .color_depth = .Rgba5551,
     });
     
-    var frame_buffer = Img16.init(allocator, width, height) catch undefined;
-    n64.video.setFrameBuffer(@intFromPtr(frame_buffer.pixel_data.ptr));
+    frame_buffer0 = Img16.init(allocator, width, height) catch undefined;
+    frame_buffer1 = Img16.init(allocator, width, height) catch undefined;
+    current_frame_buffer = &frame_buffer0;
 
-    for(0..height) |y| {
-        for(0..width) |x| {
-            const idx = y * width + x;
-            const r: u8 = @intCast((x * 255) / width - 1);
-            frame_buffer.pixel_data[idx] = Rgba5551.fromU8s(r, 0x2B, 0x40, 0xff); // .{ .r = r, .g = 0x2B, .b = 0x40, .a = 0xFF };
-        }
-    }
-    n64.cache.writebackData(frame_buffer.pixel_data);
-    rdpTest(frame_buffer);
-}
-
-fn rdpTest(frame_buffer: Img16) void {
-    const queue_buffer = allocator.alignedAlloc(u64, std.mem.Alignment.@"32", 64) catch undefined;
-    const queue = rdp.FixedQueue{ .buffer = queue_buffer };
-    var cq = rdp.FixedCommandQueue.init(queue);
-    var frame: u32 = 0;
-
-    while(true) {
-        var t:f32 = @floatFromInt(frame);
-        t /= 60;
-        const a = @sin(t) * 60;
-        const y: u16 = frame_buffer.height / 2 + @as(u16, @intFromFloat(a));
-
-        cq.clear();
-        cq.setColorFrame(frame_buffer);
-        cq.setOtherModes(.{.cycle_type = .Fill});
-        cq.setFillColor(Rgba5551.fromU32(0xFF0000FF));
-        cq.setScissor(0, 0, (frame_buffer.width - 1) << 2, (frame_buffer.height - 1) << 2);
-        cq.fillRect(0, 0, (frame_buffer.width - 1) << 2, (frame_buffer.height - 1) << 2);
-        cq.setFillColor(Rgba5551.fromU32(0x00FF00FF));
-        cq.fillRect((frame_buffer.width / 2 - 20) << 2, (y - 20) << 2, 
-            (frame_buffer.width / 2 + 20) << 2, (y + 20) << 2);
-        cq.fullSync();
-        n64.cache.writebackData(queue_buffer);
-        cq.execute();
-
-        frame += 1;
-
-        const mh = 1000 * 1000;
-        const speed = 100 * mh / 60;
-        n64.cpu.waitCycles(speed);
-        
-    }
+    queue_buffer = allocator.alignedAlloc(u64, std.mem.Alignment.@"32", 64) catch undefined;
+    queue = rdp.FixedQueue{ .buffer = queue_buffer };
+    cq = rdp.FixedCommandQueue.init(queue);
+    update();
+    n64.video.setFrameBuffer(@intFromPtr(current_frame_buffer.pixel_data.ptr));
+    
+    var status = n64.cpu.cp0.regRead(.Status);
+    status |= 0x401;
+    n64.cpu.cp0.regWrite(.Status, status);
+    n64.cpu.updateInterrupts(.{
+        .set_rdp = true,
+    });
 }
 
 

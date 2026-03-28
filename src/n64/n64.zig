@@ -4,4 +4,4 @@ pub const cpu = @import("cpu.zig");
 pub const cache = @import("cpu/cache.zig");
 pub const video = @import("video.zig");
 pub const graphics = @import("graphics.zig");
-
+pub const interrupt = @import("interrupt.zig");

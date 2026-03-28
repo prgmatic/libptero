@@ -1,7 +1,7 @@
 const control:           *volatile Control = @ptrFromInt(0xA4400000);
 const frame_buffer_addr: *volatile u32     = @ptrFromInt(0xA4400004);
 const vi_width:          *volatile u32     = @ptrFromInt(0xA4400008);
-const vi_v_int:          *volatile u32     = @ptrFromInt(0xA440000C);
+const vi_v_interrupt:    *volatile u32     = @ptrFromInt(0xA440000C);
 const vi_v_current:      *volatile u32     = @ptrFromInt(0xA4400010);
 const vi_burst:          *volatile u32     = @ptrFromInt(0xA4400014);
 const vi_v_total:        *volatile u32     = @ptrFromInt(0xA4400018);
@@ -84,7 +84,7 @@ pub fn init(options: VideoInitOptions) void {
 }
 
 pub fn setTvType(tv: TvType, scan: ScanMode) void {
-    vi_v_int.* = 2;
+    vi_v_interrupt.* = 2;
     vi_burst.* = switch (tv) {
         .Ntsc => 0x03e52239,
         .Pal =>  0x0404233a,
@@ -123,4 +123,8 @@ pub fn setTvType(tv: TvType, scan: ScanMode) void {
 
 pub fn setFrameBuffer(buffer_addr: u32) void {
     frame_buffer_addr.* = buffer_addr;
+}
+
+pub fn claerInterrupt() void {
+    vi_v_current.* = vi_v_current.*;
 }
