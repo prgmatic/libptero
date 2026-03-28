@@ -39,8 +39,7 @@ export fn __start() linksection(".text.startup") void {
     initVideo();
 
     while(true) {
-        n64.interrupt.waitForInterrupt();
-        n64.cpu.waitCycles(0x10);
+        n64.interrupt.waitForInterrupt(.{.rdp = true, .video = true});
         swapBuffer();
         update();
     }
@@ -61,6 +60,7 @@ fn update() void {
     const fb = current_frame_buffer;
     var t:f64 = @floatFromInt(frame_count);
     t /= 60;
+    t *= std.math.pi;
     const a = @sin(t) * 60;
     const y: u16 = fb.height / 2 + @as(u16, @intFromFloat(a));
 
@@ -103,6 +103,7 @@ fn initVideo() void {
     n64.cpu.cp0.regWrite(.Status, status);
     n64.cpu.updateInterrupts(.{
         .set_rdp = true,
+        .set_video = true,
     });
 }
 

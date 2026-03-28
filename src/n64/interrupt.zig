@@ -1,18 +1,42 @@
+const cpu = @import("cpu.zig");
 const print = @import("debug.zig").print;
 var lock: u8 = 0;
+var pending_interrupts: u32 = 0;
 
+pub fn interruptHandler() void {
+    const raised = cpu.getCurrentInterrupt();
 
-pub fn interruptHandler() void { 
-    @atomicStore(u8, &lock, 0, .release);
-    const cpu = @import("cpu.zig");
-    cpu.clearRdpInterrupt();
+    if (raised.rdp) {
+        cpu.clearRdpInterrupt();
+    }
+    else if(raised.video) {
+        @import("video.zig").claerInterrupt();
+    }
+
+    // print("Int {} {}\n", .{raised.rdp, raised.video});
+    const bits: u32 = @bitCast(raised);
+    _ = @atomicRmw(u32, &pending_interrupts, .Or, bits, .release);
 }
 
+pub fn waitForInterrupt(interrupts: InterruptMask) void {
+    // Clear pending
+    @atomicStore(u32, &pending_interrupts, 0, .release);
 
-pub fn waitForInterrupt() void {
+    const want: u32 = @bitCast(interrupts);
     while (true) {
-        if (@cmpxchgWeak(u8, &lock, 0, 1, .acquire, .monotonic) == null) {
+        const current = @atomicLoad(u32, &pending_interrupts, .acquire);
+        if((want & current) == want){
             break;
         }
     }
 }
+
+pub const InterruptMask = packed struct(u32) {
+    rsp: bool = false,
+    serial: bool = false,
+    audio: bool = false,
+    video: bool = false,
+    pif_dma: bool = false,
+    rdp: bool = false,
+    _pad: u26 = 0,
+};
