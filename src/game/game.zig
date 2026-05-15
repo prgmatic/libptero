@@ -14,6 +14,7 @@ const height: u16 = 240;
 var frame_buffer0: Img16 = undefined;
 var frame_buffer1: Img16 = undefined;
 var current_frame_buffer: *Img16 = undefined;
+var dummy_img: Img16 = undefined;
 
 var queue_buffer: []u64 = undefined;
 var queue: rdp.FixedQueue = undefined;
@@ -73,6 +74,14 @@ fn update() void {
     cq.setFillColor(Rgba5551.fromU32(0xAB5C0EFF));
     cq.fillRect((fb.width / 2 - 20) << 2, (y - 20) << 2, 
                 (fb.width / 2 + 20) << 2, (y + 20) << 2);
+    
+    cq.setTextureImage(dummy_img);
+    cq.setTile(.rgba, .@"16", @truncate((dummy_img.width * 16) / 64), 
+        @truncate(@intFromPtr(dummy_img.pixel_data.ptr)), 7, 0, false, false, 0, 0, false, false, 0, 0);
+    cq.loadSync();
+    cq.loadBlock(0, 0, @truncate(dummy_img.width), 7, @truncate(1 << 11 / 16));
+    cq.pipeSync();
+
     cq.fullSync();
     n64.cache.writebackData(queue_buffer);
     cq.execute();
@@ -91,6 +100,14 @@ fn initVideo() void {
     frame_buffer0 = Img16.init(allocator, width, height) catch undefined;
     frame_buffer1 = Img16.init(allocator, width, height) catch undefined;
     current_frame_buffer = &frame_buffer0;
+
+    dummy_img = Img16.init(allocator, 16, 16) catch undefined;
+    for(0..16) |y| {
+        for(0..16) |x| {
+            const idx = y * dummy_img.width * x;
+            dummy_img.pixel_data[idx] = .fromU8s(@truncate(x * 16), @truncate(y * 16), 0, 0xFF);
+        }
+    }
 
     queue_buffer = allocator.alignedAlloc(u64, std.mem.Alignment.@"32", 64) catch undefined;
     queue = rdp.FixedQueue{ .buffer = queue_buffer };

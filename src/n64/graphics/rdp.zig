@@ -51,6 +51,20 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.execute();
         }
 
+        // 0xE6
+        pub fn loadSync(cq: *Self) void {
+            cq.queue.push(0xE6 << 56);
+        }
+
+        // 0xE7
+        pub fn pipeSync(cq: *Self) void {
+            cq.queue.push(0xE7 << 56);
+        }
+
+        // 0xE8
+        pub fn tileSync(cq: *Self) void {
+            cq.queue.push(0xE8 << 56);
+        }
 
         // 0xE9
         pub fn fullSync(cq: *Self) void {
@@ -68,7 +82,7 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.push(cmd);
         }
         // 0xEF
-        pub fn setOtherModes(cq: *Self, settings: ModeSettings) void {
+        pub fn setOtherModes(cq: *Self, settings: CmdModeSettings) void {
             cq.queue.push(@bitCast(settings));
         }
 
@@ -96,32 +110,118 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.push(cmd);
         }
 
-        // 0xFF
-        pub fn setColorFrame(cq: *Self, image: anytype) void {
-            const T = @TypeOf(image);
+        // 0xF3
+        pub fn loadBlock(cq: *Self, upper_left_s: u12, upper_left_t: u12, 
+            lower_right_s: u12, tile_index: u3, dxt: u12) void {
+            const Cmd = packed struct(u64) {
+                dxt: u12,
+                lower_right_s: u12,
+                tile_index: u3,
+                _pad0: u5 = 0,
+                upper_left_t: u12,
+                upper_left_s: u12,
+                _commnad: u8 = 0xF3,
+            };
+            cq.queue.push(@bitCast(Cmd{
+                .dxt = dxt,
+                .lower_right_s = lower_right_s,
+                .tile_index = tile_index,
+                .upper_left_t = upper_left_t,
+                .upper_left_s = upper_left_s,
+            }));
+        }
+
+        // 0xF5
+        pub fn setTile(cq: *Self, format: Format, texel_size: TexelSize, line_len: u9, 
+            tmem_addr: u9, tileIndex: u3, paletteIndex: u4, 
+            clamp_t: bool, mirror_t: bool, mask_t: u4, shift_t: u4,
+            clamp_s: bool, mirror_s: bool, mask_s: u4, shift_s: u4) void {
+            
+            const Cmd = packed struct(u64) {
+                shift_s: u4,
+                mask_s: u4,
+                mirror_s: bool,
+                clamp_s: bool,
+                shift_t: u4,
+                mask_t: u4,
+                mirror_t: bool,
+                clamp_t: bool,
+                paletteIndex: u4,
+                tileIndex: u3,
+                _pad0: u5 = 0,
+                tmem_addr: u9,
+                line_len: u9,
+                _pad1: u1 = 0,
+                texel_size: TexelSize,
+                format: Format,
+                command: u8 = 0xF5
+            };
+            cq.queue.push(@bitCast(Cmd{
+                .shift_s = shift_s,
+                .mask_s =  mask_s,
+                .mirror_s = mirror_s,
+                .clamp_s = clamp_s,
+                .shift_t = shift_t,
+                .mask_t = mask_t,
+                .mirror_t = mirror_t,
+                .clamp_t = clamp_t,
+                .paletteIndex = paletteIndex,
+                .tileIndex = tileIndex,
+                .tmem_addr = tmem_addr,
+                .line_len = line_len,
+                .texel_size = texel_size,
+                .format = format,
+            }));
+        }
+
+        // 0xFD
+        pub fn setTextureImage(cq: * Self, image: anytype) void {
             const width: u64 = (image.width - 1) & 0x3FF;
             const addr: u64 = @intFromPtr(image.pixel_data.ptr) & 0xFFFFFF;
-            var size: u64 = 0;
-            const format: u64 = 0;
+            const size: u64 = getImageBitDepth(image);
+            const format: u64 = getImageFormat(image);
+            const cmd = 0xFD << 56 | format << 53 | size << 51 | width << 32 | addr;
+            cq.queue.push(cmd);
+        }
+
+        // 0xFF
+        pub fn setColorFrame(cq: *Self, image: anytype) void {
+            const width: u64 = (image.width - 1) & 0x3FF;
+            const addr: u64 = @intFromPtr(image.pixel_data.ptr) & 0xFFFFFF;
+            const size: u64 = getImageBitDepth(image);
+            const format: u64 = getImageFormat(image);
+            const cmd = 0xFF << 56 | format << 53 | size << 51 | width << 32 | addr;
+            cq.queue.push(cmd);
+        }
+
+        fn getImageBitDepth(image: anytype) u64 {
+            const T = @TypeOf(image);
             switch(T) {
                 Img16 => {
-                    size = 2;
+                    return 2;
                 },
                 Img32 => {
-                    size = 3;
+                    return 3;
                 },
                 else => @compileError("Type not supported\n")
             }
-            const cmd = 0xFF << 56 | format << 53 | size << 51 | width << 32 | addr;
-            cq.queue.push(cmd);
+        }
+
+        fn getImageFormat(image: anytype) u64 {
+            const T = @TypeOf(image);
+            switch (T) {
+                Img16, Img32 => {
+                    return 0;
+                },
+                else => @compileError("Type not supported\n")
+            }
         }
     };
 }
 
 pub const FixedCommandQueue = CommandQueue(FixedQueue);
 
-const ModeSettings = packed struct(u64) {
-    // --- low bits (0 → 15) ---
+const CmdModeSettings = packed struct(u64) {
     alpha_compare_en: bool = false,
     dither_alpha_en: bool = false,
     z_source_sel: bool = false,
@@ -137,7 +237,6 @@ const ModeSettings = packed struct(u64) {
     force_blend: bool = false,
     _pad0: u1 = 0,
 
-    // --- blender ---
     bl_m2b_1: u2 = 0,
     bl_m2b_0: u2 = 0,
     bl_m2a_1: u2 = 0,
@@ -147,10 +246,8 @@ const ModeSettings = packed struct(u64) {
     bl_m1a_1: u2 = 0,
     bl_m1a_0: u2 = 0,
 
-    // --- mid padding ---
     _pad1: u4 = 0,
 
-    // --- upper pipeline controls ---
     alpha_dither_sel: u2 = 0,
     rgb_dither_sel: u2 = 0,
     key_en: bool = false,
@@ -171,7 +268,7 @@ const ModeSettings = packed struct(u64) {
 
     // --- top bits ---
     atomic_prim: bool = false,
-    command: u8 = 0xEF,
+    _command: u8 = 0xEF,
 };
 
 const CycleType = enum(u2) {
@@ -179,4 +276,19 @@ const CycleType = enum(u2) {
     TwoCycle = 1,
     Copy      = 2,
     Fill      = 3,
+};
+
+const Format = enum(u3) {
+    rgba,
+    yuv,
+    color_indexed,
+    intensity_alpha,
+    intnsity,
+};
+
+const TexelSize = enum(u2) {
+    @"4",
+    @"8",
+    @"16",
+    @"32"
 };
