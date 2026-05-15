@@ -1,4 +1,4 @@
-const pi = @import("../io/pi.zig");
+const pi = @import("../interfaces/parallel.zig");
 
 pub var buffer:   *[0x80]u32 = @ptrFromInt(0xB3FF0020);
 var write_len: *volatile u32 = @ptrFromInt(0xB3FF0014);

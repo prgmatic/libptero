@@ -1,5 +1,5 @@
 const JoypadState = @import("joypad.zig").JoypadState;
-const serial = @import("serial.zig");
+const si = @import("../interfaces/serial.zig");
 const cache = @import("../cpu/cache.zig");
 
 const pif_ram_size = 64;
@@ -45,11 +45,11 @@ pub const JoybusBuffer = struct {
     }
 
     pub fn sendCommand(b: *JoybusBuffer) void {
-        serial.dmaDramToPif(@intFromPtr(b));
+        si.dmaDramToPif(@intFromPtr(b));
     }
 
     pub fn readFromPif(b: *JoybusBuffer) void {
-        serial.dmaPifToDram(@intFromPtr(b));
+        si.dmaPifToDram(@intFromPtr(b));
     }
 
     pub fn roundTripCommand(b: *JoybusBuffer, CmdType: type) *CmdType {
@@ -60,9 +60,9 @@ pub const JoybusBuffer = struct {
         
         cache.writebackData(b);
         b.sendCommand();
-        serial.waitDmaIo();
+        si.waitDmaIo();
         b.readFromPif();
-        serial.waitDmaIo();
+        si.waitDmaIo();
         cache.invalidateData(b);
         return cmd;
     }

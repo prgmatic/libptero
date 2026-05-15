@@ -1,4 +1,4 @@
-const io = @import("../io/rdp.zig");
+const io = @import("../interfaces/rdp.zig");
 const Img16 = @import("../graphics.zig").Img16;
 const Img32 = @import("../graphics.zig").Img32;
 const Rgba5551 = @import("../graphics.zig").Rgba5551;

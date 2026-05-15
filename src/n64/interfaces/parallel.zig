@@ -1,18 +1,20 @@
 const dma_dram_addr:    *volatile u32 = @ptrFromInt(0xa4600000);
-const dma_cart_address: *volatile u32 = @ptrFromInt(0xa4600004);
+const dma_address: *volatile u32 = @ptrFromInt(0xa4600004);
 const dma_read_len:     *volatile u32 = @ptrFromInt(0xa4600008);
 const dma_write_len:    *volatile u32 = @ptrFromInt(0xa460000C);
 const status:           *volatile u32 = @ptrFromInt(0xa4600010);
 
-pub fn startDmaWrite(dram_addr: u32, cart_addr: u32, write_len: u32) void {
+/// Start DMA from PI bus (eg. cartridge) to RDRAM.
+pub fn dmaToDram(dram_addr: u32, cart_addr: u32, write_len: u32) void {
     dma_dram_addr.* = dram_addr;
-    dma_cart_address.* = cart_addr;
+    dma_address.* = cart_addr;
     dma_write_len.* = write_len;
 }
 
-pub fn startDmaRead(dram_addr: u32, cart_addr: u32, read_len: u32) void {
+/// Start DMA from RDRAM to PI bus
+pub fn dmaFromDram(dram_addr: u32, cart_addr: u32, read_len: u32) void {
     dma_dram_addr.* = dram_addr;
-    dma_cart_address.* = cart_addr;
+    dma_address.* = cart_addr;
     dma_read_len.* = read_len;
 }
 

@@ -1,6 +1,7 @@
 const print = @import("debug.zig").dmemPrint;
 const n64 = @import("n64");
-const pi = n64.io.pi;
+const mi = n64.interfaces.mips;
+const pi = n64.interfaces.parallel;
 
 const mode:         *volatile u32 = @ptrFromInt(0xA4700000);
 const config:       *volatile u32 = @ptrFromInt(0xA4700004);
@@ -96,7 +97,7 @@ pub fn init() u32 {
 fn regInit() void {
     // Set delay for all chips
     const delay = get_reg_delay(1, 3, 7, 5);
-    n64.cpu.enableRepeatMode(16);
+    mi.enableRepeatMode(16);
     regWriteAll(.Delay, delay);
 }
 
@@ -112,10 +113,10 @@ fn regWriteAll(reg: RegisterType, value: u32) void {
 
 fn regRead(chip_id: u32, reg: RegisterType) u32 {
     if(@intFromEnum(reg) & 1 > 0)
-        n64.cpu.setUpperMode();
+        mi.setUpperMode();
     const result = registers[(chip_id << 8) + @intFromEnum(reg)];
     if(@intFromEnum(reg) & 1 > 0)
-        n64.cpu.clearUpperMode();
+        mi.clearUpperMode();
     return @byteSwap(result);
 }
 

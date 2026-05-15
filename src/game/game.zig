@@ -1,4 +1,6 @@
 const n64 = @import("n64");
+const mi = n64.interfaces.mips;
+const vi = n64.interfaces.video;
 const std = @import("std");
 const Rgba5551 = n64.graphics.Rgba5551;
 const Img16 = n64.graphics.Img16;
@@ -27,7 +29,6 @@ export fn interruptHandler(frame: *n64.debug.TrapFrame) callconv(.c) noreturn {
 }
 
 export fn __MI_handler() callconv(.c) void {
-
     n64.interrupt.interruptHandler();
 }
 
@@ -48,7 +49,7 @@ export fn __start() linksection(".text.startup") void {
 
 fn swapBuffer() void {
 
-    n64.video.setFrameBuffer(@intFromPtr(current_frame_buffer.pixel_data.ptr));
+    vi.setFrameBuffer(@intFromPtr(current_frame_buffer.pixel_data.ptr));
     if (current_frame_buffer == &frame_buffer0) {
         current_frame_buffer = &frame_buffer1;
     }
@@ -90,7 +91,7 @@ fn update() void {
 
 fn initVideo() void {
 
-    n64.video.init(.{
+    vi.init(.{
         .tv = .Ntsc,
         .width = width,
         .height = height,
@@ -113,12 +114,12 @@ fn initVideo() void {
     queue = rdp.FixedQueue{ .buffer = queue_buffer };
     cq = rdp.FixedCommandQueue.init(queue);
     update();
-    n64.video.setFrameBuffer(@intFromPtr(current_frame_buffer.pixel_data.ptr));
+    vi.setFrameBuffer(@intFromPtr(current_frame_buffer.pixel_data.ptr));
     
     var status = n64.cpu.cp0.regRead(.Status);
     status |= 0x401;
     n64.cpu.cp0.regWrite(.Status, status);
-    n64.cpu.updateInterrupts(.{
+    mi.updateInterrupts(.{
         .set_rdp = true,
         .set_video = true,
     });

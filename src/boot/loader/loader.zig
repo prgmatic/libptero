@@ -1,8 +1,9 @@
 const std = @import("std");
 const n64 = @import("n64");
 const elf = @import("elf.zig");
+const pi = n64.interfaces.parallel;
+const si = n64.interfaces.serial;
 const print = n64.debug.print;
-
 
 export fn __start() linksection(".loader") callconv(.c) noreturn {
     var sys_buffer: [256]u8 = undefined;
@@ -12,7 +13,7 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
     
     const entry = loadElf();
 
-    n64.io.serial.pifTerminateBoot();
+    si.pifTerminateBoot();
     n64.cache.clear();
     print("Entry {x}\n", .{entry});
     while (entry == 0) {}
@@ -62,8 +63,8 @@ fn loadElf() u32 {
     var elf_header: elf.ElfHeader32 align(8) = undefined;
 
     print("EH 0x{x}\n", .{@intFromPtr(&elf_header)});
-    n64.io.pi.startDmaWrite(@intFromPtr(&elf_header), elf_addr - 0xA0000000, @sizeOf(elf.ElfHeader32));
-    n64.io.pi.waitDma();
+    pi.dmaToDram(@intFromPtr(&elf_header), elf_addr - 0xA0000000, @sizeOf(elf.ElfHeader32));
+    pi.waitDma();
 
     var hdr_size: u32 = elf_header.program_header_offset + elf_header.program_header_count * elf_header.program_header_entry_size;
     if(hdr_size & 1 == 1) hdr_size += 1;
@@ -73,8 +74,8 @@ fn loadElf() u32 {
     }
 
     var hdr: [1024]u8 = undefined;
-    n64.io.pi.startDmaWrite(@intFromPtr(&hdr), elf_addr - 0xA0000000, hdr_size);
-    n64.io.pi.waitDma();
+    pi.dmaToDram(@intFromPtr(&hdr), elf_addr - 0xA0000000, hdr_size);
+    pi.waitDma();
 
     for(0..elf_header.program_header_count - 1) |i| {
         const prg_addr = @intFromPtr(&hdr) + elf_header.program_header_offset + i * elf_header.program_header_entry_size;
@@ -93,8 +94,8 @@ fn loadElf() u32 {
         }
 
         const dma_size = if (prg_header.file_size & 1 > 0) prg_header.file_size + 1 else prg_header.file_size;
-        n64.io.pi.startDmaWrite(prg_header.virtual_address, elf_addr + prg_header.offset - 0xA0000000, dma_size);
-        n64.io.pi.waitDma();
+        pi.dmaToDram(prg_header.virtual_address, elf_addr + prg_header.offset - 0xA0000000, dma_size);
+        pi.waitDma();
         print("DMA: VADDR:0x{X} PADDR:0x{X} Size:0x{X}\n", .{prg_header.virtual_address, elf_addr + prg_header.offset - 0xA0000000, dma_size});
     }
 

@@ -1,10 +1,7 @@
-const registers = struct {
-    // DRAM address used in SI DMAs
-    const dramAddress: *volatile u32 = @ptrFromInt(0xA4800000);
-    const pifReadAddress: *volatile u32 = @ptrFromInt(0xA4800004);
-    const pifWriteAddress: *volatile u32 = @ptrFromInt(0xA4800010);
-    const status: *volatile Status = @ptrFromInt(0xA4800018);
-};
+const dramAddress: *volatile u32 = @ptrFromInt(0xA4800000);
+const pifReadAddress: *volatile u32 = @ptrFromInt(0xA4800004);
+const pifWriteAddress: *volatile u32 = @ptrFromInt(0xA4800010);
+const status: *volatile Status = @ptrFromInt(0xA4800018);
 
 const pif_ram_addr = 0x1FC007C0;
 
@@ -25,25 +22,25 @@ pub fn setPifJoybusMode() void {
 
 
 pub fn waitDmaIo() void {
-    while(registers.status.is_dma_busy or registers.status.is_io_busy) { }
+    while(status.is_dma_busy or status.is_io_busy) { }
 }
 
 pub fn waitDma() void {
-    while(registers.status.is_dma_busy) { }
+    while(status.is_dma_busy) { }
 }
 
 pub fn waitIo() void {
-    while(registers.status.is_io_busy) { }
+    while(status.is_io_busy) { }
 }
 
 pub fn dmaPifToDram(dramAddr: u32) void {
-    registers.dramAddress.* = dramAddr;
-    registers.pifReadAddress.* = pif_ram_addr;
+    dramAddress.* = dramAddr;
+    pifReadAddress.* = pif_ram_addr;
 }
 
 pub fn dmaDramToPif(dramAddr: u32) void {
-    registers.dramAddress.* = dramAddr;
-    registers.pifWriteAddress.* = pif_ram_addr;
+    dramAddress.* = dramAddr;
+    pifWriteAddress.* = pif_ram_addr;
 }
 
 const Status = packed struct(u32) {

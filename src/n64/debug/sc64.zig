@@ -1,5 +1,5 @@
 const std = @import("std");
-const pi = @import("../io/pi.zig");
+const pi = @import("../interfaces/parallel.zig");
 
 const status: *volatile Status = @ptrFromInt(0xBFFF0000);
 const data_0: *volatile u32 = @ptrFromInt(0xBFFF0004);

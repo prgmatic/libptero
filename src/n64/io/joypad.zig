@@ -1,8 +1,8 @@
 const std = @import("std");
+const si = @import("../interfaces/serial.zig");
+const cache = @import("../cpu/cache.zig");
 const JoybusBuffer = @import("joybus.zig").JoybusBuffer;
 const Commands = @import("joybus.zig").Commands;
-const serial = @import("serial.zig");
-const cache = @import("../cpu/cache.zig");
 
 
 var joybus_buffer: *JoybusBuffer = undefined;
@@ -13,7 +13,7 @@ pub fn init(allocator: std.mem.Allocator) void {
     joybus_buffer = allocator.create(JoybusBuffer) catch undefined;
     joypads = allocator.alloc(Joypad, 4) catch undefined;
 
-    serial.setPifJoybusMode();
+    si.setPifJoybusMode();
     updateJoypadStatus();
 }
 

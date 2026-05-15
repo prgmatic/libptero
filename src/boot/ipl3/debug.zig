@@ -1,5 +1,5 @@
 const n64 = @import("n64");
-const pi = n64.io.pi;
+const pi = n64.interfaces.parallel;
 
 pub fn init() void {
     n64.debug.init();

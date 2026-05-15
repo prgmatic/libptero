@@ -1,16 +1,18 @@
-const cpu = @import("cpu.zig");
+const mi = @import("interfaces/mips.zig");
+const vi = @import("interfaces/video.zig");
 const print = @import("debug.zig").print;
+
 var lock: u8 = 0;
 var pending_interrupts: u32 = 0;
 
 pub fn interruptHandler() void {
-    const raised = cpu.getCurrentInterrupt();
+    const raised = mi.getCurrentInterrupt();
 
     if (raised.rdp) {
-        cpu.clearRdpInterrupt();
+        mi.clearRdpInterrupt();
     }
     else if(raised.video) {
-        @import("video.zig").claerInterrupt();
+        vi.claerInterrupt();
     }
 
     // print("Int {} {}\n", .{raised.rdp, raised.video});
