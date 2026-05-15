@@ -36,8 +36,8 @@ fn buildIpl3(b: *std.Build, loader: std.Build.LazyPath, options: BuildOptions) s
     });
 
     ipl3.setLinkerScript(b.path("src/boot/ipl3/link.ld"));
-    ipl3.addAssemblyFile(b.path("src/boot/ipl3/boot_trampoline.S"));
-    ipl3.addAssemblyFile(b.path("src/boot/ipl3/ique_trampoline.S"));
+    ipl3.root_module.addAssemblyFile(b.path("src/boot/ipl3/boot_trampoline.S"));
+    ipl3.root_module.addAssemblyFile(b.path("src/boot/ipl3/ique_trampoline.S"));
 
     // Add the elf loader program as a anonymous import
     // This file is embedded via @embedFile
