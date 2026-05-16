@@ -92,9 +92,8 @@ fn update() void {
 fn initVideo() void {
 
     vi.init(.{
-        .tv = .Ntsc,
-        .width = width,
-        .height = height,
+        .tv = .ntsc,
+        .resolution = .@"320x240p",
         .color_depth = .Rgba5551,
     });
     
