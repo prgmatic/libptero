@@ -1,6 +1,8 @@
 const std = @import("std");
 const Rbga5551 = @import("color.zig").Rgba5551;
 const Rgba32 = @import("color.zig").Rgba32;
+const ColorFormat = @import("color.zig").Format;
+const BitDepth = @import("color.zig").BitDepth;
 
 pub fn Image(comptime PixelFormat: type) type {
     return struct{
@@ -36,6 +38,18 @@ pub fn Image(comptime PixelFormat: type) type {
                     self.pixel_data[idx] = color;
                 }
             }
+        }
+
+        pub inline fn getFormat(self: Self) ColorFormat {
+            const pixel_array_type = @TypeOf(self.pixel_data);
+            const pixel_type = @typeInfo(pixel_array_type).pointer.child;
+            return pixel_type.format;
+        }
+
+        pub fn getBitDepth(self: Self) BitDepth {
+            const pixel_array_type = @TypeOf(self.pixel_data);
+            const pixel_type = @typeInfo(pixel_array_type).pointer.child;
+            return pixel_type.bit_depth;
         }
     };
 }

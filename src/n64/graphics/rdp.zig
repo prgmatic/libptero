@@ -3,6 +3,8 @@ const Img16 = @import("../graphics.zig").Img16;
 const Img32 = @import("../graphics.zig").Img32;
 const Rgba5551 = @import("../graphics.zig").Rgba5551;
 const Rgba32 = @import("../graphics.zig").Rgba32;
+const ColorFormat = @import("color.zig").Format;
+const BitDepth = @import("color.zig").BitDepth;
 
 pub const FixedQueue = struct {
     buffer: []u64,
@@ -73,148 +75,134 @@ pub fn CommandQueue(comptime QueueType: type) type {
 
         // 0xED
         pub fn setScissor(cq: *Self, upper_left_x: u16, upper_left_y: u16, lower_right_x: u16, lower_right_y: u16) void {
-            const x0: u64 = upper_left_x & 0xFFF;
-            const y0: u64 = upper_left_y & 0xFFF;
-            const x1: u64 = lower_right_x & 0xFFF;
-            const y1: u64 = lower_right_y & 0xFFF;
+            const cmd: u64 =
+                (@as(u64, 0xED) << 56) |
+                (@as(u64, lowBits(upper_left_x, 12)) << 44) |
+                (@as(u64, lowBits(upper_left_y, 12)) << 32) |
+                (@as(u64, lowBits(lower_right_x, 12)) << 12) |
+                (@as(u64, lowBits(lower_right_y, 12)));
 
-            const cmd = 0xED << 56 | x0 << 44 | y0 << 32 | x1 << 12 | y1;
             cq.queue.push(cmd);
         }
+
         // 0xEF
         pub fn setOtherModes(cq: *Self, settings: CmdModeSettings) void {
             cq.queue.push(@bitCast(settings));
         }
 
-        // 0xF6
-        pub fn fillRect(cq: *Self, upper_left_x: u16, upper_left_y: u16, lower_right_x: u16, lower_right_y: u16) void {
-            const x0: u64 = upper_left_x & 0xFFF;
-            const y0: u64 = upper_left_y & 0xFFF;
-            const x1: u64 = lower_right_x & 0xFFF;
-            const y1: u64 = lower_right_y & 0xFFF;
-
-            const cmd = 0xF6 << 56 | x1 << 44 | y1 << 32 | x0 << 12 | y0;
-            cq.queue.push(cmd);
-        }
-
-        // 0xF7
-        pub fn setFillColor(cq: *Self, color: anytype) void {
-            const T = @TypeOf(color);
-            var c: u64 =@as(u16, @bitCast(color));
-            switch(T) {
-                Rgba5551 => c |= c << 16,
-                Rgba32 => {},
-                else => @compileError("Unsupported Type\n")
-            }
-            const cmd = 0xF7 << 56 | c;
-            cq.queue.push(cmd);
-        }
+        const LoadBlockOptions = struct {
+            upper_left_s: u12 = 0,
+            upper_left_t: u12 = 0,
+            tile: u3 = 0,
+            lower_right_s: u12,
+            dxt: u12,
+        };
 
         // 0xF3
-        pub fn loadBlock(cq: *Self, upper_left_s: u12, upper_left_t: u12, 
-            lower_right_s: u12, tile_index: u3, dxt: u12) void {
-            const Cmd = packed struct(u64) {
-                dxt: u12,
-                lower_right_s: u12,
-                tile_index: u3,
-                _pad0: u5 = 0,
-                upper_left_t: u12,
-                upper_left_s: u12,
-                _commnad: u8 = 0xF3,
-            };
-            cq.queue.push(@bitCast(Cmd{
-                .dxt = dxt,
-                .lower_right_s = lower_right_s,
-                .tile_index = tile_index,
-                .upper_left_t = upper_left_t,
-                .upper_left_s = upper_left_s,
-            }));
+        pub fn loadBlock(cq: *Self, options: LoadBlockOptions) void {
+            const cmd: u64 =
+                (@as(u64, 0xF3) << 56) |
+                (@as(u64, options.upper_left_s) << 44) |
+                (@as(u64, options.upper_left_t) << 32) |
+                (@as(u64, options.tile) << 24) |
+                (@as(u64, options.lower_right_s) << 12) |
+                (@as(u64, options.dxt));
+            cq.queue.push(cmd);
         }
 
+        const SetTileOptions = struct {
+            color_format: ColorFormat,
+            bit_depth: BitDepth,
+            line_length: u9,
+            tmem_addr: usize,
+            tile_index: u3 = 0,
+            palette_index: u4 = 0,
+            shift_s: u4 = 0,
+            shift_t: u4 = 0,
+            mask_s: u4 = 0,
+            mask_t: u4 = 0,
+            clamp_s: bool = false,
+            clamp_t: bool = false,
+            mirror_s: bool = false,
+            mirror_t: bool = false,
+        };
+
         // 0xF5
-        pub fn setTile(cq: *Self, format: Format, texel_size: TexelSize, line_len: u9, 
-            tmem_addr: u9, tileIndex: u3, paletteIndex: u4, 
-            clamp_t: bool, mirror_t: bool, mask_t: u4, shift_t: u4,
-            clamp_s: bool, mirror_s: bool, mask_s: u4, shift_s: u4) void {
+        pub fn setTile(cq: *Self, options: SetTileOptions) void {
+            const cmd: u64 =
+                (@as(u64, 0xF5) << 56) |
+                (@as(u64, @intFromEnum(options.color_format)) << 53) |
+                (@as(u64, @intFromEnum(options.bit_depth)) << 51) |
+                (@as(u64, options.line_length) << 41) |
+                (@as(u64, lowBits(options.tmem_addr, 9)) << 32) |
+                (@as(u64, options.tile_index) << 24) |
+                (@as(u64, options.palette_index) << 20) |
+                (@as(u64, @intFromBool(options.clamp_t)) << 19) |
+                (@as(u64, @intFromBool(options.mirror_t)) << 18) |
+                (@as(u64, options.mask_t) << 14) |
+                (@as(u64, options.shift_t) << 10) |
+                (@as(u64, @intFromBool(options.clamp_s)) << 9) |
+                (@as(u64, @intFromBool(options.mirror_s)) << 8) |
+                (@as(u64, options.mask_s) << 4) |
+                (@as(u64, options.shift_s));
             
-            const Cmd = packed struct(u64) {
-                shift_s: u4,
-                mask_s: u4,
-                mirror_s: bool,
-                clamp_s: bool,
-                shift_t: u4,
-                mask_t: u4,
-                mirror_t: bool,
-                clamp_t: bool,
-                paletteIndex: u4,
-                tileIndex: u3,
-                _pad0: u5 = 0,
-                tmem_addr: u9,
-                line_len: u9,
-                _pad1: u1 = 0,
-                texel_size: TexelSize,
-                format: Format,
-                command: u8 = 0xF5
+            cq.queue.push(cmd);
+        }
+
+        // 0xF6
+        pub fn fillRect(cq: *Self, upper_left_x: u16, upper_left_y: u16, lower_right_x: u16, lower_right_y: u16) void {
+            const cmd: u64 =
+                (@as(u64, 0xF6) << 56) |
+                (@as(u64, lowBits(lower_right_x, 12)) << 44) |
+                (@as(u64, lowBits(lower_right_y, 12)) << 32) |
+                (@as(u64, lowBits(upper_left_x, 12)) << 12) |
+                (@as(u64, lowBits(upper_left_y, 12)));
+
+            cq.queue.push(cmd);
+        }
+
+       // 0xF7
+        pub fn setFillColor(cq: *Self, color: anytype) void {
+            const bit_depth: BitDepth = @TypeOf(color).bit_depth;
+            const packed_color: u64 = switch (bit_depth) {
+                .@"32" => @as(u64, @as(u32, @bitCast(color))),
+                .@"16" => blk: {
+                    const c = @as(u64, @as(u16, @bitCast(color)));
+                    break :blk c << 16 | c;
+                },
+                .@"8" => blk: {
+                    const c: u64 = @bitCast(color);
+                    break :blk c << 24 | c << 16 | c << 8 | c;
+                },
+                else => @compileError("Unsupported fill color type"),
             };
-            cq.queue.push(@bitCast(Cmd{
-                .shift_s = shift_s,
-                .mask_s =  mask_s,
-                .mirror_s = mirror_s,
-                .clamp_s = clamp_s,
-                .shift_t = shift_t,
-                .mask_t = mask_t,
-                .mirror_t = mirror_t,
-                .clamp_t = clamp_t,
-                .paletteIndex = paletteIndex,
-                .tileIndex = tileIndex,
-                .tmem_addr = tmem_addr,
-                .line_len = line_len,
-                .texel_size = texel_size,
-                .format = format,
-            }));
+
+            const cmd: u64 = (@as(u64, 0xF7) << 56) | packed_color;
+            cq.queue.push(cmd);
         }
 
         // 0xFD
-        pub fn setTextureImage(cq: * Self, image: anytype) void {
-            const width: u64 = (image.width - 1) & 0x3FF;
-            const addr: u64 = @intFromPtr(image.pixel_data.ptr) & 0xFFFFFF;
-            const size: u64 = getImageBitDepth(image);
-            const format: u64 = getImageFormat(image);
-            const cmd = 0xFD << 56 | format << 53 | size << 51 | width << 32 | addr;
+        pub fn setTextureImage(cq: *Self, image: anytype) void {
+            const cmd: u64 =
+                (@as(u64, 0xFD) << 56) |
+                (@as(u64, @intFromEnum(image.getFormat())) << 53) |
+                (@as(u64, @intFromEnum(image.getBitDepth())) << 51) |
+                (@as(u64, lowBits(image.width - 1, 10)) << 32) |
+                (@as(u64, lowBits(@intFromPtr(image.pixel_data.ptr), 24)));
+
             cq.queue.push(cmd);
         }
 
         // 0xFF
         pub fn setColorFrame(cq: *Self, image: anytype) void {
-            const width: u64 = (image.width - 1) & 0x3FF;
-            const addr: u64 = @intFromPtr(image.pixel_data.ptr) & 0xFFFFFF;
-            const size: u64 = getImageBitDepth(image);
-            const format: u64 = getImageFormat(image);
-            const cmd = 0xFF << 56 | format << 53 | size << 51 | width << 32 | addr;
+            const cmd: u64 =
+                (@as(u64, 0xFF) << 56) |
+                (@as(u64, @intFromEnum(image.getFormat())) << 53) |
+                (@as(u64, @intFromEnum(image.getBitDepth())) << 51) |
+                (@as(u64, lowBits(image.width - 1, 10)) << 32) |
+                (@as(u64, lowBits(@intFromPtr(image.pixel_data.ptr), 24)));
+
             cq.queue.push(cmd);
-        }
-
-        fn getImageBitDepth(image: anytype) u64 {
-            const T = @TypeOf(image);
-            switch(T) {
-                Img16 => {
-                    return 2;
-                },
-                Img32 => {
-                    return 3;
-                },
-                else => @compileError("Type not supported\n")
-            }
-        }
-
-        fn getImageFormat(image: anytype) u64 {
-            const T = @TypeOf(image);
-            switch (T) {
-                Img16, Img32 => {
-                    return 0;
-                },
-                else => @compileError("Type not supported\n")
-            }
         }
     };
 }
@@ -262,7 +250,7 @@ const CmdModeSettings = packed struct(u64) {
     sharpen_tex_en: bool = false,
     detail_tex_en: bool = false,
     persp_tex_en: bool = false,
-    cycle_type: CycleType = .OneCycle,
+    cycle_type: CycleType = .one_cycle,
 
     _pad2: u1 = 0,
 
@@ -272,23 +260,16 @@ const CmdModeSettings = packed struct(u64) {
 };
 
 const CycleType = enum(u2) {
-    OneCycle = 0,
-    TwoCycle = 1,
-    Copy      = 2,
-    Fill      = 3,
+    one_cycle = 0,
+    two_cycle = 1,
+    copy      = 2,
+    fill      = 3,
 };
 
-const Format = enum(u3) {
-    rgba,
-    yuv,
-    color_indexed,
-    intensity_alpha,
-    intnsity,
-};
 
-const TexelSize = enum(u2) {
-    @"4",
-    @"8",
-    @"16",
-    @"32"
-};
+
+
+fn lowBits(value: anytype, bitCount: u6) u64 {
+    const mask = (@as(u64, 1) << bitCount) - 1;
+    return @as(u64, @intCast(value)) & mask;
+}

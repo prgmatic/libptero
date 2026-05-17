@@ -68,7 +68,7 @@ fn update() void {
 
     cq.clear();
     cq.setColorFrame(fb.*);
-    cq.setOtherModes(.{.cycle_type = .Fill});
+    cq.setOtherModes(.{.cycle_type = .fill});
     cq.setFillColor(Rgba5551.fromU32(0x404040FF));
     cq.setScissor(0, 0, (fb.width - 1) << 2, (fb.height - 1) << 2);
     cq.fillRect(0, 0, (fb.width - 1) << 2, (fb.height - 1) << 2);
@@ -77,11 +77,21 @@ fn update() void {
                 (fb.width / 2 + 20) << 2, (y + 20) << 2);
     
     cq.setTextureImage(dummy_img);
-    cq.setTile(.rgba, .@"16", @truncate((dummy_img.width * 16) / 64), 
-        @truncate(@intFromPtr(dummy_img.pixel_data.ptr)), 7, 0, false, false, 0, 0, false, false, 0, 0);
+    cq.setTile(.{
+        .color_format = .rgba,
+        .bit_depth = .@"16",
+        .line_length = @truncate((dummy_img.width * 16) / 64),
+        .tmem_addr = @intFromPtr(dummy_img.pixel_data.ptr),
+        .tile_index = 7
+    });
     cq.loadSync();
-    cq.loadBlock(0, 0, @truncate(dummy_img.width), 7, @truncate(1 << 11 / 16));
+    cq.loadBlock(.{
+        .lower_right_s = @truncate(dummy_img.width),
+        .tile = 7,
+        .dxt = @truncate(1 << 11 / 16)
+    });
     cq.pipeSync();
+
 
     cq.fullSync();
     n64.cache.writebackData(queue_buffer);
