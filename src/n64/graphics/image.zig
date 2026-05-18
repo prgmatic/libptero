@@ -1,8 +1,26 @@
 const std = @import("std");
-const Rbga5551 = @import("color.zig").Rgba5551;
-const Rgba32 = @import("color.zig").Rgba32;
-const ColorFormat = @import("color.zig").Format;
-const BitDepth = @import("color.zig").BitDepth;
+const colors = @import("color.zig");
+const ColorFormat = colors.Format;
+const BitDepth = colors.BitDepth;
+
+/// 32-bit RGBA image.
+pub const ImgRgba32 = Image(colors.Rgba32);
+/// 16-bit RGBA image.
+pub const ImgRgba16 = Image(colors.Rgba16);
+/// 16-bit intensity+alpha image.
+pub const ImgIa16 = Image(colors.Ia16);
+/// 8-bit intensity+alpha image.
+pub const ImgIa8 = Image(colors.Ia8);
+/// 4-bit intensity+alpha image.
+pub const ImgIa4 = Image(colors.Ia4Pair);
+/// 8-bit grayscale image.
+pub const ImgI8 = Image(colors.I8);
+/// 4-bit grayscale image.
+pub const ImgI4 = Image(colors.I4Pair);
+/// 8-bit color-indexed image.
+pub const ImgCi8 = Image(colors.Ci8);
+/// 4-bit color-indexed image.
+pub const ImgCi4 = Image(colors.Ci4Pair);
 
 pub fn Image(comptime PixelFormat: type) type {
     return struct{
@@ -10,7 +28,7 @@ pub fn Image(comptime PixelFormat: type) type {
 
         width: u16,
         height: u16,
-        pixel_data: []PixelFormat,
+        texel_data: []PixelFormat,
 
         pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Self {
             const w: u32 = width;
@@ -20,34 +38,35 @@ pub fn Image(comptime PixelFormat: type) type {
                 .width = width,
                 .height = height,
                 // TODO: Configurable alignment
-                .pixel_data = try allocator.alignedAlloc(PixelFormat, std.mem.Alignment.@"32", buffer_len)
+                .texel_data = try allocator.alignedAlloc(PixelFormat, std.mem.Alignment.@"32", buffer_len)
             };
         }
 
-        pub fn deinit(self: Self, allocator: std.mem.Allocator) !void {
-            allocator.free(self.pixel_data);
+        pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
+            allocator.free(self.texel_data);
         }
 
         pub fn fill(self: *Self, color: PixelFormat) void {
-            @memset(self.pixel_data, color);
+            @memset(self.texel_data, color);
         }
+
         pub fn fillRegion(self: *Self, color: PixelFormat, x: u32, y: u32, width: u32, height: u32) void {
             for(y..y+height) |yi| {
                 for(x..x+width) |xi| {
                     const idx = yi * self.width + xi;
-                    self.pixel_data[idx] = color;
+                    self.texel_data[idx] = color;
                 }
             }
         }
 
         pub inline fn getFormat(self: Self) ColorFormat {
-            const pixel_array_type = @TypeOf(self.pixel_data);
+            const pixel_array_type = @TypeOf(self.texel_data);
             const pixel_type = @typeInfo(pixel_array_type).pointer.child;
             return pixel_type.format;
         }
 
         pub fn getBitDepth(self: Self) BitDepth {
-            const pixel_array_type = @TypeOf(self.pixel_data);
+            const pixel_array_type = @TypeOf(self.texel_data);
             const pixel_type = @typeInfo(pixel_array_type).pointer.child;
             return pixel_type.bit_depth;
         }

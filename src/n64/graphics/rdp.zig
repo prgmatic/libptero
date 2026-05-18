@@ -268,7 +268,7 @@ pub fn CommandQueue(comptime QueueType: type) type {
                 (@as(u64, @intFromEnum(image.getFormat())) << 53) |
                 (@as(u64, @intFromEnum(image.getBitDepth())) << 51) |
                 (@as(u64, lowBits(image.width - 1, 10)) << 32) |
-                (@as(u64, lowBits(@intFromPtr(image.pixel_data.ptr), 24)));
+                (@as(u64, lowBits(@intFromPtr(image.texel_data.ptr), 24)));
 
             cq.queue.push(cmd);
         }
@@ -280,7 +280,7 @@ pub fn CommandQueue(comptime QueueType: type) type {
                 (@as(u64, @intFromEnum(image.getFormat())) << 53) |
                 (@as(u64, @intFromEnum(image.getBitDepth())) << 51) |
                 (@as(u64, lowBits(image.width - 1, 10)) << 32) |
-                (@as(u64, lowBits(@intFromPtr(image.pixel_data.ptr), 24)));
+                (@as(u64, lowBits(@intFromPtr(image.texel_data.ptr), 24)));
 
             cq.queue.push(cmd);
         }

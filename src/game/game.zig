@@ -2,8 +2,8 @@ const n64 = @import("n64");
 const mi = n64.interfaces.mips;
 const vi = n64.interfaces.video;
 const std = @import("std");
-const Rgba5551 = n64.graphics.Rgba5551;
-const Img16 = n64.graphics.Img16;
+const Rgba5551 = n64.graphics.color.Rgba16;
+const Img16 = n64.graphics.image.ImgRgba16;
 const print = n64.debug.print;
 var sys_buffer: [1024 * 512]u8 = undefined;
 var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&sys_buffer);
@@ -49,7 +49,7 @@ export fn __start() linksection(".text.startup") void {
 
 fn swapBuffer() void {
 
-    vi.setFrameBuffer(@intFromPtr(current_frame_buffer.pixel_data.ptr));
+    vi.setFrameBuffer(@intFromPtr(current_frame_buffer.texel_data.ptr));
     if (current_frame_buffer == &frame_buffer0) {
         current_frame_buffer = &frame_buffer1;
     }
@@ -131,16 +131,16 @@ fn initVideo() void {
     for(0..16) |y| {
         for(0..16) |x| {
             const idx = y * dummy_img.width + x;
-            dummy_img.pixel_data[idx] = .fromU8s(@truncate(x * 16), @truncate(y * 16), 0, 0xFF);
+            dummy_img.texel_data[idx] = .fromU8s(@truncate(x * 16), @truncate(y * 16), 0, 1);
         }
     }
-    n64.cache.writebackData(dummy_img.pixel_data);
+    n64.cache.writebackData(dummy_img.texel_data);
 
     queue_buffer = allocator.alignedAlloc(u64, std.mem.Alignment.@"32", 64) catch undefined;
     queue = rdp.FixedQueue{ .buffer = queue_buffer };
     cq = rdp.FixedCommandQueue.init(queue);
     update();
-    vi.setFrameBuffer(@intFromPtr(current_frame_buffer.pixel_data.ptr));
+    vi.setFrameBuffer(@intFromPtr(current_frame_buffer.texel_data.ptr));
     
     var status = n64.cpu.cp0.regRead(.Status);
     status |= 0x401;
