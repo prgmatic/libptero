@@ -53,6 +53,54 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.execute();
         }
 
+        const TextureRectangleOptions = struct {
+            lrx: u12,
+            lry: u12,
+            tile: u3 = 0,
+            ulx: u12,
+            uly: u12,
+            s: i16 = 0,
+            t: i16 = 0,
+            dsdx: i16,
+            dtdy: i16,
+        };
+
+        // 0xE4
+        pub fn textureRectangle(cq: *Self, options: TextureRectangleOptions) void {
+            const word0: u64 =
+                (@as(u64, 0xE4) << 56) |
+                (@as(u64, options.lrx) << 44) |
+                (@as(u64, options.lry) << 32) |
+                (@as(u64, options.tile) << 24) |
+                (@as(u64, options.ulx) << 12) |
+                (@as(u64, options.uly));
+            const word1: u64 =
+                (@as(u64, @as(u16, @bitCast(options.s))) << 48) |
+                (@as(u64, @as(u16, @bitCast(options.t))) << 32) |
+                (@as(u64, @as(u16, @bitCast(options.dsdx))) << 16) |
+                (@as(u64, @as(u16, @bitCast(options.dtdy))));
+            cq.queue.push(word0);
+            cq.queue.push(word1);
+        }
+
+        // 0xE5
+        pub fn textureRectangleFlip(cq: *Self, options: TextureRectangleOptions) void {
+            const word0: u64 =
+                (@as(u64, 0xE5) << 56) |
+                (@as(u64, options.lrx) << 44) |
+                (@as(u64, options.lry) << 32) |
+                (@as(u64, options.tile) << 24) |
+                (@as(u64, options.ulx) << 12) |
+                (@as(u64, options.uly));
+            const word1: u64 =
+                (@as(u64, @as(u16, @bitCast(options.s))) << 48) |
+                (@as(u64, @as(u16, @bitCast(options.t))) << 32) |
+                (@as(u64, @as(u16, @bitCast(options.dsdx))) << 16) |
+                (@as(u64, @as(u16, @bitCast(options.dtdy))));
+            cq.queue.push(word0);
+            cq.queue.push(word1);
+        }
+
         // 0xE6
         pub fn loadSync(cq: *Self) void {
             cq.queue.push(0xE6 << 56);
@@ -97,6 +145,38 @@ pub fn CommandQueue(comptime QueueType: type) type {
             lower_right_s: u12,
             dxt: u12,
         };
+
+        const SetTileSizeOptions = struct {
+            upper_left_s: u12 = 0,
+            upper_left_t: u12 = 0,
+            tile: u3 = 0,
+            lower_right_s: u12,
+            lower_right_t: u12,
+        };
+
+        // 0xF2
+        pub fn setTileSize(cq: *Self, options: SetTileSizeOptions) void {
+            const cmd: u64 =
+                (@as(u64, 0xF2) << 56) |
+                (@as(u64, options.upper_left_s) << 44) |
+                (@as(u64, options.upper_left_t) << 32) |
+                (@as(u64, options.tile) << 24) |
+                (@as(u64, options.lower_right_s) << 12) |
+                (@as(u64, options.lower_right_t));
+            cq.queue.push(cmd);
+        }
+
+        // 0xF4 — same bit layout as SetTileSize; coordinates are u10.2 (pixel * 4)
+        pub fn loadTile(cq: *Self, options: SetTileSizeOptions) void {
+            const cmd: u64 =
+                (@as(u64, 0xF4) << 56) |
+                (@as(u64, options.upper_left_s) << 44) |
+                (@as(u64, options.upper_left_t) << 32) |
+                (@as(u64, options.tile) << 24) |
+                (@as(u64, options.lower_right_s) << 12) |
+                (@as(u64, options.lower_right_t));
+            cq.queue.push(cmd);
+        }
 
         // 0xF3
         pub fn loadBlock(cq: *Self, options: LoadBlockOptions) void {

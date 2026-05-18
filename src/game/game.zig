@@ -75,22 +75,38 @@ fn update() void {
     cq.setFillColor(Rgba5551.fromU32(0xAB5C0EFF));
     cq.fillRect((fb.width / 2 - 20) << 2, (y - 20) << 2, 
                 (fb.width / 2 + 20) << 2, (y + 20) << 2);
-    
+ 
+    // Load and draw sprite
+    cq.pipeSync();
+    cq.setOtherModes(.{ .cycle_type = .copy });
     cq.setTextureImage(dummy_img);
+    cq.loadSync();
     cq.setTile(.{
         .color_format = .rgba,
         .bit_depth = .@"16",
-        .line_length = @truncate((dummy_img.width * 16) / 64),
-        .tmem_addr = @intFromPtr(dummy_img.pixel_data.ptr),
-        .tile_index = 7
+        .line_length = 4,   // 16px * 2 bytes / 8 bytes per word
+        .tmem_addr = 0,
+    });
+    cq.loadTile(.{
+        .lower_right_s = 15 << 2,  // u10.2: texel 15 inclusive
+        .lower_right_t = 15 << 2,
     });
     cq.loadSync();
-    cq.loadBlock(.{
-        .lower_right_s = @truncate(dummy_img.width),
-        .tile = 7,
-        .dxt = @truncate(1 << 11 / 16)
+    cq.setTileSize(.{
+        .lower_right_s = 15 << 2,  // u10.2: pixel 15 inclusive
+        .lower_right_t = 15 << 2,
     });
-    cq.pipeSync();
+    cq.tileSync();
+    cq.textureRectangle(.{
+        .ulx = 100 << 2,
+        .uly = 100 << 2,
+        .lrx = 115 << 2,   // COPY mode: lrx/lry are inclusive
+        .lry = 115 << 2,
+        .s = 0,
+        .t = 0,
+        .dsdx = 4 << 10,   // s5.10: 4 pixels per cycle (COPY mode, 16-bit)
+        .dtdy = 1 << 10,   // s5.10: 1 line per cycle
+    });
 
 
     cq.fullSync();
@@ -114,10 +130,11 @@ fn initVideo() void {
     dummy_img = Img16.init(allocator, 16, 16) catch undefined;
     for(0..16) |y| {
         for(0..16) |x| {
-            const idx = y * dummy_img.width * x;
+            const idx = y * dummy_img.width + x;
             dummy_img.pixel_data[idx] = .fromU8s(@truncate(x * 16), @truncate(y * 16), 0, 0xFF);
         }
     }
+    n64.cache.writebackData(dummy_img.pixel_data);
 
     queue_buffer = allocator.alignedAlloc(u64, std.mem.Alignment.@"32", 64) catch undefined;
     queue = rdp.FixedQueue{ .buffer = queue_buffer };
