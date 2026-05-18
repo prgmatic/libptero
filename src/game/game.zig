@@ -78,7 +78,20 @@ fn update() void {
  
     // Load and draw sprite
     cq.pipeSync();
-    cq.setOtherModes(.{ .cycle_type = .copy });
+    cq.setOtherModes(.{
+      .cycle_type    = .one_cycle,
+      .image_read_en = true,   // RDP reads framebuffer to blend against
+      .force_blend   = true,   // run blender on every pixel
+      .bl_m1a_0      = 0,      // pixel color
+      .bl_m1b_0      = 0,      // pixel alpha
+      .bl_m2a_0      = 1,      // memory (framebuffer) color
+      .bl_m2b_0      = 0,      // 1 − pixel alpha
+    });
+    // cq.setCombineMode(.{ .custom = .{ .cycle2 = .{ .color_d = .tex0, .alpha_d = .tex0 } } });
+    cq.setCombineMode(.{ .custom = .{ .cycle2 = .{ .color_d = .primitive, .alpha_d = .tex0 } } });
+    cq.pipeSync();
+    cq.setPrimColor(0xAB, 0x5C, 0x0E, 0xFF);
+    cq.pipeSync();
     cq.setTextureImage(dummy_img);
     cq.loadSync();
     cq.setTile(.{
@@ -100,11 +113,11 @@ fn update() void {
     cq.textureRectangle(.{
         .ulx = 100 << 2,
         .uly = 100 << 2,
-        .lrx = 115 << 2,   // COPY mode: lrx/lry are inclusive
-        .lry = 115 << 2,
+        .lrx = 116 << 2,
+        .lry = 116 << 2,
         .s = 0,
         .t = 0,
-        .dsdx = 4 << 10,   // s5.10: 4 pixels per cycle (COPY mode, 16-bit)
+        .dsdx = 1 << 10,   // s5.10: 1 line per cycle
         .dtdy = 1 << 10,   // s5.10: 1 line per cycle
     });
 
@@ -131,7 +144,12 @@ fn initVideo() void {
     for(0..16) |y| {
         for(0..16) |x| {
             const idx = y * dummy_img.width + x;
-            dummy_img.texel_data[idx] = .fromU8s(@truncate(x * 16), @truncate(y * 16), 0, 1);
+            var d = distance(@as(f32, @floatFromInt(x)) - 7.5, @as(f32, @floatFromInt(y)) - 7.5) / 8;
+            d = @max(0, 1.0 - d);
+            // d = @min(d * 3, 1);
+            const c: u8 = @intFromFloat(d * 255);
+            
+            dummy_img.texel_data[idx] = .fromU8s(c, c, c, c);
         }
     }
     n64.cache.writebackData(dummy_img.texel_data);
@@ -156,4 +174,9 @@ fn forceCrash() void {
     print("Force a crash?\n", .{});
     const null_ptr: *volatile u32 = @ptrFromInt(4);
     _ = null_ptr.*;
+}
+
+fn distance(x: f32, y: f32) f32 {
+
+    return @sqrt(x * x + y * y);
 }

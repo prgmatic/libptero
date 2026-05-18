@@ -1,10 +1,9 @@
 const io = @import("../interfaces/rdp.zig");
-const Img16 = @import("../graphics.zig").Img16;
-const Img32 = @import("../graphics.zig").Img32;
-const Rgba5551 = @import("../graphics.zig").Rgba5551;
-const Rgba32 = @import("../graphics.zig").Rgba32;
+const cc = @import("rdp_color_combiner.zig");
 const ColorFormat = @import("color.zig").Format;
 const BitDepth = @import("color.zig").BitDepth;
+const CycleConfig = cc.CycleConfig;
+const CombineMode = cc.CombineMode;
 
 pub const FixedQueue = struct {
     buffer: []u64,
@@ -27,7 +26,6 @@ pub const FixedQueue = struct {
         self.index = 0;
     }
 };
-
 
 pub fn CommandQueue(comptime QueueType: type) type {
     if(!@hasDecl(QueueType, "push"))
@@ -136,6 +134,37 @@ pub fn CommandQueue(comptime QueueType: type) type {
         // 0xEF
         pub fn setOtherModes(cq: *Self, settings: CmdModeSettings) void {
             cq.queue.push(@bitCast(settings));
+        }
+
+        const PrimColorOptions = struct {
+            r: u8,
+            g: u8,
+            b: u8,
+            a: u8 = 255,
+            min_level: u8 = 0,
+            prim_lod_frac: u8 = 0,
+        };
+
+        // 0xF9
+        pub fn setBlendColor(cq: *Self, r: u8, g: u8, b: u8, a: u8) void {
+            const cmd: u64 =
+                (@as(u64, 0xF9) << 56) |
+                (@as(u64, r) << 24) |
+                (@as(u64, g) << 16) |
+                (@as(u64, b) <<  8) |
+                (@as(u64, a));
+            cq.queue.push(cmd);
+        }
+
+        // 0xFA
+        pub fn setPrimColor(cq: *Self, r: u8, g: u8, b: u8, a: u8) void {
+            const cmd: u64 =
+                (@as(u64, 0xFA) << 56) |
+                (@as(u64, r)            << 24) |
+                (@as(u64, g)            << 16) |
+                (@as(u64, b)            <<  8) |
+                (@as(u64, a));
+            cq.queue.push(cmd);
         }
 
         const LoadBlockOptions = struct {
@@ -258,6 +287,32 @@ pub fn CommandQueue(comptime QueueType: type) type {
             };
 
             const cmd: u64 = (@as(u64, 0xF7) << 56) | packed_color;
+            cq.queue.push(cmd);
+        }
+
+        // 0xFC — requires pipeSync before use if a primitive is in flight
+        pub fn setCombineMode(cq: *Self, mode: CombineMode) void {
+            const configs = mode.toCycleConfigs();
+            const c1 = configs[0];
+            const c2 = configs[1];
+            const cmd: u64 =
+                (@as(u64, 0xFC) << 56) |
+                (@as(u64, @intFromEnum(c1.color_a)) << 52) |
+                (@as(u64, @intFromEnum(c1.color_c)) << 47) |
+                (@as(u64, @intFromEnum(c1.alpha_a)) << 44) |
+                (@as(u64, @intFromEnum(c1.alpha_c)) << 41) |
+                (@as(u64, @intFromEnum(c2.color_a)) << 37) |
+                (@as(u64, @intFromEnum(c2.color_c)) << 32) |
+                (@as(u64, @intFromEnum(c1.color_b)) << 28) |
+                (@as(u64, @intFromEnum(c2.color_b)) << 24) |
+                (@as(u64, @intFromEnum(c2.alpha_a)) << 21) |
+                (@as(u64, @intFromEnum(c2.alpha_c)) << 18) |
+                (@as(u64, @intFromEnum(c1.color_d)) << 15) |
+                (@as(u64, @intFromEnum(c1.alpha_b)) << 12) |
+                (@as(u64, @intFromEnum(c1.alpha_d)) << 9)  |
+                (@as(u64, @intFromEnum(c2.color_d)) << 6)  |
+                (@as(u64, @intFromEnum(c2.alpha_b)) << 3)  |
+                (@as(u64, @intFromEnum(c2.alpha_d)));
             cq.queue.push(cmd);
         }
 
