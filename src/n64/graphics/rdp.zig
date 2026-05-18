@@ -263,10 +263,11 @@ pub fn CommandQueue(comptime QueueType: type) type {
 
         // 0xFD
         pub fn setTextureImage(cq: *Self, image: anytype) void {
+            const T = @TypeOf(image);
             const cmd: u64 =
                 (@as(u64, 0xFD) << 56) |
-                (@as(u64, @intFromEnum(image.getFormat())) << 53) |
-                (@as(u64, @intFromEnum(image.getBitDepth())) << 51) |
+                (@as(u64, @intFromEnum(T.format)) << 53) |
+                (@as(u64, @intFromEnum(T.bit_depth)) << 51) |
                 (@as(u64, lowBits(image.width - 1, 10)) << 32) |
                 (@as(u64, lowBits(@intFromPtr(image.texel_data.ptr), 24)));
 
@@ -275,10 +276,11 @@ pub fn CommandQueue(comptime QueueType: type) type {
 
         // 0xFF
         pub fn setColorFrame(cq: *Self, image: anytype) void {
+            const T = @TypeOf(image);
             const cmd: u64 =
                 (@as(u64, 0xFF) << 56) |
-                (@as(u64, @intFromEnum(image.getFormat())) << 53) |
-                (@as(u64, @intFromEnum(image.getBitDepth())) << 51) |
+                (@as(u64, @intFromEnum(T.format)) << 53) |
+                (@as(u64, @intFromEnum(T.bit_depth)) << 51) |
                 (@as(u64, lowBits(image.width - 1, 10)) << 32) |
                 (@as(u64, lowBits(@intFromPtr(image.texel_data.ptr), 24)));
 

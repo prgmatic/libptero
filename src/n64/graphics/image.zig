@@ -30,6 +30,9 @@ pub fn Image(comptime PixelFormat: type) type {
         height: u16,
         texel_data: []PixelFormat,
 
+        pub const format: ColorFormat = PixelFormat.format;
+        pub const bit_depth: BitDepth = PixelFormat.bit_depth;
+
         pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Self {
             const w: u32 = width;
             const h: u32 = height;
@@ -57,18 +60,6 @@ pub fn Image(comptime PixelFormat: type) type {
                     self.texel_data[idx] = color;
                 }
             }
-        }
-
-        pub inline fn getFormat(self: Self) ColorFormat {
-            const pixel_array_type = @TypeOf(self.texel_data);
-            const pixel_type = @typeInfo(pixel_array_type).pointer.child;
-            return pixel_type.format;
-        }
-
-        pub fn getBitDepth(self: Self) BitDepth {
-            const pixel_array_type = @TypeOf(self.texel_data);
-            const pixel_type = @typeInfo(pixel_array_type).pointer.child;
-            return pixel_type.bit_depth;
         }
     };
 }
