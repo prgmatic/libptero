@@ -2,7 +2,8 @@ const n64 = @import("n64");
 const mi = n64.interfaces.mips;
 const vi = n64.interfaces.video;
 const std = @import("std");
-const Rgba5551 = n64.graphics.color.Rgba16;
+const Rgba32 = n64.graphics.color.Rgba32;
+const Rgba16 = n64.graphics.color.Rgba16;
 const Img16 = n64.graphics.image.ImgRgba16;
 const print = n64.debug.print;
 var sys_buffer: [1024 * 512]u8 = undefined;
@@ -69,28 +70,18 @@ fn update() void {
     cq.clear();
     cq.setColorFrame(fb.*);
     cq.setOtherModes(.{.cycle_type = .fill});
-    cq.setFillColor(Rgba5551.fromU32(0x404040FF));
+    cq.setFillColor(Rgba16.fromInt(0x404040FF));
     cq.setScissor(0, 0, (fb.width - 1) << 2, (fb.height - 1) << 2);
     cq.fillRect(0, 0, (fb.width - 1) << 2, (fb.height - 1) << 2);
-    cq.setFillColor(Rgba5551.fromU32(0xAB5C0EFF));
+    cq.setFillColor(Rgba16.fromInt(0xAB5C0EFF));
     cq.fillRect((fb.width / 2 - 20) << 2, (y - 20) << 2, 
                 (fb.width / 2 + 20) << 2, (y + 20) << 2);
  
     // Load and draw sprite
-    cq.pipeSync();
-    cq.setOtherModes(.{
-      .cycle_type    = .one_cycle,
-      .image_read_en = true,   // RDP reads framebuffer to blend against
-      .force_blend   = true,   // run blender on every pixel
-      .bl_m1a_0      = 0,      // pixel color
-      .bl_m1b_0      = 0,      // pixel alpha
-      .bl_m2a_0      = 1,      // memory (framebuffer) color
-      .bl_m2b_0      = 0,      // 1 − pixel alpha
-    });
-    // cq.setCombineMode(.{ .custom = .{ .cycle2 = .{ .color_d = .tex0, .alpha_d = .tex0 } } });
-    cq.setCombineMode(.{ .custom = .{ .cycle2 = .{ .color_d = .primitive, .alpha_d = .tex0 } } });
-    cq.pipeSync();
-    cq.setPrimColor(0xAB, 0x5C, 0x0E, 0xFF);
+    cq.setCycleType(.one_cycle);
+    cq.setBlendMode(.alpha);
+    cq.setCombineMode(.single(.{ .rgb_d = .primitive, .alpha_d = .tex0 }));
+    cq.setPrimColor(.fromInt(0xAB5C0EFF));
     cq.pipeSync();
     cq.setTextureImage(dummy_img);
     cq.loadSync();
@@ -149,7 +140,7 @@ fn initVideo() void {
             // d = @min(d * 3, 1);
             const c: u8 = @intFromFloat(d * 255);
             
-            dummy_img.texel_data[idx] = .fromU8s(c, c, c, c);
+            dummy_img.texel_data[idx] = .fromBytes(c, c, c, c);
         }
     }
     n64.cache.writebackData(dummy_img.texel_data);

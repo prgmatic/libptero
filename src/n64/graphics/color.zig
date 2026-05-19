@@ -7,6 +7,19 @@ pub const Rgba32 = packed struct(u32) {
     g: u8,
     r: u8,
 
+    pub fn fromInt(int: u32) Rgba32 {
+        return @bitCast(int);
+    }
+
+    pub const white: Rgba32 = .fromInt(0xFFFFFFFF);
+    pub const black: Rgba32 = .fromInt(0x000000FF);
+    pub const red: Rgba32 = .fromInt(0xFF0000FF);
+    pub const green: Rgba32 = .fromInt(0x00FF00FF);
+    pub const blue: Rgba32 = .fromInt(0x0000FFFF);
+    pub const cyan: Rgba32 = .fromInt(0x00FFFFFF);
+    pub const magenta: Rgba32 = .fromInt(0xFF00FFFF);
+    pub const yellow: Rgba32 = .fromInt(0xFFFF00FF);
+
     pub const format: Format = .rgba;
     pub const bit_depth: BitDepth = .@"32";
 };
@@ -18,6 +31,15 @@ pub const Rgba16 = packed struct(u16) {
     g: u5,
     r: u5,
 
+    pub const white: Rgba16 = .fromInt(0xFFFFFFFF);
+    pub const black: Rgba16 = .fromInt(0x000000FF);
+    pub const red: Rgba16 = .fromInt(0xFF0000FF);
+    pub const green: Rgba16 = .fromInt(0x00FF00FF);
+    pub const blue: Rgba16 = .fromInt(0x0000FFFF);
+    pub const cyan: Rgba16 = .fromInt(0x00FFFFFF);
+    pub const magenta: Rgba16 = .fromInt(0xFF00FFFF);
+    pub const yellow: Rgba16 = .fromInt(0xFFFF00FF);
+
     pub const format: Format = .rgba;
     pub const bit_depth: BitDepth = .@"16";
 
@@ -25,7 +47,7 @@ pub const Rgba16 = packed struct(u16) {
         return .{ .r = r, .g = g, .b = b, .a = a };
     }
 
-    pub fn fromU32(value: u32) Rgba16 {
+    pub fn fromInt(value: u32) Rgba16 {
         return .{
             .r = @intCast((value >> 27) & 0x1F), 
             .g = @intCast((value >> 19) & 0x1F),
@@ -34,7 +56,7 @@ pub const Rgba16 = packed struct(u16) {
         };
     }
 
-    pub fn fromU8s(r: u8, g: u8, b: u8, a: u8) Rgba16 {
+    pub fn fromBytes(r: u8, g: u8, b: u8, a: u8) Rgba16 {
         return .{
             .r = @intCast(r >> 3),
             .g = @intCast(g >> 3),
