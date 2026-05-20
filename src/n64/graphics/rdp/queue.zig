@@ -2,14 +2,11 @@ const io = @import("io.zig");
 const ColorFormat = @import("../color.zig").Format;
 const BitDepth = @import("../color.zig").BitDepth;
 const cc = @import("combiner.zig");
-const bm = @import("blend.zig");
-const m = @import("modes.zig");
+const blender = @import("blender.zig");
+const modes = @import("modes.zig");
 
-const CycleConfig = cc.CycleConfig;
 const CombineMode = cc.CombineMode;
-const BlendMode = bm.BlendMode;
-const CycleType = m.CycleType;
-const OtherModes  = m.OtherModes;
+const OtherModes = modes.OtherModes;
 const Rgba32 = @import("../color.zig").Rgba32;
 
 pub const FixedQueue = struct {
@@ -84,6 +81,9 @@ pub const LoadTextureOptions = struct {
     tmem_addr: usize = 0,
 };
 
+// Thin command emitter. Every method pushes exactly the command(s) documented —
+// no hidden syncs, no state tracking. Callers are responsible for issuing
+// pipeSync/loadSync/tileSync at the right points.
 pub fn CommandQueue(comptime QueueType: type) type {
     if (!@hasDecl(QueueType, "push"))
         @compileError("Type must implement push(u64)");
@@ -95,10 +95,6 @@ pub fn CommandQueue(comptime QueueType: type) type {
     return struct {
         const Self = @This();
         queue: QueueType,
-        mode: OtherModes = .{},
-        mode_dirty: bool = true,
-        combine_mode: CombineMode = .primitive,
-        combine_dirty: bool = false,
 
         pub fn init(queue: QueueType) Self {
             return .{ .queue = queue };
@@ -112,46 +108,8 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.execute();
         }
 
-        fn flushMode(cq: *Self) void {
-            if (!cq.mode_dirty and !cq.combine_dirty) return;
-            cq.queue.push(@as(u64, 0xE7) << 56);
-            if (cq.mode_dirty) {
-                cq.queue.push(@bitCast(cq.mode));
-                cq.mode_dirty = false;
-            }
-            if (cq.combine_dirty) {
-                cq.queue.push(buildCombineCmd(cq.combine_mode));
-                cq.combine_dirty = false;
-            }
-        }
-
-        pub fn setCycleType(cq: *Self, cycle_type: CycleType) void {
-            cq.mode.cycle_type = cycle_type;
-            cq.mode_dirty = true;
-        }
-
-        pub fn setBlendMode(cq: *Self, blend: BlendMode) void {
-            cq.mode.force_blend = blend.force_blend;
-            cq.mode.image_read_en = blend.image_read_en;
-            cq.mode.blend_p0 = blend.pass1.p;
-            cq.mode.blend_a0 = blend.pass1.a;
-            cq.mode.blend_m0 = blend.pass1.m;
-            cq.mode.blend_b0 = blend.pass1.b;
-            cq.mode.blend_p1 = blend.pass2.p;
-            cq.mode.blend_a1 = blend.pass2.a;
-            cq.mode.blend_m1 = blend.pass2.m;
-            cq.mode.blend_b1 = blend.pass2.b;
-            cq.mode_dirty = true;
-        }
-
-        pub fn setCombineMode(cq: *Self, mode: CombineMode) void {
-            cq.combine_mode = mode;
-            cq.combine_dirty = true;
-        }
-
         // 0xE4
         pub fn textureRectangle(cq: *Self, options: TextureRectangleOptions) void {
-            cq.flushMode();
             const words = buildTextureRectangleWords(0xE4, options);
             cq.queue.push(words[0]);
             cq.queue.push(words[1]);
@@ -159,7 +117,6 @@ pub fn CommandQueue(comptime QueueType: type) type {
 
         // 0xE5
         pub fn textureRectangleFlip(cq: *Self, options: TextureRectangleOptions) void {
-            cq.flushMode();
             const words = buildTextureRectangleWords(0xE5, options);
             cq.queue.push(words[0]);
             cq.queue.push(words[1]);
@@ -167,22 +124,27 @@ pub fn CommandQueue(comptime QueueType: type) type {
 
         // 0xE6
         pub fn loadSync(cq: *Self) void {
-            cq.queue.push(0xE6 << 56);
+            cq.queue.push(@as(u64, 0xE6) << 56);
         }
 
         // 0xE7
         pub fn pipeSync(cq: *Self) void {
-            cq.queue.push(0xE7 << 56);
+            cq.queue.push(@as(u64, 0xE7) << 56);
         }
 
         // 0xE8
         pub fn tileSync(cq: *Self) void {
-            cq.queue.push(0xE8 << 56);
+            cq.queue.push(@as(u64, 0xE8) << 56);
         }
 
         // 0xE9
         pub fn fullSync(cq: *Self) void {
-            cq.queue.push(0xE9 << 56);
+            cq.queue.push(@as(u64, 0xE9) << 56);
+        }
+
+        // 0xEE
+        pub fn setPrimDepth(cq: *Self, z: u16, dz: u16) void {
+            cq.queue.push((@as(u64, 0xEE) << 56) | (@as(u64, z) << 16) | @as(u64, dz));
         }
 
         // 0xED
@@ -196,10 +158,8 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.push(cmd);
         }
 
-        // 0xEF — escape hatch; prefer setCycleType/setBlendMode for automatic pipeSync
+        // 0xEF
         pub fn setOtherModes(cq: *Self, settings: OtherModes) void {
-            cq.mode = settings;
-            cq.mode_dirty = false;
             cq.queue.push(@bitCast(settings));
         }
 
@@ -260,98 +220,8 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.push(cmd);
         }
 
-        // Loads a texture into TMEM, issuing all necessary RDP commands.
-        pub fn loadTexture(cq: *Self, image: anytype, opts: LoadTextureOptions) void {
-            const T = @TypeOf(image);
-            const width: u32 = image.width;
-            const height: u32 = image.height;
-
-            // Internal tile used for the LoadBlock operation; must differ from the
-            // rendering tile so its descriptor is not overwritten.
-            const load_tile: u3 = opts.tile +% 1;
-
-            const bpp: u32 = switch (T.bit_depth) {
-                .@"4"  => 4,
-                .@"8"  => 8,
-                .@"16" => 16,
-                .@"32" => 32,
-            };
-
-            // 64-bit words per row of texture data in RDRAM.
-            const words_per_row: u32 = (width * bpp + 63) / 64;
-
-            // Line length for the rendering tile. RGBA32 is stored across two TMEM banks
-            // (hi and lo), so the effective words-per-row per bank is halved.
-            const render_line_len: u9 = switch (T.bit_depth) {
-                .@"32" => @intCast((width * 16 + 63) / 64),
-                else   => @intCast(words_per_row),
-            };
-
-            // dxt: ceil(2048 / words_per_row), 1.11 fixed point (accumulator overflows at 2048).
-            const dxt: u12 = @intCast((2048 + words_per_row - 1) / words_per_row);
-
-            // Sub-byte formats fake a wider RGBA16 image so LoadBlock sees at most 2048 "texels".
-            // The render tile is configured after the load to keep its descriptor clean during transfer.
-            const load_format: ColorFormat = switch (T.bit_depth) {
-                .@"4", .@"8" => .rgba,
-                else          => T.format,
-            };
-            const load_bit_depth: BitDepth = switch (T.bit_depth) {
-                .@"4", .@"8" => .@"16",
-                else          => T.bit_depth,
-            };
-            const load_width: u32 = switch (T.bit_depth) {
-                .@"4" => (width + 3) / 4, // 4 nibbles → 1 fake RGBA16 texel
-                .@"8" => width / 2,        // 2 bytes   → 1 fake RGBA16 texel
-                else  => width,
-            };
-
-            cq.setTextureImageRaw(load_format, load_bit_depth, load_width, @intFromPtr(image.texel_data.ptr));
-            cq.setTile(.{
-                .color_format = load_format,
-                .bit_depth = load_bit_depth,
-                .line_length = 0,
-                .tmem_addr = opts.tmem_addr,
-                .tile_index = load_tile
-            });
-
-            cq.loadSync();
-
-            // LoadBlock texel count is adjusted for sub-byte packing so the fake RGBA16
-            // unit count is consistent with the fake width set in SetTextureImage above.
-            const num_texels: u32 = switch (T.bit_depth) {
-                .@"4" => (width * height + 3) / 4,
-                .@"8" => (width * height + 1) / 2,
-                else  => width * height,
-            };
-            cq.loadBlock(.{
-                .tile          = load_tile,
-                .lower_right_s = @intCast(num_texels - 1),
-                .dxt           = dxt,
-            });
-
-            // Rendering tile: real format and pitch, set after the load completes.
-            cq.setTile(.{
-                .color_format = T.format,
-                .bit_depth    = T.bit_depth,
-                .line_length  = render_line_len,
-                .tmem_addr    = opts.tmem_addr,
-                .tile_index   = opts.tile,
-            });
-
-            cq.loadSync();
-
-            // Set the rendered tile's texture coordinate extents (u10.2: pixel * 4).
-            cq.setTileSize(.{
-                .tile          = opts.tile,
-                .lower_right_s = @intCast((width  - 1) * 4),
-                .lower_right_t = @intCast((height - 1) * 4),
-            });
-        }
-
         // 0xF6
         pub fn fillRect(cq: *Self, upper_left_x: u16, upper_left_y: u16, lower_right_x: u16, lower_right_y: u16) void {
-            cq.flushMode();
             const cmd: u64 =
                 (@as(u64, 0xF6) << 56) |
                 (@as(u64, lowBits(lower_right_x, 12)) << 44) |
@@ -395,13 +265,13 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.push(cmd);
         }
 
-        // 0xFD
-        pub fn setTextureImage(cq: *Self, image: anytype) void {
-            cq.queue.push(buildImageCmd(0xFD, image));
+        // 0xFC
+        pub fn setCombiner(cq: *Self, mode: CombineMode) void {
+            cq.queue.push(buildCombineCmd(mode));
         }
 
-        // 0xFD — explicit format/depth variant used when lying to the hardware for sub-byte loads.
-        pub fn setTextureImageRaw(cq: *Self, format: ColorFormat, bit_depth: BitDepth, width: u32, addr: usize) void {
+        // 0xFD
+        pub fn setTextureImage(cq: *Self, format: ColorFormat, bit_depth: BitDepth, width: u32, addr: usize) void {
             cq.queue.push(
                 (@as(u64, 0xFD) << 56) |
                 (@as(u64, @intFromEnum(format)) << 53) |

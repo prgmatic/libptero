@@ -1,5 +1,4 @@
-const bm = @import("blend.zig");
-
+const bm = @import("blender.zig");
 
 // Packed layout for Set Other Modes (0xEF).
 pub const OtherModes = packed struct(u64) {
