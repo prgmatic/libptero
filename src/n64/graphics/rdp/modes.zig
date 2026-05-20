@@ -3,20 +3,18 @@ const bm = @import("blend.zig");
 
 // Packed layout for Set Other Modes (0xEF).
 pub const OtherModes = packed struct(u64) {
-    alpha_compare_en: bool         = false,
-    alpha_noise_en:   bool         = false,
-    z_source_sel:     bool         = true,
-    antialias_en:     bool         = false,
-    z_compare_en:     bool         = false,
-    z_update_en:      bool         = false,
-    image_read_en:    bool         = false,
-    color_on_cvg:     bool         = false,
-    cvg_dest:         CoverageDest = .clamp,
-    z_mode:           ZMode        = .opaque_surface,
-    cvg_x_alpha:      bool         = false,
-    alpha_cvg_select: bool         = false,
-    force_blend:      bool         = false,
-    _pad0:            u1           = 0,
+    alpha_compare:         AlphaCompare    = .disabled,
+    z_source:              ZSource         = .per_pixel,
+    antialias_en:          bool            = false,
+    z_compare_en:          bool            = false,
+    z_update_en:           bool            = false,
+    image_read_en:         bool            = false,
+    write_on_cvg_overflow: bool            = false,
+    cvg_dest:              CoverageDest    = .clamp,
+    z_mode:                ZMode           = .opaque_surface,
+    blender_alpha:         BlenderAlphaSrc = .combiner,
+    force_blend:           bool            = false,
+    _pad0:                 u1              = 0,
 
     blend_b1: bm.BlendInvSrc   = .inv_a,
     blend_b0: bm.BlendInvSrc   = .inv_a,
@@ -27,25 +25,24 @@ pub const OtherModes = packed struct(u64) {
     blend_p1: bm.BlendColorSrc = .pixel,
     blend_p0: bm.BlendColorSrc = .pixel,
 
-    _pad1:             u4          = 0,
-    alpha_dither:      AlphaDither = .same_as_rgb,
-    rgb_dither:        RgbDither   = .magic_square,
-    key_en:            bool        = false,
-    convert_one:       bool        = false,
-    bilinear_filter_1: bool        = true,
-    bilinear_filter_0: bool        = true,
-    average_texel:     bool        = false,
-    sample_type:       SampleType  = .point,
-    tlut_format:       TlutFormat  = .rgba16,
-    tlut_en:           bool        = false,
-    tex_lod_en:        bool        = false,
-    sharpen_tex_en:    bool        = false,
-    detail_tex_en:     bool        = false,
-    persp_tex_en:      bool        = false,
-    cycle_type:        CycleType   = .one_cycle,
-    _pad2:             u1          = 0,
-    atomic_prim:       bool        = false,
-    _command:          u8          = 0xEF,
+    _pad1:                u4            = 0,
+    alpha_dither:         AlphaDither   = .same_as_rgb,
+    rgb_dither:           RgbDither     = .magic_square,
+    chroma_key_en:        bool          = false,
+    tex_filter_use_tex0:  bool          = false,
+    tex_filter_1:         TexFilter     = .bilinear,
+    tex_filter_0:         TexFilter     = .bilinear,
+    texture_sample:       TextureSample = .point,
+    tlut_format:          TlutFormat    = .rgba16,
+    tlut_en:              bool          = false,
+    tex_lod_en:           bool          = false,
+    sharpen_tex_en:       bool          = false,
+    detail_tex_en:        bool          = false,
+    persp_tex_en:         bool          = false,
+    cycle_type:           CycleType     = .one_cycle,
+    _pad2:                u1            = 0,
+    atomic_prim:          bool          = false,
+    _command:             u8            = 0xEF,
 };
 
 pub const CycleType = enum(u2) {
@@ -60,6 +57,11 @@ pub const ZMode = enum(u2) {
     interpenetrating = 1,
     transparent      = 2,
     decal            = 3,
+};
+
+pub const ZSource = enum(u1) {
+    per_pixel = 0,
+    primitive = 1,
 };
 
 pub const CoverageDest = enum(u2) {
@@ -88,7 +90,28 @@ pub const TlutFormat = enum(u1) {
     ia16   = 1,
 };
 
-pub const SampleType = enum(u1) {
+/// Texel sampling pattern. Combines sample_type (bit 45) and mid_texel (bit 44).
+pub const TextureSample = enum(u2) {
     point    = 0,
     bilinear = 1,
+    median   = 2,
+};
+
+/// Texture filter mode per pipeline cycle (bi_lerp).
+pub const TexFilter = enum(u1) {
+    yuv_to_rgb = 0,
+    bilinear   = 1,
+};
+
+/// Alpha source for the blender's A input.
+pub const BlenderAlphaSrc = enum(u2) {
+    combiner     = 0,
+    coverage     = 1,
+    cvg_times_cc = 2,
+};
+
+pub const AlphaCompare = enum(u2) {
+    disabled  = 0,
+    threshold = 1,
+    noise     = 2,
 };
