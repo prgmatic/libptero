@@ -79,6 +79,11 @@ pub const SetTileOptions = struct {
     mirror_t: bool = false,
 };
 
+pub const LoadTextureOptions = struct {
+    tile:      u3    = 0,
+    tmem_addr: usize = 0,
+};
+
 pub fn CommandQueue(comptime QueueType: type) type {
     if (!@hasDecl(QueueType, "push"))
         @compileError("Type must implement push(u64)");
@@ -255,6 +260,95 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.push(cmd);
         }
 
+        // Loads a texture into TMEM, issuing all necessary RDP commands.
+        pub fn loadTexture(cq: *Self, image: anytype, opts: LoadTextureOptions) void {
+            const T = @TypeOf(image);
+            const width: u32 = image.width;
+            const height: u32 = image.height;
+
+            // Internal tile used for the LoadBlock operation; must differ from the
+            // rendering tile so its descriptor is not overwritten.
+            const load_tile: u3 = opts.tile +% 1;
+
+            const bpp: u32 = switch (T.bit_depth) {
+                .@"4"  => 4,
+                .@"8"  => 8,
+                .@"16" => 16,
+                .@"32" => 32,
+            };
+
+            // 64-bit words per row of texture data in RDRAM.
+            const words_per_row: u32 = (width * bpp + 63) / 64;
+
+            // Line length for the rendering tile. RGBA32 is stored across two TMEM banks
+            // (hi and lo), so the effective words-per-row per bank is halved.
+            const render_line_len: u9 = switch (T.bit_depth) {
+                .@"32" => @intCast((width * 16 + 63) / 64),
+                else   => @intCast(words_per_row),
+            };
+
+            // dxt: ceil(2048 / words_per_row), 1.11 fixed point (accumulator overflows at 2048).
+            const dxt: u12 = @intCast((2048 + words_per_row - 1) / words_per_row);
+
+            // Sub-byte formats fake a wider RGBA16 image so LoadBlock sees at most 2048 "texels".
+            // The render tile is configured after the load to keep its descriptor clean during transfer.
+            const load_format: ColorFormat = switch (T.bit_depth) {
+                .@"4", .@"8" => .rgba,
+                else          => T.format,
+            };
+            const load_bit_depth: BitDepth = switch (T.bit_depth) {
+                .@"4", .@"8" => .@"16",
+                else          => T.bit_depth,
+            };
+            const load_width: u32 = switch (T.bit_depth) {
+                .@"4" => (width + 3) / 4, // 4 nibbles → 1 fake RGBA16 texel
+                .@"8" => width / 2,        // 2 bytes   → 1 fake RGBA16 texel
+                else  => width,
+            };
+
+            cq.setTextureImageRaw(load_format, load_bit_depth, load_width, @intFromPtr(image.texel_data.ptr));
+            cq.setTile(.{
+                .color_format = load_format,
+                .bit_depth = load_bit_depth,
+                .line_length = 0,
+                .tmem_addr = opts.tmem_addr,
+                .tile_index = load_tile
+            });
+
+            cq.loadSync();
+
+            // LoadBlock texel count is adjusted for sub-byte packing so the fake RGBA16
+            // unit count is consistent with the fake width set in SetTextureImage above.
+            const num_texels: u32 = switch (T.bit_depth) {
+                .@"4" => (width * height + 3) / 4,
+                .@"8" => (width * height + 1) / 2,
+                else  => width * height,
+            };
+            cq.loadBlock(.{
+                .tile          = load_tile,
+                .lower_right_s = @intCast(num_texels - 1),
+                .dxt           = dxt,
+            });
+
+            // Rendering tile: real format and pitch, set after the load completes.
+            cq.setTile(.{
+                .color_format = T.format,
+                .bit_depth    = T.bit_depth,
+                .line_length  = render_line_len,
+                .tmem_addr    = opts.tmem_addr,
+                .tile_index   = opts.tile,
+            });
+
+            cq.loadSync();
+
+            // Set the rendered tile's texture coordinate extents (u10.2: pixel * 4).
+            cq.setTileSize(.{
+                .tile          = opts.tile,
+                .lower_right_s = @intCast((width  - 1) * 4),
+                .lower_right_t = @intCast((height - 1) * 4),
+            });
+        }
+
         // 0xF6
         pub fn fillRect(cq: *Self, upper_left_x: u16, upper_left_y: u16, lower_right_x: u16, lower_right_y: u16) void {
             cq.flushMode();
@@ -304,6 +398,17 @@ pub fn CommandQueue(comptime QueueType: type) type {
         // 0xFD
         pub fn setTextureImage(cq: *Self, image: anytype) void {
             cq.queue.push(buildImageCmd(0xFD, image));
+        }
+
+        // 0xFD — explicit format/depth variant used when lying to the hardware for sub-byte loads.
+        pub fn setTextureImageRaw(cq: *Self, format: ColorFormat, bit_depth: BitDepth, width: u32, addr: usize) void {
+            cq.queue.push(
+                (@as(u64, 0xFD) << 56) |
+                (@as(u64, @intFromEnum(format)) << 53) |
+                (@as(u64, @intFromEnum(bit_depth)) << 51) |
+                (@as(u64, lowBits(width - 1, 10)) << 32) |
+                lowBits(addr, 24)
+            );
         }
 
         // 0xFF

@@ -11,6 +11,10 @@ pub const Rgba32 = packed struct(u32) {
         return @bitCast(int);
     }
 
+    pub fn fromBytes(r: u8, g: u8, b: u8, a: u8) Rgba32 {
+        return .{.r = r, .g = g, .b = b, .a = a };
+    }
+
     pub const white: Rgba32 = .fromInt(0xFFFFFFFF);
     pub const black: Rgba32 = .fromInt(0x000000FF);
     pub const red: Rgba32 = .fromInt(0xFF0000FF);

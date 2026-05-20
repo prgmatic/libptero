@@ -5,6 +5,10 @@ const std = @import("std");
 const Rgba32 = n64.graphics.color.Rgba32;
 const Rgba16 = n64.graphics.color.Rgba16;
 const Img16 = n64.graphics.image.ImgRgba16;
+const Img32 = n64.graphics.image.ImgRgba32;
+const ImgIa8 = n64.graphics.image.ImgIa8;
+
+const img = n64.graphics.image;
 const print = n64.debug.print;
 var sys_buffer: [1024 * 512]u8 = undefined;
 var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&sys_buffer);
@@ -17,13 +21,15 @@ const height: u16 = 240;
 var frame_buffer0: Img16 = undefined;
 var frame_buffer1: Img16 = undefined;
 var current_frame_buffer: *Img16 = undefined;
-var dummy_img: Img16 = undefined;
 
 var queue_buffer: []u64 = undefined;
 var queue: rdp.FixedQueue = undefined;
 var cq: rdp.FixedCommandQueue = undefined;
 var frame_count: u32 = 0;
 
+var tex32: Img32 = undefined;
+var tex16: Img16 = undefined;
+var texIa8: ImgIa8 = undefined;
 
 export fn interruptHandler(frame: *n64.debug.TrapFrame) callconv(.c) noreturn {
     n64.debug.exepction.exceptionHandler(frame);
@@ -80,43 +86,35 @@ fn update() void {
     // Load and draw sprite
     cq.setCycleType(.one_cycle);
     cq.setBlendMode(.alpha);
-    cq.setCombineMode(.single(.{ .rgb_d = .primitive, .alpha_d = .tex0 }));
+    cq.setCombineMode(.decal_rgba);
     cq.setPrimColor(.fromInt(0xAB5C0EFF));
-    cq.pipeSync();
-    cq.setTextureImage(dummy_img);
-    cq.loadSync();
-    cq.setTile(.{
-        .color_format = .rgba,
-        .bit_depth = .@"16",
-        .line_length = 4,   // 16px * 2 bytes / 8 bytes per word
-        .tmem_addr = 0,
-    });
-    cq.loadTile(.{
-        .lower_right_s = 15 << 2,  // u10.2: texel 15 inclusive
-        .lower_right_t = 15 << 2,
-    });
-    cq.loadSync();
-    cq.setTileSize(.{
-        .lower_right_s = 15 << 2,  // u10.2: pixel 15 inclusive
-        .lower_right_t = 15 << 2,
-    });
-    cq.tileSync();
-    cq.textureRectangle(.{
-        .ulx = 100 << 2,
-        .uly = 100 << 2,
-        .lrx = 116 << 2,
-        .lry = 116 << 2,
-        .s = 0,
-        .t = 0,
-        .dsdx = 1 << 10,   // s5.10: 1 line per cycle
-        .dtdy = 1 << 10,   // s5.10: 1 line per cycle
-    });
-
+    cq.queue.push(0xEE << 56);
+    drawTexture(tex16, 100, 100);
+    drawTexture(tex32, 60, 100);
+    // (A-D)*C+D
+    cq.setCombineMode(.single(.{.rgb_a = .noise, .rgb_c = .tex0, .alpha_d = .tex0}));
+    drawTexture(texIa8, 80, 100);
 
     cq.fullSync();
     n64.cache.writebackData(queue_buffer);
     cq.execute();
     frame_count += 1;
+}
+
+fn drawTexture(image: anytype, x: u12, y: u12) void {
+    cq.loadTexture(image, .{});
+    cq.tileSync();
+    cq.textureRectangle(.{
+        .ulx = x << 2,
+        .uly = y << 2,
+        .lrx = @as(u12, @truncate(x + image.width)) << 2,
+        .lry = @as(u12, @truncate(y + image.height)) << 2,
+        .s = 0,
+        .t = 0,
+        .dsdx = 1 << 10,   // s5.10: 1 line per cycle
+        .dtdy = 1 << 10,   // s5.10: 1 line per cycle
+    });
+    cq.pipeSync();
 }
 
 fn initVideo() void {
@@ -131,19 +129,27 @@ fn initVideo() void {
     frame_buffer1 = Img16.init(allocator, width, height) catch undefined;
     current_frame_buffer = &frame_buffer0;
 
-    dummy_img = Img16.init(allocator, 16, 16) catch undefined;
+    tex16 = Img16.init(allocator, 16, 16) catch undefined;
+    tex32 = Img32.init(allocator, 16, 16) catch undefined;
+    texIa8 = ImgIa8.init(allocator, 16, 16) catch undefined;
     for(0..16) |y| {
         for(0..16) |x| {
-            const idx = y * dummy_img.width + x;
+            const idx = y * tex16.width + x;
             var d = distance(@as(f32, @floatFromInt(x)) - 7.5, @as(f32, @floatFromInt(y)) - 7.5) / 8;
             d = @max(0, 1.0 - d);
-            // d = @min(d * 3, 1);
             const c: u8 = @intFromFloat(d * 255);
+            const c2: u4 = @intFromFloat(d * 16);
+            const r: u8 = @intCast(255 / 16 * x);
+            const g: u8 = @intCast(255 / 16 * y);
             
-            dummy_img.texel_data[idx] = .fromBytes(c, c, c, c);
+            tex16.texel_data[idx] = .fromBytes(c, c, c, c);
+            tex32.texel_data[idx] = .fromBytes(r, g, 0, c);
+            texIa8.texel_data[idx] = .{.intensity = c2, .alpha = c2};
         }
     }
-    n64.cache.writebackData(dummy_img.texel_data);
+    n64.cache.writebackData(tex16.texel_data);
+    n64.cache.writebackData(tex32.texel_data);
+    n64.cache.writebackData(texIa8.texel_data);
 
     queue_buffer = allocator.alignedAlloc(u64, std.mem.Alignment.@"32", 64) catch undefined;
     queue = rdp.FixedQueue{ .buffer = queue_buffer };

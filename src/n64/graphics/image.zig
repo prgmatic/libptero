@@ -41,7 +41,7 @@ pub fn Image(comptime PixelFormat: type) type {
                 .width = width,
                 .height = height,
                 // TODO: Configurable alignment
-                .texel_data = try allocator.alignedAlloc(PixelFormat, std.mem.Alignment.@"32", buffer_len)
+                .texel_data = try allocator.alignedAlloc(PixelFormat, std.mem.Alignment.@"8", buffer_len)
             };
         }
 
