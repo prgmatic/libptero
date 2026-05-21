@@ -77,10 +77,8 @@ fn update() void {
     rq.setBlendMode(.alpha);
     rq.setCombineMode(.decal_rgba);
     rq.setPrimColor(.fromInt(0xAB5C0EFF));
-    rq.drawSprite(tex16, 100, 100, .{.scale_x = 2, .scale_y = 2, .width = 13, .height = 8});
-    rq.blitSprite(tex16, 60, 120);
-    rq.drawSprite(tex32, 60, 100, .{});
-    var s:f32 = @sin(t) * 4;
+    rq.drawSprite(tex32, 60, 100, .{.rotation = t, .pivot = .center });
+    var s:f32 = @sin(t * 4) * 4;
     if(s < 0)
         s = @min(-0.01, s)
     else
@@ -91,10 +89,20 @@ fn update() void {
         .pivot = .center,
         .s0 = 4,
         .width = 8,
+        .rotation = t,
+    });
+
+
+    // (A -B)C + D
+    rq.setCombineMode(.single(.{ .rgb_a = .noise, .rgb_c = .tex0, .alpha_d = .tex0 }));
+    rq.drawSprite(tex32, 160, 100, .{
+        .scale_x = s,
+        .scale_y = 4,
+        .pivot = .center,
+        .rotation = t,
     });
     rq.setCombineMode(.single(.{ .rgb_a = .noise, .rgb_c = .tex0, .alpha_d = .tex0 }));
     rq.drawSprite(texIa8, 80, 100, .{});
-
 
     rq.fullSync();
     n64.cache.writebackData(queue_buffer);
@@ -134,7 +142,7 @@ fn initVideo() void {
     n64.cache.writebackData(tex32.texel_data);
     n64.cache.writebackData(texIa8.texel_data);
 
-    queue_buffer = allocator.alignedAlloc(u64, std.mem.Alignment.@"32", 64) catch undefined;
+    queue_buffer = allocator.alignedAlloc(u64, std.mem.Alignment.@"32", 512) catch undefined;
     queue = rdp.FixedQueue{ .buffer = queue_buffer };
     rq = rdp.FixedRenderQueue.init(queue);
     update();

@@ -13,6 +13,7 @@ pub const RenderQueue      = rq.RenderQueue;
 pub const FixedRenderQueue = rq.FixedRenderQueue;
 pub const SpriteDrawOptions = rq.SpriteDrawOptions;
 pub const Pivot             = rq.Pivot;
+pub const TexVertex         = queue.TexVertex;
 
 pub const OtherModes   = modes.OtherModes;
 pub const CycleType    = modes.CycleType;

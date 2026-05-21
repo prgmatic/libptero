@@ -5,6 +5,7 @@ const cc = @import("combiner.zig");
 const blender = @import("blender.zig");
 const modes = @import("modes.zig");
 
+
 const CombineMode = cc.CombineMode;
 const OtherModes = modes.OtherModes;
 const Rgba32 = @import("../color.zig").Rgba32;
@@ -76,10 +77,6 @@ pub const SetTileOptions = struct {
     mirror_t: bool = false,
 };
 
-pub const LoadTextureOptions = struct {
-    tile:      u3    = 0,
-    tmem_addr: usize = 0,
-};
 
 // Thin command emitter. Every method pushes exactly the command(s) documented —
 // no hidden syncs, no state tracking. Callers are responsible for issuing
@@ -285,6 +282,7 @@ pub fn CommandQueue(comptime QueueType: type) type {
         pub fn setColorFrame(cq: *Self, image: anytype) void {
             cq.queue.push(buildImageCmd(0xFF, image));
         }
+
     };
 }
 
@@ -340,3 +338,4 @@ fn lowBits(value: anytype, bitCount: u6) u64 {
     const mask = (@as(u64, 1) << bitCount) - 1;
     return @as(u64, @intCast(value)) & mask;
 }
+
