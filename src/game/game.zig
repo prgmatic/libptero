@@ -83,7 +83,6 @@ fn update() void {
         .rotation = t,
     });
 
-
     rq.setCombineMode(.single(.{ .rgb_a = .noise, .rgb_c = .tex0, .alpha_d = .tex0 }));
     rq.drawSprite(tex32, 160, 100, .{
         .scale_x = s,

@@ -21,13 +21,11 @@ pub fn interruptHandler() void {
 }
 
 pub fn waitForInterrupt(interrupts: InterruptMask) void {
-    // Clear pending
-    @atomicStore(u32, &pending_interrupts, 0, .release);
-
     const want: u32 = @bitCast(interrupts);
     while (true) {
         const current = @atomicLoad(u32, &pending_interrupts, .acquire);
-        if((want & current) == want){
+        if ((want & current) == want) {
+            _ = @atomicRmw(u32, &pending_interrupts, .And, ~want, .release);
             break;
         }
     }
