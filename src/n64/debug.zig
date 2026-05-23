@@ -28,8 +28,8 @@ fn detect() Backend {
     return .None;
 }
 
-pub fn initFmtBuffer(allocator: std.mem.Allocator) void {
-    fmt_buffer = allocator.alloc(u8, 256) catch null;
+pub fn initFmtBuffer(allocator: std.mem.Allocator) !void {
+    fmt_buffer = try allocator.alloc(u8, 256);
 }
 
 pub fn print(comptime fmt: []const u8, args: anytype) void {

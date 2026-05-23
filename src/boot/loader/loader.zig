@@ -9,7 +9,7 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
     var sys_buffer: [256]u8 = undefined;
     var fixed_buffer_alloc = std.heap.FixedBufferAllocator.init(&sys_buffer);
     n64.debug.init();
-    n64.debug.initFmtBuffer(fixed_buffer_alloc.allocator());
+    n64.debug.initFmtBuffer(fixed_buffer_alloc.allocator()) catch undefined;
     
     const entry = loadElf();
 

@@ -11,7 +11,6 @@ const print = n64.debug.print;
 var sys_buffer: [1024 * 512]u8 = undefined;
 var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&sys_buffer);
 const allocator = fixed_buffer_allocator.allocator();
-pub const panic = std.debug.FullPanic(n64.crash);
 const rdp = n64.graphics.rdp;
 
 const width: u16 = 320;
@@ -29,20 +28,12 @@ var tex32: Img32 = undefined;
 var tex16: Img16 = undefined;
 var texIa8: ImgIa8 = undefined;
 
-export fn interruptHandler(frame: *n64.debug.TrapFrame) callconv(.c) noreturn {
-    n64.debug.exepction.exceptionHandler(frame);
-}
-
-export fn __MI_handler() callconv(.c) void {
-    n64.interrupt.interruptHandler();
-}
-
-export fn __start() linksection(".text.startup") void {
+pub fn main() !void {
     n64.debug.init();
-    n64.debug.initFmtBuffer(allocator);
+    try n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
 
-    initVideo();
+   try initVideo();
 
     while (true) {
         n64.interrupt.waitForInterrupt(.{ .rdp = true, .video = true });
@@ -93,7 +84,6 @@ fn update() void {
     });
 
 
-    // (A -B)C + D
     rq.setCombineMode(.single(.{ .rgb_a = .noise, .rgb_c = .tex0, .alpha_d = .tex0 }));
     rq.drawSprite(tex32, 160, 100, .{
         .scale_x = s,
@@ -110,20 +100,20 @@ fn update() void {
     frame_count += 1;
 }
 
-fn initVideo() void {
+fn initVideo() !void {
     vi.init(.{
         .tv = .ntsc,
         .resolution = .@"320x240p",
         .color_depth = .Rgba5551,
     });
 
-    frame_buffer0 = Img16.init(allocator, width, height) catch undefined;
-    frame_buffer1 = Img16.init(allocator, width, height) catch undefined;
+    frame_buffer0 = try Img16.init(allocator, width, height);
+    frame_buffer1 = try Img16.init(allocator, width, height);
     current_frame_buffer = &frame_buffer0;
 
-    tex16  = Img16.init(allocator, 16, 16) catch undefined;
-    tex32  = Img32.init(allocator, 16, 16) catch undefined;
-    texIa8 = ImgIa8.init(allocator, 16, 16) catch undefined;
+    tex16  = try Img16.init(allocator, 16, 16);
+    tex32  = try Img32.init(allocator, 16, 16);
+    texIa8 = try ImgIa8.init(allocator, 16, 16);
     for (0..16) |y| {
         for (0..16) |x| {
             const idx = y * tex16.width + x;
@@ -142,7 +132,7 @@ fn initVideo() void {
     n64.cache.writebackData(tex32.texel_data);
     n64.cache.writebackData(texIa8.texel_data);
 
-    queue_buffer = allocator.alignedAlloc(u64, std.mem.Alignment.@"32", 512) catch undefined;
+    queue_buffer = try allocator.alignedAlloc(u64, std.mem.Alignment.@"8", 512);
     queue = rdp.FixedQueue{ .buffer = queue_buffer };
     rq = rdp.FixedRenderQueue.init(queue);
     update();

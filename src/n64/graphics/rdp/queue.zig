@@ -15,6 +15,7 @@ pub const FixedQueue = struct {
     index: usize = 0,
 
     pub fn push(self: *FixedQueue, value: u64) void {
+        if(self.index >= self.buffer.len) @panic("QueueFull");
         self.buffer[self.index] = value;
         self.index += 1;
     }

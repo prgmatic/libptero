@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     const elf = b.addExecutable(.{
         .name = "game.elf",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/game/game.zig"),
+            .root_source_file = b.path("src/game/entry.zig"),
             .target = target,
             .optimize = .ReleaseSmall, //optimize,
             .imports = &.{ 
