@@ -3,7 +3,7 @@ const std = @import("std");
 // Produces a stripped, ROM-ready ELF from the canonical debug ELF + srcmap:
 //   - copies only PT_LOAD segments, preserving their linked virtual addresses
 //   - removes section headers, symbols, DWARF, and other non-loadable data
-//   - appends srcmap as a new PT_LOAD segment at __srcmap_start
+//   - appends srcmap as raw ROM data and patches its ROM offset/size into RAM
 //
 // Usage: elf_pack <input.elf> <input.srcmap> <output.elf>
 
@@ -49,9 +49,8 @@ fn readAll(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]u8 {
 const Error = error{
     BadElf,
     UnsupportedElf,
-    MissingSrcmapSymbol,
+    MissingSymbol,
     ProgramHeaderTableTooLarge,
-    SrcmapOverlapsImage,
 };
 
 fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8) ![]u8 {
@@ -65,23 +64,19 @@ fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8) ![]u8 {
     if (phent != 32) return Error.UnsupportedElf;
     if (@as(usize, phoff) + @as(usize, phnum) * phent > elf.len) return Error.BadElf;
 
-    const srcmap_vaddr = try findSymbol(elf, "__srcmap_start");
+    const srcmap_rom_offset_vaddr = try findSymbol(elf, "__srcmap_rom_offset");
+    const srcmap_rom_size_vaddr = try findSymbol(elf, "__srcmap_rom_size");
 
     var load_count: u16 = 0;
-    var top_vaddr: u32 = 0;
     for (0..phnum) |i| {
         const ph = @as(usize, phoff) + i * phent;
         if (r32(elf, ph + PH_TYPE) != PT_LOAD) continue;
         load_count += 1;
-
-        const end = r32(elf, ph + PH_VADDR) + r32(elf, ph + PH_MEMSZ);
-        if (end > top_vaddr) top_vaddr = end;
     }
 
-    const new_phnum = load_count + 1;
+    const new_phnum = load_count;
     const ph_table_end: u32 = phoff + @as(u32, new_phnum) * phent;
     if (ph_table_end > 1024) return Error.ProgramHeaderTableTooLarge;
-    if (srcmap_vaddr < std.mem.alignForward(u32, top_vaddr, 8)) return Error.SrcmapOverlapsImage;
 
     var cursor: u32 = std.mem.alignForward(u32, ph_table_end, 16);
     for (0..phnum) |i| {
@@ -93,7 +88,7 @@ fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8) ![]u8 {
         cursor += r32(elf, ph + PH_FILESZ);
     }
 
-    cursor = std.mem.alignForward(u32, cursor, 8);
+    cursor = std.mem.alignForward(u32, cursor, 4);
     const srcmap_offset = cursor;
     cursor += @intCast(srcmap.len);
 
@@ -132,25 +127,38 @@ fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8) ![]u8 {
         ph_idx += 1;
     }
 
-    const src_ph = @as(usize, phoff) + @as(usize, ph_idx) * phent;
-    w32(out, src_ph + PH_TYPE, PT_LOAD);
-    w32(out, src_ph + PH_OFFSET, srcmap_offset);
-    w32(out, src_ph + PH_VADDR, srcmap_vaddr);
-    w32(out, src_ph + PH_PADDR, srcmap_vaddr);
-    w32(out, src_ph + PH_FILESZ, @intCast(srcmap.len));
-    w32(out, src_ph + PH_MEMSZ, @intCast(srcmap.len));
-    w32(out, src_ph + PH_FLAGS, PF_R);
-    w32(out, src_ph + PH_ALIGN, 8);
+    patchU32AtVaddr(out, phoff, new_phnum, phent, srcmap_rom_offset_vaddr, srcmap_offset) catch return Error.BadElf;
+    patchU32AtVaddr(out, phoff, new_phnum, phent, srcmap_rom_size_vaddr, @intCast(srcmap.len)) catch return Error.BadElf;
     @memcpy(out[@as(usize, srcmap_offset)..@as(usize, srcmap_offset + srcmap.len)], srcmap);
 
     return out;
+}
+
+fn patchU32AtVaddr(out: []u8, phoff: u32, phnum: u16, phent: u16, vaddr: u32, value: u32) !void {
+    const off = try vaddrToFileOffset(out, phoff, phnum, phent, vaddr);
+    if (off + 4 > out.len) return Error.BadElf;
+    w32(out, off, value);
+}
+
+fn vaddrToFileOffset(elf: []const u8, phoff: u32, phnum: u16, phent: u16, vaddr: u32) !usize {
+    for (0..phnum) |i| {
+        const ph = @as(usize, phoff) + i * phent;
+        if (ph + 32 > elf.len) return Error.BadElf;
+        if (r32(elf, ph + PH_TYPE) != PT_LOAD) continue;
+        const offset = r32(elf, ph + PH_OFFSET);
+        const seg_vaddr = r32(elf, ph + PH_VADDR);
+        const filesz = r32(elf, ph + PH_FILESZ);
+        if (vaddr >= seg_vaddr and vaddr + 4 <= seg_vaddr + filesz)
+            return @as(usize, offset) + (vaddr - seg_vaddr);
+    }
+    return Error.BadElf;
 }
 
 fn findSymbol(elf: []const u8, name: []const u8) !u32 {
     const shoff = r32(elf, EH_SHOFF);
     const shnum = r16(elf, EH_SHNUM);
     const shent = r16(elf, EH_SHENT);
-    if (shoff == 0 or shnum == 0 or shent < 40) return Error.MissingSrcmapSymbol;
+    if (shoff == 0 or shnum == 0 or shent < 40) return Error.MissingSymbol;
     if (@as(usize, shoff) + @as(usize, shnum) * shent > elf.len) return Error.BadElf;
 
     for (0..shnum) |i| {
@@ -181,7 +189,7 @@ fn findSymbol(elf: []const u8, name: []const u8) !u32 {
         }
     }
 
-    return Error.MissingSrcmapSymbol;
+    return Error.MissingSymbol;
 }
 
 fn sliceZ(bytes: []const u8) []const u8 {
@@ -231,5 +239,4 @@ const ST_NAME = 0;
 const ST_VALUE = 4;
 
 const PT_LOAD: u32 = 1;
-const PF_R: u32 = 4;
 const SHT_SYMTAB: u32 = 2;

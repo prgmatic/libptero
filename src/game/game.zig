@@ -97,7 +97,7 @@ fn update() void {
     n64.cache.writebackData(queue_buffer);
     rq.execute();
     frame_count += 1;
-    @panic("ahhh");
+    forceCrash();
 }
 
 fn initVideo() !void {
@@ -148,7 +148,6 @@ fn initVideo() !void {
 }
 
 fn forceCrash() void {
-    print("Force a crash?\n", .{});
     const null_ptr: *volatile u32 = @ptrFromInt(4);
     _ = null_ptr.*;
 }

@@ -31,20 +31,8 @@ SECTIONS {
 	*(.bss*)
 	__bss_end = .;
     } > RAM
-    .srcmap : ALIGN(8) {
-	__srcmap_start = .;
-	KEEP(*(.srcmap))
-	__srcmap_end = .;
-    } > RAM AT > ROM
-
+ 
     /DISCARD/ :
     {
-	*(.reginfo)
-	*(.MIPS.abiflags)
-	*(.got)
-	*(.eh_frame*)
-	*(.mdebug*)
-	*(.pdr)
-	*(.comment)
     }
 }

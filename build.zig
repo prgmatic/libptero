@@ -2,13 +2,12 @@ const std = @import("std");
 
 const title: []const u8 = "Libptero";
 
-
 pub fn build(b: *std.Build) void {
     const target = b.resolveTargetQuery(target_query);
     // const optimize = b.standardOptimizeOption(.{
     //     .preferred_optimize_mode = .ReleaseSmall
     // });
-    
+
     // Create main n64 library as a module
     const n64_module = b.createModule(.{
         .root_source_file = b.path("src/n64/n64.zig"),
@@ -49,6 +48,7 @@ pub fn build(b: *std.Build) void {
     const srcmap_step = b.addRunArtifact(tools.srcmap);
     srcmap_step.addArtifactArg(elf_debug);
     const srcmap_file = srcmap_step.addOutputFileArg("game.srcmap");
+    srcmap_step.addArg(b.pathFromRoot("."));
 
     const pack_step = b.addRunArtifact(tools.elf_pack);
     pack_step.addArtifactArg(elf_debug);
