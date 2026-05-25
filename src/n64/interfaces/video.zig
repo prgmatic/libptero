@@ -134,7 +134,7 @@ pub const Resolution = enum(u8) {
     @"512x240p",
     @"640x240p",
     @"512x480i",
-    @"640x680i",
+    @"640x480i",
 };
 
 const ResolutionInfo = struct {
