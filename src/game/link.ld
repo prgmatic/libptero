@@ -1,4 +1,3 @@
-OUTPUT_FORMAT ("elf32-bigmips", "elf32-bigmips", "elf32-littlemips")
 OUTPUT_ARCH (mips)
 
 ram_start_address = 0x80000000;
@@ -15,8 +14,10 @@ SECTIONS {
 
     . = 0x400;
     .text : {
+	__text_start = .;
 	*(.text.startup)
 	*(.text*)
+	__text_end = .;
     } > RAM AT > ROM
 
     .data : ALIGN(8) {
@@ -26,15 +27,24 @@ SECTIONS {
     } > RAM AT > ROM
 
     .bss : ALIGN(8) {
+	__bss_start = .;
 	*(.bss*)
+	__bss_end = .;
     } > RAM
+    .srcmap : ALIGN(8) {
+	__srcmap_start = .;
+	KEEP(*(.srcmap))
+	__srcmap_end = .;
+    } > RAM AT > ROM
 
     /DISCARD/ :
     {
-	*(.eh_frame*)
 	*(.reginfo)
 	*(.MIPS.abiflags)
 	*(.got)
+	*(.eh_frame*)
+	*(.mdebug*)
+	*(.pdr)
+	*(.comment)
     }
 }
-

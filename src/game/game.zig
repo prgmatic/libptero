@@ -33,7 +33,7 @@ pub fn main() !void {
     try n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
 
-   try initVideo();
+    try initVideo();
 
     while (true) {
         n64.interrupt.waitForInterrupt(.{ .rdp = true, .video = true });
@@ -97,6 +97,7 @@ fn update() void {
     n64.cache.writebackData(queue_buffer);
     rq.execute();
     frame_count += 1;
+    @panic("ahhh");
 }
 
 fn initVideo() !void {

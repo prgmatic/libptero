@@ -77,7 +77,7 @@ fn loadElf() u32 {
     pi.dmaToDram(@intFromPtr(&hdr), elf_addr - 0xA0000000, hdr_size);
     pi.waitDma();
 
-    for(0..elf_header.program_header_count - 1) |i| {
+    for(0..elf_header.program_header_count) |i| {
         const prg_addr = @intFromPtr(&hdr) + elf_header.program_header_offset + i * elf_header.program_header_entry_size;
         const prg_header: *elf.ProgramHeader32 = @ptrFromInt(prg_addr);
 

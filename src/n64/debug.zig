@@ -2,6 +2,8 @@ pub const sc64 = @import("debug/sc64.zig");
 pub const is_viewer = @import("debug/is_viewer.zig");
 pub const exepction = @import("debug/exception.zig");
 pub const TrapFrame = @import("debug/cpu_state.zig").TrapFrame;
+pub const backtrace = @import("debug/backtrace.zig");
+pub const srcmap = @import("debug/srcmap.zig");
 
 const std = @import("std");
 const io = @import("io.zig");
@@ -40,3 +42,15 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
         else => {}
     }
 }
+
+// Write a raw string to the debug backend without going through std.fmt.
+// Safe to call from a panic handler (no safety checks, no allocations).
+pub fn writeStr(str: []const u8) void {
+    switch (current_backend) {
+        .IsViewer => is_viewer.print(str),
+        .Sc64 => sc64.print(str),
+        else => {},
+    }
+}
+
+pub var panic_depth: u32 = 0;
