@@ -96,6 +96,7 @@ pub noinline fn printBacktrace(skip: u32) void {
 pub fn printBacktraceFrom(pc: u32, frame_sp: u32, frame_ra: u32) void {
     var sp = frame_sp;
     var ra = pc;
+    var fallback_ra: ?u32 = frame_ra;
 
     var depth: u32 = 0;
     while (depth < max_depth) : (depth += 1) {
@@ -106,10 +107,11 @@ pub fn printBacktraceFrom(pc: u32, frame_sp: u32, frame_ra: u32) void {
         }
 
         const frame = findFrame(ra) orelse break;
-        const saved_ra = if (depth == 0)
-            frame_ra
-        else
-            readSavedRa(sp, frame.ra_offset) orelse break;
+        const saved_ra = readSavedRa(sp, frame.ra_offset) orelse blk: {
+            const fallback = fallback_ra orelse break;
+            break :blk fallback;
+        };
+        fallback_ra = null;
         sp +%= frame.stack_size;
         ra = saved_ra -% 4;
     }
