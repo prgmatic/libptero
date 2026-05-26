@@ -1,0 +1,67 @@
+const std = @import("std");
+const png = @import("../tools/imgparse/png.zig");
+
+const chars = "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+const glyph_width = 8;
+const glyph_height = 12;
+const vertical_spacing = 14;
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(args);
+    const io = init.io;
+
+    const font_img_path = args[1];
+    const img = try getImg(io, allocator, font_img_path);
+    defer img.deinit(allocator);
+
+    std.debug.print("{d} {d}\n", .{ img.width, img.height });
+    
+    const glyphs_per_row = img.width / glyph_width;
+
+    const out_file_path = args[2];
+    const out_file = try std.Io.Dir.cwd().createFile(io, out_file_path, .{});
+    defer out_file.close(io);
+
+    var buf: [4096]u8 = undefined;
+    var writer = out_file.writer(io, &buf);
+    var w = &writer.interface;
+    try w.writeInt(u8, glyph_width, .big);
+    try w.writeInt(u8, glyph_height, .big);
+    try w.writeInt(u8, chars.len, .big); // Glyph count
+    try w.writeSliceEndian(u8, chars, .big);
+
+    std.debug.print("{d}\n", .{chars.len});
+    for(0..chars.len) |i| {
+        const glyph_x = i % glyphs_per_row;
+        const glyph_y = i / glyphs_per_row;
+
+        const img_x = glyph_x * glyph_width;
+        const img_y = glyph_y * glyph_height;
+
+        for(img_y..img_y + glyph_height) |y| {
+            var line: u8 = 0;
+            for(img_x..img_x + glyph_width) |x| {
+                const idx = y * img.width + x; 
+                const p: u8 = if(img.pixels[idx * 4 + 3] > 200) 1 else 0;
+                line |= p << @truncate(x);
+            }
+                std.debug.print("{b:0>8}\n", .{line});
+            try w.writeInt(u8, line, .big);
+        } 
+    }
+    
+    try w.flush();
+}
+
+fn getImg(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !png.Image {
+    const img_file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer img_file.close(io);
+
+    var buf: [4096]u8 = undefined;
+    var reader = img_file.reader(io, &buf);
+    const bytes = try reader.interface.allocRemaining(allocator, .unlimited);
+    defer allocator.free(bytes);
+    return try png.readRgba(allocator, bytes);
+}

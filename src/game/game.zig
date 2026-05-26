@@ -97,7 +97,6 @@ fn update() void {
     n64.cache.writebackData(queue_buffer);
     rq.execute();
     frame_count += 1;
-    forceCrash();
 }
 
 fn initVideo() !void {
@@ -132,7 +131,7 @@ fn initVideo() !void {
     n64.cache.writebackData(tex32.texel_data);
     n64.cache.writebackData(texIa8.texel_data);
 
-    queue_buffer = try allocator.alignedAlloc(u64, std.mem.Alignment.@"8", 512);
+    queue_buffer = try allocator.alignedAlloc(u64, std.mem.Alignment.@"8", 32);
     queue = rdp.FixedQueue{ .buffer = queue_buffer };
     rq = rdp.FixedRenderQueue.init(queue);
     update();

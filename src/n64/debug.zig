@@ -4,6 +4,7 @@ pub const exepction = @import("debug/exception.zig");
 pub const TrapFrame = @import("debug/cpu_state.zig").TrapFrame;
 pub const backtrace = @import("debug/backtrace.zig");
 pub const srcmap = @import("debug/srcmap.zig");
+pub const crash_screen = @import("debug/crash_screen.zig");
 
 const std = @import("std");
 const io = @import("io.zig");

@@ -35,5 +35,6 @@ fn panicHandler(msg: []const u8, _: ?usize) noreturn {
     n64.debug.writeStr("\n");
     // skip=1 to omit this panicHandler frame, so frame #0 is the panic call site.
     n64.debug.backtrace.printBacktrace(1);
+    n64.debug.crash_screen.show(msg);
     while (true) {}
 }

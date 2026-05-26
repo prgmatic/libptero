@@ -8,6 +8,7 @@ const Tools = struct {
     srcmap: *std.Build.Step.Compile,
     elf_pack: *std.Build.Step.Compile,
     ipl3_cat: *std.Build.Step.Compile,
+    console_font_conv: *std.Build.Step.Compile,
 };
 
 pub fn build(b: *std.Build, n64_module: *std.Build.Module) Tools {
@@ -39,9 +40,18 @@ pub fn build(b: *std.Build, n64_module: *std.Build.Module) Tools {
         }),
     });
 
+    const console_font_conv = b.addExecutable(.{
+        .name = "console_font_conv",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/console_font_conv.zig"),
+            .target = b.graph.host
+        }),
+    });
+
     return .{
         .srcmap = srcmap,
         .elf_pack = elf_pack,
         .ipl3_cat = ipl3_cat,
+        .console_font_conv = console_font_conv,
     };
 }
