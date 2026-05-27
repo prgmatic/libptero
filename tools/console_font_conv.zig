@@ -1,10 +1,11 @@
+// This is a simple tool for exporting the debug console font.
+// Each pixel is only 1 bit and only used for software rendering
+// This is probably a one off and won't be used for other fonts
 const std = @import("std");
 const png = @import("../tools/imgparse/png.zig");
 
-const chars = "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
 const glyph_width = 8;
-const glyph_height = 12;
-const vertical_spacing = 14;
+const glyph_height = 8;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -19,6 +20,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("{d} {d}\n", .{ img.width, img.height });
     
     const glyphs_per_row = img.width / glyph_width;
+    const glyphs_per_column = img.height / glyph_height;
+    const glyph_count = glyphs_per_row * glyphs_per_column;
 
     const out_file_path = args[2];
     const out_file = try std.Io.Dir.cwd().createFile(io, out_file_path, .{});
@@ -27,13 +30,8 @@ pub fn main(init: std.process.Init) !void {
     var buf: [4096]u8 = undefined;
     var writer = out_file.writer(io, &buf);
     var w = &writer.interface;
-    try w.writeInt(u8, glyph_width, .big);
-    try w.writeInt(u8, glyph_height, .big);
-    try w.writeInt(u8, chars.len, .big); // Glyph count
-    try w.writeSliceEndian(u8, chars, .big);
 
-    std.debug.print("{d}\n", .{chars.len});
-    for(0..chars.len) |i| {
+    for(0..glyph_count) |i| {
         const glyph_x = i % glyphs_per_row;
         const glyph_y = i / glyphs_per_row;
 
@@ -47,7 +45,7 @@ pub fn main(init: std.process.Init) !void {
                 const p: u8 = if(img.pixels[idx * 4 + 3] > 200) 1 else 0;
                 line |= p << @truncate(x);
             }
-                std.debug.print("{b:0>8}\n", .{line});
+                // std.debug.print("{b:0>8}\n", .{line});
             try w.writeInt(u8, line, .big);
         } 
     }

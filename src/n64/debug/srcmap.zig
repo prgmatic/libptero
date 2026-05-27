@@ -19,10 +19,24 @@ var func_name_buf: [128]u8 align(8) = undefined;
 var file_name_buf: [192]u8 align(8) = undefined;
 var line_text_buf: [256]u8 align(8) = undefined;
 
-pub fn printLineInfo(depth: u32, addr: u32) bool {
-    const header = readHeader() orelse return false;
-    if (header.entry_count == 0) return false;
-    if (!header.isValid()) return false;
+pub const LineInfoBuffers = struct {
+    func_name: []u8,
+    file_name: []u8,
+    line_text: []u8,
+};
+
+pub const LineInfo = struct {
+    function_name: ?[]const u8,
+    file_name: ?[]const u8,
+    line_text: ?[]const u8,
+    line: u16,
+    column: u16,
+};
+
+pub fn getLineInfo(addr: u32, buffers: LineInfoBuffers) ?LineInfo {
+    const header = readHeader() orelse return null;
+    if (header.entry_count == 0) return null;
+    if (!header.isValid()) return null;
 
     const target: u24 = @truncate(addr);
 
@@ -30,7 +44,7 @@ pub fn printLineInfo(depth: u32, addr: u32) bool {
     var hi: u32 = header.entry_count;
     while (lo < hi) {
         const mid = lo + (hi - lo) / 2;
-        const mid_entry = readAddrInfo(mid) orelse return false;
+        const mid_entry = readAddrInfo(mid) orelse return null;
         if (mid_entry.start_addr < target) {
             lo = mid + 1;
         } else {
@@ -39,35 +53,50 @@ pub fn printLineInfo(depth: u32, addr: u32) bool {
     }
 
     const idx: u32 = if (lo < header.entry_count) blk: {
-        const entry = readAddrInfo(lo) orelse return false;
+        const entry = readAddrInfo(lo) orelse return null;
         if (entry.start_addr == target) break :blk lo;
         if (lo > 0) break :blk lo - 1;
-        return false;
-    } else if (lo > 0) lo - 1 else return false;
+        return null;
+    } else if (lo > 0) lo - 1 else return null;
 
-    const entry = readAddrInfo(idx) orelse return false;
+    const entry = readAddrInfo(idx) orelse return null;
     const sli_offset = header.line_blob_offset + entry.source_line_offset;
-    const sli = readSourceLineInfo(sli_offset) orelse return false;
+    const sli = readSourceLineInfo(sli_offset) orelse return null;
+
+    const line_text = readRomString(sli_offset + @sizeOf(SourceLineInfo), buffers.line_text);
+    return .{
+        .function_name = readRomString(header.func_blob_offset + sli.func_name_offset, buffers.func_name),
+        .file_name = readRomString(header.file_blob_offset + sli.file_name_offset, buffers.file_name),
+        .line_text = if (line_text != null and line_text.?.len > 0) line_text else null,
+        .line = sli.line,
+        .column = entry.column,
+    };
+}
+
+pub fn printLineInfo(depth: u32, addr: u32) bool {
+    const info = getLineInfo(addr, .{
+        .func_name = &func_name_buf,
+        .file_name = &file_name_buf,
+        .line_text = &line_text_buf,
+    }) orelse return false;
 
     debug.print(" #{d}: 0x{x:0>8} ", .{ depth, addr });
-    if (readRomString(header.func_blob_offset + sli.func_name_offset, &func_name_buf)) |func_name| {
+    if (info.function_name) |func_name| {
         debug.writeStr(func_name);
         debug.writeStr(" ");
     }
-    if (readRomString(header.file_blob_offset + sli.file_name_offset, &file_name_buf)) |file_name| {
+    if (info.file_name) |file_name| {
         debug.writeStr(file_name);
     }
-    debug.print(":{d}:{d}\n", .{ sli.line, entry.column });
-    if (readRomString(sli_offset + @sizeOf(SourceLineInfo), &line_text_buf)) |line_text| {
-        if (line_text.len > 0) {
-            debug.writeStr("  ");
-            debug.writeStr(line_text);
-            debug.writeStr("\n");
-            for(0..entry.column + 1) |_| {
-                debug.writeStr(" ");
-            }
-            debug.writeStr("^\n");
+    debug.print(":{d}:{d}\n", .{ info.line, info.column });
+    if (info.line_text) |line_text| {
+        debug.writeStr("  ");
+        debug.writeStr(line_text);
+        debug.writeStr("\n");
+        for (0..info.column + 1) |_| {
+            debug.writeStr(" ");
         }
+        debug.writeStr("^\n");
     }
     return true;
 }

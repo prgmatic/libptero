@@ -1,39 +1,50 @@
+const std = @import("std");
 const n64 = @import("n64");
 const mi = n64.interfaces.mips;
 const vi = n64.interfaces.video;
-const std = @import("std");
+const rdp = n64.graphics.rdp;
+const print = n64.debug.print;
+
+const Rgba32 = n64.graphics.color.Rgba32;
 const Rgba16 = n64.graphics.color.Rgba16;
 const Img16 = n64.graphics.image.ImgRgba16;
 const Img32 = n64.graphics.image.ImgRgba32;
-const ImgIa8 = n64.graphics.image.ImgIa8;
 
-const print = n64.debug.print;
 var sys_buffer: [1024 * 512]u8 = undefined;
 var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&sys_buffer);
 const allocator = fixed_buffer_allocator.allocator();
-const rdp = n64.graphics.rdp;
 
 const width: u16 = 320;
 const height: u16 = 240;
+const queue_command_capacity = 2048;
+
 var frame_buffer0: Img16 = undefined;
 var frame_buffer1: Img16 = undefined;
 var current_frame_buffer: *Img16 = undefined;
 
 var queue_buffer: []u64 = undefined;
-var queue: rdp.FixedQueue = undefined;
 var rq: rdp.FixedRenderQueue = undefined;
 var frame_count: u32 = 0;
 
-var tex32: Img32 = undefined;
-var tex16: Img16 = undefined;
-var texIa8: ImgIa8 = undefined;
+var star_texture: Img32 = undefined;
+
+
+var stars: [128]Star = undefined;
+const colors = [_]Rgba32{
+    .red,
+    .blue,
+    .green,
+    .cyan,
+    .magenta,
+    .yellow,
+};
 
 pub fn main() !void {
     n64.debug.init();
     try n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
 
-    try initVideo();
+    try init();
 
     while (true) {
         n64.interrupt.waitForInterrupt(.{ .rdp = true, .video = true });
@@ -42,66 +53,8 @@ pub fn main() !void {
     }
 }
 
-fn swapBuffer() void {
-    vi.setFrameBuffer(@intFromPtr(current_frame_buffer.texel_data.ptr));
-    if (current_frame_buffer == &frame_buffer0) {
-        current_frame_buffer = &frame_buffer1;
-    }
-    else {
-        current_frame_buffer = &frame_buffer0;
-    }
-}
-
-fn update() void {
-    const fb = current_frame_buffer;
-    var t: f32 = @floatFromInt(frame_count % 120);
-    t /= 60;
-    t *= std.math.pi;
-    const a = @sin(t) * 60;
-    const y: u16 = fb.height / 2 + @as(u16, @intFromFloat(a));
-
-    rq.clear();
-    rq.setFrameBuffer(fb.*);
-    rq.clearScreen(Rgba16.fromInt(0x404040FF));
-    rq.drawRect(fb.width / 2 - 20, y - 20, 40, 40, Rgba16.fromInt(0xAB5C0EFF));
-
-    rq.setBlendMode(.alpha);
-    rq.setCombineMode(.decal_rgba);
-    rq.setPrimColor(.fromInt(0xAB5C0EFF));
-    rq.drawSprite(tex32, 60, 100, .{.rotation = t, .pivot = .center });
-    var s:f32 = @sin(t * 4) * 4;
-    if(s < 0)
-        s = @min(-0.01, s)
-    else
-        s = @max(0.01, s);
-    rq.drawSprite(tex32, 60, 50, .{
-        .scale_x = s,
-        .scale_y = 4,
-        .pivot = .center,
-        .s0 = 4,
-        .width = 8,
-        .rotation = t,
-    });
-
-    rq.setCombineMode(.single(.{ .rgb_a = .noise, .rgb_c = .tex0, .alpha_d = .tex0 }));
-    rq.drawSprite(tex32, 160, 100, .{
-        .scale_x = s,
-        .scale_y = 4,
-        .pivot = .center,
-        .rotation = t,
-    });
-    rq.setCombineMode(.single(.{ .rgb_a = .noise, .rgb_c = .tex0, .alpha_d = .tex0 }));
-    rq.drawSprite(texIa8, 80, 100, .{});
-
-    rq.fullSync();
-    n64.cache.writebackData(queue_buffer);
-    rq.execute();
-    frame_count += 1;
-}
-
-fn initVideo() !void {
+fn init() !void {
     vi.init(.{
-        .tv = .ntsc,
         .resolution = .@"320x240p",
         .color_depth = .Rgba5551,
     });
@@ -110,33 +63,82 @@ fn initVideo() !void {
     frame_buffer1 = try Img16.init(allocator, width, height);
     current_frame_buffer = &frame_buffer0;
 
-    tex16  = try Img16.init(allocator, 16, 16);
-    tex32  = try Img32.init(allocator, 16, 16);
-    texIa8 = try ImgIa8.init(allocator, 16, 16);
-    for (0..16) |y| {
-        for (0..16) |x| {
-            const idx = y * tex16.width + x;
-            var d = distance(@as(f32, @floatFromInt(x)) - 7.5, @as(f32, @floatFromInt(y)) - 7.5) / 8;
-            d = @max(0, 1.0 - d);
-            const c: u8  = @intFromFloat(d * 255);
-            const c2: u4 = @intFromFloat(d * 16);
-            const r: u8  = @intCast(255 / 16 * x);
-            const g: u8  = @intCast(255 / 16 * y);
-            tex16.texel_data[idx]  = .fromBytes(c, c, c, c);
-            tex32.texel_data[idx]  = .fromBytes(r, g, 0, c);
-            texIa8.texel_data[idx] = .{ .intensity = c2, .alpha = c2 };
-        }
-    }
-    n64.cache.writebackData(tex16.texel_data);
-    n64.cache.writebackData(tex32.texel_data);
-    n64.cache.writebackData(texIa8.texel_data);
+    try initStarTexture();
 
-    queue_buffer = try allocator.alignedAlloc(u64, std.mem.Alignment.@"8", 32);
-    queue = rdp.FixedQueue{ .buffer = queue_buffer };
-    rq = rdp.FixedRenderQueue.init(queue);
+    queue_buffer = try allocator.alignedAlloc(u64, std.mem.Alignment.@"8", queue_command_capacity);
+    rq = rdp.FixedRenderQueue.init(.{ .buffer = queue_buffer });
+
+    initStars();
     update();
     vi.setFrameBuffer(@intFromPtr(current_frame_buffer.texel_data.ptr));
+    enableInterrupts();
+}
 
+
+fn update() void {
+    const elapsed = elapsedSeconds();
+
+    rq.clear();
+    rq.setFrameBuffer(current_frame_buffer.*);
+    rq.clearScreen(Rgba16.fromInt(0x404040FF));
+
+    // Mul texture color and prim
+    rq.setCombineMode(.single(.{ 
+        .rgb_a = .tex0, 
+        .rgb_c = .primitive, 
+        .alpha_d = .tex0 
+    }));
+    rq.setBlendMode(.alpha);
+
+    var star_count: usize = @intFromFloat(elapsed * 10 + 1);
+    star_count = @min(stars.len, star_count);
+    for (0..star_count) |i| {
+        stars[i].update(elapsed);
+        stars[i].draw(&rq, star_texture, elapsed);
+    }
+
+    rq.fullSync();
+    n64.cache.writebackData(queue_buffer);
+    rq.execute();
+    frame_count += 1;
+}
+
+fn elapsedSeconds() f32 {
+    const frames: f32 = @floatFromInt(frame_count);
+    return frames / 60;
+}
+
+fn initStarTexture() !void {
+    star_texture = try .init(allocator, 32, 32);
+    for (0..star_texture.height) |y| {
+        for (0..star_texture.width) |x| {
+            const idx = y * star_texture.width + x;
+            var xf: f32 = @floatFromInt(x);
+            xf /= star_texture.width;
+            xf -= 0.5;
+            var yf: f32 = @floatFromInt(y);
+            yf /= star_texture.height;
+            yf -= 0.5;
+
+            var dist = distance(xf, yf);
+            dist = @max(0, 1.0 - dist);
+
+            const xp = std.math.atan2(xf, yf);
+            const yp = distance(xf, yf);
+
+            xf = xp + yp * 2;
+            yf = yp;
+            const cf = smoothstep(0, 0.1, @cos(xf * std.math.pi * 1.93) * 0.1 - yf + 0.4);
+            const d: u8 = @intFromFloat(dist * 255);
+            const c: u8 = @intFromFloat(cf * 255);
+
+            star_texture.texel_data[idx] = .fromBytes(d, d, d, c);
+        }
+    }
+    n64.cache.writebackData(star_texture.texel_data);
+}
+
+fn enableInterrupts() void {
     var status = n64.cpu.cp0.regRead(.Status);
     status |= 0x401;
     n64.cpu.cp0.regWrite(.Status, status);
@@ -146,11 +148,107 @@ fn initVideo() !void {
     });
 }
 
-fn forceCrash() void {
-    const null_ptr: *volatile u32 = @ptrFromInt(4);
-    _ = null_ptr.*;
+fn initStars() void {
+    for (0..stars.len) |i| {
+        const f: f32 = @floatFromInt(i);
+        const c = colors[i % colors.len];
+        stars[i] = .init(c, f);
+    }
+}
+
+fn swapBuffer() void {
+    vi.setFrameBuffer(@intFromPtr(current_frame_buffer.texel_data.ptr));
+    if (current_frame_buffer == &frame_buffer0) {
+        current_frame_buffer = &frame_buffer1;
+    } else {
+        current_frame_buffer = &frame_buffer0;
+    }
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
+    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
 }
 
 fn distance(x: f32, y: f32) f32 {
     return @sqrt(x * x + y * y);
+}
+
+const Star = struct {
+    x: f32,
+    y: f32,
+    color: Rgba32,
+    dir_x: f32 = 1,
+    dir_y: f32 = 0,
+    spawn_time: f32 = -1,
+    bounce_time: f32 = -1,
+
+    const grow_time: f32 = 0.5;
+    const flip_time: f32 = 0.6;
+    const speed: f32 = 2;
+
+    pub fn init(color: Rgba32, rot: f32) Star {
+        return .{
+            .x = width / 2,
+            .y = height / 2,
+            .color = color,
+            .dir_x = @cos(rot),
+            .dir_y = @sin(rot),
+        };
+    }
+
+    pub fn draw(self: Star, render_queue: *rdp.FixedRenderQueue, image: Img32, elapsed: f32) void {
+        var scale_x: f32 = 1;
+        var scale_y: f32 = 1;
+
+        if (elapsed - self.spawn_time < grow_time) {
+            const t = (elapsed - self.spawn_time) / grow_time;
+            scale_x = @max(0.01, t);
+            scale_y = @max(0.01, t);
+        } else if (elapsed - self.bounce_time < flip_time) {
+            const t = (elapsed - self.bounce_time) / flip_time;
+            scale_x = @max(0.01, t);
+        }
+
+        render_queue.setPrimColor(self.color);
+        render_queue.drawSprite(image, self.x, self.y, .{
+            .rotation = std.math.pi * elapsed * 3,
+            .pivot = .center,
+            .scale_x = scale_x,
+            .scale_y = scale_y,
+        });
+    }
+
+    pub fn update(self: *Star, elapsed: f32) void {
+        if (self.spawn_time < 0) {
+            self.spawn_time = elapsed;
+        }
+
+        self.x += self.dir_x * speed;
+        self.y += self.dir_y * speed;
+
+        if (self.x > width) {
+            self.x = width;
+            self.dir_x = -self.dir_x;
+            self.bounce_time = elapsed;
+        } else if (self.x < 0) {
+            self.x = 0;
+            self.dir_x = -self.dir_x;
+            self.bounce_time = elapsed;
+        }
+        if (self.y > height) {
+            self.y = height;
+            self.dir_y = -self.dir_y;
+            self.bounce_time = elapsed;
+        } else if (self.y < 0) {
+            self.y = 0;
+            self.dir_y = -self.dir_y;
+            self.bounce_time = elapsed;
+        }
+    }
+};
+
+fn forceCrash() void {
+    const null_ptr: *volatile u32 = @ptrFromInt(4);
+    _ = null_ptr.*;
 }

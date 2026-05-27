@@ -1,17 +1,21 @@
 const TrapFrame = @import("cpu_state.zig").TrapFrame;
 const GprIndex = @import("cpu_state.zig").GprIndex;
 const debug = @import("../debug.zig");
+const crash_screen = @import("crash_screen.zig");
 
 pub inline fn exceptionHandler(frame: *TrapFrame) noreturn {
+    const causeStr = getCause(frame);
     debug.print("Interrupt Handler\n", .{});
     debug.print("Addr: 0x{X:0>8}\n", .{frame.epc});
-    printCause(frame);
-    debug.print("Backtrace\n", .{});
-    debug.backtrace.printBacktraceFrom(
+    debug.writeStr(causeStr);
+    debug.writeStr("\n");
+    const trace = debug.backtrace.captureFrom(
         exceptionPc(frame),
         @truncate(frame.gpr[@intFromEnum(GprIndex.sp)]),
         @truncate(frame.gpr[@intFromEnum(GprIndex.ra)]),
     );
+    debug.print("Backtrace\n", .{});
+    debug.backtrace.printTrace(trace);
     debug.print("General Purpose Registers\n", .{});
     var i: u8 = 0;
     while (i < frame.gpr.len) : (i += 4) {
@@ -25,6 +29,7 @@ pub inline fn exceptionHandler(frame: *TrapFrame) noreturn {
         const v3: u32 = @truncate(frame.gpr[i + 3]);
         debug.print("  {s}: 0x{X:0>8} {s}: 0x{X:0>8} {s}: 0x{X:0>8} {s}: 0x{X:0>8}\n", .{ n0, v0, n1, v1, n2, v2, n3, v3 });
     }
+    crash_screen.show(.exception, causeStr, trace);
     while (true) {}
 }
 
@@ -35,8 +40,7 @@ fn exceptionPc(frame: *TrapFrame) u32 {
     return epc;
 }
 
-fn printCause(frame: *TrapFrame) void {
-    const print = debug.print;
+fn getCause(frame: *TrapFrame) []const u8 {
     const cop0 = @import("../cpu/cp0.zig");
     const badVAddr = cop0.regRead(.BadVAddr);
     const epc = exceptionPc(frame);
@@ -44,32 +48,32 @@ fn printCause(frame: *TrapFrame) void {
     const code = ExceptionCode.fromCauseReg(frame.cause);
     switch (code) {
         // TODO: Finish strings
-        .TlbModification => print("Write to read-only memory", .{}),
+        .TlbModification => return "Write to read-only memory",
         .TlbLoad => {
             if (epc == badVAddr) {
-                print("Invalid program counter address\n", .{});
+                return "Invalid program counter address";
             } else if (badVAddr < 120) {
-                print("NULL pointer dereference (read)\n", .{});
+                return "NULL pointer dereference (read)";
             } else {
                 if (badVAddr >= TLS_INVALID_MIN and badVAddr < (TLS_INVALID_MIN + TP_OFFSET)) {
-                    print("Read from TLS in interrupt handler\n", .{});
+                    return "Read from TLS in interrupt handler";
                 } else {
-                    print("Read from invalid memory address\n", .{});
+                    return "Read from invalid memory address";
                 }
             }
         },
         .TlbStore => {
             if (badVAddr < 120) {
-                print("NULL pointer dereference (write)\n", .{});
+                return "NULL pointer dereference (write)";
             } else {
                 if (badVAddr >= TLS_INVALID_MIN and badVAddr < (TLS_INVALID_MIN + TP_OFFSET)) {
-                    print("Write to TLS in interrupt handler\n", .{});
+                    return "Write to TLS in interrupt handler";
                 } else {
-                    print("Write to invalid memory address\n", .{});
+                    return "Write to invalid memory address";
                 }
             }
         },
-        else => print("Cause: {s}\n", .{@tagName(code)}),
+        else => return @tagName(code),
     }
 }
 
