@@ -24,6 +24,33 @@ pub fn build(b: *std.Build) void {
         .root_source_file = font_file,
     });
 
+    const fill_dmem_zsp = b.addRunArtifact(tools.zsp);
+    fill_dmem_zsp.addFileArg(b.path("src/n64/rsp/ucode/fill_dmem.zsp"));
+    const fill_dmem_asm = fill_dmem_zsp.addOutputFileArg("fill_dmem.S");
+
+    const fill_dmem_elf = b.addExecutable(.{
+        .name = "fill_dmem_rsp.elf",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    fill_dmem_elf.root_module.addAssemblyFile(fill_dmem_asm);
+    fill_dmem_elf.setLinkerScript(b.path("src/n64/rsp/link.ld"));
+    fill_dmem_elf.entry = .{ .symbol_name = "_start" };
+    fill_dmem_elf.bundle_compiler_rt = false;
+    fill_dmem_elf.bundle_ubsan_rt = false;
+    const fill_dmem_bin = fill_dmem_elf.addObjCopy(.{
+        .format = .bin,
+        .only_section = ".text",
+    }).getOutput();
+
+    n64_module.addAnonymousImport("fill_dmem_rsp", .{
+        .root_source_file = fill_dmem_bin,
+    });
+
+
+
     // Build the ipl3
     const ipl3 = @import("build/boot.zig").build(b, .{
         .title = title,
@@ -32,17 +59,18 @@ pub fn build(b: *std.Build) void {
     });
 
     // Has debug info
-    const elf_debug = b.addExecutable(.{
+    const game_module = b.createModule(.{
+        .root_source_file = b.path("src/game/entry.zig"),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .strip = false,
+        .imports = &.{
+            .{ .name = "n64", .module = n64_module },
+        },
+    });
+       const elf_debug = b.addExecutable(.{
         .name = "game_debug.elf",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/game/entry.zig"),
-            .target = target,
-            .optimize = .ReleaseSmall,
-            .strip = false,
-            .imports = &.{
-                .{ .name = "n64", .module = n64_module },
-            },
-        })
+        .root_module = game_module,
     });
     elf_debug.link_z_max_page_size = 8;
     elf_debug.setLinkerScript(b.path("src/game/link.ld"));

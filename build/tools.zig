@@ -9,6 +9,7 @@ const Tools = struct {
     elf_pack: *std.Build.Step.Compile,
     ipl3_cat: *std.Build.Step.Compile,
     console_font_conv: *std.Build.Step.Compile,
+    zsp: *std.Build.Step.Compile,
 };
 
 pub fn build(b: *std.Build, n64_module: *std.Build.Module) Tools {
@@ -48,10 +49,19 @@ pub fn build(b: *std.Build, n64_module: *std.Build.Module) Tools {
         }),
     });
 
+    const zsp = b.addExecutable(.{
+        .name = "zsp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/zsp/zsp.zig"),
+            .target = b.graph.host,
+        }),
+    });
+
     return .{
         .srcmap = srcmap,
         .elf_pack = elf_pack,
         .ipl3_cat = ipl3_cat,
         .console_font_conv = console_font_conv,
+        .zsp = zsp,
     };
 }

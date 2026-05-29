@@ -1,6 +1,7 @@
 const std = @import("std");
 const n64 = @import("n64");
 const mi = n64.interfaces.mips;
+const rsp = n64.rsp;
 const vi = n64.interfaces.video;
 const rdp = n64.graphics.rdp;
 const print = n64.debug.print;
@@ -43,6 +44,7 @@ pub fn main() !void {
     n64.debug.init();
     try n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
+    runRspFillDmem();
 
     try init();
 
@@ -50,6 +52,32 @@ pub fn main() !void {
         n64.interrupt.waitForInterrupt(.{ .rdp = true, .video = true });
         swapBuffer();
         update();
+    }
+}
+
+fn runRspFillDmem() void {
+    const prg = rsp.programs.fill_dmem_rsp;
+    print("loading fill_dmem RSP program ({} bytes)\n", .{prg.len});
+    rsp.runProgram(prg);
+    rsp.waitBroke();
+    rsp.halt();
+
+    var mismatch_count: u32 = 0;
+
+    var offset: u32 = 0;
+    while (offset < rsp.io.dmem_len) : (offset += 2) {
+        const expected: u16 = @truncate(offset);
+        const actual = rsp.io.readDmem(u16, offset).*;
+        if (actual != expected) {
+            mismatch_count += 1;
+        }
+    }
+
+    if(mismatch_count == 0) {
+        print("Success\n", .{});
+    }
+    else {
+        print("Mismatches {d}\n", .{mismatch_count});
     }
 }
 
