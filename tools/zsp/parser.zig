@@ -81,6 +81,10 @@ pub const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) anyerror!ast.Statement {
+        if (try self.eat(.at)) {
+            return self.parseBuiltinStatement();
+        }
+
         const first = try self.expect(.ident);
 
         if (std.mem.eql(u8, first.text, "asm")) {
@@ -146,17 +150,28 @@ pub const Parser = struct {
         return self.fail(first, "unsupported statement");
     }
 
+    fn parseBuiltinStatement(self: *Parser) !ast.Statement {
+        const name = try self.expect(.ident);
+        _ = try self.expect(.l_paren);
+        _ = try self.expect(.r_paren);
+        _ = try self.expect(.semicolon);
+
+        if (std.mem.eql(u8, name.text, "nop")) return .{ .builtin = .nop };
+        if (std.mem.eql(u8, name.text, "break")) return .{ .builtin = .breakpoint };
+        return self.fail(name, "unsupported builtin");
+    }
+
     fn parseVarDecl(self: *Parser, is_const: bool) !ast.VarDecl {
         const name = try self.expect(.ident);
         _ = try self.expect(.colon);
         const data_type = try self.expect(.ident);
         if (!isDataType(data_type.text)) return self.fail(data_type, "expected data type");
 
-        var reg: ?[]const u8 = null;
+        var reg: ?ast.Register = null;
         if (try self.eat(.less)) {
             const reg_token = try self.expect(.register);
             _ = try self.expect(.type_end);
-            reg = reg_token.text;
+            reg = parseRegister(reg_token) orelse return self.fail(reg_token, "expected scalar register");
         }
 
         _ = try self.expect(.equal);
@@ -208,6 +223,15 @@ pub const Parser = struct {
 
 fn isDataType(text: []const u8) bool {
     return std.mem.eql(u8, text, "u16");
+}
+
+fn parseRegister(tok: token.Token) ?ast.Register {
+    inline for (std.meta.fields(ast.Register)) |field| {
+        if (std.mem.eql(u8, tok.text[1..], field.name)) {
+            return @enumFromInt(field.value);
+        }
+    }
+    return null;
 }
 
 fn parseNumber(tok: token.Token) !i64 {
