@@ -20,6 +20,7 @@ pub const Lexer = struct {
         const c = self.advance();
         switch (c) {
             '@' => return self.makeToken(.at, start, start_line, start_column),
+            ':' => return self.makeToken(.colon, start, start_line, start_column),
             ',' => return self.makeToken(.comma, start, start_line, start_column),
             '<' => return self.makeToken(.less, start, start_line, start_column),
             '>' => return self.makeToken(.type_end, start, start_line, start_column),

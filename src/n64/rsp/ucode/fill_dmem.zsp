@@ -1,13 +1,10 @@
-@Export
-function _start()
-{
-  u16<$t0> ptr = 0;
-  const u16 dmem_end = 0x1000;
+export fn _start() noreturn {
+    var ptr: u16<$t0> = 0;
+    const dmem_end: u16 = 0x1000;
 
-  while(ptr < dmem_end) {
-    store<u16>(ptr, ptr);
-    ptr += 2;
-  }
-
-  asm("break");
+    while(ptr < dmem_end) {
+	store(u16, ptr, ptr);
+	ptr += 2;
+    }
+    asm("break");
 }

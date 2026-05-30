@@ -3,6 +3,8 @@ const std = @import("std");
 pub const Function = struct {
     name: []const u8,
     export_symbol: bool,
+    inline_call: bool,
+    no_return: bool,
     statements: []const Statement,
 };
 
@@ -33,9 +35,10 @@ pub const Statement = union(enum) {
     },
     store: struct {
         data_type: []const u8,
-        address: []const u8,
-        value: []const u8,
+        address: Value,
+        value: Value,
     },
+    call: []const u8,
     while_loop: struct {
         condition: Condition,
         statements: []const Statement,

@@ -20,36 +20,45 @@ pub const Parser = struct {
 
     pub fn parse(self: *Parser) ![]ast.Function {
         var functions: std.ArrayList(ast.Function) = .empty;
-        var pending_export = false;
-
         while (self.current.tag != .eof) {
-            if (try self.eat(.at)) {
-                const anno = try self.expect(.ident);
-                if (std.mem.eql(u8, anno.text, "Export")) {
-                    pending_export = true;
-                } else {
-                    return self.fail(anno, "unsupported annotation");
+            var inline_call = false;
+            var export_symbol = false;
+            while (true) {
+                const prefix = try self.expect(.ident);
+                if (std.mem.eql(u8, prefix.text, "export")) {
+                    export_symbol = true;
+                    continue;
                 }
-                continue;
+                if (std.mem.eql(u8, prefix.text, "inline")) {
+                    inline_call = true;
+                    continue;
+                }
+                if (!std.mem.eql(u8, prefix.text, "fn")) {
+                    return self.fail(prefix, "expected function declaration");
+                }
+                break;
             }
 
-            const keyword = try self.expect(.ident);
-            if (!std.mem.eql(u8, keyword.text, "function")) {
-                return self.fail(keyword, "expected function declaration");
-            }
-
-            const func = try self.parseFunction(pending_export);
+            const func = try self.parseFunction(export_symbol, inline_call);
             try functions.append(self.allocator, func);
-            pending_export = false;
         }
 
         return functions.toOwnedSlice(self.allocator);
     }
 
-    fn parseFunction(self: *Parser, export_symbol: bool) !ast.Function {
+    fn parseFunction(self: *Parser, export_symbol: bool, inline_call: bool) !ast.Function {
         const name = try self.expect(.ident);
         _ = try self.expect(.l_paren);
         _ = try self.expect(.r_paren);
+        var no_return = false;
+        while (self.current.tag == .ident) {
+            const modifier = try self.expect(.ident);
+            if (std.mem.eql(u8, modifier.text, "noreturn")) {
+                no_return = true;
+            } else {
+                return self.fail(modifier, "unsupported function modifier");
+            }
+        }
         _ = try self.expect(.l_brace);
 
         const statements = try self.parseBlockStatements();
@@ -57,6 +66,8 @@ pub const Parser = struct {
         return .{
             .name = name.text,
             .export_symbol = export_symbol,
+            .inline_call = inline_call,
+            .no_return = no_return,
             .statements = statements,
         };
     }
@@ -94,19 +105,18 @@ pub const Parser = struct {
         }
 
         if (std.mem.eql(u8, first.text, "store")) {
-            _ = try self.expect(.less);
-            const data_type = try self.expect(.ident);
-            _ = try self.expect(.type_end);
             _ = try self.expect(.l_paren);
-            const address = try self.expect(.ident);
+            const data_type = try self.expect(.ident);
             _ = try self.expect(.comma);
-            const value = try self.expect(.ident);
+            const address = try self.parseValue();
+            _ = try self.expect(.comma);
+            const value = try self.parseValue();
             _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
             return .{ .store = .{
                 .data_type = data_type.text,
-                .address = address.text,
-                .value = value.text,
+                .address = address,
+                .value = value,
             } };
         }
 
@@ -114,8 +124,8 @@ pub const Parser = struct {
             return .{ .var_decl = try self.parseVarDecl(true) };
         }
 
-        if (isDataType(first.text)) {
-            return .{ .var_decl = try self.parseVarDeclAfterType(false, first.text) };
+        if (std.mem.eql(u8, first.text, "var")) {
+            return .{ .var_decl = try self.parseVarDecl(false) };
         }
 
         if (try self.eat(.plus_equal)) {
@@ -127,16 +137,21 @@ pub const Parser = struct {
             } };
         }
 
+        if (try self.eat(.l_paren)) {
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .call = first.text };
+        }
+
         return self.fail(first, "unsupported statement");
     }
 
     fn parseVarDecl(self: *Parser, is_const: bool) !ast.VarDecl {
+        const name = try self.expect(.ident);
+        _ = try self.expect(.colon);
         const data_type = try self.expect(.ident);
         if (!isDataType(data_type.text)) return self.fail(data_type, "expected data type");
-        return self.parseVarDeclAfterType(is_const, data_type.text);
-    }
 
-    fn parseVarDeclAfterType(self: *Parser, is_const: bool, data_type: []const u8) !ast.VarDecl {
         var reg: ?[]const u8 = null;
         if (try self.eat(.less)) {
             const reg_token = try self.expect(.register);
@@ -144,14 +159,13 @@ pub const Parser = struct {
             reg = reg_token.text;
         }
 
-        const name = try self.expect(.ident);
         _ = try self.expect(.equal);
         const value = try self.parseValue();
         _ = try self.expect(.semicolon);
 
         return .{
             .is_const = is_const,
-            .data_type = data_type,
+            .data_type = data_type.text,
             .reg = reg,
             .name = name.text,
             .value = value,

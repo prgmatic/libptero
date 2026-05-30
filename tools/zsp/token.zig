@@ -5,6 +5,7 @@ pub const Tag = enum {
     number,
     register,
     at,
+    colon,
     comma,
     equal,
     plus_equal,
