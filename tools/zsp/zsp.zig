@@ -22,7 +22,20 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(source);
 
     var parser = try parser_mod.Parser.init(allocator, source);
-    const functions = try parser.parse();
+    const functions = parser.parse() catch |err| switch (err) {
+        error.ParseError => {
+            if (parser.diagnostic) |diagnostic| {
+                std.debug.print("zsp:{d}:{d}: {s}: '{s}'\n", .{
+                    diagnostic.line,
+                    diagnostic.column,
+                    parser_mod.errorString(diagnostic.err),
+                    diagnostic.token_text,
+                });
+            }
+            return err;
+        },
+        else => return err,
+    };
     defer ast.freeFunctions(allocator, functions);
 
     var out_buf: [4096]u8 = undefined;

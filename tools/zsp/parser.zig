@@ -7,12 +7,14 @@ pub const Parser = struct {
     allocator: std.mem.Allocator,
     lexer: lexer_mod.Lexer,
     current: token.Token,
+    diagnostic: ?Diagnostic = null,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
         var parser = Parser{
             .allocator = allocator,
             .lexer = .{ .source = source },
             .current = undefined,
+            .diagnostic = null,
         };
         parser.current = try parser.lexer.next();
         return parser;
@@ -34,7 +36,7 @@ pub const Parser = struct {
                     continue;
                 }
                 if (!std.mem.eql(u8, prefix.text, "fn")) {
-                    return self.fail(prefix, "expected function declaration");
+                    return self.fail(prefix, .expected_function_declaration);
                 }
                 break;
             }
@@ -56,7 +58,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, modifier.text, "noreturn")) {
                 no_return = true;
             } else {
-                return self.fail(modifier, "unsupported function modifier");
+                return self.fail(modifier, .unsupported_function_modifier);
             }
         }
         _ = try self.expect(.l_brace);
@@ -137,7 +139,7 @@ pub const Parser = struct {
             _ = try self.expect(.semicolon);
             return .{ .add_assign = .{
                 .name = first.text,
-                .value = try parseNumber(value),
+                .value = try self.parseNumberValue(value),
             } };
         }
 
@@ -147,7 +149,7 @@ pub const Parser = struct {
             return .{ .call = first.text };
         }
 
-        return self.fail(first, "unsupported statement");
+        return self.fail(first, .unsupported_statement);
     }
 
     fn parseBuiltinStatement(self: *Parser) !ast.Statement {
@@ -158,20 +160,20 @@ pub const Parser = struct {
 
         if (std.mem.eql(u8, name.text, "nop")) return .{ .builtin = .nop };
         if (std.mem.eql(u8, name.text, "break")) return .{ .builtin = .breakpoint };
-        return self.fail(name, "unsupported builtin");
+        return self.fail(name, .unsupported_builtin);
     }
 
     fn parseVarDecl(self: *Parser, is_const: bool) !ast.VarDecl {
         const name = try self.expect(.ident);
         _ = try self.expect(.colon);
         const data_type = try self.expect(.ident);
-        if (!isDataType(data_type.text)) return self.fail(data_type, "expected data type");
+        if (!isDataType(data_type.text)) return self.fail(data_type, .expected_data_type);
 
         var reg: ?ast.Register = null;
         if (try self.eat(.less)) {
             const reg_token = try self.expect(.register);
             _ = try self.expect(.type_end);
-            reg = parseRegister(reg_token) orelse return self.fail(reg_token, "expected scalar register");
+            reg = parseRegister(reg_token) orelse return self.fail(reg_token, .expected_scalar_register);
         }
 
         _ = try self.expect(.equal);
@@ -195,9 +197,9 @@ pub const Parser = struct {
             },
             .number => {
                 const tok = try self.expect(.number);
-                return .{ .number = try parseNumber(tok) };
+                return .{ .number = try self.parseNumberValue(tok) };
             },
-            else => return self.fail(self.current, "expected value"),
+            else => return self.fail(self.current, .expected_value),
         }
     }
 
@@ -209,17 +211,71 @@ pub const Parser = struct {
 
     fn expect(self: *Parser, tag: token.Tag) !token.Token {
         const tok = self.current;
-        if (tok.tag != tag) return self.fail(tok, "unexpected token");
+        if (tok.tag != tag) return self.failExpected(tok, tag);
         self.current = try self.lexer.next();
         return tok;
     }
 
-    fn fail(self: *Parser, tok: token.Token, message: []const u8) error{ParseError} {
-        _ = self;
-        std.debug.print("zsp:{d}:{d}: {s}: '{s}'\n", .{ tok.line, tok.column, message, tok.text });
+    fn parseNumberValue(self: *Parser, tok: token.Token) !i64 {
+        return parseNumber(tok) catch return self.fail(tok, .invalid_number);
+    }
+
+    fn failExpected(self: *Parser, tok: token.Token, expected: token.Tag) error{ParseError} {
+        self.setDiagnostic(tok, .unexpected_token, expected);
         return error.ParseError;
     }
+
+    fn fail(self: *Parser, tok: token.Token, code: ErrorType) error{ParseError} {
+        self.setDiagnostic(tok, code, null);
+        return error.ParseError;
+    }
+
+    fn setDiagnostic(self: *Parser, tok: token.Token, code: ErrorType, expected_token: ?token.Tag) void {
+        self.diagnostic = .{
+            .err = code,
+            .line = tok.line,
+            .column = tok.column,
+            .token_tag = tok.tag,
+            .token_text = tok.text,
+            .expected_token = expected_token,
+        };
+    }
 };
+
+pub const ErrorType = enum {
+    expected_function_declaration,
+    unsupported_function_modifier,
+    unsupported_statement,
+    unsupported_builtin,
+    expected_data_type,
+    expected_scalar_register,
+    expected_value,
+    unexpected_token,
+    invalid_number,
+};
+
+pub const Diagnostic = struct {
+    line: usize,
+    column: usize,
+    token_tag: token.Tag,
+    token_text: []const u8,
+    expected_token: ?token.Tag = null,
+    err: ErrorType,
+};
+
+pub fn errorString(code: ErrorType) []const u8 {
+    return switch (code) {
+        .expected_function_declaration => "expected function declaration",
+        .unsupported_function_modifier => "unsupported function modifier",
+        .unsupported_statement => "unsupported statement",
+        .unsupported_builtin => "unsupported builtin",
+        .expected_data_type => "expected data type",
+        .expected_scalar_register => "expected scalar register",
+        .expected_value => "expected value",
+        .unexpected_token => "unexpected token",
+        .invalid_number => "invalid number",
+    };
+}
 
 fn isDataType(text: []const u8) bool {
     return std.mem.eql(u8, text, "u16");
