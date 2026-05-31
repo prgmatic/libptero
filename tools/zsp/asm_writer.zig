@@ -16,14 +16,18 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     try writer.writeAll(".set noat\n");
     try writer.writeAll(".text\n\n");
 
+    var top_level_context = FunctionContext{ .label_prefix = "top_level" };
     for (functions) |function| {
         if (function.inline_call) continue;
-        if (function.export_symbol) {
+        if (function.export_symbol and function.emit_label) {
             try writer.print(".globl {s}\n", .{function.name});
         }
-        try writer.print("{s}:\n", .{function.name});
-        var context = FunctionContext{ .label_prefix = function.name };
-        try writeStatements(writer, functions, &context, function.statements);
+        if (function.emit_label) {
+            try writer.print("{s}:\n", .{function.name});
+        }
+        var function_context = FunctionContext{ .label_prefix = function.name };
+        const context = if (function.emit_label) &function_context else &top_level_context;
+        try writeStatements(writer, functions, context, function.statements);
         if (!function.no_return) {
             try writer.writeAll("  jr $ra\n");
             try writer.writeAll("  nop\n");

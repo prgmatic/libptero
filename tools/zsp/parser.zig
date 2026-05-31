@@ -23,29 +23,47 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) ![]ast.Function {
         var functions: std.ArrayList(ast.Function) = .empty;
         while (self.current.tag != .eof) {
-            var inline_call = false;
-            var export_symbol = false;
-            while (true) {
-                const prefix = try self.expect(.ident);
-                if (std.mem.eql(u8, prefix.text, "export")) {
-                    export_symbol = true;
-                    continue;
-                }
-                if (std.mem.eql(u8, prefix.text, "inline")) {
-                    inline_call = true;
-                    continue;
-                }
-                if (!std.mem.eql(u8, prefix.text, "fn")) {
-                    return self.fail(prefix, .expected_function_declaration);
-                }
-                break;
+            if (self.isFunctionDeclarationStart()) {
+                try functions.append(self.allocator, try self.parseFunctionDeclaration());
+            } else {
+                try functions.append(self.allocator, try self.parseTopLevelBlock());
             }
-
-            const func = try self.parseFunction(export_symbol, inline_call);
-            try functions.append(self.allocator, func);
         }
 
         return functions.toOwnedSlice(self.allocator);
+    }
+
+    fn parseFunctionDeclaration(self: *Parser) !ast.Function {
+        var inline_call = false;
+        var export_symbol = false;
+        while (true) {
+            const prefix = try self.expect(.ident);
+            if (std.mem.eql(u8, prefix.text, "export")) {
+                export_symbol = true;
+                continue;
+            }
+            if (std.mem.eql(u8, prefix.text, "inline")) {
+                inline_call = true;
+                continue;
+            }
+            if (!std.mem.eql(u8, prefix.text, "fn")) {
+                return self.fail(prefix, .expected_function_declaration);
+            }
+            break;
+        }
+
+        return self.parseFunction(export_symbol, inline_call);
+    }
+
+    fn parseTopLevelBlock(self: *Parser) !ast.Function {
+        return .{
+            .name = "top_level",
+            .emit_label = false,
+            .export_symbol = false,
+            .inline_call = false,
+            .no_return = true,
+            .statements = try self.parseTopLevelStatements(),
+        };
     }
 
     fn parseFunction(self: *Parser, export_symbol: bool, inline_call: bool) !ast.Function {
@@ -72,6 +90,14 @@ pub const Parser = struct {
             .no_return = no_return,
             .statements = statements,
         };
+    }
+
+    fn parseTopLevelStatements(self: *Parser) anyerror![]const ast.Statement {
+        var statements: std.ArrayList(ast.Statement) = .empty;
+        while (self.current.tag != .eof and !self.isFunctionDeclarationStart()) {
+            try statements.append(self.allocator, try self.parseStatement());
+        }
+        return statements.toOwnedSlice(self.allocator);
     }
 
     fn parseBlockStatements(self: *Parser) anyerror![]const ast.Statement {
@@ -207,6 +233,13 @@ pub const Parser = struct {
         if (self.current.tag != tag) return false;
         self.current = try self.lexer.next();
         return true;
+    }
+
+    fn isFunctionDeclarationStart(self: *const Parser) bool {
+        if (self.current.tag != .ident) return false;
+        return std.mem.eql(u8, self.current.text, "export") or
+            std.mem.eql(u8, self.current.text, "inline") or
+            std.mem.eql(u8, self.current.text, "fn");
     }
 
     fn expect(self: *Parser, tag: token.Tag) !token.Token {

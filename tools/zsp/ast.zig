@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const Function = struct {
     name: []const u8,
+    emit_label: bool = true,
     export_symbol: bool,
     inline_call: bool,
     no_return: bool,
