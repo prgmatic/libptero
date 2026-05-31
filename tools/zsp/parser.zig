@@ -146,7 +146,7 @@ pub const Parser = struct {
             _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
             return .{ .store = .{
-                .data_type = data_type.text,
+                .data_type = try self.parseDataType(data_type),
                 .address = address,
                 .value = value,
             } };
@@ -192,8 +192,8 @@ pub const Parser = struct {
     fn parseVarDecl(self: *Parser, is_const: bool) !ast.VarDecl {
         const name = try self.expect(.ident);
         _ = try self.expect(.colon);
-        const data_type = try self.expect(.ident);
-        if (!isDataType(data_type.text)) return self.fail(data_type, .expected_data_type);
+        const data_type_token = try self.expect(.ident);
+        const data_type = try self.parseDataType(data_type_token);
 
         var reg: ?ast.Register = null;
         if (try self.eat(.less)) {
@@ -208,7 +208,7 @@ pub const Parser = struct {
 
         return .{
             .is_const = is_const,
-            .data_type = data_type.text,
+            .data_type = data_type,
             .reg = reg,
             .name = name.text,
             .value = value,
@@ -227,6 +227,10 @@ pub const Parser = struct {
             },
             else => return self.fail(self.current, .expected_value),
         }
+    }
+
+    fn parseDataType(self: *Parser, tok: token.Token) !ast.DataType {
+        return parseDataTypeName(tok.text) orelse self.fail(tok, .expected_data_type);
     }
 
     fn eat(self: *Parser, tag: token.Tag) !bool {
@@ -310,13 +314,18 @@ pub fn errorString(code: ErrorType) []const u8 {
     };
 }
 
-fn isDataType(text: []const u8) bool {
-    return std.mem.eql(u8, text, "u16");
-}
-
 fn parseRegister(tok: token.Token) ?ast.Register {
     inline for (std.meta.fields(ast.Register)) |field| {
         if (std.mem.eql(u8, tok.text[1..], field.name)) {
+            return @enumFromInt(field.value);
+        }
+    }
+    return null;
+}
+
+fn parseDataTypeName(text: []const u8) ?ast.DataType {
+    inline for (std.meta.fields(ast.DataType)) |field| {
+        if (std.mem.eql(u8, text, field.name)) {
             return @enumFromInt(field.value);
         }
     }

@@ -14,6 +14,15 @@ pub const Value = union(enum) {
     number: i64,
 };
 
+pub const DataType = enum {
+    u8,
+    u16,
+    u32,
+    i8,
+    i16,
+    i32,
+};
+
 pub const Condition = struct {
     lhs: []const u8,
     op: enum { lt },
@@ -57,7 +66,7 @@ pub const Register = enum {
 
 pub const VarDecl = struct {
     is_const: bool,
-    data_type: []const u8,
+    data_type: DataType,
     reg: ?Register,
     name: []const u8,
     value: Value,
@@ -75,7 +84,7 @@ pub const Statement = union(enum) {
         value: i64,
     },
     store: struct {
-        data_type: []const u8,
+        data_type: DataType,
         address: Value,
         value: Value,
     },

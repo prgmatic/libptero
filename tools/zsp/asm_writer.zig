@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 
 const Register = ast.Register;
+const DataType = ast.DataType;
 
 const compiler_scratch: Register = .at;
 const compiler_scratch_2: Register = .v1;
@@ -77,8 +78,8 @@ const FunctionContext = struct {
         self.symbol_count = scope;
     }
 
-    fn allocRegister(self: *const FunctionContext, data_type: []const u8) !Register {
-        if (!std.mem.eql(u8, data_type, "u16")) return error.UnsupportedType;
+    fn allocRegister(self: *const FunctionContext, data_type: DataType) !Register {
+        _ = data_type;
         for (alloc_scalar_registers) |reg| {
             if (!self.isRegisterInUse(reg)) return reg;
         }
@@ -115,8 +116,6 @@ fn writeStatements(
 }
 
 fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.VarDecl) !void {
-    if (!std.mem.eql(u8, decl.data_type, "u16")) return error.UnsupportedType;
-
     if (decl.is_const) {
         try context.add(.{
             .name = decl.name,
@@ -148,10 +147,9 @@ fn writeAddAssign(writer: *std.Io.Writer, context: *FunctionContext, name: []con
 }
 
 fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype) !void {
-    if (!std.mem.eql(u8, store.data_type, "u16")) return error.UnsupportedStoreType;
     const address_reg = try valueAsAddressReg(writer, context, store.address);
     const value_reg = try valueAsStoreReg(writer, context, store.value);
-    try writer.print("  sh {s}, 0({s})\n", .{ regName(value_reg), regName(address_reg) });
+    try writer.print("  {s} {s}, 0({s})\n", .{ storeOp(store.data_type), regName(value_reg), regName(address_reg) });
 }
 
 fn writeCall(
@@ -284,6 +282,14 @@ fn isScalarRegister(reg: Register) bool {
         .t8, .t9,
         .k0, .k1, .gp, .sp, .fp, .ra,
         => true,
+    };
+}
+
+fn storeOp(data_type: DataType) []const u8 {
+    return switch (data_type) {
+        .u8, .i8 => "sb",
+        .u16, .i16 => "sh",
+        .u32, .i32 => "sw",
     };
 }
 
