@@ -26,7 +26,7 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
         if (function.emit_label) {
             try writer.print("{s}:\n", .{function.name});
         }
-        var function_context = FunctionContext{ .label_prefix = function.name };
+        var function_context = top_level_context.child(function.name);
         const context = if (function.emit_label) &function_context else &top_level_context;
         try writeStatements(writer, functions, context, function.statements);
         if (!function.no_return) {
@@ -51,8 +51,16 @@ const FunctionContext = struct {
 
     fn add(self: *FunctionContext, symbol: Symbol) !void {
         if (self.symbol_count >= self.symbols.len) return error.TooManySymbols;
+        if (self.contains(symbol.name)) return error.SymbolAlreadyDefined;
         self.symbols[self.symbol_count] = symbol;
         self.symbol_count += 1;
+    }
+
+    fn child(self: *const FunctionContext, label_prefix: []const u8) FunctionContext {
+        var result = FunctionContext{ .label_prefix = label_prefix };
+        @memcpy(result.symbols[0..self.symbol_count], self.symbols[0..self.symbol_count]);
+        result.symbol_count = self.symbol_count;
+        return result;
     }
 
     fn lookup(self: *const FunctionContext, name: []const u8) !Symbol {
@@ -62,6 +70,11 @@ const FunctionContext = struct {
             if (std.mem.eql(u8, self.symbols[i].name, name)) return self.symbols[i];
         }
         return error.UnknownSymbol;
+    }
+
+    fn contains(self: *const FunctionContext, name: []const u8) bool {
+        _ = self.lookup(name) catch return false;
+        return true;
     }
 
     fn allocLabel(self: *FunctionContext) usize {
