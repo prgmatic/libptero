@@ -15,6 +15,17 @@ pub fn build(b: *std.Build) void {
 
     const tools = @import("build/tools.zig").build(b, n64_module);
 
+    const zsp_tests = b.addTest(.{
+        .name = "zsp-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/zsp/tests.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const run_zsp_tests = b.addRunArtifact(zsp_tests);
+    const test_step = b.step("test", "Run tests");
+    test_step.dependOn(&run_zsp_tests.step);
+
     // build console font
     const font_step = b.addRunArtifact(tools.console_font_conv);
     font_step.addFileArg(b.path("assets/console_font.png"));
