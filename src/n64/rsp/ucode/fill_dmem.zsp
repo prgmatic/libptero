@@ -1,5 +1,5 @@
 export fn _start() noreturn {
-    var ptr: u16<$t0> = 0;
+    reg ptr: u16 = 0;
     const dmem_end: u16 = 0x1000;
 
     while(ptr < dmem_end) {

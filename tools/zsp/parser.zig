@@ -125,14 +125,33 @@ pub const Parser = struct {
 
         if (std.mem.eql(u8, first.text, "while")) {
             _ = try self.expect(.l_paren);
-            const lhs = try self.expect(.ident);
-            _ = try self.expect(.less);
-            const rhs = try self.parseValue();
+            const condition = try self.parseCondition();
             _ = try self.expect(.r_paren);
             _ = try self.expect(.l_brace);
             return .{ .while_loop = .{
-                .condition = .{ .lhs = lhs.text, .op = .lt, .rhs = rhs },
+                .condition = condition,
                 .statements = try self.parseBlockStatements(),
+            } };
+        }
+
+        if (std.mem.eql(u8, first.text, "if")) {
+            _ = try self.expect(.l_paren);
+            const condition = try self.parseCondition();
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.l_brace);
+            const then_statements = try self.parseBlockStatements();
+
+            var else_statements: ?[]const ast.Statement = null;
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "else")) {
+                _ = try self.expect(.ident);
+                _ = try self.expect(.l_brace);
+                else_statements = try self.parseBlockStatements();
+            }
+
+            return .{ .if_statement = .{
+                .condition = condition,
+                .then_statements = then_statements,
+                .else_statements = else_statements,
             } };
         }
 
@@ -153,19 +172,53 @@ pub const Parser = struct {
         }
 
         if (std.mem.eql(u8, first.text, "const")) {
-            return .{ .var_decl = try self.parseVarDecl(true) };
+            return .{ .var_decl = try self.parseConstDecl() };
         }
 
         if (std.mem.eql(u8, first.text, "var")) {
-            return .{ .var_decl = try self.parseVarDecl(false) };
+            return self.fail(first, .var_keyword_removed);
         }
 
-        if (try self.eat(.plus_equal)) {
-            const value = try self.expect(.number);
+        if (std.mem.eql(u8, first.text, "reg")) {
+            return .{ .var_decl = try self.parseRegDecl() };
+        }
+
+        if (try self.parseCompoundAssignOp()) |op| {
+            const value = try self.parseValue();
             _ = try self.expect(.semicolon);
-            return .{ .add_assign = .{
-                .name = first.text,
-                .value = try self.parseNumberValue(value),
+            return .{ .assignment = .{
+                .destination = first.text,
+                .lhs = .{ .ident = first.text },
+                .op = op,
+                .rhs = value,
+            } };
+        }
+
+        if (try self.eat(.equal)) {
+            if (try self.eat(.tilde)) {
+                const value = try self.parseValue();
+                _ = try self.expect(.semicolon);
+                return .{ .assignment = .{
+                    .destination = first.text,
+                    .lhs = value,
+                    .op = .bit_not,
+                    .rhs = null,
+                } };
+            }
+
+            const lhs = try self.parseValue();
+            var op: ast.AssignOp = .set;
+            var rhs: ?ast.Value = null;
+            if (try self.parseBinaryAssignOp()) |binary_op| {
+                op = binary_op;
+                rhs = try self.parseValue();
+            }
+            _ = try self.expect(.semicolon);
+            return .{ .assignment = .{
+                .destination = first.text,
+                .lhs = lhs,
+                .op = op,
+                .rhs = rhs,
             } };
         }
 
@@ -189,25 +242,43 @@ pub const Parser = struct {
         return self.fail(name, .unsupported_builtin);
     }
 
-    fn parseVarDecl(self: *Parser, is_const: bool) !ast.VarDecl {
+    fn parseConstDecl(self: *Parser) !ast.VarDecl {
         const name = try self.expect(.ident);
         _ = try self.expect(.colon);
         const data_type_token = try self.expect(.ident);
         const data_type = try self.parseDataType(data_type_token);
-
-        var reg: ?ast.Register = null;
-        if (try self.eat(.less)) {
-            const reg_token = try self.expect(.register);
-            _ = try self.expect(.type_end);
-            reg = parseRegister(reg_token) orelse return self.fail(reg_token, .expected_scalar_register);
-        }
 
         _ = try self.expect(.equal);
         const value = try self.parseValue();
         _ = try self.expect(.semicolon);
 
         return .{
-            .is_const = is_const,
+            .is_const = true,
+            .data_type = data_type,
+            .reg = null,
+            .name = name.text,
+            .value = value,
+        };
+    }
+
+    fn parseRegDecl(self: *Parser) !ast.VarDecl {
+        var reg: ?ast.Register = null;
+        if (try self.eat(.l_paren)) {
+            const reg_token = try self.expect(.register);
+            _ = try self.expect(.r_paren);
+            reg = parseRegister(reg_token) orelse return self.fail(reg_token, .expected_scalar_register);
+        }
+
+        const name = try self.expect(.ident);
+        _ = try self.expect(.colon);
+        const data_type_token = try self.expect(.ident);
+        const data_type = try self.parseDataType(data_type_token);
+        _ = try self.expect(.equal);
+        const value = try self.parseValue();
+        _ = try self.expect(.semicolon);
+
+        return .{
+            .is_const = false,
             .data_type = data_type,
             .reg = reg,
             .name = name.text,
@@ -216,6 +287,12 @@ pub const Parser = struct {
     }
 
     fn parseValue(self: *Parser) !ast.Value {
+        if (try self.eat(.minus)) {
+            const tok = try self.expect(.number);
+            const value = try self.parseNumberValue(tok);
+            return .{ .number = std.math.negate(value) catch return self.fail(tok, .invalid_number) };
+        }
+
         switch (self.current.tag) {
             .ident => {
                 const tok = try self.expect(.ident);
@@ -227,6 +304,63 @@ pub const Parser = struct {
             },
             else => return self.fail(self.current, .expected_value),
         }
+    }
+
+    fn parseCondition(self: *Parser) !ast.Condition {
+        const lhs = try self.expect(.ident);
+        const op = switch (self.current.tag) {
+            .equal_equal => ast.CompareOp.eq,
+            .not_equal => ast.CompareOp.ne,
+            .less => ast.CompareOp.lt,
+            .less_equal => ast.CompareOp.le,
+            .greater => ast.CompareOp.gt,
+            .greater_equal => ast.CompareOp.ge,
+            else => return self.fail(self.current, .expected_comparison_operator),
+        };
+        self.current = try self.lexer.next();
+        return .{
+            .lhs = lhs.text,
+            .op = op,
+            .rhs = try self.parseValue(),
+        };
+    }
+
+    fn parseCompoundAssignOp(self: *Parser) !?ast.AssignOp {
+        const op: ast.AssignOp = switch (self.current.tag) {
+            .plus_equal => .add,
+            .minus_equal => .sub,
+            .star_equal => .mul,
+            .slash_equal => .div,
+            .shift_left_equal => .shift_left,
+            .shift_right_equal => .shift_right,
+            .logical_shift_right_equal => .logical_shift_right,
+            .ampersand_equal => .bit_and,
+            .pipe_equal => .bit_or,
+            .caret_equal => .bit_xor,
+            .nor_equal => .bit_nor,
+            else => return null,
+        };
+        self.current = try self.lexer.next();
+        return op;
+    }
+
+    fn parseBinaryAssignOp(self: *Parser) !?ast.AssignOp {
+        const op: ast.AssignOp = switch (self.current.tag) {
+            .plus => .add,
+            .minus => .sub,
+            .star => .mul,
+            .slash => .div,
+            .shift_left => .shift_left,
+            .shift_right => .shift_right,
+            .logical_shift_right => .logical_shift_right,
+            .ampersand => .bit_and,
+            .pipe => .bit_or,
+            .caret => .bit_xor,
+            .nor => .bit_nor,
+            else => return null,
+        };
+        self.current = try self.lexer.next();
+        return op;
     }
 
     fn parseDataType(self: *Parser, tok: token.Token) !ast.DataType {
@@ -284,9 +418,11 @@ pub const ErrorType = enum {
     unsupported_function_modifier,
     unsupported_statement,
     unsupported_builtin,
+    var_keyword_removed,
     expected_data_type,
     expected_scalar_register,
     expected_value,
+    expected_comparison_operator,
     unexpected_token,
     invalid_number,
 };
@@ -306,9 +442,11 @@ pub fn errorString(code: ErrorType) []const u8 {
         .unsupported_function_modifier => "unsupported function modifier",
         .unsupported_statement => "unsupported statement",
         .unsupported_builtin => "unsupported builtin",
+        .var_keyword_removed => "'var' has been replaced by 'reg' for register variables",
         .expected_data_type => "expected data type",
         .expected_scalar_register => "expected scalar register",
         .expected_value => "expected value",
+        .expected_comparison_operator => "expected comparison operator",
         .unexpected_token => "unexpected token",
         .invalid_number => "invalid number",
     };

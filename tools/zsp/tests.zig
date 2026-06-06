@@ -42,8 +42,9 @@ fn expectAsmError(source: []const u8, expected_err: anyerror) !void {
 test "syntax numbers and scalar variables emit addiu" {
     try expectAsm(
         \\fn test() {
-        \\  var a: u32<$t0> = 1234;
-        \\  var b: u32<$t1> = 0x1234;
+        \\  const initial: u32 = 0x1234;
+        \\  reg($t0) a: u32 = 1234;
+        \\  reg($t1) b: u32 = initial;
         \\  a += 10;
         \\}
     ,
@@ -62,10 +63,292 @@ test "syntax numbers and scalar variables emit addiu" {
     );
 }
 
+test "scalar assignment operators support every data type" {
+    const data_types = [_][]const u8{ "u8", "u16", "u32", "i8", "i16", "i32" };
+    const expected =
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 14
+        \\  addiu $t1, $zero, 18
+        \\  addiu $t2, $zero, 0
+        \\  or $t2, $zero, $t0
+        \\  addu $t2, $t2, $t0
+        \\  addu $t2, $t0, $t1
+        \\  subu $t2, $t2, $t0
+        \\  subu $t2, $t0, $t1
+        \\  addiu $t2, $zero, 10
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    ;
+
+    for (data_types) |data_type| {
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\fn test() {{
+            \\  reg($t0) a: {s} = 14;
+            \\  reg($t1) b: {s} = 18;
+            \\  reg($t2) c: {s} = 0;
+            \\
+            \\  c = a;
+            \\  c += a;
+            \\  c = a + b;
+            \\  c -= a;
+            \\  c = a - b;
+            \\  c = 10;
+            \\}}
+        , .{ data_type, data_type, data_type });
+        defer testing.allocator.free(source);
+        try expectAsm(source, expected);
+    }
+}
+
+test "scalar assignment rejects mixed register data types" {
+    try expectAsmError(
+        \\fn test() {
+        \\  reg a: u16 = 1;
+        \\  reg b: i16 = 2;
+        \\  a = a + b;
+        \\}
+    , error.RegisterTypeMismatch);
+}
+
+test "scalar math and shifts support every data type" {
+    const data_types = [_][]const u8{ "u8", "u16", "u32", "i8", "i16", "i32" };
+
+    for (data_types) |data_type| {
+        const signed = data_type[0] == 'i';
+        const right_shift = if (signed) "sra" else "srl";
+        const variable_right_shift = if (signed) "srav" else "srlv";
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\fn test() {{
+            \\  const factor: {s} = 4;
+            \\  const shift: {s} = 2;
+            \\  reg($t0) a: {s} = 16;
+            \\  reg($t1) b: {s} = 2;
+            \\  reg($t2) c: {s} = 0;
+            \\
+            \\  c = a * factor;
+            \\  c *= 8;
+            \\  c = a / factor;
+            \\  c /= 8;
+            \\  c = a << b;
+            \\  c <<= shift;
+            \\  c = a >> b;
+            \\  c >>= shift;
+            \\  c = a >>> b;
+            \\  c >>>= shift;
+            \\}}
+        , .{ data_type, data_type, data_type, data_type, data_type });
+        defer testing.allocator.free(source);
+
+        const expected = try std.fmt.allocPrint(testing.allocator,
+            \\.set noreorder
+            \\.set noat
+            \\.text
+            \\
+            \\test:
+            \\  addiu $t0, $zero, 16
+            \\  addiu $t1, $zero, 2
+            \\  addiu $t2, $zero, 0
+            \\  sll $t2, $t0, 2
+            \\  sll $t2, $t2, 3
+            \\  {s} $t2, $t0, 2
+            \\  {s} $t2, $t2, 3
+            \\  sllv $t2, $t0, $t1
+            \\  sll $t2, $t2, 2
+            \\  {s} $t2, $t0, $t1
+            \\  {s} $t2, $t2, 2
+            \\  srlv $t2, $t0, $t1
+            \\  srl $t2, $t2, 2
+            \\  jr $ra
+            \\  nop
+            \\
+            \\
+        , .{ right_shift, right_shift, variable_right_shift, right_shift });
+        defer testing.allocator.free(expected);
+        try expectAsm(source, expected);
+    }
+}
+
+test "scalar math rejects unsupported multiplication and division" {
+    try expectAsmError(
+        \\fn test() {
+        \\  reg a: u32 = 8;
+        \\  reg b: u32 = 3;
+        \\  a = a * b;
+        \\}
+    , error.PowerOfTwoConstantRequired);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg a: u32 = 8;
+        \\  a /= 3;
+        \\}
+    , error.PowerOfTwoConstantRequired);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg a: u32 = 8;
+        \\  a *= 1;
+        \\}
+    , error.NoOpPowerOfTwoMath);
+}
+
+test "scalar bitwise operators support every data type" {
+    const data_types = [_][]const u8{ "u8", "u16", "u32", "i8", "i16", "i32" };
+    const expected =
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 12
+        \\  addiu $t1, $zero, 10
+        \\  addiu $t2, $zero, 0
+        \\  and $t2, $t0, $t1
+        \\  andi $t2, $t2, 15
+        \\  or $t2, $t0, $t1
+        \\  ori $t2, $t2, 16
+        \\  xor $t2, $t0, $t1
+        \\  xori $t2, $t2, 3
+        \\  nor $t2, $zero, $t0
+        \\  nor $t2, $t0, $t1
+        \\  nor $t2, $t2, $t0
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    ;
+
+    for (data_types) |data_type| {
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\fn test() {{
+            \\  reg($t0) a: {s} = 12;
+            \\  reg($t1) b: {s} = 10;
+            \\  reg($t2) c: {s} = 0;
+            \\
+            \\  c = a & b;
+            \\  c &= 15;
+            \\  c = a | b;
+            \\  c |= 16;
+            \\  c = a ^ b;
+            \\  c ^= 3;
+            \\  c = ~a;
+            \\  c = a ~| b;
+            \\  c ~|= a;
+            \\}}
+        , .{ data_type, data_type, data_type });
+        defer testing.allocator.free(source);
+        try expectAsm(source, expected);
+    }
+}
+
+test "comparisons support every operator and scalar data type" {
+    const data_types = [_][]const u8{ "u8", "u16", "u32", "i8", "i16", "i32" };
+
+    for (data_types) |data_type| {
+        const compare_instruction: []const u8 = if (data_type[0] == 'i') "slt" else "sltu";
+        const source = try std.fmt.allocPrint(testing.allocator,
+            \\fn test() {{
+            \\  reg($t0) a: {s} = 1;
+            \\  reg($t1) b: {s} = 2;
+            \\  reg($t2) c: {s} = 0;
+            \\  if (a == b) {{ c += 1; }}
+            \\  if (a != b) {{ c += 2; }}
+            \\  if (a < b)  {{ c += 3; }}
+            \\  if (a <= b) {{ c += 4; }}
+            \\  if (a > b)  {{ c += 5; }}
+            \\  if (a >= b) {{ c += 6; }}
+            \\}}
+        , .{ data_type, data_type, data_type });
+        defer testing.allocator.free(source);
+
+        const expected = try std.fmt.allocPrint(testing.allocator,
+            \\.set noreorder
+            \\.set noat
+            \\.text
+            \\
+            \\test:
+            \\  addiu $t0, $zero, 1
+            \\  addiu $t1, $zero, 2
+            \\  addiu $t2, $zero, 0
+            \\  bne $t0, $t1, LABEL_test_ifend_0
+            \\  nop
+            \\  addiu $t2, $t2, 1
+            \\LABEL_test_ifend_0:
+            \\  beq $t0, $t1, LABEL_test_ifend_1
+            \\  nop
+            \\  addiu $t2, $t2, 2
+            \\LABEL_test_ifend_1:
+            \\  {s} $at, $t0, $t1
+            \\  beq $at, $zero, LABEL_test_ifend_2
+            \\  nop
+            \\  addiu $t2, $t2, 3
+            \\LABEL_test_ifend_2:
+            \\  {s} $at, $t1, $t0
+            \\  bne $at, $zero, LABEL_test_ifend_3
+            \\  nop
+            \\  addiu $t2, $t2, 4
+            \\LABEL_test_ifend_3:
+            \\  {s} $at, $t1, $t0
+            \\  beq $at, $zero, LABEL_test_ifend_4
+            \\  nop
+            \\  addiu $t2, $t2, 5
+            \\LABEL_test_ifend_4:
+            \\  {s} $at, $t0, $t1
+            \\  bne $at, $zero, LABEL_test_ifend_5
+            \\  nop
+            \\  addiu $t2, $t2, 6
+            \\LABEL_test_ifend_5:
+            \\  jr $ra
+            \\  nop
+            \\
+            \\
+        , .{ compare_instruction, compare_instruction, compare_instruction, compare_instruction });
+        defer testing.allocator.free(expected);
+        try expectAsm(source, expected);
+    }
+}
+
+test "comparison immediates and else blocks emit direct branches" {
+    try expectAsm(
+        \\fn test() {
+        \\  reg($t0) a: i32 = -1;
+        \\  if (a >= 0) {
+        \\    a += 1;
+        \\  } else {
+        \\    a -= 1;
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, -1
+        \\  slti $at, $t0, 0
+        \\  bne $at, $zero, LABEL_test_ifelse_0
+        \\  nop
+        \\  addiu $t0, $t0, 1
+        \\  j LABEL_test_ifend_0
+        \\  nop
+        \\LABEL_test_ifelse_0:
+        \\  addiu $t0, $t0, -1
+        \\LABEL_test_ifend_0:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
 test "top level declarations allocate registers without label" {
     try expectAsm(
-        \\var a: u8 = 1;
-        \\var b: u16 = 2;
+        \\reg a: u8 = 1;
+        \\reg b: u16 = 2;
         \\@nop();
     ,
         \\.set noreorder
@@ -83,8 +366,8 @@ test "top level declarations allocate registers without label" {
 test "store emits byte halfword and word writes" {
     try expectAsm(
         \\fn test() {
-        \\  var ptr: u32<$t0> = 0x100;
-        \\  var value: u32<$t1> = 0x55;
+        \\  reg($t0) ptr: u32 = 0x100;
+        \\  reg($t1) value: u32 = 0x55;
         \\  store(u8, ptr, value);
         \\  store(u16, ptr, 0x1234);
         \\  store(u32, 0, value);
@@ -98,7 +381,7 @@ test "store emits byte halfword and word writes" {
         \\  addiu $t0, $zero, 256
         \\  addiu $t1, $zero, 85
         \\  sb $t1, 0($t0)
-        \\  ori $v1, $zero, 4660
+        \\  addiu $v1, $zero, 4660
         \\  sh $v1, 0($t0)
         \\  sw $t1, 0($zero)
         \\  jr $ra
@@ -136,7 +419,7 @@ test "inline calls expand inside caller scope" {
 test "while loop emits labels branch and back edge" {
     try expectAsm(
         \\export fn _start() noreturn {
-        \\  var ptr: u16<$t0> = 0;
+        \\  reg($t0) ptr: u16 = 0;
         \\  const end: u16 = 4;
         \\  while(ptr < end) {
         \\    store(u16, ptr, ptr);
@@ -177,17 +460,25 @@ test "syntax rejects unsupported function modifier" {
 test "syntax rejects invalid number literal" {
     try expectParseError(
         \\fn test() {
-        \\  var a: u32<$t0> = 0xzz;
+        \\  reg($t0) a: u32 = 0xzz;
         \\}
     , .invalid_number, 2, 21);
 }
 
 test "semantic rejects function variable redefining global" {
     try expectAsmError(
-        \\var a: u8 = 0;
+        \\reg a: u8 = 0;
         \\
         \\fn test() {
-        \\  var a: u16 = 2;
+        \\  reg a: u16 = 2;
         \\}
     , error.SymbolAlreadyDefined);
+}
+
+test "syntax rejects removed var keyword" {
+    try expectParseError(
+        \\fn test() {
+        \\  var a: u16 = 0;
+        \\}
+    , .var_keyword_removed, 2, 3);
 }

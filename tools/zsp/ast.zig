@@ -25,43 +25,25 @@ pub const DataType = enum {
 
 pub const Condition = struct {
     lhs: []const u8,
-    op: enum { lt },
+    op: CompareOp,
     rhs: Value,
+};
+
+pub const CompareOp = enum {
+    eq,
+    ne,
+    lt,
+    le,
+    gt,
+    ge,
 };
 
 pub const Register = enum {
     zero,
-    at,
-    v0,
-    v1,
-    a0,
-    a1,
-    a2,
-    a3,
-    t0,
-    t1,
-    t2,
-    t3,
-    t4,
-    t5,
-    t6,
-    t7,
-    s0,
-    s1,
-    s2,
-    s3,
-    s4,
-    s5,
-    s6,
-    s7,
-    t8,
-    t9,
-    k0,
-    k1,
-    gp,
-    sp,
-    fp,
-    ra,
+    at, v0, v1, a0, a1, a2, a3, 
+    t0, t1, t2, t3, t4, t5, t6, t7,
+    s0, s1, s2, s3, s4, s5, s6, s7,
+    t8, t9, k0, k1, gp, sp, fp, ra,
 };
 
 pub const VarDecl = struct {
@@ -77,12 +59,32 @@ pub const Builtin = enum {
     breakpoint,
 };
 
+pub const AssignOp = enum {
+    set,
+    add,
+    sub,
+    mul,
+    div,
+    shift_left,
+    shift_right,
+    logical_shift_right,
+    bit_and,
+    bit_or,
+    bit_xor,
+    bit_nor,
+    bit_not,
+};
+
+pub const Assignment = struct {
+    destination: []const u8,
+    lhs: Value,
+    op: AssignOp,
+    rhs: ?Value,
+};
+
 pub const Statement = union(enum) {
     var_decl: VarDecl,
-    add_assign: struct {
-        name: []const u8,
-        value: i64,
-    },
+    assignment: Assignment,
     store: struct {
         data_type: DataType,
         address: Value,
@@ -93,6 +95,11 @@ pub const Statement = union(enum) {
     while_loop: struct {
         condition: Condition,
         statements: []const Statement,
+    },
+    if_statement: struct {
+        condition: Condition,
+        then_statements: []const Statement,
+        else_statements: ?[]const Statement,
     },
     asm_line: []const u8,
 };
@@ -106,6 +113,10 @@ fn freeStatements(allocator: std.mem.Allocator, statements: []const Statement) v
     for (statements) |statement| {
         switch (statement) {
             .while_loop => |loop| freeStatements(allocator, loop.statements),
+            .if_statement => |if_statement| {
+                freeStatements(allocator, if_statement.then_statements);
+                if (if_statement.else_statements) |else_statements| freeStatements(allocator, else_statements);
+            },
             else => {},
         }
     }

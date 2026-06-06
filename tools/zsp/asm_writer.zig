@@ -8,8 +8,8 @@ const compiler_scratch: Register = .at;
 const compiler_scratch_2: Register = .v1;
 const alloc_scalar_registers = [_]Register{
     .t0, .t1, .t2, .t3, .t4, .t5, .t6, .t7, .t8, .t9,
-    .k0, .k1, .sp, .fp,
-    .s0, .s1, .s2, .s3, .s4, .s5, .s6, .s7,
+    .k0, .k1, .sp, .fp, .s0, .s1, .s2, .s3, .s4, .s5,
+    .s6, .s7,
 };
 
 pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
@@ -39,6 +39,7 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
 
 const Symbol = struct {
     name: []const u8,
+    data_type: DataType,
     reg: ?Register,
     constant: ?i64,
 };
@@ -118,11 +119,12 @@ fn writeStatements(
     for (statements) |statement| {
         switch (statement) {
             .var_decl => |decl| try writeVarDecl(writer, context, decl),
-            .add_assign => |assign| try writeAddAssign(writer, context, assign.name, assign.value),
+            .assignment => |assignment| try writeAssignment(writer, context, assignment),
             .store => |store| try writeStore(writer, context, store),
             .call => |name| try writeCall(writer, functions, context, name),
             .builtin => |builtin| try writeBuiltin(writer, builtin),
             .while_loop => |loop| try writeWhile(writer, functions, context, loop),
+            .if_statement => |if_statement| try writeIf(writer, functions, context, if_statement),
             .asm_line => |asm_line| try writer.print("  {s}\n", .{asm_line}),
         }
     }
@@ -132,6 +134,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
     if (decl.is_const) {
         try context.add(.{
             .name = decl.name,
+            .data_type = decl.data_type,
             .reg = null,
             .constant = try valueAsImmediate(context, decl.value),
         });
@@ -140,23 +143,315 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
 
     const reg = decl.reg orelse try context.allocRegister(decl.data_type);
     if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
-    if (reg == compiler_scratch or reg == compiler_scratch_2 or reg == .gp)
-    {
+    if (reg == compiler_scratch or reg == compiler_scratch_2 or reg == .gp) {
         return error.RegisterReservedForBackend;
     }
     if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
-    try writer.print("  addiu {s}, {s}, {d}\n", .{ regName(reg), regName(.zero), try valueAsImmediate(context, decl.value) });
+    try loadImmediateInto(writer, reg, try valueAsImmediate(context, decl.value));
     try context.add(.{
         .name = decl.name,
+        .data_type = decl.data_type,
         .reg = reg,
         .constant = null,
     });
 }
 
-fn writeAddAssign(writer: *std.Io.Writer, context: *FunctionContext, name: []const u8, value: i64) !void {
-    const symbol = try context.lookup(name);
-    const reg = symbol.reg orelse return error.CannotAssignConst;
-    try writer.print("  addiu {s}, {s}, {d}\n", .{ regName(reg), regName(reg), value });
+fn writeAssignment(writer: *std.Io.Writer, context: *FunctionContext, assignment: ast.Assignment) !void {
+    const destination = try context.lookup(assignment.destination);
+    const destination_reg = destination.reg orelse return error.CannotAssignConst;
+
+    switch (assignment.op) {
+        .set => {
+            if (assignment.rhs != null) return error.InvalidAssignment;
+            try writeSet(writer, context, destination, destination_reg, assignment.lhs);
+        },
+        .bit_not => {
+            if (assignment.rhs != null) return error.InvalidAssignment;
+            try writeBitNot(writer, context, destination, destination_reg, assignment.lhs);
+        },
+        else => {
+            const rhs = assignment.rhs orelse return error.InvalidAssignment;
+            try writeBinary(writer, context, destination, destination_reg, assignment.lhs, assignment.op, rhs);
+        },
+    }
+}
+
+fn writeSet(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    destination_reg: Register,
+    value: ast.Value,
+) !void {
+    switch (value) {
+        .number => |number| try loadImmediateInto(writer, destination_reg, number),
+        .ident => |name| {
+            const source = try context.lookup(name);
+            try expectSameType(destination, source);
+            if (source.reg) |source_reg| {
+                try writer.print("  or {s}, {s}, {s}\n", .{
+                    regName(destination_reg),
+                    regName(.zero),
+                    regName(source_reg),
+                });
+            } else {
+                try loadImmediateInto(writer, destination_reg, source.constant orelse return error.ExpectedConstant);
+            }
+        },
+    }
+}
+
+fn writeBitNot(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    destination_reg: Register,
+    value: ast.Value,
+) !void {
+    const source = switch (value) {
+        .ident => |name| try context.lookup(name),
+        .number => return error.BitNotRequiresRegister,
+    };
+    try expectSameType(destination, source);
+    const source_reg = source.reg orelse return error.BitNotRequiresRegister;
+    try writer.print("  nor {s}, {s}, {s}\n", .{
+        regName(destination_reg),
+        regName(.zero),
+        regName(source_reg),
+    });
+}
+
+fn writeBinary(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    destination_reg: Register,
+    lhs_value: ast.Value,
+    op: ast.AssignOp,
+    rhs_value: ast.Value,
+) !void {
+    const lhs = switch (lhs_value) {
+        .ident => |name| try context.lookup(name),
+        .number => return error.ArithmeticLhsMustBeRegister,
+    };
+    try expectSameType(destination, lhs);
+    const lhs_reg = lhs.reg orelse return error.ArithmeticLhsMustBeRegister;
+
+    if (op == .mul or op == .div) {
+        return writePowerOfTwoMath(writer, context, destination, destination_reg, lhs_reg, op, rhs_value);
+    }
+
+    if (op == .shift_left or op == .shift_right or op == .logical_shift_right) {
+        return writeShift(writer, context, destination, destination_reg, lhs_reg, op, rhs_value);
+    }
+
+    switch (rhs_value) {
+        .ident => |name| {
+            const rhs = try context.lookup(name);
+            try expectSameType(destination, rhs);
+            if (rhs.reg) |rhs_reg| {
+                const instruction = registerBinaryInstruction(op) orelse return error.UnsupportedOperator;
+                try writer.print("  {s} {s}, {s}, {s}\n", .{
+                    instruction,
+                    regName(destination_reg),
+                    regName(lhs_reg),
+                    regName(rhs_reg),
+                });
+            } else {
+                try writeBinaryImmediate(
+                    writer,
+                    destination_reg,
+                    lhs_reg,
+                    op,
+                    rhs.constant orelse return error.ExpectedConstant,
+                );
+            }
+        },
+        .number => |number| try writeBinaryImmediate(writer, destination_reg, lhs_reg, op, number),
+    }
+}
+
+fn writeBinaryImmediate(
+    writer: *std.Io.Writer,
+    destination: Register,
+    lhs: Register,
+    op: ast.AssignOp,
+    immediate: i64,
+) !void {
+    switch (op) {
+        .add, .sub => {
+            const addend = if (op == .add) immediate else std.math.negate(immediate) catch
+                return error.ImmediateOutOfRange;
+            if (addend >= std.math.minInt(i16) and addend <= std.math.maxInt(i16)) {
+                try writer.print("  addiu {s}, {s}, {d}\n", .{
+                    regName(destination),
+                    regName(lhs),
+                    addend,
+                });
+                return;
+            }
+        },
+        .bit_and, .bit_or, .bit_xor => {
+            if (immediate >= 0 and immediate <= std.math.maxInt(u16)) {
+                const instruction = immediateBinaryInstruction(op).?;
+                try writer.print("  {s} {s}, {s}, {d}\n", .{
+                    instruction,
+                    regName(destination),
+                    regName(lhs),
+                    immediate,
+                });
+                return;
+            }
+        },
+        .bit_nor => return error.NorRequiresRegister,
+        else => return error.UnsupportedOperator,
+    }
+
+    try loadImmediateInto(writer, compiler_scratch_2, immediate);
+    const instruction = registerBinaryInstruction(op) orelse return error.UnsupportedOperator;
+    try writer.print("  {s} {s}, {s}, {s}\n", .{
+        instruction,
+        regName(destination),
+        regName(lhs),
+        regName(compiler_scratch_2),
+    });
+}
+
+fn registerBinaryInstruction(op: ast.AssignOp) ?[]const u8 {
+    return switch (op) {
+        .add => "addu",
+        .sub => "subu",
+        .bit_and => "and",
+        .bit_or => "or",
+        .bit_xor => "xor",
+        .bit_nor => "nor",
+        else => null,
+    };
+}
+
+fn immediateBinaryInstruction(op: ast.AssignOp) ?[]const u8 {
+    return switch (op) {
+        .add, .sub => "addiu",
+        .bit_and => "andi",
+        .bit_or => "ori",
+        .bit_xor => "xori",
+        else => null,
+    };
+}
+
+fn writePowerOfTwoMath(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    destination_reg: Register,
+    lhs_reg: Register,
+    op: ast.AssignOp,
+    rhs_value: ast.Value,
+) !void {
+    const value = switch (rhs_value) {
+        .number => |number| number,
+        .ident => |name| blk: {
+            const rhs = try context.lookup(name);
+            try expectSameType(destination, rhs);
+            if (rhs.reg != null) return error.PowerOfTwoConstantRequired;
+            break :blk rhs.constant orelse return error.ExpectedConstant;
+        },
+    };
+    if (value <= 0 or value > std.math.maxInt(u32)) return error.PowerOfTwoConstantRequired;
+    const unsigned: u32 = @intCast(value);
+    if (!std.math.isPowerOfTwo(unsigned)) return error.PowerOfTwoConstantRequired;
+    if (unsigned == 1) return error.NoOpPowerOfTwoMath;
+    const shift: u5 = @intCast(@ctz(unsigned));
+
+    const instruction = if (op == .mul)
+        "sll"
+    else if (isSigned(destination.data_type))
+        "sra"
+    else
+        "srl";
+    try writer.print("  {s} {s}, {s}, {d}\n", .{
+        instruction,
+        regName(destination_reg),
+        regName(lhs_reg),
+        shift,
+    });
+}
+
+fn writeShift(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    destination_reg: Register,
+    lhs_reg: Register,
+    op: ast.AssignOp,
+    rhs_value: ast.Value,
+) !void {
+    switch (rhs_value) {
+        .number => |amount| try writeImmediateShift(
+            writer,
+            destination,
+            destination_reg,
+            lhs_reg,
+            op,
+            amount,
+        ),
+        .ident => |name| {
+            const rhs = try context.lookup(name);
+            try expectSameType(destination, rhs);
+            if (rhs.constant) |amount| {
+                return writeImmediateShift(
+                    writer,
+                    destination,
+                    destination_reg,
+                    lhs_reg,
+                    op,
+                    amount,
+                );
+            }
+            const rhs_reg = rhs.reg orelse return error.ShiftAmountMustBeRegisterOrNumber;
+            const instruction = shiftInstruction(op, isSigned(destination.data_type), true);
+            try writer.print("  {s} {s}, {s}, {s}\n", .{
+                instruction,
+                regName(destination_reg),
+                regName(lhs_reg),
+                regName(rhs_reg),
+            });
+        },
+    }
+}
+
+fn writeImmediateShift(
+    writer: *std.Io.Writer,
+    destination: Symbol,
+    destination_reg: Register,
+    lhs_reg: Register,
+    op: ast.AssignOp,
+    amount: i64,
+) !void {
+    if (amount < 0 or amount > 31) return error.InvalidShiftAmount;
+    const instruction = shiftInstruction(op, isSigned(destination.data_type), false);
+    try writer.print("  {s} {s}, {s}, {d}\n", .{
+        instruction,
+        regName(destination_reg),
+        regName(lhs_reg),
+        amount,
+    });
+}
+
+fn shiftInstruction(op: ast.AssignOp, signed: bool, variable: bool) []const u8 {
+    return switch (op) {
+        .shift_left => if (variable) "sllv" else "sll",
+        .logical_shift_right => if (variable) "srlv" else "srl",
+        .shift_right => if (signed)
+            (if (variable) "srav" else "sra")
+        else
+            (if (variable) "srlv" else "srl"),
+        else => unreachable,
+    };
+}
+
+fn expectSameType(lhs: Symbol, rhs: Symbol) !void {
+    if (lhs.data_type != rhs.data_type) return error.RegisterTypeMismatch;
 }
 
 fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype) !void {
@@ -199,7 +494,7 @@ fn writeWhile(
     const label = context.allocLabel();
 
     try writer.print("LABEL_{s}_while_{d}:\n", .{ context.label_prefix, label });
-    try writeConditionBranchToEnd(writer, context, loop.condition, label);
+    try writeConditionBranchFalse(writer, context, loop.condition, "whileend", label);
     const scope = context.pushScope();
     defer context.popScope(scope);
     try writeStatements(writer, functions, context, loop.statements);
@@ -208,29 +503,138 @@ fn writeWhile(
     try writer.print("LABEL_{s}_whileend_{d}:\n", .{ context.label_prefix, label });
 }
 
-fn writeConditionBranchToEnd(
+fn writeIf(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+    if_statement: anytype,
+) anyerror!void {
+    const label = context.allocLabel();
+    const false_suffix: []const u8 = if (if_statement.else_statements != null) "ifelse" else "ifend";
+    try writeConditionBranchFalse(writer, context, if_statement.condition, false_suffix, label);
+
+    const then_scope = context.pushScope();
+    try writeStatements(writer, functions, context, if_statement.then_statements);
+    context.popScope(then_scope);
+
+    if (if_statement.else_statements) |else_statements| {
+        try writer.print("  j LABEL_{s}_ifend_{d}\n", .{ context.label_prefix, label });
+        try writer.writeAll("  nop\n");
+        try writer.print("LABEL_{s}_ifelse_{d}:\n", .{ context.label_prefix, label });
+        const else_scope = context.pushScope();
+        try writeStatements(writer, functions, context, else_statements);
+        context.popScope(else_scope);
+    }
+    try writer.print("LABEL_{s}_ifend_{d}:\n", .{ context.label_prefix, label });
+}
+
+fn writeConditionBranchFalse(
     writer: *std.Io.Writer,
     context: *FunctionContext,
     condition: ast.Condition,
+    label_suffix: []const u8,
     label: usize,
 ) !void {
-    if (condition.op != .lt) return error.UnsupportedCondition;
-
     const lhs = try context.lookup(condition.lhs);
     const lhs_reg = lhs.reg orelse return error.ConditionLhsMustBeRegister;
+    var rhs_reg: ?Register = null;
+    var rhs_immediate: ?i64 = null;
     switch (condition.rhs) {
-        .number => |number| try writer.print("  sltiu {s}, {s}, {d}\n", .{ regName(compiler_scratch), regName(lhs_reg), number }),
-        .ident => |name| {
+        .number => |number| rhs_immediate = number,
+        .ident => |name| blk: {
             const rhs = try context.lookup(name);
-            if (rhs.constant) |constant| {
-                try writer.print("  sltiu {s}, {s}, {d}\n", .{ regName(compiler_scratch), regName(lhs_reg), constant });
-            } else {
-                const rhs_reg = rhs.reg orelse return error.ConditionRhsMustBeRegister;
-                try writer.print("  sltu {s}, {s}, {s}\n", .{ regName(compiler_scratch), regName(lhs_reg), regName(rhs_reg) });
+            try expectSameType(lhs, rhs);
+            if (rhs.reg) |reg| {
+                rhs_reg = reg;
+                break :blk;
             }
+            rhs_immediate = rhs.constant orelse return error.ExpectedConstant;
         },
     }
-    try writer.print("  beq {s}, {s}, LABEL_{s}_whileend_{d}\n", .{ regName(compiler_scratch), regName(.zero), context.label_prefix, label });
+
+    switch (condition.op) {
+        .eq, .ne => {
+            if (rhs_reg == null) {
+                const immediate = rhs_immediate.?;
+                if (immediate == 0) {
+                    rhs_reg = .zero;
+                } else {
+                    try loadImmediateInto(writer, compiler_scratch_2, immediate);
+                    rhs_reg = compiler_scratch_2;
+                }
+            }
+            const branch = if (condition.op == .eq) "bne" else "beq";
+            try writer.print("  {s} {s}, {s}, LABEL_{s}_{s}_{d}\n", .{
+                branch,
+                regName(lhs_reg),
+                regName(rhs_reg.?),
+                context.label_prefix,
+                label_suffix,
+                label,
+            });
+        },
+        .lt, .le, .gt, .ge => {
+            if (rhs_immediate) |immediate| {
+                const adjusted = if (condition.op == .gt or condition.op == .le)
+                    std.math.add(i64, immediate, 1) catch null
+                else
+                    immediate;
+                if (adjusted) |value| {
+                    if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) {
+                        const instruction = if (isSigned(lhs.data_type)) "slti" else "sltiu";
+                        try writer.print("  {s} {s}, {s}, {d}\n", .{
+                            instruction,
+                            regName(compiler_scratch),
+                            regName(lhs_reg),
+                            value,
+                        });
+                        const branch = switch (condition.op) {
+                            .lt, .le => "beq",
+                            .gt, .ge => "bne",
+                            else => unreachable,
+                        };
+                        try writer.print("  {s} {s}, {s}, LABEL_{s}_{s}_{d}\n", .{
+                            branch,
+                            regName(compiler_scratch),
+                            regName(.zero),
+                            context.label_prefix,
+                            label_suffix,
+                            label,
+                        });
+                        try writer.writeAll("  nop\n");
+                        return;
+                    }
+                }
+
+                try loadImmediateInto(writer, compiler_scratch_2, immediate);
+                rhs_reg = compiler_scratch_2;
+            }
+
+            const instruction = if (isSigned(lhs.data_type)) "slt" else "sltu";
+            const reverse = condition.op == .gt or condition.op == .le;
+            const first = if (reverse) rhs_reg.? else lhs_reg;
+            const second = if (reverse) lhs_reg else rhs_reg.?;
+            try writer.print("  {s} {s}, {s}, {s}\n", .{
+                instruction,
+                regName(compiler_scratch),
+                regName(first),
+                regName(second),
+            });
+            const branch = switch (condition.op) {
+                .lt, .gt => "beq",
+                .le, .ge => "bne",
+                else => unreachable,
+            };
+            try writer.print("  {s} {s}, {s}, LABEL_{s}_{s}_{d}\n", .{
+                branch,
+                regName(compiler_scratch),
+                regName(.zero),
+                context.label_prefix,
+                label_suffix,
+                label,
+            });
+        },
+    }
     try writer.writeAll("  nop\n");
 }
 
@@ -273,10 +677,25 @@ fn loadImmediate(writer: *std.Io.Writer, value: i64) !Register {
 }
 
 fn loadImmediateInto(writer: *std.Io.Writer, reg: Register, value: i64) !void {
-    if (value >= 0 and value <= 0xffff) {
-        try writer.print("  ori {s}, {s}, {d}\n", .{ regName(reg), regName(.zero), value });
-    } else {
+    if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) {
         try writer.print("  addiu {s}, {s}, {d}\n", .{ regName(reg), regName(.zero), value });
+        return;
+    }
+    if (value >= 0 and value <= std.math.maxInt(u16)) {
+        try writer.print("  ori {s}, {s}, {d}\n", .{ regName(reg), regName(.zero), value });
+        return;
+    }
+    if (value < std.math.minInt(i32) or value > std.math.maxInt(u32)) return error.ImmediateOutOfRange;
+
+    const bits: u32 = if (value < 0)
+        @bitCast(@as(i32, @intCast(value)))
+    else
+        @intCast(value);
+    const upper: u16 = @truncate(bits >> 16);
+    const lower: u16 = @truncate(bits);
+    try writer.print("  lui {s}, {d}\n", .{ regName(reg), upper });
+    if (lower != 0) {
+        try writer.print("  ori {s}, {s}, {d}\n", .{ regName(reg), regName(reg), lower });
     }
 }
 
@@ -292,9 +711,16 @@ fn isScalarRegister(reg: Register) bool {
         .zero, .at, .v0, .v1, .a0, .a1, .a2, .a3,
         .t0, .t1, .t2, .t3, .t4, .t5, .t6, .t7,
         .s0, .s1, .s2, .s3, .s4, .s5, .s6, .s7,
-        .t8, .t9,
-        .k0, .k1, .gp, .sp, .fp, .ra,
+        .t8, .t9, .k0, .k1, .gp,
+        .sp, .fp, .ra,
         => true,
+    };
+}
+
+fn isSigned(data_type: DataType) bool {
+    return switch (data_type) {
+        .i8, .i16, .i32 => true,
+        .u8, .u16, .u32 => false,
     };
 }
 

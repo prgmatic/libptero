@@ -22,15 +22,68 @@ pub const Lexer = struct {
             '@' => return self.makeToken(.at, start, start_line, start_column),
             ':' => return self.makeToken(.colon, start, start_line, start_column),
             ',' => return self.makeToken(.comma, start, start_line, start_column),
-            '<' => return self.makeToken(.less, start, start_line, start_column),
-            '>' => return self.makeToken(.type_end, start, start_line, start_column),
-            '=' => return self.makeToken(.equal, start, start_line, start_column),
-            '+' => {
-                if (self.index < self.source.len and self.source[self.index] == '=') {
-                    _ = self.advance();
-                    return self.makeToken(.plus_equal, start, start_line, start_column);
+            '<' => {
+                if (self.eatByte('<')) {
+                    if (self.eatByte('=')) return self.makeToken(.shift_left_equal, start, start_line, start_column);
+                    return self.makeToken(.shift_left, start, start_line, start_column);
                 }
+                if (self.eatByte('=')) return self.makeToken(.less_equal, start, start_line, start_column);
+                return self.makeToken(.less, start, start_line, start_column);
+            },
+            '>' => {
+                if (self.eatByte('>')) {
+                    if (self.eatByte('>')) {
+                        if (self.eatByte('=')) return self.makeToken(.logical_shift_right_equal, start, start_line, start_column);
+                        return self.makeToken(.logical_shift_right, start, start_line, start_column);
+                    }
+                    if (self.eatByte('=')) return self.makeToken(.shift_right_equal, start, start_line, start_column);
+                    return self.makeToken(.shift_right, start, start_line, start_column);
+                }
+                if (self.eatByte('=')) return self.makeToken(.greater_equal, start, start_line, start_column);
+                return self.makeToken(.greater, start, start_line, start_column);
+            },
+            '=' => {
+                if (self.eatByte('=')) return self.makeToken(.equal_equal, start, start_line, start_column);
+                return self.makeToken(.equal, start, start_line, start_column);
+            },
+            '!' => {
+                if (self.eatByte('=')) return self.makeToken(.not_equal, start, start_line, start_column);
                 return error.UnexpectedCharacter;
+            },
+            '+' => {
+                if (self.eatByte('=')) return self.makeToken(.plus_equal, start, start_line, start_column);
+                return self.makeToken(.plus, start, start_line, start_column);
+            },
+            '-' => {
+                if (self.eatByte('=')) return self.makeToken(.minus_equal, start, start_line, start_column);
+                return self.makeToken(.minus, start, start_line, start_column);
+            },
+            '*' => {
+                if (self.eatByte('=')) return self.makeToken(.star_equal, start, start_line, start_column);
+                return self.makeToken(.star, start, start_line, start_column);
+            },
+            '/' => {
+                if (self.eatByte('=')) return self.makeToken(.slash_equal, start, start_line, start_column);
+                return self.makeToken(.slash, start, start_line, start_column);
+            },
+            '&' => {
+                if (self.eatByte('=')) return self.makeToken(.ampersand_equal, start, start_line, start_column);
+                return self.makeToken(.ampersand, start, start_line, start_column);
+            },
+            '|' => {
+                if (self.eatByte('=')) return self.makeToken(.pipe_equal, start, start_line, start_column);
+                return self.makeToken(.pipe, start, start_line, start_column);
+            },
+            '^' => {
+                if (self.eatByte('=')) return self.makeToken(.caret_equal, start, start_line, start_column);
+                return self.makeToken(.caret, start, start_line, start_column);
+            },
+            '~' => {
+                if (self.eatByte('|')) {
+                    if (self.eatByte('=')) return self.makeToken(.nor_equal, start, start_line, start_column);
+                    return self.makeToken(.nor, start, start_line, start_column);
+                }
+                return self.makeToken(.tilde, start, start_line, start_column);
             },
             '(' => return self.makeToken(.l_paren, start, start_line, start_column),
             ')' => return self.makeToken(.r_paren, start, start_line, start_column),
@@ -62,6 +115,12 @@ pub const Lexer = struct {
 
     fn makeToken(self: *Lexer, tag: token.Tag, start: usize, line: usize, column: usize) token.Token {
         return .{ .tag = tag, .text = self.source[start..self.index], .line = line, .column = column };
+    }
+
+    fn eatByte(self: *Lexer, expected: u8) bool {
+        if (self.index >= self.source.len or self.source[self.index] != expected) return false;
+        _ = self.advance();
+        return true;
     }
 
     fn string(self: *Lexer, start: usize, line: usize, column: usize) !token.Token {
