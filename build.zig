@@ -51,16 +51,14 @@ pub fn build(b: *std.Build) void {
     fill_dmem_elf.entry = .{ .symbol_name = "_start" };
     fill_dmem_elf.bundle_compiler_rt = false;
     fill_dmem_elf.bundle_ubsan_rt = false;
-    const fill_dmem_bin = fill_dmem_elf.addObjCopy(.{
-        .format = .bin,
-        .only_section = ".text",
-    }).getOutput();
+
+    const fill_dmem_pack = b.addRunArtifact(tools.rsp_pack);
+    fill_dmem_pack.addArtifactArg(fill_dmem_elf);
+    const fill_dmem_rsp = fill_dmem_pack.addOutputFileArg("fill_dmem.rsp");
 
     n64_module.addAnonymousImport("fill_dmem_rsp", .{
-        .root_source_file = fill_dmem_bin,
+        .root_source_file = fill_dmem_rsp,
     });
-
-
 
     // Build the ipl3
     const ipl3 = @import("build/boot.zig").build(b, .{

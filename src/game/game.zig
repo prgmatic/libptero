@@ -56,9 +56,9 @@ pub fn main() !void {
 }
 
 fn runRspFillDmem() void {
-    const prg = &rsp.programs.fill_dmem_rsp;
-    print("loading fill_dmem RSP program ({} bytes)\n", .{prg.len});
-    rsp.runProgram(prg);
+    const prg = rsp.programs.fill_dmem;
+    print("loading fill_dmem RSP program ({} bytes)\n", .{prg.text.len});
+    rsp.runUCode(prg);
     rsp.waitBroke();
     rsp.halt();
 
