@@ -1,16 +1,18 @@
 const std = @import("std");
 const n64 = @import("n64");
+const config = @import("config");
 const elf = @import("elf.zig");
 const pi = n64.interfaces.parallel;
 const si = n64.interfaces.serial;
-const print = n64.debug.print;
 
 export fn __start() linksection(".loader") callconv(.c) noreturn {
     var sys_buffer: [256]u8 = undefined;
     var fixed_buffer_alloc = std.heap.FixedBufferAllocator.init(&sys_buffer);
-    n64.debug.init();
-    n64.debug.initFmtBuffer(fixed_buffer_alloc.allocator()) catch undefined;
-    
+    if (config.debug_logging) {
+        n64.debug.init();
+        n64.debug.initFmtBuffer(fixed_buffer_alloc.allocator()) catch undefined;
+    }
+
     const entry = loadElf();
 
     si.pifTerminateBoot();
@@ -23,11 +25,16 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
         \\ jr $t9
         \\ nop
         :
-        : [addr] "r" (entry)
-        : .{.r25 = true }
-    );
+        : [addr] "r" (entry),
+        : .{ .r25 = true });
 
     unreachable;
+}
+
+fn print(comptime fmt: []const u8, args: anytype) void {
+    if (config.debug_logging) {
+        n64.debug.print(fmt, args);
+    }
 }
 
 fn loadElf() u32 {
@@ -35,27 +42,27 @@ fn loadElf() u32 {
     var elf_addr: u32 = 0xB0001000;
     var elf_found: bool = false;
     const search_count = 1 * 1026 * 1024 / 256;
-    
-    for(0..search_count) |_| {
+
+    for (0..search_count) |_| {
         const ptr: *u32 = @ptrFromInt(elf_addr);
-        if(ptr.* == elf_magic){
+        if (ptr.* == elf_magic) {
             elf_found = true;
             break;
         }
         elf_addr += 256;
     }
-    if(!elf_found){
+    if (!elf_found) {
         print("No elf found :( \n)", .{});
         return 0;
     }
 
     const elf_type: *u32 = @ptrFromInt(elf_addr + 0x4);
     const elf64: bool = (elf_type.* >> 24) == 2;
-    if(elf64) {
+    if (elf64) {
         print("64 bit currently supported\n", .{});
         return 0;
     }
-    if(((elf_type.* >> 16) & 0xFF) == 1) {
+    if (((elf_type.* >> 16) & 0xFF) == 1) {
         print("Little endian not supported\n", .{});
         return 0;
     }
@@ -67,8 +74,8 @@ fn loadElf() u32 {
     pi.waitDma();
 
     var hdr_size: u32 = elf_header.program_header_offset + elf_header.program_header_count * elf_header.program_header_entry_size;
-    if(hdr_size & 1 == 1) hdr_size += 1;
-    if(hdr_size > 1024) {
+    if (hdr_size & 1 == 1) hdr_size += 1;
+    if (hdr_size > 1024) {
         print("Header was larger than 1024 bytes", .{});
         return 0;
     }
@@ -77,18 +84,18 @@ fn loadElf() u32 {
     pi.dmaToDram(@intFromPtr(&hdr), elf_addr - 0xA0000000, hdr_size);
     pi.waitDma();
 
-    for(0..elf_header.program_header_count) |i| {
+    for (0..elf_header.program_header_count) |i| {
         const prg_addr = @intFromPtr(&hdr) + elf_header.program_header_offset + i * elf_header.program_header_entry_size;
         const prg_header: *elf.ProgramHeader32 = @ptrFromInt(prg_addr);
 
-        if(prg_header.segment_type != 1)
+        if (prg_header.segment_type != 1)
             continue;
 
-        if(prg_header.virtual_address % 8 != 0) {
+        if (prg_header.virtual_address % 8 != 0) {
             print("Elf: 0x{X} is not 8-byte aligned in segment\n", .{prg_header.virtual_address});
             continue;
         }
-        if(prg_header.offset % 2 != 0) {
+        if (prg_header.offset % 2 != 0) {
             print("ELF: file offset is not 2-byte aligned in segment\n", .{});
             continue;
         }
@@ -96,10 +103,9 @@ fn loadElf() u32 {
         const dma_size = if (prg_header.file_size & 1 > 0) prg_header.file_size + 1 else prg_header.file_size;
         pi.dmaToDram(prg_header.virtual_address, elf_addr + prg_header.offset - 0xA0000000, dma_size);
         pi.waitDma();
-        print("DMA: VADDR:0x{X} PADDR:0x{X} Size:0x{X}\n", .{prg_header.virtual_address, elf_addr + prg_header.offset - 0xA0000000, dma_size});
+        print("DMA: VADDR:0x{X} PADDR:0x{X} Size:0x{X}\n", .{ prg_header.virtual_address, elf_addr + prg_header.offset - 0xA0000000, dma_size });
     }
 
     print("Elf Loaded\n", .{});
     return elf_header.entry_point;
 }
-

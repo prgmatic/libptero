@@ -1,13 +1,16 @@
 const n64 = @import("n64");
 const pi = n64.interfaces.parallel;
+const config = @import("config");
 
 pub fn init() void {
+    if (!config.debug_logging) return;
     n64.debug.init();
 }
 
-
 // For printing from ipl3 when in DMEM. DMEM can only do 32 bit writes.
 pub fn dmemPrint(fmt: []const u8, args: []const u32) void {
+    if (!config.debug_logging) return;
+
     switch (n64.debug.current_backend) {
         .IsViewer => {
             const s = dmemFormat(n64.debug.is_viewer.buffer, fmt, args);
@@ -18,7 +21,7 @@ pub fn dmemPrint(fmt: []const u8, args: []const u32) void {
             const s = dmemFormat(n64.debug.sc64.data_buffer, fmt, args);
             n64.debug.sc64.flushBuffer(s.len * 4);
         },
-        
+
         else => {},
     }
 }
@@ -35,7 +38,7 @@ fn dmemFormat(buffer: []u32, fmt: []const u8, args: []const u32) []u32 {
                 const c: u32 = if (idx < fmt.len) @intCast(fmt[idx]) else 0x20; // pad with space
                 chunk |= c << @intCast((3 - j) * 8);
             }
-            
+
             pi.waitIo();
             buffer[buf_index] = chunk;
             buf_index += 1;

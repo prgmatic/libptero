@@ -10,8 +10,8 @@ const elf_search_start: u32 = 0x1000;
 const elf_search_step: u32 = 0x100;
 const elf_search_limit: u32 = 1024 * 1024;
 
-export var __srcmap_rom_offset: u32 = 0xffffffff;
-export var __srcmap_rom_size: u32 = 0xffffffff;
+pub export var __srcmap_rom_offset: u32 = 0xffffffff;
+pub export var __srcmap_rom_size: u32 = 0xffffffff;
 
 var elf_rom_offset: u32 = 0xffffffff;
 

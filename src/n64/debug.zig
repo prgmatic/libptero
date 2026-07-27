@@ -5,6 +5,7 @@ pub const TrapFrame = @import("debug/cpu_state.zig").TrapFrame;
 pub const backtrace = @import("debug/backtrace.zig");
 pub const srcmap = @import("debug/srcmap.zig");
 pub const crash_screen = @import("debug/crash_screen.zig");
+pub const console_font = @import("debug/console_font.zig");
 
 const std = @import("std");
 const io = @import("io.zig");
@@ -24,9 +25,9 @@ pub fn init() void {
 }
 
 fn detect() Backend {
-    if(sc64.detect())
+    if (sc64.detect())
         return .Sc64;
-    if(is_viewer.detect())
+    if (is_viewer.detect())
         return .IsViewer;
     return .None;
 }
@@ -40,7 +41,7 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     switch (current_backend) {
         .IsViewer => is_viewer.print(str),
         .Sc64 => sc64.print(str),
-        else => {}
+        else => {},
     }
 }
 
