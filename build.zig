@@ -3,6 +3,8 @@ const std = @import("std");
 const title: []const u8 = "Libptero";
 
 pub fn build(b: *std.Build) void {
+    const coverage_enabled = b.option(bool, "coverage", "Enable zcov instrumentation") orelse false;
+    const coverage_runtime_path = b.option([]const u8, "coverage-rt", "zcov runtime object");
     const target = b.resolveTargetQuery(target_query);
     // const optimize = b.standardOptimizeOption(.{
     //     .preferred_optimize_mode = .ReleaseSmall
@@ -25,6 +27,38 @@ pub fn build(b: *std.Build) void {
     const run_zsp_tests = b.addRunArtifact(zsp_tests);
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_zsp_tests.step);
+
+    const png_module = b.createModule(.{
+        .root_source_file = b.path("tools/imgparse/png.zig"),
+        .target = b.graph.host,
+    });
+    const mksprite_module = b.createModule(.{
+        .root_source_file = b.path("tools/mksprite/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "png", .module = png_module }},
+    });
+    const mksprite_tests = b.addTest(.{
+        .name = "mksprite-tests",
+        .root_module = mksprite_module,
+    });
+    instrumentTests(mksprite_tests, coverage_enabled, coverage_runtime_path);
+    test_step.dependOn(&b.addRunArtifact(mksprite_tests).step);
+
+    const cli_mksprite_module = b.createModule(.{
+        .root_source_file = b.path("tools/mksprite/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "png", .module = png_module }},
+    });
+    const mksprite_cli_tests = b.addTest(.{
+        .name = "mksprite-cli-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/mksprite/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "mksprite", .module = cli_mksprite_module }},
+        }),
+    });
+    instrumentTests(mksprite_cli_tests, coverage_enabled, coverage_runtime_path);
+    test_step.dependOn(&b.addRunArtifact(mksprite_cli_tests).step);
 
     // build console font
     const font_step = b.addRunArtifact(tools.console_font_conv);
@@ -61,11 +95,7 @@ pub fn build(b: *std.Build) void {
     });
 
     // Build the ipl3
-    const ipl3 = @import("build/boot.zig").build(b, .{
-        .title = title,
-        .n64_module = n64_module,
-        .target = target
-    });
+    const ipl3 = @import("build/boot.zig").build(b, .{ .title = title, .n64_module = n64_module, .target = target });
 
     // Has debug info
     const game_module = b.createModule(.{
@@ -77,7 +107,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "n64", .module = n64_module },
         },
     });
-       const elf_debug = b.addExecutable(.{
+    const elf_debug = b.addExecutable(.{
         .name = "game_debug.elf",
         .root_module = game_module,
     });
@@ -113,10 +143,13 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(srcmap_file, .prefix, "game.srcmap").step);
 }
 
+fn instrumentTests(tests: *std.Build.Step.Compile, enabled: bool, runtime_path: ?[]const u8) void {
+    if (!enabled) return;
+    tests.root_module.link_libc = true;
+    tests.use_llvm = true;
+    tests.sanitize_coverage_trace_pc_guard = true;
+    tests.forceUndefinedSymbol("__sanitizer_cov_trace_pc_guard_init");
+    if (runtime_path) |path| tests.root_module.addObjectFile(.{ .cwd_relative = path });
+}
 
-const target_query = std.Target.Query {
-    .cpu_arch = std.Target.Cpu.Arch.mips,
-    .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips3 },
-    .os_tag = std.Target.Os.Tag.freestanding,
-    .abi = std.Target.Abi.none
-};
+const target_query = std.Target.Query{ .cpu_arch = std.Target.Cpu.Arch.mips, .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips3 }, .os_tag = std.Target.Os.Tag.freestanding, .abi = std.Target.Abi.none };
