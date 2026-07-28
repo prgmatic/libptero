@@ -8,54 +8,38 @@ pub const Test = struct {
     run: TestFn,
 };
 
-pub const Result = struct {
-    name: []const u8,
-    failure: ?Failure,
-};
-
-pub const Failure = struct {
-    err: anyerror,
-    diagnostic: ?testing.Diagnostic,
-};
-
 pub const Summary = struct {
     passed: usize,
     failed: usize,
 };
 
-pub fn run(tests: []const Test, results: []Result) Summary {
+pub fn run(tests: []const Test) Summary {
     var summary: Summary = .{ .passed = 0, .failed = 0 };
 
-    for (tests, results) |test_case, *result| {
-        n64.debug.print("[ RUN  ] {s}\n", .{test_case.name});
+    for (tests) |test_case| {
+        n64.debug.print("[Run] {s}", .{test_case.name});
         testing.reset();
 
         test_case.run() catch |err| {
             const diagnostic = testing.failure();
-            result.* = .{
-                .name = test_case.name,
-                .failure = .{
-                    .err = err,
-                    .diagnostic = diagnostic,
-                },
-            };
             summary.failed += 1;
-            n64.debug.print("[ FAIL ] {s}: {s}\n", .{
-                test_case.name,
-                @errorName(err),
-            });
+            if (err == error.RspTimeout) {
+                n64.debug.print(" [Timeout ⏱️]\n", .{});
+            } else {
+                n64.debug.print(" [Fail ❌]\n", .{});
+                n64.debug.print("      {s}\n", .{@errorName(err)});
+            }
             if (diagnostic) |details| {
-                n64.debug.print("         {s}\n", .{details.messageSlice()});
+                n64.debug.print("      {s}\n", .{details.messageSlice()});
                 if (!n64.debug.srcmap.printLineInfo(0, details.address)) {
-                    n64.debug.print("         at 0x{x:0>8}\n", .{details.address});
+                    n64.debug.print("      at 0x{x:0>8}\n", .{details.address});
                 }
             }
             continue;
         };
 
-        result.* = .{ .name = test_case.name, .failure = null };
         summary.passed += 1;
-        n64.debug.print("[ PASS ] {s}\n", .{test_case.name});
+        n64.debug.print(" [Pass ✅]\n", .{});
     }
 
     n64.debug.print("\n{d} passed, {d} failed\n", .{

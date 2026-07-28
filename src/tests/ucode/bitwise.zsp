@@ -1,0 +1,8 @@
+export fn _start() noreturn {
+    reg value: u32 = 0x55;
+    value |= 0x0F;
+    value &= 0x5F;
+    value ^= 0x10;
+    store(u32, 0, value);
+    @break();
+}

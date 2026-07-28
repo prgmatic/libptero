@@ -1,21 +1,17 @@
-const n64 = @import("n64");
-const runner = @import("runner.zig");
-const testing = @import("assert.zig");
+const UCode = @import("ucode.zig").UCode;
+const testing = @import("std").testing;
 
-pub const tests = [_]runner.Test{
-    .{ .name = "RSP: parse ucode blob", .run = parseUcodeBlob },
-};
-
-fn parseUcodeBlob() !void {
+test "parse packed blob" {
     const blob align(8) = [_]u8{
         0x00, 0x04, // text length
         0x00, 0x02, // data length
-        0x00, 0x0c, // data offset
+        0x00, 0x10, // data offset
         0x00, 0x08, // initial PC
         0xaa, 0xbb, 0xcc, 0xdd, // text
+        0x00, 0x00, 0x00, 0x00, // padding
         0x12, 0x34, // data
     };
-    const ucode = n64.rsp.UCode.fromBlob(&blob);
+    const ucode = UCode.fromBlob(&blob);
 
     try testing.expectEqual(@as(usize, 4), ucode.text.len);
     try testing.expectEqual(@as(usize, 2), ucode.data.len);

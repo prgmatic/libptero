@@ -1,0 +1,20 @@
+export fn _start() noreturn {
+    store(u32, 0, 0x11223344);
+    store(u32, 4, 0x55667788);
+    store(u32, 8, 0x99AABBCC);
+
+    store(u8, 1, 0xAA);
+    store(u16, 6, 0xBEEF);
+    store(i8, 11, 0x80);
+
+    reg byte = load(u8, 1);
+    reg signed_byte = load(i8, 11);
+    reg half = load(u16, 6);
+    reg misaligned = load(u32, 1);
+
+    store(u32, 16, byte);
+    store(i32, 20, signed_byte);
+    store(u32, 24, half);
+    store(u32, 28, misaligned);
+    @break();
+}

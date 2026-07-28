@@ -1,0 +1,4 @@
+export fn _start() noreturn {
+    store(u8, 0, 0xAB);
+    @break();
+}

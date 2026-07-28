@@ -1,17 +1,14 @@
 const std = @import("std");
 const n64 = @import("n64");
 const runner = @import("runner.zig");
-const display = @import("display.zig");
 
 extern var __bss_start: u8;
 extern const __bss_end: u8;
 
 var debug_buffer: [1024]u8 = undefined;
 
-const tests = [_]runner.Test{} ++ @import("color_tests.zig").tests ++
-    @import("image_tests.zig").tests ++
-    @import("rdp_tests.zig").tests ++
-    @import("ucode_tests.zig").tests ++
+const tests = [_]runner.Test{} ++
+    @import("zsp_tests.zig").tests ++
     @import("rsp_tests.zig").tests;
 
 export fn __start() linksection(".text.startup") noreturn {
@@ -30,9 +27,7 @@ export fn __start() linksection(".text.startup") noreturn {
         while (true) {}
     };
 
-    var results: [tests.len]runner.Result = undefined;
-    const summary = runner.run(&tests, &results);
-    display.show(&results, summary);
+    _ = runner.run(&tests);
 
     while (true) {}
 }

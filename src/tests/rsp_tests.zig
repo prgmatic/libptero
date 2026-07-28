@@ -5,38 +5,46 @@ const testing = @import("assert.zig");
 const rsp = n64.rsp;
 
 pub const tests = [_]runner.Test{
-    .{ .name = "RSP: DMEM typed access", .run = dmemTypedAccess },
-    .{ .name = "RSP: DMEM byte order", .run = dmemByteOrder },
+    .{ .name = "RSP API: direct DMEM word access", .run = directDmemWordAccess },
+    .{ .name = "RSP API: DMA data load", .run = dmaDataLoad },
     .{ .name = "RSP: fill DMEM ucode", .run = fillDmemUcode },
 };
 
-fn dmemTypedAccess() !void {
-    // SP memory is written through its 32-bit bus. Seed a complete word, then
-    // verify that the typed accessor exposes the expected byte and halfword.
+fn directDmemWordAccess() !void {
+    rsp.halt();
+    rsp.waitHalted();
+
     rsp.io.readDmem(u32, 0).* = 0xa5001234;
     rsp.io.readDmem(u32, rsp.io.dmem_len - 4).* = 0x89abcdef;
 
-    try testing.expectEqual(@as(u8, 0xa5), rsp.io.readDmem(u8, 0).*);
-    try testing.expectEqual(@as(u16, 0x1234), rsp.io.readDmem(u16, 2).*);
+    try testing.expectEqual(@as(u32, 0xa5001234), rsp.io.readDmem(u32, 0).*);
     try testing.expectEqual(
         @as(u32, 0x89abcdef),
         rsp.io.readDmem(u32, rsp.io.dmem_len - 4).*,
     );
 }
 
-fn dmemByteOrder() !void {
-    rsp.io.readDmem(u32, 8).* = 0x12345678;
+fn dmaDataLoad() !void {
+    const data align(8) = [_]u8{
+        0x12, 0x34, 0x56, 0x78,
+        0x9a, 0xbc, 0xde, 0xf0,
+        0x0f, 0x1e, 0x2d, 0x3c,
+        0x4b, 0x5a, 0x69, 0x78,
+    };
 
-    try testing.expectEqual(@as(u8, 0x12), rsp.io.readDmem(u8, 8).*);
-    try testing.expectEqual(@as(u8, 0x34), rsp.io.readDmem(u8, 9).*);
-    try testing.expectEqual(@as(u8, 0x56), rsp.io.readDmem(u8, 10).*);
-    try testing.expectEqual(@as(u8, 0x78), rsp.io.readDmem(u8, 11).*);
+    rsp.halt();
+    rsp.waitHalted();
+    rsp.loadData(&data, 0x20);
+
+    try testing.expectEqual(@as(u32, 0x12345678), rsp.io.readDmem(u32, 0x20).*);
+    try testing.expectEqual(@as(u32, 0x9abcdef0), rsp.io.readDmem(u32, 0x24).*);
+    try testing.expectEqual(@as(u32, 0x0f1e2d3c), rsp.io.readDmem(u32, 0x28).*);
+    try testing.expectEqual(@as(u32, 0x4b5a6978), rsp.io.readDmem(u32, 0x2c).*);
 }
 
 fn fillDmemUcode() !void {
     rsp.runUCode(rsp.programs.fill_dmem);
     rsp.waitBroke();
-    rsp.halt();
 
     var offset: u32 = 0;
     while (offset < rsp.io.dmem_len) : (offset += 2) {

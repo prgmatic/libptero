@@ -1,0 +1,9 @@
+export fn _start() noreturn {
+    reg result: u32 = 5;
+    result += 3;
+    result *= 4;
+    result -= 2;
+    result /= 2;
+    store(u32, 0, result);
+    @break();
+}

@@ -11,6 +11,7 @@ pub const Options = struct {
     n64_module: *std.Build.Module,
     tools: Tools,
     ipl3_debug: bool = false,
+    imports: []const std.Build.Module.Import = &.{},
 };
 
 pub const Rom = struct {
@@ -58,14 +59,16 @@ pub fn build(b: *std.Build, options: Options) Rom {
         .debug_logging = options.ipl3_debug,
     });
 
+    const root_imports = b.allocator.alloc(std.Build.Module.Import, options.imports.len + 1) catch @panic("OOM");
+    root_imports[0] = .{ .name = "n64", .module = options.n64_module };
+    @memcpy(root_imports[1..], options.imports);
+
     const game_module = b.createModule(.{
         .root_source_file = b.path(options.root_source_file),
         .target = options.target,
         .optimize = .ReleaseSmall,
         .strip = false,
-        .imports = &.{
-            .{ .name = "n64", .module = options.n64_module },
-        },
+        .imports = root_imports,
     });
     const debug_elf = b.addExecutable(.{
         .name = b.fmt("{s}_debug.elf", .{options.name}),

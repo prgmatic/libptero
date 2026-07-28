@@ -1,0 +1,4 @@
+export fn _start() noreturn {
+    store(i32, 0, 0xABCDEF);
+    @break();
+}

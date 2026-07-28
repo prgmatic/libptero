@@ -1,0 +1,34 @@
+export fn _start() noreturn {
+    reg result: u32 = 0;
+    reg signed_low: i32 = -2;
+    reg signed_high: i32 = 1;
+    reg unsigned_high: u32 = 0xFFFFFFFF;
+    reg unsigned_low: u32 = 1;
+
+    if (signed_low < signed_high) { result |= 1; }
+    if (signed_low <= signed_high) { result |= 2; }
+    if (signed_high > signed_low) { result |= 4; }
+    if (signed_high >= signed_low) { result |= 8; }
+    if (signed_low != signed_high) { result |= 16; }
+
+    if (unsigned_high > unsigned_low) { result |= 32; }
+    if (unsigned_high >= unsigned_low) { result |= 64; }
+    if (unsigned_low < unsigned_high) { result |= 128; }
+    if (unsigned_low <= unsigned_high) { result |= 256; }
+    if (unsigned_low != unsigned_high) { result |= 512; }
+
+    if (signed_low == signed_high) {
+        result = 0;
+    } else {
+        result |= 1024;
+    }
+
+    reg zero_iterations: u32 = 0;
+    while (zero_iterations < 0) {
+        result = 0;
+    }
+    if (zero_iterations == 0) { result |= 2048; }
+
+    store(u32, 0, result);
+    @break();
+}

@@ -1,0 +1,8 @@
+export fn _start() noreturn {
+    reg value: u32 = 0;
+    while (value < 4) {
+        value += 1;
+    }
+    store(u32, 0, value);
+    @break();
+}

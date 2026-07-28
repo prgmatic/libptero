@@ -1,0 +1,21 @@
+export fn _start() noreturn {
+    reg amount: u32 = 4;
+    reg logical: u32 = 0x80000000;
+    logical >>= amount;
+
+    reg signed_amount: i32 = 2;
+    reg arithmetic: i32 = -16;
+    arithmetic >>= signed_amount;
+
+    reg forced_logical: i32 = -16;
+    forced_logical >>>= signed_amount;
+
+    reg inverted: u32 = 0x0F0F00FF;
+    inverted = ~inverted;
+
+    store(u32, 0, logical);
+    store(i32, 4, arithmetic);
+    store(i32, 8, forced_logical);
+    store(u32, 12, inverted);
+    @break();
+}

@@ -1,0 +1,10 @@
+export fn _start() noreturn {
+    reg value: u32 = 1;
+    if (value == 1) {
+        value = 2;
+    } else {
+        value = 3;
+    }
+    store(u32, 0, value);
+    @break();
+}

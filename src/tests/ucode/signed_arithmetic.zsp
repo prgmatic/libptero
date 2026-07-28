@@ -1,0 +1,16 @@
+export fn _start() noreturn {
+    reg product: i32 = -3;
+    product *= 8;
+
+    reg quotient: i32 = -33;
+    quotient /= 4;
+
+    reg sum: i32 = -20;
+    sum += 7;
+    sum -= 5;
+
+    store(i32, 0, product);
+    store(i32, 4, quotient);
+    store(i32, 8, sum);
+    @break();
+}
