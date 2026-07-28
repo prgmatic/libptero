@@ -159,9 +159,9 @@ pub const Parser = struct {
             _ = try self.expect(.l_paren);
             const data_type = try self.expect(.ident);
             _ = try self.expect(.comma);
-            const address = try self.parseValue();
+            const address = try self.parseValueRef();
             _ = try self.expect(.comma);
-            const value = try self.parseValue();
+            const value = try self.parseValueRef();
             _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
             return .{ .store = .{
@@ -184,7 +184,7 @@ pub const Parser = struct {
         }
 
         if (try self.parseCompoundAssignOp()) |op| {
-            const value = try self.parseValue();
+            const value = valueFromRef(try self.parseValueRef());
             _ = try self.expect(.semicolon);
             return .{ .assignment = .{
                 .destination = first.text,
@@ -196,7 +196,7 @@ pub const Parser = struct {
 
         if (try self.eat(.equal)) {
             if (try self.eat(.tilde)) {
-                const value = try self.parseValue();
+                const value = valueFromRef(try self.parseValueRef());
                 _ = try self.expect(.semicolon);
                 return .{ .assignment = .{
                     .destination = first.text,
@@ -211,7 +211,7 @@ pub const Parser = struct {
             var rhs: ?ast.Value = null;
             if (try self.parseBinaryAssignOp()) |binary_op| {
                 op = binary_op;
-                rhs = try self.parseValue();
+                rhs = valueFromRef(try self.parseValueRef());
             }
             _ = try self.expect(.semicolon);
             return .{ .assignment = .{
@@ -249,7 +249,7 @@ pub const Parser = struct {
         const data_type = try self.parseDataType(data_type_token);
 
         _ = try self.expect(.equal);
-        const value = try self.parseValue();
+        const value = valueFromRef(try self.parseValueRef());
         _ = try self.expect(.semicolon);
 
         return .{
@@ -270,12 +270,17 @@ pub const Parser = struct {
         }
 
         const name = try self.expect(.ident);
-        _ = try self.expect(.colon);
-        const data_type_token = try self.expect(.ident);
-        const data_type = try self.parseDataType(data_type_token);
+        var explicit_data_type: ?ast.DataType = null;
+        if (try self.eat(.colon)) {
+            explicit_data_type = try self.parseDataType(try self.expect(.ident));
+        }
         _ = try self.expect(.equal);
         const value = try self.parseValue();
         _ = try self.expect(.semicolon);
+        const data_type = explicit_data_type orelse switch (value) {
+            .load => |load| load.data_type,
+            else => return self.fail(name, .expected_data_type),
+        };
 
         return .{
             .is_const = false,
@@ -287,6 +292,24 @@ pub const Parser = struct {
     }
 
     fn parseValue(self: *Parser) !ast.Value {
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "load")) {
+            _ = try self.expect(.ident);
+            _ = try self.expect(.l_paren);
+            const data_type = try self.parseDataType(try self.expect(.ident));
+            _ = try self.expect(.comma);
+            const address = try self.parseValueRef();
+            _ = try self.expect(.r_paren);
+            return .{ .load = .{ .data_type = data_type, .address = address } };
+        }
+
+        const value_ref = try self.parseValueRef();
+        return switch (value_ref) {
+            .ident => |name| .{ .ident = name },
+            .number => |number| .{ .number = number },
+        };
+    }
+
+    fn parseValueRef(self: *Parser) !ast.ValueRef {
         if (try self.eat(.minus)) {
             const tok = try self.expect(.number);
             const value = try self.parseNumberValue(tok);
@@ -321,7 +344,7 @@ pub const Parser = struct {
         return .{
             .lhs = lhs.text,
             .op = op,
-            .rhs = try self.parseValue(),
+            .rhs = valueFromRef(try self.parseValueRef()),
         };
     }
 
@@ -412,6 +435,13 @@ pub const Parser = struct {
         };
     }
 };
+
+fn valueFromRef(value_ref: ast.ValueRef) ast.Value {
+    return switch (value_ref) {
+        .ident => |name| .{ .ident = name },
+        .number => |number| .{ .number = number },
+    };
+}
 
 pub const ErrorType = enum {
     expected_function_declaration,

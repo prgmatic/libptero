@@ -12,6 +12,17 @@ pub const Function = struct {
 pub const Value = union(enum) {
     ident: []const u8,
     number: i64,
+    load: Load,
+};
+
+pub const Load = struct {
+    data_type: DataType,
+    address: ValueRef,
+};
+
+pub const ValueRef = union(enum) {
+    ident: []const u8,
+    number: i64,
 };
 
 pub const DataType = enum {
@@ -87,8 +98,8 @@ pub const Statement = union(enum) {
     assignment: Assignment,
     store: struct {
         data_type: DataType,
-        address: Value,
-        value: Value,
+        address: ValueRef,
+        value: ValueRef,
     },
     call: []const u8,
     builtin: Builtin,

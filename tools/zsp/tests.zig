@@ -371,6 +371,9 @@ test "store emits byte halfword and word writes" {
         \\  store(u8, ptr, value);
         \\  store(u16, ptr, 0x1234);
         \\  store(u32, 0, value);
+        \\  store(i8, ptr, value);
+        \\  store(i16, ptr, 0x1234);
+        \\  store(i32, 0, value);
         \\}
     ,
         \\.set noreorder
@@ -384,11 +387,79 @@ test "store emits byte halfword and word writes" {
         \\  addiu $v1, $zero, 4660
         \\  sh $v1, 0($t0)
         \\  sw $t1, 0($zero)
+        \\  sb $t1, 0($t0)
+        \\  addiu $v1, $zero, 4660
+        \\  sh $v1, 0($t0)
+        \\  sw $t1, 0($zero)
         \\  jr $ra
         \\  nop
         \\
         \\
     );
+}
+
+test "load emits signed and unsigned byte halfword and word reads" {
+    try expectAsm(
+        \\fn test() {
+        \\  reg($t0) ptr: u32 = 0x100;
+        \\  reg($t1) a = load(u8, ptr);
+        \\  reg($t2) b = load(i8, ptr);
+        \\  reg($t3) c = load(u16, ptr);
+        \\  reg($t4) d = load(i16, ptr);
+        \\  reg($t5) e = load(u32, ptr);
+        \\  reg($t6) f = load(i32, ptr);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 256
+        \\  lbu $t1, 0($t0)
+        \\  lb $t2, 0($t0)
+        \\  lhu $t3, 0($t0)
+        \\  lh $t4, 0($t0)
+        \\  lw $t5, 0($t0)
+        \\  lw $t6, 0($t0)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "load can assign an already defined register" {
+    try expectAsm(
+        \\fn test() {
+        \\  reg($t0) ptr: u32 = 0x100;
+        \\  reg($t1) value: u16 = 0;
+        \\  value = load(u16, ptr);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 256
+        \\  addiu $t1, $zero, 0
+        \\  lhu $t1, 0($t0)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "load destination type must match requested data type" {
+    try expectAsmError(
+        \\fn test() {
+        \\  reg ptr: u32 = 0;
+        \\  reg value: u32 = 0;
+        \\  value = load(u16, ptr);
+        \\}
+    , error.RegisterTypeMismatch);
 }
 
 test "inline calls expand inside caller scope" {

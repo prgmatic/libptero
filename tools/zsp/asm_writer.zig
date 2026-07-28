@@ -147,7 +147,13 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         return error.RegisterReservedForBackend;
     }
     if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
-    try loadImmediateInto(writer, reg, try valueAsImmediate(context, decl.value));
+    switch (decl.value) {
+        .load => |load| {
+            if (decl.data_type != load.data_type) return error.RegisterTypeMismatch;
+            try writeLoadInto(writer, context, reg, load);
+        },
+        else => try loadImmediateInto(writer, reg, try valueAsImmediate(context, decl.value)),
+    }
     try context.add(.{
         .name = decl.name,
         .data_type = decl.data_type,
@@ -198,6 +204,10 @@ fn writeSet(
                 try loadImmediateInto(writer, destination_reg, source.constant orelse return error.ExpectedConstant);
             }
         },
+        .load => |load| {
+            if (destination.data_type != load.data_type) return error.RegisterTypeMismatch;
+            try writeLoadInto(writer, context, destination_reg, load);
+        },
     }
 }
 
@@ -211,6 +221,7 @@ fn writeBitNot(
     const source = switch (value) {
         .ident => |name| try context.lookup(name),
         .number => return error.BitNotRequiresRegister,
+        .load => return error.BitNotRequiresRegister,
     };
     try expectSameType(destination, source);
     const source_reg = source.reg orelse return error.BitNotRequiresRegister;
@@ -233,6 +244,7 @@ fn writeBinary(
     const lhs = switch (lhs_value) {
         .ident => |name| try context.lookup(name),
         .number => return error.ArithmeticLhsMustBeRegister,
+        .load => return error.ArithmeticLhsMustBeRegister,
     };
     try expectSameType(destination, lhs);
     const lhs_reg = lhs.reg orelse return error.ArithmeticLhsMustBeRegister;
@@ -268,6 +280,7 @@ fn writeBinary(
             }
         },
         .number => |number| try writeBinaryImmediate(writer, destination_reg, lhs_reg, op, number),
+        .load => return error.ArithmeticRhsMustBeRegisterOrNumber,
     }
 }
 
@@ -356,6 +369,7 @@ fn writePowerOfTwoMath(
             if (rhs.reg != null) return error.PowerOfTwoConstantRequired;
             break :blk rhs.constant orelse return error.ExpectedConstant;
         },
+        .load => return error.PowerOfTwoConstantRequired,
     };
     if (value <= 0 or value > std.math.maxInt(u32)) return error.PowerOfTwoConstantRequired;
     const unsigned: u32 = @intCast(value);
@@ -417,6 +431,7 @@ fn writeShift(
                 regName(rhs_reg),
             });
         },
+        .load => return error.ShiftAmountMustBeRegisterOrNumber,
     }
 }
 
@@ -458,6 +473,11 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
     const address_reg = try valueAsAddressReg(writer, context, store.address);
     const value_reg = try valueAsStoreReg(writer, context, store.value);
     try writer.print("  {s} {s}, 0({s})\n", .{ storeOp(store.data_type), regName(value_reg), regName(address_reg) });
+}
+
+fn writeLoadInto(writer: *std.Io.Writer, context: *FunctionContext, destination_reg: Register, load: ast.Load) !void {
+    const address_reg = try valueAsAddressReg(writer, context, load.address);
+    try writer.print("  {s} {s}, 0({s})\n", .{ loadOp(load.data_type), regName(destination_reg), regName(address_reg) });
 }
 
 fn writeCall(
@@ -550,6 +570,7 @@ fn writeConditionBranchFalse(
             }
             rhs_immediate = rhs.constant orelse return error.ExpectedConstant;
         },
+        .load => return error.ConditionRhsMustBeRegisterOrNumber,
     }
 
     switch (condition.op) {
@@ -642,10 +663,11 @@ fn valueAsImmediate(context: *FunctionContext, value: ast.Value) !i64 {
     return switch (value) {
         .number => |number| number,
         .ident => |name| (try context.lookup(name)).constant orelse error.ExpectedConstant,
+        .load => error.ExpectedConstant,
     };
 }
 
-fn valueAsAddressReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.Value) !Register {
+fn valueAsAddressReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.ValueRef) !Register {
     switch (value) {
         .ident => |name| {
             const symbol = try context.lookup(name);
@@ -659,7 +681,7 @@ fn valueAsAddressReg(writer: *std.Io.Writer, context: *FunctionContext, value: a
     }
 }
 
-fn valueAsStoreReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.Value) !Register {
+fn valueAsStoreReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.ValueRef) !Register {
     switch (value) {
         .ident => |name| {
             const symbol = try context.lookup(name);
@@ -709,10 +731,10 @@ fn findFunction(functions: []const ast.Function, name: []const u8) ?ast.Function
 fn isScalarRegister(reg: Register) bool {
     return switch (reg) {
         .zero, .at, .v0, .v1, .a0, .a1, .a2, .a3,
-        .t0, .t1, .t2, .t3, .t4, .t5, .t6, .t7,
-        .s0, .s1, .s2, .s3, .s4, .s5, .s6, .s7,
-        .t8, .t9, .k0, .k1, .gp,
-        .sp, .fp, .ra,
+        .t0,   .t1, .t2, .t3, .t4, .t5, .t6, .t7,
+        .s0,   .s1, .s2, .s3, .s4, .s5, .s6, .s7,
+        .t8,   .t9, .k0, .k1, .gp,
+        .sp,   .fp, .ra,
         => true,
     };
 }
@@ -729,6 +751,16 @@ fn storeOp(data_type: DataType) []const u8 {
         .u8, .i8 => "sb",
         .u16, .i16 => "sh",
         .u32, .i32 => "sw",
+    };
+}
+
+fn loadOp(data_type: DataType) []const u8 {
+    return switch (data_type) {
+        .u8 => "lbu",
+        .i8 => "lb",
+        .u16 => "lhu",
+        .i16 => "lh",
+        .u32, .i32 => "lw",
     };
 }
 
