@@ -60,15 +60,21 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
 
     const text_size: usize = @intCast(text.sh_size);
     const data_size: usize = if (data) |d| @intCast(d.sh_size) else 0;
-    const data_offset = std.mem.alignForward(usize, header_size + text_size, 8);
+    const padded_text_size = std.mem.alignForward(usize, text_size, 8);
+    const padded_data_size = std.mem.alignForward(usize, data_size, 8);
+    const data_offset = header_size + padded_text_size;
+    if (padded_text_size > 0x1000) return error.TextTooLarge;
+    if (padded_data_size > 0x1000) return error.DataTooLarge;
+    if (padded_text_size > std.math.maxInt(u16)) return error.TextTooLarge;
+    if (padded_data_size > std.math.maxInt(u16)) return error.DataTooLarge;
     if (data_offset > std.math.maxInt(u16)) return error.DataOffsetTooLarge;
-    const out_size = data_offset + data_size;
+    const out_size = data_offset + padded_data_size;
 
     const out = try alloc.alloc(u8, out_size);
     @memset(out, 0);
 
-    w16(out, 0, @intCast(text_size));
-    w16(out, 2, @intCast(data_size));
+    w16(out, 0, @intCast(padded_text_size));
+    w16(out, 2, @intCast(padded_data_size));
     w16(out, 4, @intCast(data_offset));
     w16(out, 6, @intCast(pc_start));
 

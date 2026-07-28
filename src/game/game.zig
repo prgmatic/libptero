@@ -60,7 +60,6 @@ fn runRspFillDmem() void {
     print("loading fill_dmem RSP program ({} bytes)\n", .{prg.text.len});
     rsp.runUCode(prg);
     rsp.waitBroke();
-    rsp.halt();
 
     var mismatch_count: u32 = 0;
 

@@ -10,25 +10,29 @@ pub const dma_dram_addr: *volatile u32 = @ptrFromInt(0xA4040004);
 pub const dma_read_len: *volatile u32 = @ptrFromInt(0xA4040008);
 pub const dma_write_len: *volatile u32 = @ptrFromInt(0xA404000C);
 pub const status_register_read: *volatile Status = @ptrFromInt(0xA4040010);
-pub const status_register_write: *volatile StatusUpdate = @ptrFromInt(0xA4040010);
+pub const status_register_write: *volatile u32 = @ptrFromInt(0xA4040010);
 pub const dma_full: *volatile u32 = @ptrFromInt(0xA4040014);
 pub const dma_busy: *volatile u32 = @ptrFromInt(0xA4040018);
 pub const semaphore: *volatile bool = @ptrFromInt(0xA404001C);
 pub const program_counter: *volatile u32 = @ptrFromInt(0xA4080000);
+
+pub const status_clear_halt: u32 = 1 << 0;
+pub const status_set_halt: u32 = 1 << 1;
+pub const status_clear_broke: u32 = 1 << 2;
 
 pub fn readDmem(comptime T: type, offset: u32) *volatile T {
     return @ptrFromInt(dmem_base + offset);
 }
 
 pub fn dmaToDram(rsp_addr: u32, dram_addr: u32, write_len: u32) void {
-    dma_rsp_addr.* = rsp_addr;
     dma_dram_addr.* = dram_addr;
+    dma_rsp_addr.* = rsp_addr;
     dma_write_len.* = write_len;
 }
 
 pub fn dmaFromDram(rsp_addr: u32, dram_addr: u32, read_len: u32) void {
-    dma_rsp_addr.* = rsp_addr;
     dma_dram_addr.* = dram_addr;
+    dma_rsp_addr.* = rsp_addr;
     dma_read_len.* = read_len;
 }
 
@@ -66,33 +70,4 @@ pub const Status = packed struct(u32) {
     signal6: bool,
     signal7: bool,
     _unused: u17 = 0,
-};
-
-pub const StatusUpdate = packed struct(u32) {
-    clear_halt: bool = false,
-    set_halt: bool = false,
-    clear_broke: bool = false,
-    clear_interrupt: bool = false,
-    set_interrupt: bool = false,
-    clear_single_step: bool = false,
-    set_single_step: bool = false,
-    clear_interrupt_on_break: bool = false,
-    set_interrupt_on_break: bool = false,
-    clear_signal0: bool = false,
-    set_signal0: bool = false,
-    clear_signal1: bool = false,
-    set_signal1: bool = false,
-    clear_signal2: bool = false,
-    set_signal2: bool = false,
-    clear_signal3: bool = false,
-    set_signal3: bool = false,
-    clear_signal4: bool = false,
-    set_signal4: bool = false,
-    clear_signal5: bool = false,
-    set_signal5: bool = false,
-    clear_signal6: bool = false,
-    set_signal6: bool = false,
-    clear_signal7: bool = false,
-    set_signal7: bool = false,
-    _unused: u7 = 0,
 };

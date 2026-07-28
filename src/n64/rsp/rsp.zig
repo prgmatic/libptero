@@ -1,3 +1,4 @@
+const std = @import("std");
 const cache = @import("../cpu/cache.zig");
 
 pub const io = @import("io.zig");
@@ -7,9 +8,11 @@ pub const ucode = @import("ucode.zig");
 pub const UCode = ucode.UCode;
 pub const Ucode = UCode;
 
+var dma_staging: [io.dmem_len]u8 align(8) = undefined;
+
 pub fn runUCode(program: UCode) void {
     halt();
-    clearBroke();
+    waitHalted();
     load(program);
     runAsync(program.pc_start);
 }
@@ -20,37 +23,26 @@ pub fn load(program: UCode) void {
 }
 
 pub fn loadText(text: []const u8, imem_offset: u32) void {
-    if (imem_offset + text.len > io.imem_len) {
+    if (imem_offset > io.imem_len or paddedDmaLen(text.len) > io.imem_len - imem_offset) {
         @panic("RSP text does not fit in IMEM");
     }
-    dmaFromDram(text, io.dma_imem_addr + imem_offset);
+    dmaFromDramStaged(text, io.dma_imem_addr + imem_offset);
 }
 
 pub fn loadData(data: []const u8, dmem_offset: u32) void {
-    if (dmem_offset + data.len > io.dmem_len) {
+    if (dmem_offset > io.dmem_len or paddedDmaLen(data.len) > io.dmem_len - dmem_offset) {
         @panic("RSP data does not fit in DMEM");
     }
-    dmaFromDram(data, io.dma_dmem_addr + dmem_offset);
+    dmaFromDramStaged(data, io.dma_dmem_addr + dmem_offset);
 }
 
 pub fn runAsync(pc_start: u32) void {
     setProgramCounter(pc_start);
-    io.status_register_write.* = .{
-        .clear_halt = true,
-        .clear_broke = true,
-    };
+    io.status_register_write.* = io.status_clear_halt | io.status_clear_broke;
 }
 
 pub inline fn halt() void {
-    io.status_register_write.* = .{ .set_halt = true };
-}
-
-pub inline fn run() void {
-    io.status_register_write.* = .{ .clear_halt = true };
-}
-
-pub inline fn clearBroke() void {
-    io.status_register_write.* = .{ .clear_broke = true };
+    io.status_register_write.* = io.status_set_halt;
 }
 
 pub fn setProgramCounter(pc: u32) void {
@@ -84,6 +76,26 @@ fn dmaFromDram(data: []const u8, rsp_addr: u32) void {
     io.waitDmaReady();
     io.dmaFromDram(rsp_addr, physicalAddress(@intFromPtr(data.ptr)), @intCast(data.len - 1));
     io.waitDma();
+}
+
+fn dmaFromDramStaged(data: []const u8, rsp_addr: u32) void {
+    if (data.len == 0) {
+        return;
+    }
+    const padded_len = paddedDmaLen(data.len);
+    const rsp_offset = rsp_addr & 0xfff;
+    if (padded_len > dma_staging.len or rsp_offset + padded_len > io.dmem_len) {
+        @panic("RSP DMA transfer does not fit in memory");
+    }
+
+    const staged = dma_staging[0..padded_len];
+    @memset(staged, 0);
+    @memcpy(staged[0..data.len], data);
+    dmaFromDram(staged, rsp_addr);
+}
+
+fn paddedDmaLen(len: usize) usize {
+    return std.mem.alignForward(usize, len, 8);
 }
 
 fn assertRspDma(data: []const u8, rsp_addr: u32) void {
