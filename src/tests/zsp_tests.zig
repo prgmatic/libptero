@@ -14,6 +14,13 @@ var dma_in_batch align(8) = [_]u32{
     0x00000000,
 };
 
+var invalid_command_batch align(8) = [_]u32{
+    0xff000000,
+    0x00000000,
+    0x00000000,
+    0x00000000,
+};
+
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
     .{ .name = "ZSP: signed arithmetic", .run = signedArithmetic },
@@ -38,6 +45,8 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: load u32", .run = loadU32 },
     .{ .name = "ZSP: load i32", .run = loadI32 },
     .{ .name = "ZSP: DMA in", .run = dmaIn },
+    .{ .name = "ZSP: command dispatcher", .run = commandDispatcher },
+    .{ .name = "ZSP: command dispatcher invalid command", .run = commandDispatcherInvalid },
 };
 
 fn arithmetic() !void {
@@ -171,17 +180,35 @@ fn loadI32() !void {
 }
 
 fn dmaIn() !void {
-    n64.cache.writebackData(&dma_in_batch);
-
-    rsp.halt();
-    rsp.waitHalted();
-    const physical_address: u32 = @truncate(@intFromPtr(&dma_in_batch) & 0x1fffffff);
-    rsp.io.readDmem(u32, 0).* = physical_address;
-
+    submitCommandBatch(&dma_in_batch);
     try run(zsp_programs.dma_in);
     for (dma_in_batch, 0..) |expected, index| {
         try expectDmemWord(u32, 0x20 + @as(u32, @intCast(index * 4)), expected);
     }
+}
+
+fn commandDispatcher() !void {
+    submitCommandBatch(&dma_in_batch);
+    try run(rsp.programs.command_dispatcher);
+
+    try expectDmemWord(u32, 4, 0);
+    try expectDmemWord(u32, 0x100, 0x12345678);
+}
+
+fn commandDispatcherInvalid() !void {
+    submitCommandBatch(&invalid_command_batch);
+    try run(rsp.programs.command_dispatcher);
+
+    try expectDmemWord(u32, 4, 0xff);
+}
+
+fn submitCommandBatch(batch: *[4]u32) void {
+    n64.cache.writebackData(batch);
+
+    rsp.halt();
+    rsp.waitHalted();
+    const physical_address: u32 = @truncate(@intFromPtr(batch) & 0x1fffffff);
+    rsp.io.readDmem(u32, 0).* = physical_address;
 }
 
 fn run(program: rsp.UCode) !void {

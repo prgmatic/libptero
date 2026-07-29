@@ -94,6 +94,14 @@ fn addGeneratedN64Assets(
     n64_module.addAnonymousImport("fill_dmem_rsp", .{
         .root_source_file = buildRspUcode(b, tools, "fill_dmem", "src/n64/rsp/ucode/fill_dmem.zsp"),
     });
+    n64_module.addAnonymousImport("command_dispatcher_rsp", .{
+        .root_source_file = buildRspUcode(
+            b,
+            tools,
+            "command_dispatcher",
+            "src/n64/rsp/ucode/command_dispatcher.zsp",
+        ),
+    });
 }
 
 fn addZspTestPrograms(
