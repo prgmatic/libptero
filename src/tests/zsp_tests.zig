@@ -46,6 +46,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: load i16", .run = loadI16 },
     .{ .name = "ZSP: load u32", .run = loadU32 },
     .{ .name = "ZSP: load i32", .run = loadI32 },
+    .{ .name = "ZSP: vector operations", .run = vectorOperations },
     .{ .name = "ZSP: DMA in", .run = dmaIn },
     .{ .name = "ZSP: command dispatcher", .run = commandDispatcher },
     .{ .name = "ZSP: command dispatcher invalid command", .run = commandDispatcherInvalid },
@@ -181,6 +182,32 @@ fn loadI32() !void {
     try expectDmemWord(i32, 4, -2147483648);
 }
 
+fn vectorOperations() !void {
+    try run(zsp_programs.vector_ops);
+
+    const add_expected = [_]u32{ 0x00040006, 0x00007fff, 0x80003456, 0xb9b94645 };
+    const sub_expected = [_]u32{ 0xfffefffe, 0xfffe8001, 0x7ffef012, 0x9b9b9b9b };
+    const and_expected = [_]u32{ 0x00010000, 0x00018000, 0x00010220, 0x0a0a5050 };
+    const or_expected = [_]u32{ 0x00030006, 0xffffffff, 0x7fff3236, 0xafaff5f5 };
+    const xor_expected = [_]u32{ 0x00020006, 0xfffe7fff, 0x7ffe3016, 0xa5a5a5a5 };
+    const not_expected = [_]u32{ 0xfffefffd, 0x00007fff, 0x8000edcb, 0x55550f0f };
+    const nor_expected = [_]u32{ 0xfffcfff9, 0x00000000, 0x8000cdc9, 0x50500a0a };
+
+    try expectDmemWords(0x100, &add_expected);
+    try expectDmemWords(0x110, &sub_expected);
+    try expectDmemWords(0x120, &and_expected);
+    try expectDmemWords(0x130, &or_expected);
+    try expectDmemWords(0x140, &xor_expected);
+    try expectDmemWords(0x150, &not_expected);
+    try expectDmemWords(0x180, &nor_expected);
+
+    const wide_expected = [_]u32{
+        0x00040004, 0x00040004, 0x00040004, 0x00040004,
+        0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    };
+    try expectDmemWords(0x160, &wide_expected);
+}
+
 fn dmaIn() !void {
     submitCommandBatch(&dma_in_batch);
     try run(zsp_programs.dma_in);
@@ -239,6 +266,12 @@ fn waitBrokeTimeout() !void {
 
 fn expectDmemWord(comptime T: type, offset: u32, expected: T) !void {
     try testing.expectEqual(expected, readDmemInt(T, offset));
+}
+
+fn expectDmemWords(offset: u32, expected: []const u32) !void {
+    for (expected, 0..) |word, index| {
+        try expectDmemWord(u32, offset + @as(u32, @intCast(index * 4)), word);
+    }
 }
 
 fn readDmemInt(comptime T: type, offset: u32) T {

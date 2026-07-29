@@ -11,6 +11,12 @@ const alloc_scalar_registers = [_]Register{
     .k0, .k1, .sp, .fp, .s0, .s1, .s2, .s3, .s4, .s5,
     .s6, .s7,
 };
+const alloc_vector_registers = [_]ast.VectorRegister{
+    .v01, .v02, .v03, .v04, .v05, .v06, .v07,
+    .v08, .v09, .v10, .v11, .v12, .v13, .v14,
+    .v15, .v16, .v17, .v18, .v19, .v20, .v21,
+    .v22, .v23, .v24, .v25, .v26, .v27, .v28,
+};
 
 pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     try writer.writeAll(".set noreorder\n");
@@ -40,17 +46,22 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
 
 fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) !void {
     for (parameters) |parameter| {
-        if (!isScalarRegister(parameter.reg)) return error.InvalidScalarRegister;
-        if (parameter.reg == compiler_scratch or
-            parameter.reg == compiler_scratch_2)
-        {
-            return error.RegisterReservedForBackend;
+        if (isVectorType(parameter.data_type)) {
+            const vector_reg = parameter.vector_reg orelse return error.ExpectedVectorRegister;
+            try validateVectorRegisterBinding(context, parameter.data_type, vector_reg);
+        } else {
+            const reg = parameter.reg orelse return error.InvalidScalarRegister;
+            if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
+            if (reg == compiler_scratch or reg == compiler_scratch_2) {
+                return error.RegisterReservedForBackend;
+            }
+            if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
         }
-        if (context.isRegisterInUse(parameter.reg)) return error.RegisterAlreadyInUse;
         try context.add(.{
             .name = parameter.name,
             .data_type = parameter.data_type,
             .reg = parameter.reg,
+            .vector_reg = parameter.vector_reg,
             .constant = null,
         });
     }
@@ -60,6 +71,7 @@ const Symbol = struct {
     name: []const u8,
     data_type: DataType,
     reg: ?Register,
+    vector_reg: ?ast.VectorRegister = null,
     constant: ?i64,
 };
 
@@ -112,11 +124,25 @@ const FunctionContext = struct {
     }
 
     fn allocRegister(self: *const FunctionContext, data_type: DataType) !Register {
-        _ = data_type;
+        if (isVectorType(data_type)) return error.ExpectedScalarType;
         for (alloc_scalar_registers) |reg| {
             if (!self.isRegisterInUse(reg)) return reg;
         }
         return error.OutOfFreeRegisters;
+    }
+
+    fn allocVectorRegister(self: *const FunctionContext, data_type: DataType) !ast.VectorRegister {
+        if (!isVectorType(data_type)) return error.ExpectedVectorType;
+        for (alloc_vector_registers) |reg| {
+            if (self.isVectorRegisterInUse(reg)) continue;
+            if (data_type == .vec32) {
+                const second = nextVectorRegister(reg) orelse continue;
+                if (@intFromEnum(second) >= 29) continue;
+                if (self.isVectorRegisterInUse(second)) continue;
+            }
+            return reg;
+        }
+        return error.OutOfFreeVectorRegisters;
     }
 
     fn isRegisterInUse(self: *const FunctionContext, reg: Register) bool {
@@ -124,6 +150,15 @@ const FunctionContext = struct {
             if (symbol.reg) |symbol_reg| {
                 if (symbol_reg == reg) return true;
             }
+        }
+        return false;
+    }
+
+    fn isVectorRegisterInUse(self: *const FunctionContext, reg: ast.VectorRegister) bool {
+        for (self.symbols[0..self.symbol_count]) |symbol| {
+            const symbol_reg = symbol.vector_reg orelse continue;
+            if (symbol_reg == reg) return true;
+            if (symbol.data_type == .vec32 and nextVectorRegister(symbol_reg) == reg) return true;
         }
         return false;
     }
@@ -151,6 +186,7 @@ fn writeStatements(
 
 fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.VarDecl) !void {
     if (decl.is_const) {
+        if (isVectorType(decl.data_type)) return error.VectorConstUnsupported;
         try context.add(.{
             .name = decl.name,
             .data_type = decl.data_type,
@@ -160,6 +196,22 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         return;
     }
 
+    if (isVectorType(decl.data_type)) {
+        if (decl.reg != null) return error.InvalidVectorRegister;
+        const vector_reg = decl.vector_reg orelse try context.allocVectorRegister(decl.data_type);
+        try validateVectorRegisterBinding(context, decl.data_type, vector_reg);
+        try writeVectorInitialValue(writer, context, vector_reg, decl.data_type, decl.value);
+        try context.add(.{
+            .name = decl.name,
+            .data_type = decl.data_type,
+            .reg = null,
+            .vector_reg = vector_reg,
+            .constant = null,
+        });
+        return;
+    }
+
+    if (decl.vector_reg != null) return error.InvalidScalarRegister;
     const reg = decl.reg orelse try context.allocRegister(decl.data_type);
     if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
     if (reg == compiler_scratch or reg == compiler_scratch_2) {
@@ -181,8 +233,66 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
     });
 }
 
+fn validateVectorRegisterBinding(
+    context: *const FunctionContext,
+    data_type: DataType,
+    vector_reg: ast.VectorRegister,
+) !void {
+    if (vector_reg == .v00 or @intFromEnum(vector_reg) >= 29) {
+        return error.VectorRegisterReservedForBackend;
+    }
+    if (context.isVectorRegisterInUse(vector_reg)) return error.RegisterAlreadyInUse;
+    if (data_type == .vec32) {
+        const second = nextVectorRegister(vector_reg) orelse return error.InvalidVectorRegisterPair;
+        if (@intFromEnum(second) >= 29) return error.VectorRegisterReservedForBackend;
+        if (context.isVectorRegisterInUse(second)) return error.RegisterAlreadyInUse;
+    }
+}
+
+fn writeVectorInitialValue(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: ast.VectorRegister,
+    data_type: DataType,
+    value: ast.Value,
+) !void {
+    switch (value) {
+        .load => |load| {
+            if (load.data_type != data_type) return error.RegisterTypeMismatch;
+            try writeVectorLoad(writer, context, destination, load);
+        },
+        .ident => |name| {
+            const source = try context.lookup(name);
+            if (source.data_type != data_type) return error.RegisterTypeMismatch;
+            const source_reg = source.vector_reg orelse return error.ExpectedVectorRegister;
+            try writeVectorOp(writer, .vor, destination, source_reg, source_reg, 0);
+            if (data_type == .vec32) {
+                try writeVectorOp(
+                    writer,
+                    .vor,
+                    nextVectorRegister(destination).?,
+                    nextVectorRegister(source_reg).?,
+                    nextVectorRegister(source_reg).?,
+                    0,
+                );
+            }
+        },
+        .number => |number| {
+            if (number != 0) return error.VectorImmediateUnsupported;
+            try writeVectorOp(writer, .vxor, destination, destination, destination, 0);
+            if (data_type == .vec32) {
+                const fraction = nextVectorRegister(destination).?;
+                try writeVectorOp(writer, .vxor, fraction, fraction, fraction, 0);
+            }
+        },
+    }
+}
+
 fn writeAssignment(writer: *std.Io.Writer, context: *FunctionContext, assignment: ast.Assignment) !void {
     const destination = try context.lookup(assignment.destination);
+    if (isVectorType(destination.data_type)) {
+        return writeVectorAssignment(writer, context, destination, assignment);
+    }
     const destination_reg = destination.reg orelse return error.CannotAssignConst;
 
     switch (assignment.op) {
@@ -199,6 +309,141 @@ fn writeAssignment(writer: *std.Io.Writer, context: *FunctionContext, assignment
             try writeBinary(writer, context, destination, destination_reg, assignment.lhs, assignment.op, rhs);
         },
     }
+}
+
+const VectorOp = enum(u6) {
+    vadd = 0b010000,
+    vsub = 0b010001,
+    vaddc = 0b010100,
+    vsubc = 0b010101,
+    vand = 0b101000,
+    vnor = 0b101011,
+    vor = 0b101010,
+    vxor = 0b101100,
+};
+
+fn writeVectorAssignment(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    assignment: ast.Assignment,
+) !void {
+    const destination_reg = destination.vector_reg orelse return error.ExpectedVectorRegister;
+    const lhs = switch (assignment.lhs) {
+        .ident => |name| try context.lookup(name),
+        .number => return error.VectorImmediateUnsupported,
+        .load => |load| {
+            if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
+            if (load.data_type != destination.data_type) return error.RegisterTypeMismatch;
+            return writeVectorLoad(writer, context, destination_reg, load);
+        },
+    };
+    if (lhs.data_type != destination.data_type) return error.RegisterTypeMismatch;
+    const lhs_reg = lhs.vector_reg orelse return error.ExpectedVectorRegister;
+
+    if (assignment.op == .set) {
+        if (assignment.rhs != null) return error.InvalidAssignment;
+        try writeVectorOp(writer, .vor, destination_reg, lhs_reg, lhs_reg, 0);
+        if (destination.data_type == .vec32) {
+            try writeVectorOp(
+                writer,
+                .vor,
+                nextVectorRegister(destination_reg).?,
+                nextVectorRegister(lhs_reg).?,
+                nextVectorRegister(lhs_reg).?,
+                0,
+            );
+        }
+        return;
+    }
+
+    if (assignment.op == .bit_not) {
+        if (assignment.rhs != null) return error.InvalidAssignment;
+        try writeVectorOp(writer, .vnor, destination_reg, lhs_reg, lhs_reg, 0);
+        if (destination.data_type == .vec32) {
+            try writeVectorOp(
+                writer,
+                .vnor,
+                nextVectorRegister(destination_reg).?,
+                nextVectorRegister(lhs_reg).?,
+                nextVectorRegister(lhs_reg).?,
+                0,
+            );
+        }
+        return;
+    }
+
+    const rhs_value = assignment.rhs orelse return error.InvalidAssignment;
+    const rhs = switch (rhs_value) {
+        .ident => |name| try context.lookup(name),
+        else => return error.VectorImmediateUnsupported,
+    };
+    if (rhs.data_type != destination.data_type) return error.RegisterTypeMismatch;
+    const rhs_reg = rhs.vector_reg orelse return error.ExpectedVectorRegister;
+
+    if (destination.data_type == .vec32) {
+        const destination_fraction = nextVectorRegister(destination_reg).?;
+        const lhs_fraction = nextVectorRegister(lhs_reg).?;
+        const rhs_fraction = nextVectorRegister(rhs_reg).?;
+        switch (assignment.op) {
+            .add => {
+                try writeVectorOp(writer, .vaddc, destination_fraction, lhs_fraction, rhs_fraction, 0);
+                try writeVectorOp(writer, .vadd, destination_reg, lhs_reg, rhs_reg, 0);
+            },
+            .sub => {
+                try writeVectorOp(writer, .vsubc, destination_fraction, lhs_fraction, rhs_fraction, 0);
+                try writeVectorOp(writer, .vsub, destination_reg, lhs_reg, rhs_reg, 0);
+            },
+            .bit_and, .bit_or, .bit_xor, .bit_nor => {
+                const op = vectorLogicOp(assignment.op);
+                try writeVectorOp(writer, op, destination_reg, lhs_reg, rhs_reg, 0);
+                try writeVectorOp(writer, op, destination_fraction, lhs_fraction, rhs_fraction, 0);
+            },
+            else => return error.UnsupportedVectorOperator,
+        }
+        return;
+    }
+
+    const op: VectorOp = switch (assignment.op) {
+        .add => .vaddc,
+        .sub => .vsubc,
+        .bit_and, .bit_or, .bit_xor, .bit_nor => vectorLogicOp(assignment.op),
+        else => return error.UnsupportedVectorOperator,
+    };
+    try writeVectorOp(writer, op, destination_reg, lhs_reg, rhs_reg, 0);
+}
+
+fn vectorLogicOp(op: ast.AssignOp) VectorOp {
+    return switch (op) {
+        .bit_and => .vand,
+        .bit_or => .vor,
+        .bit_xor => .vxor,
+        .bit_nor => .vnor,
+        else => unreachable,
+    };
+}
+
+fn writeVectorOp(
+    writer: *std.Io.Writer,
+    op: VectorOp,
+    destination: ast.VectorRegister,
+    lhs: ast.VectorRegister,
+    rhs: ast.VectorRegister,
+    element: u4,
+) !void {
+    const word: u32 = 0x4a000000 |
+        (@as(u32, element) << 21) |
+        (@as(u32, @intFromEnum(rhs)) << 16) |
+        (@as(u32, @intFromEnum(lhs)) << 11) |
+        (@as(u32, @intFromEnum(destination)) << 6) |
+        @as(u32, @intFromEnum(op));
+    try writer.print("  .word 0x{x:0>8} # {s} ${s}, ${s}, ${s}\n", .{
+        word,
+        @tagName(op),
+        vectorRegName(destination),
+        vectorRegName(lhs),
+        vectorRegName(rhs),
+    });
 }
 
 fn writeSet(
@@ -489,6 +734,27 @@ fn expectSameType(lhs: Symbol, rhs: Symbol) !void {
 }
 
 fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype) !void {
+    if (isVectorType(store.data_type)) {
+        const value_name = switch (store.value) {
+            .ident => |name| name,
+            .number => return error.ExpectedVectorRegister,
+        };
+        const value = try context.lookup(value_name);
+        if (value.data_type != store.data_type) return error.RegisterTypeMismatch;
+        const vector_reg = value.vector_reg orelse return error.ExpectedVectorRegister;
+        const address_reg = try valueAsAddressReg(writer, context, store.address);
+        try writeVectorMemory(writer, false, vector_reg, address_reg, store.offset);
+        if (store.data_type == .vec32) {
+            try writeVectorMemory(
+                writer,
+                false,
+                nextVectorRegister(vector_reg).?,
+                address_reg,
+                store.offset + 16,
+            );
+        }
+        return;
+    }
     try validateMemoryOffset(store.offset);
     const address_reg = try valueAsAddressReg(writer, context, store.address);
     const value_reg = try valueAsStoreReg(writer, context, store.value);
@@ -496,6 +762,51 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
         storeOp(store.data_type),
         regName(value_reg),
         store.offset,
+        regName(address_reg),
+    });
+}
+
+fn writeVectorLoad(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: ast.VectorRegister,
+    load: ast.Load,
+) !void {
+    const address_reg = try valueAsAddressReg(writer, context, load.address);
+    try writeVectorMemory(writer, true, destination, address_reg, load.offset);
+    if (load.data_type == .vec32) {
+        try writeVectorMemory(
+            writer,
+            true,
+            nextVectorRegister(destination).?,
+            address_reg,
+            load.offset + 16,
+        );
+    }
+}
+
+fn writeVectorMemory(
+    writer: *std.Io.Writer,
+    load: bool,
+    vector_reg: ast.VectorRegister,
+    address_reg: Register,
+    offset: i64,
+) !void {
+    if (@mod(offset, 16) != 0) return error.VectorMemoryOffsetUnaligned;
+    const scaled_offset = @divExact(offset, 16);
+    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
+    const opcode: u32 = if (load) 0x32 else 0x3a;
+    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
+    const word = (opcode << 26) |
+        (@as(u32, @intFromEnum(address_reg)) << 21) |
+        (@as(u32, @intFromEnum(vector_reg)) << 16) |
+        (0b00100 << 11) |
+        encoded_offset;
+    try writer.print("  .word 0x{x:0>8} # {s} ${s}, {d}({s})\n", .{
+        word,
+        if (load) "lqv" else "sqv",
+        vectorRegName(vector_reg),
+        offset,
         regName(address_reg),
     });
 }
@@ -528,16 +839,23 @@ fn writeCall(
     if (call.arguments.len != function.parameters.len) return error.FunctionArgumentCountMismatch;
     for (call.arguments, function.parameters) |argument, parameter| {
         switch (argument) {
-            .number => |number| try loadImmediateInto(writer, parameter.reg, number),
+            .number => |number| {
+                if (isVectorType(parameter.data_type)) return error.VectorArgumentMustBeRegister;
+                try loadImmediateInto(writer, parameter.reg orelse return error.InvalidScalarRegister, number);
+            },
             .ident => |name| {
                 const symbol = try context.lookup(name);
                 if (symbol.data_type != parameter.data_type) return error.FunctionArgumentTypeMismatch;
-                if (symbol.reg) |argument_reg| {
-                    if (argument_reg != parameter.reg) return error.FunctionArgumentRegisterMismatch;
+                if (isVectorType(parameter.data_type)) {
+                    if (symbol.vector_reg != parameter.vector_reg) {
+                        return error.FunctionArgumentRegisterMismatch;
+                    }
+                } else if (symbol.reg) |argument_reg| {
+                    if (argument_reg != parameter.reg.?) return error.FunctionArgumentRegisterMismatch;
                 } else {
                     try loadImmediateInto(
                         writer,
-                        parameter.reg,
+                        parameter.reg orelse return error.InvalidScalarRegister,
                         symbol.constant orelse return error.ExpectedConstant,
                     );
                 }
@@ -551,13 +869,16 @@ fn writeCall(
         for (function.parameters) |parameter| {
             if (context.lookup(parameter.name) catch null) |existing| {
                 if (existing.data_type != parameter.data_type) return error.FunctionArgumentTypeMismatch;
-                if (existing.reg != parameter.reg) return error.FunctionArgumentRegisterMismatch;
+                if (existing.reg != parameter.reg or existing.vector_reg != parameter.vector_reg) {
+                    return error.FunctionArgumentRegisterMismatch;
+                }
                 continue;
             }
             try context.add(.{
                 .name = parameter.name,
                 .data_type = parameter.data_type,
                 .reg = parameter.reg,
+                .vector_reg = parameter.vector_reg,
                 .constant = null,
             });
         }
@@ -801,11 +1122,38 @@ fn findFunction(functions: []const ast.Function, name: []const u8) ?ast.Function
 
 fn isScalarRegister(reg: Register) bool {
     return switch (reg) {
-        .zero, .at, .v0, .v1, .a0, .a1, .a2, .a3,
-        .t0,   .t1, .t2, .t3, .t4, .t5, .t6, .t7,
-        .s0,   .s1, .s2, .s3, .s4, .s5, .s6, .s7,
-        .t8,   .t9, .k0, .k1, .gp,
-        .sp,   .fp, .ra,
+        .zero,
+        .at,
+        .v0,
+        .v1,
+        .a0,
+        .a1,
+        .a2,
+        .a3,
+        .t0,
+        .t1,
+        .t2,
+        .t3,
+        .t4,
+        .t5,
+        .t6,
+        .t7,
+        .s0,
+        .s1,
+        .s2,
+        .s3,
+        .s4,
+        .s5,
+        .s6,
+        .s7,
+        .t8,
+        .t9,
+        .k0,
+        .k1,
+        .gp,
+        .sp,
+        .fp,
+        .ra,
         => true,
     };
 }
@@ -814,6 +1162,7 @@ fn isSigned(data_type: DataType) bool {
     return switch (data_type) {
         .i8, .i16, .i32 => true,
         .u8, .u16, .u32 => false,
+        .vec16, .vec32 => unreachable,
     };
 }
 
@@ -822,6 +1171,7 @@ fn storeOp(data_type: DataType) []const u8 {
         .u8, .i8 => "sb",
         .u16, .i16 => "sh",
         .u32, .i32 => "sw",
+        .vec16, .vec32 => unreachable,
     };
 }
 
@@ -832,7 +1182,22 @@ fn loadOp(data_type: DataType) []const u8 {
         .u16 => "lhu",
         .i16 => "lh",
         .u32, .i32 => "lw",
+        .vec16, .vec32 => unreachable,
     };
+}
+
+fn isVectorType(data_type: DataType) bool {
+    return data_type == .vec16 or data_type == .vec32;
+}
+
+fn nextVectorRegister(reg: ast.VectorRegister) ?ast.VectorRegister {
+    const index = @intFromEnum(reg);
+    if (index == 31) return null;
+    return @enumFromInt(index + 1);
+}
+
+fn vectorRegName(reg: ast.VectorRegister) []const u8 {
+    return @tagName(reg);
 }
 
 fn regName(reg: Register) []const u8 {

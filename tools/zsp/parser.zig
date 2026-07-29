@@ -143,15 +143,24 @@ pub const Parser = struct {
             _ = try self.expect(.l_paren);
             const reg_token = try self.expect(.register);
             _ = try self.expect(.r_paren);
-            const reg = parseRegister(reg_token) orelse
-                return self.fail(reg_token, .expected_scalar_register);
             const name = try self.expect(.ident);
             _ = try self.expect(.colon);
             const data_type = try self.parseDataType(try self.expect(.ident));
+            const reg = if (!isVectorType(data_type))
+                parseRegister(reg_token) orelse
+                    return self.fail(reg_token, .expected_scalar_register)
+            else
+                null;
+            const vector_reg = if (isVectorType(data_type))
+                parseVectorRegister(reg_token) orelse
+                    return self.fail(reg_token, .expected_vector_register)
+            else
+                null;
             try parameters.append(self.allocator, .{
                 .name = name.text,
                 .data_type = data_type,
                 .reg = reg,
+                .vector_reg = vector_reg,
             });
 
             if (try self.eat(.r_paren)) break;
@@ -338,6 +347,7 @@ pub const Parser = struct {
     fn parseBuiltinStatement(self: *Parser) !ast.Statement {
         const name = try self.expect(.ident);
         _ = try self.expect(.l_paren);
+
         _ = try self.expect(.r_paren);
         _ = try self.expect(.semicolon);
 
@@ -366,11 +376,10 @@ pub const Parser = struct {
     }
 
     fn parseRegDecl(self: *Parser) !ast.VarDecl {
-        var reg: ?ast.Register = null;
+        var register_token: ?token.Token = null;
         if (try self.eat(.l_paren)) {
-            const reg_token = try self.expect(.register);
+            register_token = try self.expect(.register);
             _ = try self.expect(.r_paren);
-            reg = parseRegister(reg_token) orelse return self.fail(reg_token, .expected_scalar_register);
         }
 
         const name = try self.expect(.ident);
@@ -385,11 +394,23 @@ pub const Parser = struct {
             .load => |load| load.data_type,
             else => return self.fail(name, .expected_data_type),
         };
+        var reg: ?ast.Register = null;
+        var vector_reg: ?ast.VectorRegister = null;
+        if (register_token) |reg_token| {
+            if (isVectorType(data_type)) {
+                vector_reg = parseVectorRegister(reg_token) orelse
+                    return self.fail(reg_token, .expected_vector_register);
+            } else {
+                reg = parseRegister(reg_token) orelse
+                    return self.fail(reg_token, .expected_scalar_register);
+            }
+        }
 
         return .{
             .is_const = false,
             .data_type = data_type,
             .reg = reg,
+            .vector_reg = vector_reg,
             .name = name.text,
             .value = value,
         };
@@ -576,6 +597,7 @@ pub const ErrorType = enum {
     var_keyword_removed,
     expected_data_type,
     expected_scalar_register,
+    expected_vector_register,
     expected_fixed_register_parameter,
     expected_import,
     expected_value,
@@ -603,6 +625,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .var_keyword_removed => "'var' has been replaced by 'reg' for register variables",
         .expected_data_type => "expected data type",
         .expected_scalar_register => "expected scalar register",
+        .expected_vector_register => "expected vector register ($v00 through $v31)",
         .expected_fixed_register_parameter => "expected fixed-register parameter",
         .expected_import => "expected import",
         .expected_value => "expected value",
@@ -620,6 +643,16 @@ fn parseRegister(tok: token.Token) ?ast.Register {
         }
     }
     return null;
+}
+
+fn parseVectorRegister(tok: token.Token) ?ast.VectorRegister {
+    if (tok.text.len != 4 or tok.text[1] != 'v') return null;
+    const index = std.fmt.parseInt(u5, tok.text[2..], 10) catch return null;
+    return @enumFromInt(index);
+}
+
+fn isVectorType(data_type: ast.DataType) bool {
+    return data_type == .vec16 or data_type == .vec32;
 }
 
 fn parseDataTypeName(text: []const u8) ?ast.DataType {

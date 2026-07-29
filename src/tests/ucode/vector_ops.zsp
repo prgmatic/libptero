@@ -1,0 +1,89 @@
+inline fn add_vectors(
+    reg($v01) a: vec16,
+    reg($v02) b: vec16,
+    reg($v03) add_result: vec16,
+) {
+    add_result += b;
+}
+
+export fn _start() noreturn {
+    reg input: u32 = 0;
+
+    // Two vec16 inputs.
+    reg seed: u32 = 0x00010002;
+    store(u32, input, seed, 0);
+    seed = 0xffff8000;
+    store(u32, input, seed, 4);
+    seed = 0x7fff1234;
+    store(u32, input, seed, 8);
+    seed = 0xaaaaf0f0;
+    store(u32, input, seed, 12);
+
+    seed = 0x00030004;
+    store(u32, input, seed, 16);
+    seed = 0x0001ffff;
+    store(u32, input, seed, 20);
+    seed = 0x00012222;
+    store(u32, input, seed, 24);
+    seed = 0x0f0f5555;
+    store(u32, input, seed, 28);
+
+    reg($v01) a: vec16 = load(vec16, input, 0);
+    reg($v02) b: vec16 = load(vec16, input, 16);
+    reg($v03) add_result: vec16 = 0;
+    reg($v04) sub_result: vec16 = 0;
+    reg($v05) and_result: vec16 = 0;
+    reg($v06) or_result: vec16 = 0;
+    reg($v07) xor_result: vec16 = 0;
+    reg($v14) not_result: vec16 = 0;
+    reg($v15) nor_result: vec16 = 0;
+
+    add_result = a;
+    add_vectors(a, b, add_result);
+    sub_result = a - b;
+    and_result = a;
+    and_result &= b;
+    or_result = a | b;
+    xor_result = a ^ b;
+    not_result = ~a;
+    nor_result = a ~| b;
+
+    store(vec16, input, add_result, 0x100);
+    store(vec16, input, sub_result, 0x110);
+    store(vec16, input, and_result, 0x120);
+    store(vec16, input, or_result, 0x130);
+    store(vec16, input, xor_result, 0x140);
+    store(vec16, input, not_result, 0x150);
+    store(vec16, input, nor_result, 0x180);
+
+    // A vec32 is an integer vector followed by its fractional vector.
+    seed = 0x00010001;
+    store(u32, input, seed, 32);
+    store(u32, input, seed, 36);
+    store(u32, input, seed, 40);
+    store(u32, input, seed, 44);
+    seed = 0xffffffff;
+    store(u32, input, seed, 48);
+    store(u32, input, seed, 52);
+    store(u32, input, seed, 56);
+    store(u32, input, seed, 60);
+
+    seed = 0x00020002;
+    store(u32, input, seed, 64);
+    store(u32, input, seed, 68);
+    store(u32, input, seed, 72);
+    store(u32, input, seed, 76);
+    seed = 0x00010001;
+    store(u32, input, seed, 80);
+    store(u32, input, seed, 84);
+    store(u32, input, seed, 88);
+    store(u32, input, seed, 92);
+
+    reg($v08) wide_a: vec32 = load(vec32, input, 32);
+    reg($v10) wide_b: vec32 = load(vec32, input, 64);
+    reg($v12) wide_result: vec32 = 0;
+    wide_result = wide_a + wide_b;
+    store(vec32, input, wide_result, 0x160);
+
+    @break();
+}

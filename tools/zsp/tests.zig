@@ -363,6 +363,224 @@ test "top level declarations allocate registers without label" {
     );
 }
 
+test "vec16 and vec32 operations emit encoded RSP vector instructions" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) ptr: u32 = 0;
+        \\  reg($v01) a: vec16 = load(vec16, ptr);
+        \\  reg($v02) b: vec16 = load(vec16, ptr, 16);
+        \\  reg($v03) c: vec16 = 0;
+        \\  c = a + b;
+        \\  store(vec16, ptr, c, 128);
+        \\  reg($v04) x: vec32 = load(vec32, ptr, 32);
+        \\  reg($v06) y: vec32 = load(vec32, ptr, 64);
+        \\  reg($v08) z: vec32 = 0;
+        \\  z = x ^ y;
+        \\  store(vec32, ptr, z, 96);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 0
+        \\  .word 0xc9012000 # lqv $v01, 0($t0)
+        \\  .word 0xc9022001 # lqv $v02, 16($t0)
+        \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
+        \\  .word 0x4a0208d4 # vaddc $v03, $v01, $v02
+        \\  .word 0xe9032008 # sqv $v03, 128($t0)
+        \\  .word 0xc9042002 # lqv $v04, 32($t0)
+        \\  .word 0xc9052003 # lqv $v05, 48($t0)
+        \\  .word 0xc9062004 # lqv $v06, 64($t0)
+        \\  .word 0xc9072005 # lqv $v07, 80($t0)
+        \\  .word 0x4a08422c # vxor $v08, $v08, $v08
+        \\  .word 0x4a094a6c # vxor $v09, $v09, $v09
+        \\  .word 0x4a06222c # vxor $v08, $v04, $v06
+        \\  .word 0x4a072a6c # vxor $v09, $v05, $v07
+        \\  .word 0xe9082006 # sqv $v08, 96($t0)
+        \\  .word 0xe9092007 # sqv $v09, 112($t0)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "vector compound assignments use the destination as the left operand" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) a: vec16 = 0;
+        \\  reg($v02) b: vec16 = 0;
+        \\  a += b;
+        \\  a -= b;
+        \\  a &= b;
+        \\  a |= b;
+        \\  a ^= b;
+        \\  a ~|= b;
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  .word 0x4a020854 # vaddc $v01, $v01, $v02
+        \\  .word 0x4a020855 # vsubc $v01, $v01, $v02
+        \\  .word 0x4a020868 # vand $v01, $v01, $v02
+        \\  .word 0x4a02086a # vor $v01, $v01, $v02
+        \\  .word 0x4a02086c # vxor $v01, $v01, $v02
+        \\  .word 0x4a02086b # vnor $v01, $v01, $v02
+        \\
+        \\
+    );
+}
+
+test "fixed vector parameters bind and inline with exact registers" {
+    try expectAsm(
+        \\inline fn accumulate(
+        \\  reg($v01) value: vec16,
+        \\  reg($v02) addend: vec16,
+        \\) {
+        \\  value += addend;
+        \\}
+        \\fn test() noreturn {
+        \\  reg($t0) ptr: u32 = 0;
+        \\  reg($v01) a: vec16 = load(vec16, ptr);
+        \\  reg($v02) b: vec16 = load(vec16, ptr, 16);
+        \\  accumulate(a, b);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 0
+        \\  .word 0xc9012000 # lqv $v01, 0($t0)
+        \\  .word 0xc9022001 # lqv $v02, 16($t0)
+        \\  .word 0x4a020854 # vaddc $v01, $v01, $v02
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "vector calls require matching types and fixed registers" {
+    try expectAsmError(
+        \\fn consume(reg($v01) value: vec16) {}
+        \\fn test() {
+        \\  reg($v02) value: vec16 = 0;
+        \\  consume(value);
+        \\}
+    , error.FunctionArgumentRegisterMismatch);
+    try expectAsmError(
+        \\fn consume(reg($v01) value: vec16) {}
+        \\fn test() {
+        \\  consume(0);
+        \\}
+    , error.VectorArgumentMustBeRegister);
+    try expectAsmError(
+        \\fn consume(reg($v01) value: vec16) {}
+        \\fn test() {
+        \\  reg($v01) value: vec32 = 0;
+        \\  consume(value);
+        \\}
+    , error.FunctionArgumentTypeMismatch);
+    try expectAsmError(
+        \\fn consume(
+        \\  reg($v01) wide: vec32,
+        \\  reg($v02) overlap: vec16,
+        \\) {}
+    , error.RegisterAlreadyInUse);
+}
+
+test "vector declarations validate fixed registers and register pairs" {
+    try expectParseError(
+        \\fn test() {
+        \\  reg($v1) value: vec16 = 0;
+        \\}
+    , .expected_vector_register, 2, 7);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg($v28) value: vec32 = 0;
+        \\}
+    , error.VectorRegisterReservedForBackend);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg($v01) a: vec32 = 0;
+        \\  reg($v02) b: vec16 = 0;
+        \\}
+    , error.RegisterAlreadyInUse);
+}
+
+test "automatic vector allocation keeps vec32 register pairs contiguous" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg a: vec16 = 0;
+        \\  reg b: vec32 = 0;
+        \\  reg c: vec16 = 0;
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
+        \\  .word 0x4a04212c # vxor $v04, $v04, $v04
+        \\
+        \\
+    );
+}
+
+test "automatic vector allocation reports exhaustion" {
+    var source_writer = std.Io.Writer.Allocating.init(testing.allocator);
+    defer source_writer.deinit();
+    try source_writer.writer.writeAll("fn test() {\n");
+    for (0..29) |index| {
+        try source_writer.writer.print("  reg value_{d}: vec16 = 0;\n", .{index});
+    }
+    try source_writer.writer.writeAll("}\n");
+    const source = try source_writer.toOwnedSlice();
+    defer testing.allocator.free(source);
+
+    try expectAsmError(source, error.OutOfFreeVectorRegisters);
+}
+
+test "vector operations reject mixed types, immediates, and invalid memory offsets" {
+    try expectAsmError(
+        \\fn test() {
+        \\  reg($v01) narrow: vec16 = 0;
+        \\  reg($v02) wide: vec32 = 0;
+        \\  narrow += wide;
+        \\}
+    , error.RegisterTypeMismatch);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg($v01) value: vec16 = 0;
+        \\  value += 1;
+        \\}
+    , error.VectorImmediateUnsupported);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg ptr: u32 = 0;
+        \\  reg($v01) value: vec16 = load(vec16, ptr, 1);
+        \\}
+    , error.VectorMemoryOffsetUnaligned);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg ptr: u32 = 0;
+        \\  reg($v01) value: vec16 = load(vec16, ptr, 1024);
+        \\}
+    , error.VectorMemoryOffsetOutOfRange);
+}
+
 test "store emits byte halfword and word writes" {
     try expectAsm(
         \\fn test() {
