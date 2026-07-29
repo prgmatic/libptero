@@ -69,6 +69,16 @@ fn addToolTests(b: *std.Build) void {
     const run_ucode_tests = b.addRunArtifact(ucode_tests);
     test_step.dependOn(&run_ucode_tests.step);
 
+    const command_queue_tests = b.addTest(.{
+        .name = "command-queue-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/n64/rsp/command_queue_tests.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const run_command_queue_tests = b.addRunArtifact(command_queue_tests);
+    test_step.dependOn(&run_command_queue_tests.step);
+
     const test_protocol_tests = b.addTest(.{
         .name = "test-protocol-tests",
         .root_module = b.createModule(.{

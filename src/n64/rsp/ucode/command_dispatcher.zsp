@@ -1,5 +1,21 @@
 const dma = @import("dma.zsp");
 
+// Dispatcher/handler ABI, matching libdragon's RSPQ convention:
+//   $gp: address immediately after the current command
+//   $a0-$a3: first four command words
+//   $t7: command size in bytes
+//   $ra: return address in the resident dispatcher
+//
+// $gp is the only scalar register handlers must preserve.
+fn write_dmem(
+    reg($a0) command: u32,
+    reg($a1) value: u32,
+) {
+    reg dmem_address: u32 = 0;
+    dmem_address = command & 0x00ffffff;
+    store(u32, dmem_address, value);
+}
+
 // Resident command queue dispatcher.
 export fn _start() noreturn {
     const command_buffer: u32 = 0x20;
@@ -9,26 +25,29 @@ export fn _start() noreturn {
 
     store(u32, 4, 0);
 
-    reg command_address: u32 = command_buffer;
-    reg command_header: u32 = load(u32, command_address);
+    reg($gp) command_address: u32 = command_buffer;
+    reg($a0) command_header: u32 = load(u32, command_address);
+    reg($a1) argument_1: u32 = 0;
+    reg($a2) argument_2: u32 = 0;
+    reg($a3) argument_3: u32 = 0;
+    reg($t7) command_size: u32 = 0;
     reg command_id: u32 = 0;
     command_id = command_header >> 24;
 
     while(command_id != 0) {
+        command_size = 8;
+        argument_1 = load(u32, command_address, 4);
+        argument_2 = load(u32, command_address, 8);
+        argument_3 = load(u32, command_address, 12);
+        command_address += command_size;
+
         if(command_id == 1) {
-            reg dmem_address: u32 = 0;
-            dmem_address = command_header & 0x00ffffff;
-            reg value_address: u32 = 0;
-            value_address = command_address;
-            value_address += 4;
-            reg value: u32 = load(u32, value_address);
-            store(u32, dmem_address, value);
+            write_dmem(command_header, argument_1);
         } else {
             store(u32, 4, command_id);
             @break();
         }
 
-        command_address += 8;
         command_header = load(u32, command_address);
         command_id = command_header >> 24;
     }

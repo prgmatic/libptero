@@ -21,6 +21,8 @@ var invalid_command_batch align(8) = [_]u32{
     0x00000000,
 };
 
+var command_queue_buffer: [4]u32 align(8) = undefined;
+
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
     .{ .name = "ZSP: signed arithmetic", .run = signedArithmetic },
@@ -188,7 +190,10 @@ fn dmaIn() !void {
 }
 
 fn commandDispatcher() !void {
-    submitCommandBatch(&dma_in_batch);
+    var queue = rsp.CommandQueue.init(&command_queue_buffer);
+    queue.writeDmem(0x100, 0x12345678);
+    queue.stop();
+    rsp.submitCommands(&queue);
     try run(rsp.programs.command_dispatcher);
 
     try expectDmemWord(u32, 4, 0);

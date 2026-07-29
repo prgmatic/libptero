@@ -374,6 +374,8 @@ test "store emits byte halfword and word writes" {
         \\  store(i8, ptr, value);
         \\  store(i16, ptr, 0x1234);
         \\  store(i32, 0, value);
+        \\  store(u32, ptr, value, 12);
+        \\  store(u8, ptr, value, -4);
         \\}
     ,
         \\.set noreorder
@@ -391,6 +393,8 @@ test "store emits byte halfword and word writes" {
         \\  addiu $v1, $zero, 4660
         \\  sh $v1, 0($t0)
         \\  sw $t1, 0($zero)
+        \\  sw $t1, 12($t0)
+        \\  sb $t1, -4($t0)
         \\  jr $ra
         \\  nop
         \\
@@ -406,8 +410,8 @@ test "load emits signed and unsigned byte halfword and word reads" {
         \\  reg($t2) b = load(i8, ptr);
         \\  reg($t3) c = load(u16, ptr);
         \\  reg($t4) d = load(i16, ptr);
-        \\  reg($t5) e = load(u32, ptr);
-        \\  reg($t6) f = load(i32, ptr);
+        \\  reg($t5) e = load(u32, ptr, 12);
+        \\  reg($t6) f = load(i32, ptr, -4);
         \\}
     ,
         \\.set noreorder
@@ -420,13 +424,28 @@ test "load emits signed and unsigned byte halfword and word reads" {
         \\  lb $t2, 0($t0)
         \\  lhu $t3, 0($t0)
         \\  lh $t4, 0($t0)
-        \\  lw $t5, 0($t0)
-        \\  lw $t6, 0($t0)
+        \\  lw $t5, 12($t0)
+        \\  lw $t6, -4($t0)
         \\  jr $ra
         \\  nop
         \\
         \\
     );
+}
+
+test "memory offsets must fit the instruction immediate" {
+    try expectAsmError(
+        \\fn test() {
+        \\  reg ptr: u32 = 0x100;
+        \\  reg value = load(u32, ptr, 32768);
+        \\}
+    , error.MemoryOffsetOutOfRange);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg ptr: u32 = 0x100;
+        \\  store(u32, ptr, 1, -32769);
+        \\}
+    , error.MemoryOffsetOutOfRange);
 }
 
 test "load can assign an already defined register" {
@@ -536,6 +555,29 @@ test "function parameters require explicit register bindings" {
     try expectParseError(
         \\fn invalid(value: u32) {}
     , .expected_fixed_register_parameter, 1, 12);
+}
+
+test "gp can be explicitly pinned but is not automatically allocated" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($gp) command_address: u32 = 0x20;
+        \\  reg automatic: u32 = 1;
+        \\  command_address += automatic;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $gp, $zero, 32
+        \\  addiu $t0, $zero, 1
+        \\  addu $gp, $gp, $t0
+        \\  break
+        \\
+        \\
+    );
 }
 
 test "function calls verify fixed-register arguments without moves" {

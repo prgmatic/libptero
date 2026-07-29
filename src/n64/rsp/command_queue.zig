@@ -1,0 +1,65 @@
+const io = @import("io.zig");
+
+pub const batch_word_count = 4;
+
+pub const CommandQueue = struct {
+    buffer: *align(8) [batch_word_count]u32,
+    index: usize,
+    stopped: bool,
+
+    pub fn init(buffer: *align(8) [batch_word_count]u32) CommandQueue {
+        var queue = CommandQueue{
+            .buffer = buffer,
+            .index = 0,
+            .stopped = false,
+        };
+        queue.clear();
+        return queue;
+    }
+
+    pub fn clear(self: *CommandQueue) void {
+        @memset(self.buffer[0..], 0);
+        self.index = 0;
+        self.stopped = false;
+    }
+
+    pub fn writeDmem(self: *CommandQueue, offset: u32, value: u32) void {
+        if (self.stopped) {
+            @panic("cannot append to a stopped RSP command queue");
+        }
+        if (offset & 3 != 0 or offset > io.dmem_len - @sizeOf(u32)) {
+            @panic("RSP command queue DMEM offset is invalid");
+        }
+        if (self.index + 2 >= self.buffer.len) {
+            @panic("RSP command queue is full");
+        }
+
+        self.buffer[self.index] = 0x01000000 | offset;
+        self.buffer[self.index + 1] = value;
+        self.index += 2;
+
+        // Keep a STOP after the last complete command while the queue is open.
+        self.buffer[self.index] = 0;
+    }
+
+    pub fn stop(self: *CommandQueue) void {
+        if (self.stopped) {
+            return;
+        }
+
+        self.buffer[self.index] = 0;
+        self.index += 1;
+        while (self.index < self.buffer.len) : (self.index += 1) {
+            self.buffer[self.index] = 0;
+        }
+        self.stopped = true;
+    }
+
+    pub fn isStopped(self: *const CommandQueue) bool {
+        return self.stopped;
+    }
+
+    pub fn words(self: *const CommandQueue) []const u32 {
+        return self.buffer[0..];
+    }
+};

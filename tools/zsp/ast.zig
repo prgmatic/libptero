@@ -32,6 +32,7 @@ pub const Value = union(enum) {
 pub const Load = struct {
     data_type: DataType,
     address: ValueRef,
+    offset: i64 = 0,
 };
 
 pub const ValueRef = union(enum) {
@@ -120,6 +121,7 @@ pub const Statement = union(enum) {
         data_type: DataType,
         address: ValueRef,
         value: ValueRef,
+        offset: i64 = 0,
     },
     call: Call,
     builtin: Builtin,

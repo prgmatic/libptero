@@ -42,8 +42,7 @@ fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) 
     for (parameters) |parameter| {
         if (!isScalarRegister(parameter.reg)) return error.InvalidScalarRegister;
         if (parameter.reg == compiler_scratch or
-            parameter.reg == compiler_scratch_2 or
-            parameter.reg == .gp)
+            parameter.reg == compiler_scratch_2)
         {
             return error.RegisterReservedForBackend;
         }
@@ -163,7 +162,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
 
     const reg = decl.reg orelse try context.allocRegister(decl.data_type);
     if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
-    if (reg == compiler_scratch or reg == compiler_scratch_2 or reg == .gp) {
+    if (reg == compiler_scratch or reg == compiler_scratch_2) {
         return error.RegisterReservedForBackend;
     }
     if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
@@ -490,14 +489,32 @@ fn expectSameType(lhs: Symbol, rhs: Symbol) !void {
 }
 
 fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype) !void {
+    try validateMemoryOffset(store.offset);
     const address_reg = try valueAsAddressReg(writer, context, store.address);
     const value_reg = try valueAsStoreReg(writer, context, store.value);
-    try writer.print("  {s} {s}, 0({s})\n", .{ storeOp(store.data_type), regName(value_reg), regName(address_reg) });
+    try writer.print("  {s} {s}, {d}({s})\n", .{
+        storeOp(store.data_type),
+        regName(value_reg),
+        store.offset,
+        regName(address_reg),
+    });
 }
 
 fn writeLoadInto(writer: *std.Io.Writer, context: *FunctionContext, destination_reg: Register, load: ast.Load) !void {
+    try validateMemoryOffset(load.offset);
     const address_reg = try valueAsAddressReg(writer, context, load.address);
-    try writer.print("  {s} {s}, 0({s})\n", .{ loadOp(load.data_type), regName(destination_reg), regName(address_reg) });
+    try writer.print("  {s} {s}, {d}({s})\n", .{
+        loadOp(load.data_type),
+        regName(destination_reg),
+        load.offset,
+        regName(address_reg),
+    });
+}
+
+fn validateMemoryOffset(offset: i64) !void {
+    if (offset < std.math.minInt(i16) or offset > std.math.maxInt(i16)) {
+        return error.MemoryOffsetOutOfRange;
+    }
 }
 
 fn writeCall(

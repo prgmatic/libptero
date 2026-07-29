@@ -7,6 +7,7 @@ pub const ucode = @import("ucode.zig");
 
 pub const UCode = ucode.UCode;
 pub const Ucode = UCode;
+pub const CommandQueue = @import("command_queue.zig").CommandQueue;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
 
@@ -15,6 +16,19 @@ pub fn runUCode(program: UCode) void {
     waitHalted();
     load(program);
     runAsync(program.pc_start);
+}
+
+pub fn submitCommands(queue: *const CommandQueue) void {
+    if (!queue.isStopped()) {
+        @panic("RSP command queue must end with stop()");
+    }
+
+    halt();
+    waitHalted();
+
+    const words = queue.words();
+    cache.writebackData(words);
+    io.readDmem(u32, 0).* = physicalAddress(@intFromPtr(words.ptr));
 }
 
 pub fn load(program: UCode) void {

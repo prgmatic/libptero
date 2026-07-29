@@ -231,12 +231,17 @@ pub const Parser = struct {
             const address = try self.parseValueRef();
             _ = try self.expect(.comma);
             const value = try self.parseValueRef();
+            const offset = if (try self.eat(.comma))
+                try self.parseLiteralOffset()
+            else
+                0;
             _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
             return .{ .store = .{
                 .data_type = try self.parseDataType(data_type),
                 .address = address,
                 .value = value,
+                .offset = offset,
             } };
         }
 
@@ -397,8 +402,12 @@ pub const Parser = struct {
             const data_type = try self.parseDataType(try self.expect(.ident));
             _ = try self.expect(.comma);
             const address = try self.parseValueRef();
+            const offset = if (try self.eat(.comma))
+                try self.parseLiteralOffset()
+            else
+                0;
             _ = try self.expect(.r_paren);
-            return .{ .load = .{ .data_type = data_type, .address = address } };
+            return .{ .load = .{ .data_type = data_type, .address = address, .offset = offset } };
         }
 
         const value_ref = try self.parseValueRef();
@@ -426,6 +435,14 @@ pub const Parser = struct {
             },
             else => return self.fail(self.current, .expected_value),
         }
+    }
+
+    fn parseLiteralOffset(self: *Parser) !i64 {
+        const tok = self.current;
+        return switch (try self.parseValueRef()) {
+            .number => |number| number,
+            .ident => self.fail(tok, .expected_literal_offset),
+        };
     }
 
     fn parseCondition(self: *Parser) !ast.Condition {
@@ -563,6 +580,7 @@ pub const ErrorType = enum {
     expected_import,
     expected_value,
     expected_comparison_operator,
+    expected_literal_offset,
     unexpected_token,
     invalid_number,
 };
@@ -589,6 +607,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .expected_import => "expected import",
         .expected_value => "expected value",
         .expected_comparison_operator => "expected comparison operator",
+        .expected_literal_offset => "expected literal memory offset",
         .unexpected_token => "unexpected token",
         .invalid_number => "invalid number",
     };
