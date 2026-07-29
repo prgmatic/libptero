@@ -6,13 +6,33 @@ pub const Function = struct {
     export_symbol: bool,
     inline_call: bool,
     no_return: bool,
+    parameters: []const Parameter,
     statements: []const Statement,
+};
+
+pub const Parameter = struct {
+    name: []const u8,
+    data_type: DataType,
+    reg: Register,
 };
 
 pub const Value = union(enum) {
     ident: []const u8,
     number: i64,
     load: Load,
+    cop0_read: Cop0Read,
+};
+
+pub const Cop0Read = enum {
+    dma_full,
+    sp_status,
+};
+
+pub const Cop0Write = enum {
+    dma_addr_rsp,
+    dma_addr_rdram,
+    dma_read,
+    dma_write,
 };
 
 pub const Load = struct {
@@ -93,6 +113,17 @@ pub const Assignment = struct {
     rhs: ?Value,
 };
 
+pub const DmaIn = struct {
+    dmem: ValueRef,
+    rdram: ValueRef,
+    size: ValueRef,
+};
+
+pub const Call = struct {
+    name: []const u8,
+    arguments: []const ValueRef,
+};
+
 pub const Statement = union(enum) {
     var_decl: VarDecl,
     assignment: Assignment,
@@ -101,7 +132,12 @@ pub const Statement = union(enum) {
         address: ValueRef,
         value: ValueRef,
     },
-    call: []const u8,
+    dma_in: DmaIn,
+    cop0_write: struct {
+        register: Cop0Write,
+        value: ValueRef,
+    },
+    call: Call,
     builtin: Builtin,
     while_loop: struct {
         condition: Condition,
@@ -116,7 +152,10 @@ pub const Statement = union(enum) {
 };
 
 pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) void {
-    for (functions) |function| freeStatements(allocator, function.statements);
+    for (functions) |function| {
+        allocator.free(function.parameters);
+        freeStatements(allocator, function.statements);
+    }
     allocator.free(functions);
 }
 
@@ -128,6 +167,7 @@ fn freeStatements(allocator: std.mem.Allocator, statements: []const Statement) v
                 freeStatements(allocator, if_statement.then_statements);
                 if (if_statement.else_statements) |else_statements| freeStatements(allocator, else_statements);
             },
+            .call => |call| allocator.free(call.arguments),
             else => {},
         }
     }

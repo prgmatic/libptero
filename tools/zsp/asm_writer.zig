@@ -28,12 +28,32 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
         }
         var function_context = top_level_context.child(function.name);
         const context = if (function.emit_label) &function_context else &top_level_context;
+        try bindParameters(context, function.parameters);
         try writeStatements(writer, functions, context, function.statements);
         if (!function.no_return) {
             try writer.writeAll("  jr $ra\n");
             try writer.writeAll("  nop\n");
         }
         try writer.writeByte('\n');
+    }
+}
+
+fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) !void {
+    for (parameters) |parameter| {
+        if (!isScalarRegister(parameter.reg)) return error.InvalidScalarRegister;
+        if (parameter.reg == compiler_scratch or
+            parameter.reg == compiler_scratch_2 or
+            parameter.reg == .gp)
+        {
+            return error.RegisterReservedForBackend;
+        }
+        if (context.isRegisterInUse(parameter.reg)) return error.RegisterAlreadyInUse;
+        try context.add(.{
+            .name = parameter.name,
+            .data_type = parameter.data_type,
+            .reg = parameter.reg,
+            .constant = null,
+        });
     }
 }
 
@@ -121,7 +141,9 @@ fn writeStatements(
             .var_decl => |decl| try writeVarDecl(writer, context, decl),
             .assignment => |assignment| try writeAssignment(writer, context, assignment),
             .store => |store| try writeStore(writer, context, store),
-            .call => |name| try writeCall(writer, functions, context, name),
+            .dma_in => |dma| try writeDmaIn(writer, context, dma),
+            .cop0_write => |cop0| try writeCop0Write(writer, context, cop0),
+            .call => |call| try writeCall(writer, functions, context, call),
             .builtin => |builtin| try writeBuiltin(writer, builtin),
             .while_loop => |loop| try writeWhile(writer, functions, context, loop),
             .if_statement => |if_statement| try writeIf(writer, functions, context, if_statement),
@@ -151,6 +173,10 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         .load => |load| {
             if (decl.data_type != load.data_type) return error.RegisterTypeMismatch;
             try writeLoadInto(writer, context, reg, load);
+        },
+        .cop0_read => |cop0| {
+            if (decl.data_type != .u32) return error.RegisterTypeMismatch;
+            try writeCop0Read(writer, reg, cop0);
         },
         else => try loadImmediateInto(writer, reg, try valueAsImmediate(context, decl.value)),
     }
@@ -208,6 +234,10 @@ fn writeSet(
             if (destination.data_type != load.data_type) return error.RegisterTypeMismatch;
             try writeLoadInto(writer, context, destination_reg, load);
         },
+        .cop0_read => |cop0| {
+            if (destination.data_type != .u32) return error.RegisterTypeMismatch;
+            try writeCop0Read(writer, destination_reg, cop0);
+        },
     }
 }
 
@@ -222,6 +252,7 @@ fn writeBitNot(
         .ident => |name| try context.lookup(name),
         .number => return error.BitNotRequiresRegister,
         .load => return error.BitNotRequiresRegister,
+        .cop0_read => return error.BitNotRequiresRegister,
     };
     try expectSameType(destination, source);
     const source_reg = source.reg orelse return error.BitNotRequiresRegister;
@@ -245,6 +276,7 @@ fn writeBinary(
         .ident => |name| try context.lookup(name),
         .number => return error.ArithmeticLhsMustBeRegister,
         .load => return error.ArithmeticLhsMustBeRegister,
+        .cop0_read => return error.ArithmeticLhsMustBeRegister,
     };
     try expectSameType(destination, lhs);
     const lhs_reg = lhs.reg orelse return error.ArithmeticLhsMustBeRegister;
@@ -281,6 +313,7 @@ fn writeBinary(
         },
         .number => |number| try writeBinaryImmediate(writer, destination_reg, lhs_reg, op, number),
         .load => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .cop0_read => return error.ArithmeticRhsMustBeRegisterOrNumber,
     }
 }
 
@@ -370,6 +403,7 @@ fn writePowerOfTwoMath(
             break :blk rhs.constant orelse return error.ExpectedConstant;
         },
         .load => return error.PowerOfTwoConstantRequired,
+        .cop0_read => return error.PowerOfTwoConstantRequired,
     };
     if (value <= 0 or value > std.math.maxInt(u32)) return error.PowerOfTwoConstantRequired;
     const unsigned: u32 = @intCast(value);
@@ -432,6 +466,7 @@ fn writeShift(
             });
         },
         .load => return error.ShiftAmountMustBeRegisterOrNumber,
+        .cop0_read => return error.ShiftAmountMustBeRegisterOrNumber,
     }
 }
 
@@ -480,21 +515,102 @@ fn writeLoadInto(writer: *std.Io.Writer, context: *FunctionContext, destination_
     try writer.print("  {s} {s}, 0({s})\n", .{ loadOp(load.data_type), regName(destination_reg), regName(address_reg) });
 }
 
+fn writeCop0Read(writer: *std.Io.Writer, destination: Register, cop0: ast.Cop0Read) !void {
+    const register: u5 = switch (cop0) {
+        .dma_full => 5,
+        .sp_status => 4,
+    };
+    try writer.print("  mfc0 {s}, ${d}\n", .{ regName(destination), register });
+}
+
+fn writeCop0Write(writer: *std.Io.Writer, context: *FunctionContext, cop0: anytype) !void {
+    const source = try valueAsStoreReg(writer, context, cop0.value);
+    const register: u5 = switch (cop0.register) {
+        .dma_addr_rsp => 0,
+        .dma_addr_rdram => 1,
+        .dma_read => 2,
+        .dma_write => 3,
+    };
+    try writer.print("  mtc0 {s}, ${d}\n", .{ regName(source), register });
+}
+
+fn writeDmaIn(writer: *std.Io.Writer, context: *FunctionContext, dma: ast.DmaIn) !void {
+    const dmem = try valueRefAsConstant(context, dma.dmem);
+    if (dmem < 0 or dmem > 0xfff) return error.InvalidDmaDmemAddress;
+
+    const size = try valueRefAsConstant(context, dma.size);
+    if (size < 8 or size > 0x1000 or size & 7 != 0) return error.InvalidDmaSize;
+
+    const rdram_name = switch (dma.rdram) {
+        .ident => |name| name,
+        .number => return error.DmaRdramAddressMustBeRegister,
+    };
+    const rdram = try context.lookup(rdram_name);
+    if (rdram.data_type != .u32) return error.DmaRdramAddressMustBeU32;
+    const rdram_reg = rdram.reg orelse return error.DmaRdramAddressMustBeRegister;
+
+    const label = context.allocLabel();
+    try writer.print("LABEL_{s}_dma_ready_{d}:\n", .{ context.label_prefix, label });
+    try writer.writeAll("  mfc0 $at, $5\n");
+    try writer.print("  bne $at, $zero, LABEL_{s}_dma_ready_{d}\n", .{ context.label_prefix, label });
+    try writer.writeAll("  nop\n");
+
+    try loadImmediateInto(writer, compiler_scratch_2, dmem);
+    try writer.print("  mtc0 {s}, $0\n", .{regName(compiler_scratch_2)});
+    try writer.print("  mtc0 {s}, $1\n", .{regName(rdram_reg)});
+    try loadImmediateInto(writer, compiler_scratch_2, size - 1);
+    try writer.print("  mtc0 {s}, $2\n", .{regName(compiler_scratch_2)});
+
+    try writer.print("LABEL_{s}_dma_idle_{d}:\n", .{ context.label_prefix, label });
+    try writer.writeAll("  mfc0 $at, $4\n");
+    try writer.writeAll("  andi $at, $at, 12\n");
+    try writer.print("  bne $at, $zero, LABEL_{s}_dma_idle_{d}\n", .{ context.label_prefix, label });
+    try writer.writeAll("  nop\n");
+}
+
+fn valueRefAsConstant(context: *const FunctionContext, value: ast.ValueRef) !i64 {
+    return switch (value) {
+        .number => |number| number,
+        .ident => |name| (try context.lookup(name)).constant orelse return error.ExpectedConstant,
+    };
+}
+
 fn writeCall(
     writer: *std.Io.Writer,
     functions: []const ast.Function,
     context: *FunctionContext,
-    name: []const u8,
+    call: ast.Call,
 ) anyerror!void {
-    const function = findFunction(functions, name) orelse return error.UnknownFunction;
+    const function = findFunction(functions, call.name) orelse return error.UnknownFunction;
+    if (call.arguments.len != function.parameters.len) return error.FunctionArgumentCountMismatch;
+    for (call.arguments, function.parameters) |argument, parameter| {
+        switch (argument) {
+            .number => |number| try loadImmediateInto(writer, parameter.reg, number),
+            .ident => |name| {
+                const symbol = try context.lookup(name);
+                if (symbol.data_type != parameter.data_type) return error.FunctionArgumentTypeMismatch;
+                if (symbol.reg) |argument_reg| {
+                    if (argument_reg != parameter.reg) return error.FunctionArgumentRegisterMismatch;
+                } else {
+                    try loadImmediateInto(
+                        writer,
+                        parameter.reg,
+                        symbol.constant orelse return error.ExpectedConstant,
+                    );
+                }
+            },
+        }
+    }
+
     if (function.inline_call) {
+        if (function.parameters.len != 0) return error.InlineFunctionParametersUnsupported;
         const scope = context.pushScope();
         defer context.popScope(scope);
         try writeStatements(writer, functions, context, function.statements);
         return;
     }
 
-    try writer.print("  jal {s}\n", .{name});
+    try writer.print("  jal {s}\n", .{call.name});
     try writer.writeAll("  nop\n");
 }
 
@@ -571,6 +687,7 @@ fn writeConditionBranchFalse(
             rhs_immediate = rhs.constant orelse return error.ExpectedConstant;
         },
         .load => return error.ConditionRhsMustBeRegisterOrNumber,
+        .cop0_read => return error.ConditionRhsMustBeRegisterOrNumber,
     }
 
     switch (condition.op) {
@@ -664,6 +781,7 @@ fn valueAsImmediate(context: *FunctionContext, value: ast.Value) !i64 {
         .number => |number| number,
         .ident => |name| (try context.lookup(name)).constant orelse error.ExpectedConstant,
         .load => error.ExpectedConstant,
+        .cop0_read => error.ExpectedConstant,
     };
 }
 

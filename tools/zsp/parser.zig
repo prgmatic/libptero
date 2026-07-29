@@ -62,6 +62,7 @@ pub const Parser = struct {
             .export_symbol = false,
             .inline_call = false,
             .no_return = true,
+            .parameters = &.{},
             .statements = try self.parseTopLevelStatements(),
         };
     }
@@ -69,7 +70,8 @@ pub const Parser = struct {
     fn parseFunction(self: *Parser, export_symbol: bool, inline_call: bool) !ast.Function {
         const name = try self.expect(.ident);
         _ = try self.expect(.l_paren);
-        _ = try self.expect(.r_paren);
+        const parameters = try self.parseParameters();
+        errdefer self.allocator.free(parameters);
         var no_return = false;
         while (self.current.tag == .ident) {
             const modifier = try self.expect(.ident);
@@ -88,8 +90,40 @@ pub const Parser = struct {
             .export_symbol = export_symbol,
             .inline_call = inline_call,
             .no_return = no_return,
+            .parameters = parameters,
             .statements = statements,
         };
+    }
+
+    fn parseParameters(self: *Parser) ![]const ast.Parameter {
+        var parameters: std.ArrayList(ast.Parameter) = .empty;
+        errdefer parameters.deinit(self.allocator);
+        if (try self.eat(.r_paren)) return parameters.toOwnedSlice(self.allocator);
+
+        while (true) {
+            const reg_keyword = try self.expect(.ident);
+            if (!std.mem.eql(u8, reg_keyword.text, "reg")) {
+                return self.fail(reg_keyword, .expected_fixed_register_parameter);
+            }
+            _ = try self.expect(.l_paren);
+            const reg_token = try self.expect(.register);
+            _ = try self.expect(.r_paren);
+            const reg = parseRegister(reg_token) orelse
+                return self.fail(reg_token, .expected_scalar_register);
+            const name = try self.expect(.ident);
+            _ = try self.expect(.colon);
+            const data_type = try self.parseDataType(try self.expect(.ident));
+            try parameters.append(self.allocator, .{
+                .name = name.text,
+                .data_type = data_type,
+                .reg = reg,
+            });
+
+            if (try self.eat(.r_paren)) break;
+            _ = try self.expect(.comma);
+            if (try self.eat(.r_paren)) break;
+        }
+        return parameters.toOwnedSlice(self.allocator);
     }
 
     fn parseTopLevelStatements(self: *Parser) anyerror![]const ast.Statement {
@@ -171,6 +205,33 @@ pub const Parser = struct {
             } };
         }
 
+        if (std.mem.eql(u8, first.text, "dma_in")) {
+            _ = try self.expect(.l_paren);
+            const dmem = try self.parseValueRef();
+            _ = try self.expect(.comma);
+            const rdram = try self.parseValueRef();
+            _ = try self.expect(.comma);
+            const size = try self.parseValueRef();
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .dma_in = .{
+                .dmem = dmem,
+                .rdram = rdram,
+                .size = size,
+            } };
+        }
+
+        if (parseCop0Write(first.text)) |register| {
+            _ = try self.expect(.l_paren);
+            const value = try self.parseValueRef();
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .cop0_write = .{
+                .register = register,
+                .value = value,
+            } };
+        }
+
         if (std.mem.eql(u8, first.text, "const")) {
             return .{ .var_decl = try self.parseConstDecl() };
         }
@@ -223,12 +284,29 @@ pub const Parser = struct {
         }
 
         if (try self.eat(.l_paren)) {
-            _ = try self.expect(.r_paren);
+            const arguments = try self.parseCallArguments();
             _ = try self.expect(.semicolon);
-            return .{ .call = first.text };
+            return .{ .call = .{
+                .name = first.text,
+                .arguments = arguments,
+            } };
         }
 
         return self.fail(first, .unsupported_statement);
+    }
+
+    fn parseCallArguments(self: *Parser) ![]const ast.ValueRef {
+        var arguments: std.ArrayList(ast.ValueRef) = .empty;
+        errdefer arguments.deinit(self.allocator);
+        if (try self.eat(.r_paren)) return arguments.toOwnedSlice(self.allocator);
+
+        while (true) {
+            try arguments.append(self.allocator, try self.parseValueRef());
+            if (try self.eat(.r_paren)) break;
+            _ = try self.expect(.comma);
+            if (try self.eat(.r_paren)) break;
+        }
+        return arguments.toOwnedSlice(self.allocator);
     }
 
     fn parseBuiltinStatement(self: *Parser) !ast.Statement {
@@ -292,6 +370,15 @@ pub const Parser = struct {
     }
 
     fn parseValue(self: *Parser) !ast.Value {
+        if (self.current.tag == .ident) {
+            if (parseCop0Read(self.current.text)) |register| {
+                _ = try self.expect(.ident);
+                _ = try self.expect(.l_paren);
+                _ = try self.expect(.r_paren);
+                return .{ .cop0_read = register };
+            }
+        }
+
         if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "load")) {
             _ = try self.expect(.ident);
             _ = try self.expect(.l_paren);
@@ -436,6 +523,20 @@ pub const Parser = struct {
     }
 };
 
+fn parseCop0Read(name: []const u8) ?ast.Cop0Read {
+    if (std.mem.eql(u8, name, "get_dma_full")) return .dma_full;
+    if (std.mem.eql(u8, name, "get_sp_status")) return .sp_status;
+    return null;
+}
+
+fn parseCop0Write(name: []const u8) ?ast.Cop0Write {
+    if (std.mem.eql(u8, name, "set_dma_addr_rsp")) return .dma_addr_rsp;
+    if (std.mem.eql(u8, name, "set_dma_addr_rdram")) return .dma_addr_rdram;
+    if (std.mem.eql(u8, name, "set_dma_read")) return .dma_read;
+    if (std.mem.eql(u8, name, "set_dma_write")) return .dma_write;
+    return null;
+}
+
 fn valueFromRef(value_ref: ast.ValueRef) ast.Value {
     return switch (value_ref) {
         .ident => |name| .{ .ident = name },
@@ -451,6 +552,7 @@ pub const ErrorType = enum {
     var_keyword_removed,
     expected_data_type,
     expected_scalar_register,
+    expected_fixed_register_parameter,
     expected_value,
     expected_comparison_operator,
     unexpected_token,
@@ -475,6 +577,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .var_keyword_removed => "'var' has been replaced by 'reg' for register variables",
         .expected_data_type => "expected data type",
         .expected_scalar_register => "expected scalar register",
+        .expected_fixed_register_parameter => "expected fixed-register parameter",
         .expected_value => "expected value",
         .expected_comparison_operator => "expected comparison operator",
         .unexpected_token => "unexpected token",

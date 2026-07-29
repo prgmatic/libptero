@@ -462,6 +462,98 @@ test "load destination type must match requested data type" {
     , error.RegisterTypeMismatch);
 }
 
+test "dma_in emits synchronous RDRAM to DMEM transfer" {
+    try expectAsm(
+        \\export fn _start() noreturn {
+        \\  const command_buffer: u16 = 0x20;
+        \\  const command_buffer_size: u16 = 16;
+        \\  reg($s0) rdram: u32 = load(u32, 0);
+        \\  dma_in(command_buffer, rdram, command_buffer_size);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.globl _start
+        \\_start:
+        \\  lw $s0, 0($zero)
+        \\LABEL__start_dma_ready_0:
+        \\  mfc0 $at, $5
+        \\  bne $at, $zero, LABEL__start_dma_ready_0
+        \\  nop
+        \\  addiu $v1, $zero, 32
+        \\  mtc0 $v1, $0
+        \\  mtc0 $s0, $1
+        \\  addiu $v1, $zero, 15
+        \\  mtc0 $v1, $2
+        \\LABEL__start_dma_idle_0:
+        \\  mfc0 $at, $4
+        \\  andi $at, $at, 12
+        \\  bne $at, $zero, LABEL__start_dma_idle_0
+        \\  nop
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "dma_in validates its initial supported subset" {
+    try expectAsmError(
+        \\fn test() {
+        \\  reg rdram: u32 = 0;
+        \\  dma_in(0x20, rdram, 12);
+        \\}
+    , error.InvalidDmaSize);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg rdram: u16 = 0;
+        \\  dma_in(0x20, rdram, 16);
+        \\}
+    , error.DmaRdramAddressMustBeU32);
+}
+
+test "COP0 builtins emit DMA register reads and writes" {
+    try expectAsm(
+        \\fn cop0(
+        \\  reg($t0) value: u32,
+        \\  reg($t1) result: u32,
+        \\) {
+        \\  result = get_dma_full();
+        \\  result = get_sp_status();
+        \\  set_dma_addr_rsp(value);
+        \\  set_dma_addr_rdram(value);
+        \\  set_dma_read(value);
+        \\  set_dma_write(value);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\cop0:
+        \\  mfc0 $t1, $5
+        \\  mfc0 $t1, $4
+        \\  mtc0 $t0, $0
+        \\  mtc0 $t0, $1
+        \\  mtc0 $t0, $2
+        \\  mtc0 $t0, $3
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "COP0 reads require u32 destinations" {
+    try expectAsmError(
+        \\fn invalid() {
+        \\  reg value: i32 = get_dma_full();
+        \\}
+    , error.RegisterTypeMismatch);
+}
+
 test "inline calls expand inside caller scope" {
     try expectAsm(
         \\inline fn clear() {
@@ -482,6 +574,141 @@ test "inline calls expand inside caller scope" {
         \\  break
         \\  jr $ra
         \\  nop
+        \\
+        \\
+    );
+}
+
+test "fixed-register parameters bind without emitting initialization" {
+    try expectAsm(
+        \\fn write_word(
+        \\  reg($t0) value: u32,
+        \\  reg($s0) destination: u32,
+        \\) {
+        \\  store(u32, destination, value);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\write_word:
+        \\  sw $t0, 0($s0)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "fixed-register parameters reject conflicting bindings" {
+    try expectAsmError(
+        \\fn duplicate_name(
+        \\  reg($t0) value: u32,
+        \\  reg($t1) value: u32,
+        \\) {}
+    , error.SymbolAlreadyDefined);
+    try expectAsmError(
+        \\fn duplicate_register(
+        \\  reg($t0) first: u32,
+        \\  reg($t0) second: u32,
+        \\) {}
+    , error.RegisterAlreadyInUse);
+    try expectAsmError(
+        \\fn reserved_register(reg($at) value: u32) {}
+    , error.RegisterReservedForBackend);
+}
+
+test "function parameters require explicit register bindings" {
+    try expectParseError(
+        \\fn invalid(value: u32) {}
+    , .expected_fixed_register_parameter, 1, 12);
+}
+
+test "function calls verify fixed-register arguments without moves" {
+    try expectAsm(
+        \\fn callee(
+        \\  reg($t0) size: u32,
+        \\  reg($s0) address: u32,
+        \\) {}
+        \\
+        \\fn caller() noreturn {
+        \\  reg($t0) size: u32 = 15;
+        \\  reg($s0) address: u32 = 0x1000;
+        \\  callee(size, address);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\callee:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\caller:
+        \\  addiu $t0, $zero, 15
+        \\  addiu $s0, $zero, 4096
+        \\  jal callee
+        \\  nop
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "function calls reject arguments that do not match pinned parameters" {
+    try expectAsmError(
+        \\fn callee(reg($t0) value: u32) {}
+        \\fn caller() {
+        \\  callee();
+        \\}
+    , error.FunctionArgumentCountMismatch);
+    try expectAsmError(
+        \\fn callee(reg($t0) value: u32) {}
+        \\fn caller() {
+        \\  reg($t0) value: i32 = 1;
+        \\  callee(value);
+        \\}
+    , error.FunctionArgumentTypeMismatch);
+    try expectAsmError(
+        \\fn callee(reg($t0) value: u32) {}
+        \\fn caller() {
+        \\  reg($t1) value: u32 = 1;
+        \\  callee(value);
+        \\}
+    , error.FunctionArgumentRegisterMismatch);
+}
+
+test "function calls materialize constants and literals in pinned registers" {
+    try expectAsm(
+        \\fn callee(
+        \\  reg($t0) size: u32,
+        \\  reg($s0) address: u32,
+        \\) {}
+        \\
+        \\fn caller() noreturn {
+        \\  const address: u32 = 0x12345678;
+        \\  callee(16, address);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\callee:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\caller:
+        \\  addiu $t0, $zero, 16
+        \\  lui $s0, 4660
+        \\  ori $s0, $s0, 22136
+        \\  jal callee
+        \\  nop
+        \\  break
         \\
         \\
     );
