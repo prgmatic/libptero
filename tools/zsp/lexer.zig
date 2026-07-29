@@ -88,6 +88,8 @@ pub const Lexer = struct {
             },
             '(' => return self.makeToken(.l_paren, start, start_line, start_column),
             ')' => return self.makeToken(.r_paren, start, start_line, start_column),
+            '[' => return self.makeToken(.l_bracket, start, start_line, start_column),
+            ']' => return self.makeToken(.r_bracket, start, start_line, start_column),
             '{' => return self.makeToken(.l_brace, start, start_line, start_column),
             '}' => return self.makeToken(.r_brace, start, start_line, start_column),
             ';' => return self.makeToken(.semicolon, start, start_line, start_column),

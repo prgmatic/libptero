@@ -26,8 +26,31 @@ pub const Parameter = struct {
 
 pub const Value = union(enum) {
     ident: []const u8,
+    vector_access: VectorAccess,
+    vector_operation: VectorOperation,
     number: i64,
     load: Load,
+};
+
+pub const VectorOp = enum(u6) {
+    vmulf = 0b000000,
+    vmulu = 0b000001,
+    vmudl = 0b000100,
+    vmudm = 0b000101,
+    vmudn = 0b000110,
+    vmudh = 0b000111,
+    vmacf = 0b001000,
+    vmacu = 0b001001,
+    vmadl = 0b001100,
+    vmadm = 0b001101,
+    vmadn = 0b001110,
+    vmadh = 0b001111,
+};
+
+pub const VectorOperation = struct {
+    op: VectorOp,
+    lhs: VectorAccess,
+    rhs: VectorAccess,
 };
 
 pub const Load = struct {
@@ -38,7 +61,22 @@ pub const Load = struct {
 
 pub const ValueRef = union(enum) {
     ident: []const u8,
+    vector_access: VectorAccess,
     number: i64,
+};
+
+pub const VectorView = enum {
+    sint,
+    uint,
+    sfract,
+    ufract,
+};
+
+pub const VectorAccess = struct {
+    name: []const u8,
+    element: u4 = 0,
+    lane: ?u3 = null,
+    view: ?VectorView = null,
 };
 
 pub const DataType = enum {
@@ -169,6 +207,8 @@ pub const AssignOp = enum {
 
 pub const Assignment = struct {
     destination: []const u8,
+    destination_lane: ?u3 = null,
+    destination_view: ?VectorView = null,
     lhs: Value,
     op: AssignOp,
     rhs: ?Value,

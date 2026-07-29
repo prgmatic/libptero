@@ -200,6 +200,8 @@ fn vectorOperations() !void {
     try expectDmemWords(0x140, &xor_expected);
     try expectDmemWords(0x150, &not_expected);
     try expectDmemWords(0x180, &nor_expected);
+    const multiply_expected = [_]u32{ 0, 0, 0, 0 };
+    try expectDmemWords(0x1a0, &multiply_expected);
 
     const wide_expected = [_]u32{
         0x00040004, 0x00040004, 0x00040004, 0x00040004,

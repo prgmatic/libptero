@@ -42,6 +42,8 @@ pub const Tag = enum {
     type_end,
     l_paren,
     r_paren,
+    l_bracket,
+    r_bracket,
     l_brace,
     r_brace,
     semicolon,

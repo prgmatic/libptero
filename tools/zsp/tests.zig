@@ -581,6 +581,128 @@ test "vector operations reject mixed types, immediates, and invalid memory offse
     , error.VectorMemoryOffsetOutOfRange);
 }
 
+test "vector swizzles views and indexed lane transfers lower to COP2 encodings" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) scalar: u32 = 0x1234;
+        \\  reg($v01) source: vec16 = 0;
+        \\  reg($v02) result: vec16 = 0;
+        \\  source[2] = scalar;
+        \\  scalar = source[2];
+        \\  result = source + source.xxxxxxxx;
+        \\  reg($v04) wide: vec32 = 0;
+        \\  reg($v06) half: vec16 = 0;
+        \\  half = wide.sfract ^ half;
+        \\  wide.sint = half;
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 4660
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  .word 0x48880a00 # mtc2 $t0, $v01[2]
+        \\  .word 0x48080a00 # mfc2 $t0, $v01[2]
+        \\  andi $t0, $t0, 65535
+        \\  .word 0x4b010894 # vaddc $v02, $v01, $v01
+        \\  .word 0x4a04212c # vxor $v04, $v04, $v04
+        \\  .word 0x4a05296c # vxor $v05, $v05, $v05
+        \\  .word 0x4a0631ac # vxor $v06, $v06, $v06
+        \\  .word 0x4a0629ac # vxor $v06, $v05, $v06
+        \\  .word 0x4a06312a # vor $v04, $v06, $v06
+        \\
+        \\
+    );
+}
+
+test "fractional multiply and accumulate expressions emit VU instructions" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) source: vec16 = 0;
+        \\  reg($v02) factor: vec16 = 0;
+        \\  reg($v03) result: vec16 = 0;
+        \\  result.sfract = vmulf(source.sfract, factor.x);
+        \\  result.ufract = vmulu(source.ufract, factor);
+        \\  result.sfract = vmacf(source.sfract, factor.yyyyyyyy);
+        \\  result.ufract = vmacu(source.ufract, factor);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
+        \\  .word 0x4b0208c0 # vmulf $v03, $v01, $v02
+        \\  .word 0x4a0208c1 # vmulu $v03, $v01, $v02
+        \\  .word 0x4b2208c8 # vmacf $v03, $v01, $v02
+        \\  .word 0x4a0208c9 # vmacu $v03, $v01, $v02
+        \\
+        \\
+    );
+}
+
+test "fractional multiply validates operand widths and swizzle placement" {
+    try expectAsmError(
+        \\fn test() {
+        \\  reg($v01) wide: vec32 = 0;
+        \\  reg($v03) factor: vec16 = 0;
+        \\  reg($v04) result: vec16 = 0;
+        \\  result = vmulf(wide, factor);
+        \\}
+    , error.VectorMultiplyRequiresVec16Operands);
+    try expectAsmError(
+        \\fn test() {
+        \\  reg($v01) source: vec16 = 0;
+        \\  reg($v02) factor: vec16 = 0;
+        \\  reg($v03) result: vec16 = 0;
+        \\  result = vmulf(source.x, factor);
+        \\}
+    , error.VectorSwizzleOnlyAllowedOnRhs);
+}
+
+test "partial-product multiply and accumulate families emit their function codes" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) left: vec16 = 0;
+        \\  reg($v02) right: vec16 = 0;
+        \\  reg($v03) result: vec16 = 0;
+        \\  result = vmudl(left, right);
+        \\  result = vmudm(left, right);
+        \\  result = vmudn(left, right);
+        \\  result = vmudh(left, right);
+        \\  result = vmadl(left, right);
+        \\  result = vmadm(left, right);
+        \\  result = vmadn(left, right);
+        \\  result = vmadh(left, right);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
+        \\  .word 0x4a0208c4 # vmudl $v03, $v01, $v02
+        \\  .word 0x4a0208c5 # vmudm $v03, $v01, $v02
+        \\  .word 0x4a0208c6 # vmudn $v03, $v01, $v02
+        \\  .word 0x4a0208c7 # vmudh $v03, $v01, $v02
+        \\  .word 0x4a0208cc # vmadl $v03, $v01, $v02
+        \\  .word 0x4a0208cd # vmadm $v03, $v01, $v02
+        \\  .word 0x4a0208ce # vmadn $v03, $v01, $v02
+        \\  .word 0x4a0208cf # vmadh $v03, $v01, $v02
+        \\
+        \\
+    );
+}
+
 test "store emits byte halfword and word writes" {
     try expectAsm(
         \\fn test() {

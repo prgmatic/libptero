@@ -266,11 +266,24 @@ pub const Parser = struct {
             return .{ .var_decl = try self.parseRegDecl() };
         }
 
+        var destination_lane: ?u3 = null;
+        var destination_view: ?ast.VectorView = null;
+        if (self.current.tag == .l_bracket or self.isVectorDotSuffix()) {
+            const access = try self.parseVectorAccess(first.text);
+            destination_lane = access.lane;
+            destination_view = access.view;
+            if (access.lane == null and access.view == null) {
+                return self.fail(first, .unsupported_destination_swizzle);
+            }
+        }
+
         if (try self.parseCompoundAssignOp()) |op| {
             const value = valueFromRef(try self.parseValueRef());
             _ = try self.expect(.semicolon);
             return .{ .assignment = .{
                 .destination = first.text,
+                .destination_lane = destination_lane,
+                .destination_view = destination_view,
                 .lhs = .{ .ident = first.text },
                 .op = op,
                 .rhs = value,
@@ -283,6 +296,8 @@ pub const Parser = struct {
                 _ = try self.expect(.semicolon);
                 return .{ .assignment = .{
                     .destination = first.text,
+                    .destination_lane = destination_lane,
+                    .destination_view = destination_view,
                     .lhs = value,
                     .op = .bit_not,
                     .rhs = null,
@@ -299,6 +314,8 @@ pub const Parser = struct {
             _ = try self.expect(.semicolon);
             return .{ .assignment = .{
                 .destination = first.text,
+                .destination_lane = destination_lane,
+                .destination_view = destination_view,
                 .lhs = lhs,
                 .op = op,
                 .rhs = rhs,
@@ -431,9 +448,25 @@ pub const Parser = struct {
             return .{ .load = .{ .data_type = data_type, .address = address, .offset = offset } };
         }
 
+        if (self.current.tag == .ident and parseVectorOp(self.current.text) != null) {
+            const op_token = try self.expect(.ident);
+            const op = parseVectorOp(op_token.text).?;
+            _ = try self.expect(.l_paren);
+            const lhs_token = self.current;
+            const lhs = try vectorAccessFromRef(try self.parseValueRef()) orelse
+                return self.fail(lhs_token, .expected_vector_operand);
+            _ = try self.expect(.comma);
+            const rhs_token = self.current;
+            const rhs = try vectorAccessFromRef(try self.parseValueRef()) orelse
+                return self.fail(rhs_token, .expected_vector_operand);
+            _ = try self.expect(.r_paren);
+            return .{ .vector_operation = .{ .op = op, .lhs = lhs, .rhs = rhs } };
+        }
+
         const value_ref = try self.parseValueRef();
         return switch (value_ref) {
             .ident => |name| .{ .ident = name },
+            .vector_access => |access| .{ .vector_access = access },
             .number => |number| .{ .number = number },
         };
     }
@@ -448,6 +481,9 @@ pub const Parser = struct {
         switch (self.current.tag) {
             .ident => {
                 const tok = try self.expect(.ident);
+                if (self.current.tag == .l_bracket or self.isVectorDotSuffix()) {
+                    return .{ .vector_access = try self.parseVectorAccess(tok.text) };
+                }
                 return .{ .ident = tok.text };
             },
             .number => {
@@ -458,11 +494,40 @@ pub const Parser = struct {
         }
     }
 
+    fn isVectorDotSuffix(self: *const Parser) bool {
+        if (self.current.tag != .dot) return false;
+        var lexer = self.lexer;
+        const suffix = lexer.next() catch return false;
+        return suffix.tag == .ident and
+            (parseVectorView(suffix.text) != null or parseSwizzle(suffix.text) != null);
+    }
+
+    fn parseVectorAccess(self: *Parser, name: []const u8) !ast.VectorAccess {
+        if (try self.eat(.l_bracket)) {
+            const lane_token = try self.expect(.number);
+            const lane = try self.parseNumberValue(lane_token);
+            if (lane < 0 or lane > 7) return self.fail(lane_token, .invalid_vector_lane);
+            _ = try self.expect(.r_bracket);
+            return .{ .name = name, .element = @intCast(lane + 8), .lane = @intCast(lane) };
+        }
+
+        _ = try self.expect(.dot);
+        const suffix = try self.expect(.ident);
+        if (parseVectorView(suffix.text)) |view| return .{ .name = name, .view = view };
+        const swizzle = parseSwizzle(suffix.text) orelse
+            return self.fail(suffix, .invalid_vector_swizzle);
+        return .{
+            .name = name,
+            .element = swizzle.element,
+            .lane = swizzle.lane,
+        };
+    }
+
     fn parseLiteralOffset(self: *Parser) !i64 {
         const tok = self.current;
         return switch (try self.parseValueRef()) {
             .number => |number| number,
-            .ident => self.fail(tok, .expected_literal_offset),
+            .ident, .vector_access => self.fail(tok, .expected_literal_offset),
         };
     }
 
@@ -585,6 +650,7 @@ pub const Parser = struct {
 fn valueFromRef(value_ref: ast.ValueRef) ast.Value {
     return switch (value_ref) {
         .ident => |name| .{ .ident = name },
+        .vector_access => |access| .{ .vector_access = access },
         .number => |number| .{ .number = number },
     };
 }
@@ -598,6 +664,10 @@ pub const ErrorType = enum {
     expected_data_type,
     expected_scalar_register,
     expected_vector_register,
+    invalid_vector_lane,
+    invalid_vector_swizzle,
+    unsupported_destination_swizzle,
+    expected_vector_operand,
     expected_fixed_register_parameter,
     expected_import,
     expected_value,
@@ -626,6 +696,10 @@ pub fn errorString(code: ErrorType) []const u8 {
         .expected_data_type => "expected data type",
         .expected_scalar_register => "expected scalar register",
         .expected_vector_register => "expected vector register ($v00 through $v31)",
+        .invalid_vector_lane => "vector lane must be between 0 and 7",
+        .invalid_vector_swizzle => "unsupported vector swizzle",
+        .unsupported_destination_swizzle => "only a single lane or typed view is allowed on an assignment destination",
+        .expected_vector_operand => "expected vector operand",
         .expected_fixed_register_parameter => "expected fixed-register parameter",
         .expected_import => "expected import",
         .expected_value => "expected value",
@@ -653,6 +727,51 @@ fn parseVectorRegister(tok: token.Token) ?ast.VectorRegister {
 
 fn isVectorType(data_type: ast.DataType) bool {
     return data_type == .vec16 or data_type == .vec32;
+}
+
+fn parseVectorView(text: []const u8) ?ast.VectorView {
+    inline for (std.meta.fields(ast.VectorView)) |field| {
+        if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
+    }
+    return null;
+}
+
+fn parseVectorOp(text: []const u8) ?ast.VectorOp {
+    inline for (std.meta.fields(ast.VectorOp)) |field| {
+        if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
+    }
+    return null;
+}
+
+fn vectorAccessFromRef(value: ast.ValueRef) !?ast.VectorAccess {
+    return switch (value) {
+        .ident => |name| .{ .name = name },
+        .vector_access => |access| access,
+        .number => null,
+    };
+}
+
+const ParsedSwizzle = struct { element: u4, lane: ?u3 = null };
+
+fn parseSwizzle(text: []const u8) ?ParsedSwizzle {
+    const names = [_][]const u8{
+        "x",        "y",        "z",        "w",        "X",        "Y",        "Z",        "W",
+        "xxxxxxxx", "yyyyyyyy", "zzzzzzzz", "wwwwwwww", "XXXXXXXX", "YYYYYYYY", "ZZZZZZZZ", "WWWWWWWW",
+    };
+    for (names, 0..) |name, index| {
+        if (std.mem.eql(u8, text, name)) {
+            const lane: u3 = @intCast(index % 8);
+            return .{ .element = @as(u4, lane) + 8, .lane = if (text.len == 1) lane else null };
+        }
+    }
+    if (std.mem.eql(u8, text, "xyzwXYZW")) return .{ .element = 0 };
+    if (std.mem.eql(u8, text, "xxzzXXZZ")) return .{ .element = 2 };
+    if (std.mem.eql(u8, text, "yywwYYWW")) return .{ .element = 3 };
+    if (std.mem.eql(u8, text, "xxxxXXXX")) return .{ .element = 4 };
+    if (std.mem.eql(u8, text, "yyyyYYYY")) return .{ .element = 5 };
+    if (std.mem.eql(u8, text, "zzzzZZZZ")) return .{ .element = 6 };
+    if (std.mem.eql(u8, text, "wwwwWWWW")) return .{ .element = 7 };
+    return null;
 }
 
 fn parseDataTypeName(text: []const u8) ?ast.DataType {

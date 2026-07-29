@@ -37,6 +37,8 @@ export fn _start() noreturn {
     reg($v07) xor_result: vec16 = 0;
     reg($v14) not_result: vec16 = 0;
     reg($v15) nor_result: vec16 = 0;
+    reg($v16) mul_result: vec16 = 0;
+    reg($v17) zero_factor: vec16 = 0;
 
     add_result = a;
     add_vectors(a, b, add_result);
@@ -47,6 +49,10 @@ export fn _start() noreturn {
     xor_result = a ^ b;
     not_result = ~a;
     nor_result = a ~| b;
+    mul_result.sfract = vmulf(a.sfract, zero_factor.x);
+    mul_result.sfract = vmacf(b.sfract, zero_factor.yyyyyyyy);
+    mul_result.ufract = vmulu(a.ufract, zero_factor);
+    mul_result.ufract = vmacu(b.ufract, zero_factor);
 
     store(vec16, input, add_result, 0x100);
     store(vec16, input, sub_result, 0x110);
@@ -55,6 +61,7 @@ export fn _start() noreturn {
     store(vec16, input, xor_result, 0x140);
     store(vec16, input, not_result, 0x150);
     store(vec16, input, nor_result, 0x180);
+    store(vec16, input, mul_result, 0x1a0);
 
     // A vec32 is an integer vector followed by its fractional vector.
     seed = 0x00010001;

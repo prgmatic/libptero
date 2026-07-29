@@ -277,6 +277,33 @@ fn writeVectorInitialValue(
                 );
             }
         },
+        .vector_access => |access| {
+            if (access.lane != null) return error.VectorLaneInitializationUnsupported;
+            const source = try context.lookup(access.name);
+            const source_reg = try vectorRegisterForView(source, access.view);
+            if (data_type != .vec16 or source.data_type != .vec16) {
+                return error.RegisterTypeMismatch;
+            }
+            try writeVectorOp(writer, .vor, destination, source_reg, source_reg, access.element);
+        },
+        .vector_operation => |operation| {
+            if (data_type != .vec16) return error.Vec32ViewRequired;
+            const lhs = try vectorOperand(context, operation.lhs);
+            const rhs = try vectorOperand(context, operation.rhs);
+            if (lhs.data_type != .vec16 or rhs.data_type != .vec16) {
+                return error.VectorMultiplyRequiresVec16Operands;
+            }
+            if (lhs.element != 0) return error.VectorSwizzleOnlyAllowedOnRhs;
+            try writeEncodedVectorOp(
+                writer,
+                @tagName(operation.op),
+                @intFromEnum(operation.op),
+                destination,
+                lhs.reg,
+                rhs.reg,
+                rhs.element,
+            );
+        },
         .number => |number| {
             if (number != 0) return error.VectorImmediateUnsupported;
             try writeVectorOp(writer, .vxor, destination, destination, destination, 0);
@@ -311,7 +338,7 @@ fn writeAssignment(writer: *std.Io.Writer, context: *FunctionContext, assignment
     }
 }
 
-const VectorOp = enum(u6) {
+const VectorAluOp = enum(u6) {
     vadd = 0b010000,
     vsub = 0b010001,
     vaddc = 0b010100,
@@ -329,8 +356,43 @@ fn writeVectorAssignment(
     assignment: ast.Assignment,
 ) !void {
     const destination_reg = destination.vector_reg orelse return error.ExpectedVectorRegister;
-    const lhs = switch (assignment.lhs) {
-        .ident => |name| try context.lookup(name),
+    if (assignment.lhs == .vector_operation) {
+        if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
+        if (assignment.destination_lane != null) return error.InvalidVectorLaneAssignment;
+        const operation = assignment.lhs.vector_operation;
+        const lhs = try vectorOperand(context, operation.lhs);
+        const rhs = try vectorOperand(context, operation.rhs);
+        if (lhs.data_type != .vec16 or rhs.data_type != .vec16) {
+            return error.VectorMultiplyRequiresVec16Operands;
+        }
+        if (lhs.element != 0) return error.VectorSwizzleOnlyAllowedOnRhs;
+        const result_reg = try vectorRegisterForView(destination, assignment.destination_view);
+        if (destination.data_type == .vec32 and assignment.destination_view == null) {
+            return error.Vec32ViewRequired;
+        }
+        return writeEncodedVectorOp(
+            writer,
+            @tagName(operation.op),
+            @intFromEnum(operation.op),
+            result_reg,
+            lhs.reg,
+            rhs.reg,
+            rhs.element,
+        );
+    }
+    if (assignment.destination_lane) |lane| {
+        if (assignment.op != .set or assignment.rhs != null) return error.InvalidVectorLaneAssignment;
+        const source_reg = switch (assignment.lhs) {
+            .ident => |name| (try context.lookup(name)).reg orelse
+                return error.VectorLaneSourceMustBeScalarRegister,
+            else => return error.VectorLaneSourceMustBeScalarRegister,
+        };
+        return writeMtc2(writer, source_reg, destination_reg, lane);
+    }
+    const lhs_operand = switch (assignment.lhs) {
+        .ident => |name| try vectorOperand(context, .{ .name = name }),
+        .vector_access => |access| try vectorOperand(context, access),
+        .vector_operation => return error.InvalidAssignment,
         .number => return error.VectorImmediateUnsupported,
         .load => |load| {
             if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
@@ -338,13 +400,15 @@ fn writeVectorAssignment(
             return writeVectorLoad(writer, context, destination_reg, load);
         },
     };
-    if (lhs.data_type != destination.data_type) return error.RegisterTypeMismatch;
-    const lhs_reg = lhs.vector_reg orelse return error.ExpectedVectorRegister;
+    const destination_type: DataType = if (assignment.destination_view != null) .vec16 else destination.data_type;
+    if (lhs_operand.data_type != destination_type) return error.RegisterTypeMismatch;
+    const destination_view_reg = try vectorRegisterForView(destination, assignment.destination_view);
+    const lhs_reg = lhs_operand.reg;
 
     if (assignment.op == .set) {
         if (assignment.rhs != null) return error.InvalidAssignment;
-        try writeVectorOp(writer, .vor, destination_reg, lhs_reg, lhs_reg, 0);
-        if (destination.data_type == .vec32) {
+        try writeVectorOp(writer, .vor, destination_view_reg, lhs_reg, lhs_reg, lhs_operand.element);
+        if (destination_type == .vec32) {
             try writeVectorOp(
                 writer,
                 .vor,
@@ -359,8 +423,8 @@ fn writeVectorAssignment(
 
     if (assignment.op == .bit_not) {
         if (assignment.rhs != null) return error.InvalidAssignment;
-        try writeVectorOp(writer, .vnor, destination_reg, lhs_reg, lhs_reg, 0);
-        if (destination.data_type == .vec32) {
+        try writeVectorOp(writer, .vnor, destination_view_reg, lhs_reg, lhs_reg, lhs_operand.element);
+        if (destination_type == .vec32) {
             try writeVectorOp(
                 writer,
                 .vnor,
@@ -374,46 +438,65 @@ fn writeVectorAssignment(
     }
 
     const rhs_value = assignment.rhs orelse return error.InvalidAssignment;
-    const rhs = switch (rhs_value) {
-        .ident => |name| try context.lookup(name),
+    const rhs_operand = switch (rhs_value) {
+        .ident => |name| try vectorOperand(context, .{ .name = name }),
+        .vector_access => |access| try vectorOperand(context, access),
         else => return error.VectorImmediateUnsupported,
     };
-    if (rhs.data_type != destination.data_type) return error.RegisterTypeMismatch;
-    const rhs_reg = rhs.vector_reg orelse return error.ExpectedVectorRegister;
+    if (rhs_operand.data_type != destination_type) return error.RegisterTypeMismatch;
+    if (lhs_operand.element != 0) return error.VectorSwizzleOnlyAllowedOnRhs;
+    const rhs_reg = rhs_operand.reg;
+    const element = rhs_operand.element;
 
-    if (destination.data_type == .vec32) {
+    if (destination_type == .vec32) {
         const destination_fraction = nextVectorRegister(destination_reg).?;
         const lhs_fraction = nextVectorRegister(lhs_reg).?;
         const rhs_fraction = nextVectorRegister(rhs_reg).?;
         switch (assignment.op) {
             .add => {
-                try writeVectorOp(writer, .vaddc, destination_fraction, lhs_fraction, rhs_fraction, 0);
-                try writeVectorOp(writer, .vadd, destination_reg, lhs_reg, rhs_reg, 0);
+                try writeVectorOp(writer, .vaddc, destination_fraction, lhs_fraction, rhs_fraction, element);
+                try writeVectorOp(writer, .vadd, destination_reg, lhs_reg, rhs_reg, element);
             },
             .sub => {
-                try writeVectorOp(writer, .vsubc, destination_fraction, lhs_fraction, rhs_fraction, 0);
-                try writeVectorOp(writer, .vsub, destination_reg, lhs_reg, rhs_reg, 0);
+                try writeVectorOp(writer, .vsubc, destination_fraction, lhs_fraction, rhs_fraction, element);
+                try writeVectorOp(writer, .vsub, destination_reg, lhs_reg, rhs_reg, element);
             },
             .bit_and, .bit_or, .bit_xor, .bit_nor => {
                 const op = vectorLogicOp(assignment.op);
-                try writeVectorOp(writer, op, destination_reg, lhs_reg, rhs_reg, 0);
-                try writeVectorOp(writer, op, destination_fraction, lhs_fraction, rhs_fraction, 0);
+                try writeVectorOp(writer, op, destination_reg, lhs_reg, rhs_reg, element);
+                try writeVectorOp(writer, op, destination_fraction, lhs_fraction, rhs_fraction, element);
             },
             else => return error.UnsupportedVectorOperator,
         }
         return;
     }
 
-    const op: VectorOp = switch (assignment.op) {
+    const op: VectorAluOp = switch (assignment.op) {
         .add => .vaddc,
         .sub => .vsubc,
         .bit_and, .bit_or, .bit_xor, .bit_nor => vectorLogicOp(assignment.op),
         else => return error.UnsupportedVectorOperator,
     };
-    try writeVectorOp(writer, op, destination_reg, lhs_reg, rhs_reg, 0);
+    try writeVectorOp(writer, op, destination_view_reg, lhs_reg, rhs_reg, element);
 }
 
-fn vectorLogicOp(op: ast.AssignOp) VectorOp {
+const VectorOperand = struct {
+    data_type: DataType,
+    reg: ast.VectorRegister,
+    element: u4,
+};
+
+fn vectorOperand(context: *FunctionContext, access: ast.VectorAccess) !VectorOperand {
+    const symbol = try context.lookup(access.name);
+    if (!isVectorType(symbol.data_type)) return error.ExpectedVectorType;
+    return .{
+        .data_type = if (access.view != null) .vec16 else symbol.data_type,
+        .reg = try vectorRegisterForView(symbol, access.view),
+        .element = access.element,
+    };
+}
+
+fn vectorLogicOp(op: ast.AssignOp) VectorAluOp {
     return switch (op) {
         .bit_and => .vand,
         .bit_or => .vor,
@@ -425,7 +508,27 @@ fn vectorLogicOp(op: ast.AssignOp) VectorOp {
 
 fn writeVectorOp(
     writer: *std.Io.Writer,
-    op: VectorOp,
+    op: VectorAluOp,
+    destination: ast.VectorRegister,
+    lhs: ast.VectorRegister,
+    rhs: ast.VectorRegister,
+    element: u4,
+) !void {
+    return writeEncodedVectorOp(
+        writer,
+        @tagName(op),
+        @intFromEnum(op),
+        destination,
+        lhs,
+        rhs,
+        element,
+    );
+}
+
+fn writeEncodedVectorOp(
+    writer: *std.Io.Writer,
+    name: []const u8,
+    opcode: u6,
     destination: ast.VectorRegister,
     lhs: ast.VectorRegister,
     rhs: ast.VectorRegister,
@@ -436,13 +539,43 @@ fn writeVectorOp(
         (@as(u32, @intFromEnum(rhs)) << 16) |
         (@as(u32, @intFromEnum(lhs)) << 11) |
         (@as(u32, @intFromEnum(destination)) << 6) |
-        @as(u32, @intFromEnum(op));
+        @as(u32, opcode);
     try writer.print("  .word 0x{x:0>8} # {s} ${s}, ${s}, ${s}\n", .{
         word,
-        @tagName(op),
+        name,
         vectorRegName(destination),
         vectorRegName(lhs),
         vectorRegName(rhs),
+    });
+}
+
+fn writeMtc2(
+    writer: *std.Io.Writer,
+    source: Register,
+    destination: ast.VectorRegister,
+    lane: u3,
+) !void {
+    const word: u32 = 0x48800000 |
+        (@as(u32, @intFromEnum(source)) << 16) |
+        (@as(u32, @intFromEnum(destination)) << 11) |
+        (@as(u32, lane) << 8);
+    try writer.print("  .word 0x{x:0>8} # mtc2 {s}, ${s}[{d}]\n", .{
+        word, regName(source), vectorRegName(destination), lane,
+    });
+}
+
+fn writeMfc2(
+    writer: *std.Io.Writer,
+    destination: Register,
+    source: ast.VectorRegister,
+    lane: u3,
+) !void {
+    const word: u32 = 0x48000000 |
+        (@as(u32, @intFromEnum(destination)) << 16) |
+        (@as(u32, @intFromEnum(source)) << 11) |
+        (@as(u32, lane) << 8);
+    try writer.print("  .word 0x{x:0>8} # mfc2 {s}, ${s}[{d}]\n", .{
+        word, regName(destination), vectorRegName(source), lane,
     });
 }
 
@@ -468,6 +601,18 @@ fn writeSet(
                 try loadImmediateInto(writer, destination_reg, source.constant orelse return error.ExpectedConstant);
             }
         },
+        .vector_access => |access| {
+            const lane = access.lane orelse return error.VectorLaneRequired;
+            const source = try context.lookup(access.name);
+            const source_reg = try vectorRegisterForView(source, access.view);
+            try writeMfc2(writer, destination_reg, source_reg, lane);
+            if (destination.data_type == .u16 or destination.data_type == .u32) {
+                try writer.print("  andi {s}, {s}, 65535\n", .{
+                    regName(destination_reg), regName(destination_reg),
+                });
+            }
+        },
+        .vector_operation => return error.RegisterTypeMismatch,
         .load => |load| {
             if (destination.data_type != load.data_type) return error.RegisterTypeMismatch;
             try writeLoadInto(writer, context, destination_reg, load);
@@ -484,6 +629,8 @@ fn writeBitNot(
 ) !void {
     const source = switch (value) {
         .ident => |name| try context.lookup(name),
+        .vector_access => return error.BitNotRequiresRegister,
+        .vector_operation => return error.BitNotRequiresRegister,
         .number => return error.BitNotRequiresRegister,
         .load => return error.BitNotRequiresRegister,
     };
@@ -507,6 +654,8 @@ fn writeBinary(
 ) !void {
     const lhs = switch (lhs_value) {
         .ident => |name| try context.lookup(name),
+        .vector_access => return error.ArithmeticLhsMustBeRegister,
+        .vector_operation => return error.ArithmeticLhsMustBeRegister,
         .number => return error.ArithmeticLhsMustBeRegister,
         .load => return error.ArithmeticLhsMustBeRegister,
     };
@@ -544,6 +693,8 @@ fn writeBinary(
             }
         },
         .number => |number| try writeBinaryImmediate(writer, destination_reg, lhs_reg, op, number),
+        .vector_access => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .vector_operation => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .load => return error.ArithmeticRhsMustBeRegisterOrNumber,
     }
 }
@@ -633,6 +784,8 @@ fn writePowerOfTwoMath(
             if (rhs.reg != null) return error.PowerOfTwoConstantRequired;
             break :blk rhs.constant orelse return error.ExpectedConstant;
         },
+        .vector_access => return error.PowerOfTwoConstantRequired,
+        .vector_operation => return error.PowerOfTwoConstantRequired,
         .load => return error.PowerOfTwoConstantRequired,
     };
     if (value <= 0 or value > std.math.maxInt(u32)) return error.PowerOfTwoConstantRequired;
@@ -695,6 +848,8 @@ fn writeShift(
                 regName(rhs_reg),
             });
         },
+        .vector_access => return error.ShiftAmountMustBeRegisterOrNumber,
+        .vector_operation => return error.ShiftAmountMustBeRegisterOrNumber,
         .load => return error.ShiftAmountMustBeRegisterOrNumber,
     }
 }
@@ -737,6 +892,7 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
     if (isVectorType(store.data_type)) {
         const value_name = switch (store.value) {
             .ident => |name| name,
+            .vector_access => return error.PartialVectorStoreNotImplemented,
             .number => return error.ExpectedVectorRegister,
         };
         const value = try context.lookup(value_name);
@@ -839,6 +995,7 @@ fn writeCall(
     if (call.arguments.len != function.parameters.len) return error.FunctionArgumentCountMismatch;
     for (call.arguments, function.parameters) |argument, parameter| {
         switch (argument) {
+            .vector_access => return error.FunctionArgumentTypeMismatch,
             .number => |number| {
                 if (isVectorType(parameter.data_type)) return error.VectorArgumentMustBeRegister;
                 try loadImmediateInto(writer, parameter.reg orelse return error.InvalidScalarRegister, number);
@@ -953,6 +1110,8 @@ fn writeConditionBranchFalse(
     var rhs_immediate: ?i64 = null;
     switch (condition.rhs) {
         .number => |number| rhs_immediate = number,
+        .vector_access => return error.ConditionRhsMustBeRegisterOrNumber,
+        .vector_operation => return error.ConditionRhsMustBeRegisterOrNumber,
         .ident => |name| blk: {
             const rhs = try context.lookup(name);
             try expectSameType(lhs, rhs);
@@ -1055,6 +1214,8 @@ fn valueAsImmediate(context: *FunctionContext, value: ast.Value) !i64 {
     return switch (value) {
         .number => |number| number,
         .ident => |name| (try context.lookup(name)).constant orelse error.ExpectedConstant,
+        .vector_access => error.ExpectedConstant,
+        .vector_operation => error.ExpectedConstant,
         .load => error.ExpectedConstant,
     };
 }
@@ -1070,6 +1231,7 @@ fn valueAsAddressReg(writer: *std.Io.Writer, context: *FunctionContext, value: a
             try loadImmediateInto(writer, compiler_scratch, number);
             return compiler_scratch;
         },
+        .vector_access => return error.AddressMustBeRegister,
     }
 }
 
@@ -1081,6 +1243,7 @@ fn valueAsStoreReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast
             return try loadImmediate(writer, symbol.constant orelse return error.StoreValueMustBeRegister);
         },
         .number => |number| return try loadImmediate(writer, number),
+        .vector_access => return error.StoreValueMustBeRegister,
     }
 }
 
@@ -1194,6 +1357,16 @@ fn nextVectorRegister(reg: ast.VectorRegister) ?ast.VectorRegister {
     const index = @intFromEnum(reg);
     if (index == 31) return null;
     return @enumFromInt(index + 1);
+}
+
+fn vectorRegisterForView(symbol: Symbol, view: ?ast.VectorView) !ast.VectorRegister {
+    const reg = symbol.vector_reg orelse return error.ExpectedVectorRegister;
+    if (symbol.data_type == .vec16) return reg;
+    if (symbol.data_type != .vec32) return error.ExpectedVectorType;
+    return switch (view orelse return reg) {
+        .sint, .uint => reg,
+        .sfract, .ufract => nextVectorRegister(reg) orelse error.InvalidVectorRegisterPair,
+    };
 }
 
 fn vectorRegName(reg: ast.VectorRegister) []const u8 {
