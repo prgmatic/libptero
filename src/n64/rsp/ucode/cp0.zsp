@@ -1,0 +1,23 @@
+inline pub fn get_dma_full(reg($t3) value: u32) {
+    asm("mfc0 $t3, $5");
+}
+
+inline pub fn get_sp_status(reg($t3) value: u32) {
+    asm("mfc0 $t3, $4");
+}
+
+inline pub fn set_dma_addr_rsp(reg($s4) value: u32) {
+    asm("mtc0 $s4, $0");
+}
+
+inline pub fn set_dma_addr_rdram(reg($s0) value: u32) {
+    asm("mtc0 $s0, $1");
+}
+
+inline pub fn set_dma_read(reg($t3) value: u32) {
+    asm("mtc0 $t3, $2");
+}
+
+inline pub fn set_dma_write(reg($t3) value: u32) {
+    asm("mtc0 $t3, $3");
+}

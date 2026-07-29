@@ -7,6 +7,13 @@ const zsp_programs = @import("zsp_test_programs");
 const rsp = n64.rsp;
 const rsp_timeout_attempts: u32 = 1_000_000;
 
+var dma_in_batch align(8) = [_]u32{
+    0x01000100,
+    0x12345678,
+    0x00000000,
+    0x00000000,
+};
+
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
     .{ .name = "ZSP: signed arithmetic", .run = signedArithmetic },
@@ -30,6 +37,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: load i16", .run = loadI16 },
     .{ .name = "ZSP: load u32", .run = loadU32 },
     .{ .name = "ZSP: load i32", .run = loadI32 },
+    .{ .name = "ZSP: DMA in", .run = dmaIn },
 };
 
 fn arithmetic() !void {
@@ -160,6 +168,20 @@ fn loadI32() !void {
     seedLoadSource(0x80000000);
     try run(zsp_programs.load_i32);
     try expectDmemWord(i32, 4, -2147483648);
+}
+
+fn dmaIn() !void {
+    n64.cache.writebackData(&dma_in_batch);
+
+    rsp.halt();
+    rsp.waitHalted();
+    const physical_address: u32 = @truncate(@intFromPtr(&dma_in_batch) & 0x1fffffff);
+    rsp.io.readDmem(u32, 0).* = physical_address;
+
+    try run(zsp_programs.dma_in);
+    for (dma_in_batch, 0..) |expected, index| {
+        try expectDmemWord(u32, 0x20 + @as(u32, @intCast(index * 4)), expected);
+    }
 }
 
 fn run(program: rsp.UCode) !void {

@@ -1,0 +1,49 @@
+const cp0 = @import("cp0.zsp");
+
+// Stackless DMA ABI, matching libdragon's rsp_dma.inc:
+//   $t0: DMA size descriptor
+//   $t1: RDRAM pitch
+//   $s0: RDRAM address
+//   $s4: DMEM address
+//   $t2: operation flags
+//
+// Returns through $ra. Clobbers $t2 and $t3. For DMA reads, $s4 is adjusted
+// by the low three bits of the RDRAM address.
+pub fn exec(
+    reg($t0) size: u32,
+    reg($t1) pitch: u32,
+    reg($s0) rdram: u32,
+    reg($s4) dmem: u32,
+    reg($t2) flags: u32,
+) {
+    reg($t3) scratch: u32 = 0;
+    cp0.get_dma_full(scratch);
+    while(scratch != 0) {
+        cp0.get_dma_full(scratch);
+    }
+
+    scratch = size & 0x0fff;
+    scratch = pitch - scratch;
+    scratch -= 1;
+    scratch <<= 20;
+    scratch |= size;
+
+    cp0.set_dma_addr_rdram(rdram);
+    cp0.set_dma_addr_rsp(dmem);
+    if(flags < 0x80000000) {
+        cp0.set_dma_read(scratch);
+    } else {
+        cp0.set_dma_write(scratch);
+    }
+
+    scratch = rdram & 7;
+    dmem += scratch;
+    flags &= 0x0f;
+
+    cp0.get_sp_status(scratch);
+    scratch &= flags;
+    while(scratch != 0) {
+        cp0.get_sp_status(scratch);
+        scratch &= flags;
+    }
+}
