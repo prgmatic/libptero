@@ -192,6 +192,10 @@ fn buildRspUcodeFromPath(
 ) std.Build.LazyPath {
     const zsp = b.addRunArtifact(tools.zsp);
     zsp.addFileArg(source);
+    zsp.addArg("--module-dir");
+    zsp.addDirectoryArg(b.path("src/n64/rsp/ucode"));
+    zsp.addArg("--depfile");
+    _ = zsp.addDepFileOutputArg(b.fmt("{s}.d", .{name}));
     const asm_file = zsp.addOutputFileArg(b.fmt("{s}.S", .{name}));
 
     const elf = b.addExecutable(.{

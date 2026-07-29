@@ -8,6 +8,7 @@ pub const Parser = struct {
     lexer: lexer_mod.Lexer,
     current: token.Token,
     diagnostic: ?Diagnostic = null,
+    imports: std.ArrayList(ast.Import) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
         var parser = Parser{
@@ -23,7 +24,9 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) ![]ast.Function {
         var functions: std.ArrayList(ast.Function) = .empty;
         while (self.current.tag != .eof) {
-            if (self.isFunctionDeclarationStart()) {
+            if (self.isImportStart()) {
+                try self.parseImport();
+            } else if (self.isFunctionDeclarationStart()) {
                 try functions.append(self.allocator, try self.parseFunctionDeclaration());
             } else {
                 try functions.append(self.allocator, try self.parseTopLevelBlock());
@@ -33,9 +36,14 @@ pub const Parser = struct {
         return functions.toOwnedSlice(self.allocator);
     }
 
+    pub fn takeImports(self: *Parser) ![]ast.Import {
+        return self.imports.toOwnedSlice(self.allocator);
+    }
+
     fn parseFunctionDeclaration(self: *Parser) !ast.Function {
         var inline_call = false;
         var export_symbol = false;
+        var public = false;
         while (true) {
             const prefix = try self.expect(.ident);
             if (std.mem.eql(u8, prefix.text, "export")) {
@@ -46,20 +54,26 @@ pub const Parser = struct {
                 inline_call = true;
                 continue;
             }
+            if (std.mem.eql(u8, prefix.text, "pub")) {
+                public = true;
+                continue;
+            }
             if (!std.mem.eql(u8, prefix.text, "fn")) {
                 return self.fail(prefix, .expected_function_declaration);
             }
             break;
         }
 
-        return self.parseFunction(export_symbol, inline_call);
+        return self.parseFunction(export_symbol, inline_call, public);
     }
 
     fn parseTopLevelBlock(self: *Parser) !ast.Function {
         return .{
             .name = "top_level",
+            .source_name = "top_level",
             .emit_label = false,
             .export_symbol = false,
+            .public = false,
             .inline_call = false,
             .no_return = true,
             .parameters = &.{},
@@ -67,7 +81,7 @@ pub const Parser = struct {
         };
     }
 
-    fn parseFunction(self: *Parser, export_symbol: bool, inline_call: bool) !ast.Function {
+    fn parseFunction(self: *Parser, export_symbol: bool, inline_call: bool, public: bool) !ast.Function {
         const name = try self.expect(.ident);
         _ = try self.expect(.l_paren);
         const parameters = try self.parseParameters();
@@ -87,12 +101,33 @@ pub const Parser = struct {
 
         return .{
             .name = name.text,
+            .source_name = name.text,
             .export_symbol = export_symbol,
+            .public = public,
             .inline_call = inline_call,
             .no_return = no_return,
             .parameters = parameters,
             .statements = statements,
         };
+    }
+
+    fn parseImport(self: *Parser) !void {
+        _ = try self.expect(.ident);
+        const name = try self.expect(.ident);
+        _ = try self.expect(.equal);
+        _ = try self.expect(.at);
+        const import_name = try self.expect(.ident);
+        if (!std.mem.eql(u8, import_name.text, "import")) {
+            return self.fail(import_name, .expected_import);
+        }
+        _ = try self.expect(.l_paren);
+        const path = try self.expect(.string);
+        _ = try self.expect(.r_paren);
+        _ = try self.expect(.semicolon);
+        try self.imports.append(self.allocator, .{
+            .name = name.text,
+            .path = path.text,
+        });
     }
 
     fn parseParameters(self: *Parser) ![]const ast.Parameter {
@@ -126,7 +161,7 @@ pub const Parser = struct {
         return parameters.toOwnedSlice(self.allocator);
     }
 
-    fn parseTopLevelStatements(self: *Parser) anyerror![]const ast.Statement {
+    fn parseTopLevelStatements(self: *Parser) anyerror![]ast.Statement {
         var statements: std.ArrayList(ast.Statement) = .empty;
         while (self.current.tag != .eof and !self.isFunctionDeclarationStart()) {
             try statements.append(self.allocator, try self.parseStatement());
@@ -134,7 +169,7 @@ pub const Parser = struct {
         return statements.toOwnedSlice(self.allocator);
     }
 
-    fn parseBlockStatements(self: *Parser) anyerror![]const ast.Statement {
+    fn parseBlockStatements(self: *Parser) anyerror![]ast.Statement {
         var statements: std.ArrayList(ast.Statement) = .empty;
         while (!try self.eat(.r_brace)) {
             try statements.append(self.allocator, try self.parseStatement());
@@ -175,7 +210,7 @@ pub const Parser = struct {
             _ = try self.expect(.l_brace);
             const then_statements = try self.parseBlockStatements();
 
-            var else_statements: ?[]const ast.Statement = null;
+            var else_statements: ?[]ast.Statement = null;
             if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "else")) {
                 _ = try self.expect(.ident);
                 _ = try self.expect(.l_brace);
@@ -201,33 +236,6 @@ pub const Parser = struct {
             return .{ .store = .{
                 .data_type = try self.parseDataType(data_type),
                 .address = address,
-                .value = value,
-            } };
-        }
-
-        if (std.mem.eql(u8, first.text, "dma_in")) {
-            _ = try self.expect(.l_paren);
-            const dmem = try self.parseValueRef();
-            _ = try self.expect(.comma);
-            const rdram = try self.parseValueRef();
-            _ = try self.expect(.comma);
-            const size = try self.parseValueRef();
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .dma_in = .{
-                .dmem = dmem,
-                .rdram = rdram,
-                .size = size,
-            } };
-        }
-
-        if (parseCop0Write(first.text)) |register| {
-            _ = try self.expect(.l_paren);
-            const value = try self.parseValueRef();
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .cop0_write = .{
-                .register = register,
                 .value = value,
             } };
         }
@@ -287,7 +295,20 @@ pub const Parser = struct {
             const arguments = try self.parseCallArguments();
             _ = try self.expect(.semicolon);
             return .{ .call = .{
+                .module = null,
                 .name = first.text,
+                .arguments = arguments,
+            } };
+        }
+
+        if (try self.eat(.dot)) {
+            const member = try self.expect(.ident);
+            _ = try self.expect(.l_paren);
+            const arguments = try self.parseCallArguments();
+            _ = try self.expect(.semicolon);
+            return .{ .call = .{
+                .module = first.text,
+                .name = member.text,
                 .arguments = arguments,
             } };
         }
@@ -370,15 +391,6 @@ pub const Parser = struct {
     }
 
     fn parseValue(self: *Parser) !ast.Value {
-        if (self.current.tag == .ident) {
-            if (parseCop0Read(self.current.text)) |register| {
-                _ = try self.expect(.ident);
-                _ = try self.expect(.l_paren);
-                _ = try self.expect(.r_paren);
-                return .{ .cop0_read = register };
-            }
-        }
-
         if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "load")) {
             _ = try self.expect(.ident);
             _ = try self.expect(.l_paren);
@@ -487,7 +499,16 @@ pub const Parser = struct {
         if (self.current.tag != .ident) return false;
         return std.mem.eql(u8, self.current.text, "export") or
             std.mem.eql(u8, self.current.text, "inline") or
+            std.mem.eql(u8, self.current.text, "pub") or
             std.mem.eql(u8, self.current.text, "fn");
+    }
+
+    fn isImportStart(self: *const Parser) bool {
+        if (self.current.tag != .ident or !std.mem.eql(u8, self.current.text, "const")) return false;
+        var lexer = self.lexer;
+        _ = lexer.next() catch return false;
+        const separator = lexer.next() catch return false;
+        return separator.tag == .equal;
     }
 
     fn expect(self: *Parser, tag: token.Tag) !token.Token {
@@ -523,20 +544,6 @@ pub const Parser = struct {
     }
 };
 
-fn parseCop0Read(name: []const u8) ?ast.Cop0Read {
-    if (std.mem.eql(u8, name, "get_dma_full")) return .dma_full;
-    if (std.mem.eql(u8, name, "get_sp_status")) return .sp_status;
-    return null;
-}
-
-fn parseCop0Write(name: []const u8) ?ast.Cop0Write {
-    if (std.mem.eql(u8, name, "set_dma_addr_rsp")) return .dma_addr_rsp;
-    if (std.mem.eql(u8, name, "set_dma_addr_rdram")) return .dma_addr_rdram;
-    if (std.mem.eql(u8, name, "set_dma_read")) return .dma_read;
-    if (std.mem.eql(u8, name, "set_dma_write")) return .dma_write;
-    return null;
-}
-
 fn valueFromRef(value_ref: ast.ValueRef) ast.Value {
     return switch (value_ref) {
         .ident => |name| .{ .ident = name },
@@ -553,6 +560,7 @@ pub const ErrorType = enum {
     expected_data_type,
     expected_scalar_register,
     expected_fixed_register_parameter,
+    expected_import,
     expected_value,
     expected_comparison_operator,
     unexpected_token,
@@ -578,6 +586,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .expected_data_type => "expected data type",
         .expected_scalar_register => "expected scalar register",
         .expected_fixed_register_parameter => "expected fixed-register parameter",
+        .expected_import => "expected import",
         .expected_value => "expected value",
         .expected_comparison_operator => "expected comparison operator",
         .unexpected_token => "unexpected token",

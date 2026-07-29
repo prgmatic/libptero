@@ -2,12 +2,19 @@ const std = @import("std");
 
 pub const Function = struct {
     name: []const u8,
+    source_name: []const u8,
     emit_label: bool = true,
     export_symbol: bool,
+    public: bool,
     inline_call: bool,
     no_return: bool,
     parameters: []const Parameter,
-    statements: []const Statement,
+    statements: []Statement,
+};
+
+pub const Import = struct {
+    name: []const u8,
+    path: []const u8,
 };
 
 pub const Parameter = struct {
@@ -20,19 +27,6 @@ pub const Value = union(enum) {
     ident: []const u8,
     number: i64,
     load: Load,
-    cop0_read: Cop0Read,
-};
-
-pub const Cop0Read = enum {
-    dma_full,
-    sp_status,
-};
-
-pub const Cop0Write = enum {
-    dma_addr_rsp,
-    dma_addr_rdram,
-    dma_read,
-    dma_write,
 };
 
 pub const Load = struct {
@@ -113,13 +107,8 @@ pub const Assignment = struct {
     rhs: ?Value,
 };
 
-pub const DmaIn = struct {
-    dmem: ValueRef,
-    rdram: ValueRef,
-    size: ValueRef,
-};
-
 pub const Call = struct {
+    module: ?[]const u8,
     name: []const u8,
     arguments: []const ValueRef,
 };
@@ -132,21 +121,16 @@ pub const Statement = union(enum) {
         address: ValueRef,
         value: ValueRef,
     },
-    dma_in: DmaIn,
-    cop0_write: struct {
-        register: Cop0Write,
-        value: ValueRef,
-    },
     call: Call,
     builtin: Builtin,
     while_loop: struct {
         condition: Condition,
-        statements: []const Statement,
+        statements: []Statement,
     },
     if_statement: struct {
         condition: Condition,
-        then_statements: []const Statement,
-        else_statements: ?[]const Statement,
+        then_statements: []Statement,
+        else_statements: ?[]Statement,
     },
     asm_line: []const u8,
 };
@@ -159,7 +143,7 @@ pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) 
     allocator.free(functions);
 }
 
-fn freeStatements(allocator: std.mem.Allocator, statements: []const Statement) void {
+fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
     for (statements) |statement| {
         switch (statement) {
             .while_loop => |loop| freeStatements(allocator, loop.statements),

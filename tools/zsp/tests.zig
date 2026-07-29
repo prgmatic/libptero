@@ -462,13 +462,19 @@ test "load destination type must match requested data type" {
     , error.RegisterTypeMismatch);
 }
 
-test "dma_in emits synchronous RDRAM to DMEM transfer" {
+test "inline calls bind parameters and expand inside caller scope" {
     try expectAsm(
-        \\export fn _start() noreturn {
-        \\  const command_buffer: u16 = 0x20;
-        \\  const command_buffer_size: u16 = 16;
-        \\  reg($s0) rdram: u32 = load(u32, 0);
-        \\  dma_in(command_buffer, rdram, command_buffer_size);
+        \\inline fn write(
+        \\  reg($t0) value: u32,
+        \\  reg($s0) destination: u32,
+        \\) {
+        \\  store(u32, destination, value);
+        \\}
+        \\
+        \\fn test() noreturn {
+        \\  reg($t0) value: u32 = 0x1234;
+        \\  reg($s0) destination: u32 = 0x20;
+        \\  write(value, destination);
         \\  @break();
         \\}
     ,
@@ -476,104 +482,11 @@ test "dma_in emits synchronous RDRAM to DMEM transfer" {
         \\.set noat
         \\.text
         \\
-        \\.globl _start
-        \\_start:
-        \\  lw $s0, 0($zero)
-        \\LABEL__start_dma_ready_0:
-        \\  mfc0 $at, $5
-        \\  bne $at, $zero, LABEL__start_dma_ready_0
-        \\  nop
-        \\  addiu $v1, $zero, 32
-        \\  mtc0 $v1, $0
-        \\  mtc0 $s0, $1
-        \\  addiu $v1, $zero, 15
-        \\  mtc0 $v1, $2
-        \\LABEL__start_dma_idle_0:
-        \\  mfc0 $at, $4
-        \\  andi $at, $at, 12
-        \\  bne $at, $zero, LABEL__start_dma_idle_0
-        \\  nop
-        \\  break
-        \\
-        \\
-    );
-}
-
-test "dma_in validates its initial supported subset" {
-    try expectAsmError(
-        \\fn test() {
-        \\  reg rdram: u32 = 0;
-        \\  dma_in(0x20, rdram, 12);
-        \\}
-    , error.InvalidDmaSize);
-    try expectAsmError(
-        \\fn test() {
-        \\  reg rdram: u16 = 0;
-        \\  dma_in(0x20, rdram, 16);
-        \\}
-    , error.DmaRdramAddressMustBeU32);
-}
-
-test "COP0 builtins emit DMA register reads and writes" {
-    try expectAsm(
-        \\fn cop0(
-        \\  reg($t0) value: u32,
-        \\  reg($t1) result: u32,
-        \\) {
-        \\  result = get_dma_full();
-        \\  result = get_sp_status();
-        \\  set_dma_addr_rsp(value);
-        \\  set_dma_addr_rdram(value);
-        \\  set_dma_read(value);
-        \\  set_dma_write(value);
-        \\}
-    ,
-        \\.set noreorder
-        \\.set noat
-        \\.text
-        \\
-        \\cop0:
-        \\  mfc0 $t1, $5
-        \\  mfc0 $t1, $4
-        \\  mtc0 $t0, $0
-        \\  mtc0 $t0, $1
-        \\  mtc0 $t0, $2
-        \\  mtc0 $t0, $3
-        \\  jr $ra
-        \\  nop
-        \\
-        \\
-    );
-}
-
-test "COP0 reads require u32 destinations" {
-    try expectAsmError(
-        \\fn invalid() {
-        \\  reg value: i32 = get_dma_full();
-        \\}
-    , error.RegisterTypeMismatch);
-}
-
-test "inline calls expand inside caller scope" {
-    try expectAsm(
-        \\inline fn clear() {
-        \\  @nop();
-        \\  asm("break");
-        \\}
-        \\
-        \\fn test() {
-        \\  clear();
-        \\}
-    ,
-        \\.set noreorder
-        \\.set noat
-        \\.text
-        \\
         \\test:
-        \\  nop
+        \\  addiu $t0, $zero, 4660
+        \\  addiu $s0, $zero, 32
+        \\  sw $t0, 0($s0)
         \\  break
-        \\  jr $ra
-        \\  nop
         \\
         \\
     );
@@ -712,6 +625,29 @@ test "function calls materialize constants and literals in pinned registers" {
         \\
         \\
     );
+}
+
+test "module imports public functions and qualified calls parse" {
+    var parser = try parser_mod.Parser.init(testing.allocator,
+        \\const dma = @import("dma.zsp");
+        \\pub fn helper() {}
+        \\export fn _start() noreturn {
+        \\  dma.exec();
+        \\}
+    );
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    const imports = try parser.takeImports();
+    defer testing.allocator.free(imports);
+
+    try testing.expectEqual(@as(usize, 1), imports.len);
+    try testing.expectEqualStrings("dma", imports[0].name);
+    try testing.expectEqualStrings("dma.zsp", imports[0].path);
+    try testing.expect(functions[0].public);
+
+    const call = functions[1].statements[0].call;
+    try testing.expectEqualStrings("dma", call.module.?);
+    try testing.expectEqualStrings("exec", call.name);
 }
 
 test "while loop emits labels branch and back edge" {
