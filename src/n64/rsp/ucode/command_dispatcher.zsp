@@ -22,10 +22,14 @@ fn write_dmem(
 
 // Resident command queue dispatcher.
 export fn _start() noreturn {
-    const command_buffer: u32 = 0x20;
+    const command_buffer: u32 = 0x40;
 
     reg($s0) rdram: u32 = load(u32, 0);
-    dma.exec(15, 0, rdram, command_buffer, 0x0c);
+    reg($t0) dma_size: u32 = 31;
+    reg($t1) dma_pitch: u32 = 0;
+    reg($s4) dma_destination: u32 = command_buffer;
+    reg($t2) dma_flags: u32 = 0x0c;
+    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
 
     store(u32, 4, 0);
 
@@ -50,7 +54,22 @@ export fn _start() noreturn {
             write_dmem(command_header, argument_1);
         } else {
             if(command_id == 0x10) {
-                handler_address = 0x1800;
+                reg current_overlay: u32 = load(u32, 0x18);
+                if(current_overlay != 1) {
+                    rdram = load(u32, 0x08);
+                    dma_size = load(u32, 0x0c);
+                    dma_destination = load(u32, 0x10);
+                    dma_pitch = 0;
+                    dma_flags = 0x0c;
+                    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+
+                    current_overlay = load(u32, 0x1c);
+                    current_overlay += 1;
+                    store(u32, 0x1c, current_overlay);
+                    store(u32, 0x18, 1);
+                }
+
+                handler_address = load(u32, 0x14);
                 dispatch(handler_address);
             } else {
                 store(u32, 4, command_id);

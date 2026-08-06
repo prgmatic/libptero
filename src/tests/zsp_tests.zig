@@ -21,7 +21,7 @@ var invalid_command_batch align(8) = [_]u32{
     0x00000000,
 };
 
-var command_queue_buffer: [4]u32 align(8) = undefined;
+var command_queue_buffer: [8]u32 align(8) = undefined;
 
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
@@ -49,7 +49,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: vector operations", .run = vectorOperations },
     .{ .name = "ZSP: DMA in", .run = dmaIn },
     .{ .name = "ZSP: command dispatcher", .run = commandDispatcher },
-    .{ .name = "ZSP: static overlay dispatch", .run = staticOverlayDispatch },
+    .{ .name = "ZSP: RSP-loaded overlay dispatch", .run = rspLoadedOverlayDispatch },
     .{ .name = "ZSP: command dispatcher invalid command", .run = commandDispatcherInvalid },
 };
 
@@ -230,19 +230,20 @@ fn commandDispatcher() !void {
     try expectDmemWord(u32, 0x100, 0x12345678);
 }
 
-fn staticOverlayDispatch() !void {
+fn rspLoadedOverlayDispatch() !void {
     var queue = rsp.CommandQueue.init(&command_queue_buffer);
     queue.writeCommand(0x10, 0x104, 0xcafebabe);
+    queue.writeCommand(0x10, 0x108, 0xdeadbeef);
     queue.stop();
 
-    rsp.halt();
-    rsp.waitHalted();
-    rsp.loadText(rsp.programs.static_overlay.text, 0x800);
+    rsp.submitOverlay(1, rsp.programs.static_overlay, 0x800);
     rsp.submitCommands(&queue);
     try run(rsp.programs.command_dispatcher);
 
     try expectDmemWord(u32, 4, 0);
     try expectDmemWord(u32, 0x104, 0xcafebabe);
+    try expectDmemWord(u32, 0x108, 0xdeadbeef);
+    try expectDmemWord(u32, rsp.overlay_load_count_dmem, 1);
 }
 
 fn commandDispatcherInvalid() !void {

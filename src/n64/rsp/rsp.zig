@@ -9,6 +9,14 @@ pub const UCode = ucode.UCode;
 pub const Ucode = UCode;
 pub const CommandQueue = @import("command_queue.zig").CommandQueue;
 
+pub const overlay_load_count_dmem = 0x1c;
+
+const overlay_text_address_dmem = 0x08;
+const overlay_text_size_dmem = 0x0c;
+const overlay_imem_address_dmem = 0x10;
+const overlay_handler_address_dmem = 0x14;
+const current_overlay_id_dmem = 0x18;
+
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
 
 pub fn runUCode(program: UCode) void {
@@ -29,6 +37,34 @@ pub fn submitCommands(queue: *const CommandQueue) void {
     const words = queue.words();
     cache.writebackData(words);
     io.readDmem(u32, 0).* = physicalAddress(@intFromPtr(words.ptr));
+}
+
+pub fn submitOverlay(overlay_id: u8, program: UCode, imem_offset: u32) void {
+    if (overlay_id != 1) {
+        @panic("only static RSP overlay 1 is currently supported");
+    }
+    if (program.text.len == 0 or program.text.len & 7 != 0) {
+        @panic("RSP overlay text must have a nonzero DMA-aligned size");
+    }
+    if (imem_offset > io.imem_len or
+        program.text.len > @as(usize, io.imem_len - imem_offset))
+    {
+        @panic("RSP overlay text does not fit in IMEM");
+    }
+
+    const imem_address = io.dma_imem_addr + imem_offset;
+    assertRspDma(program.text, imem_address);
+
+    halt();
+    waitHalted();
+    cache.writebackData(program.text);
+
+    io.readDmem(u32, overlay_text_address_dmem).* = physicalAddress(@intFromPtr(program.text.ptr));
+    io.readDmem(u32, overlay_text_size_dmem).* = @intCast(program.text.len - 1);
+    io.readDmem(u32, overlay_imem_address_dmem).* = imem_address;
+    io.readDmem(u32, overlay_handler_address_dmem).* = io.dma_imem_addr + program.pc_start;
+    io.readDmem(u32, current_overlay_id_dmem).* = 0;
+    io.readDmem(u32, overlay_load_count_dmem).* = 0;
 }
 
 pub fn load(program: UCode) void {

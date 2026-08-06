@@ -1,6 +1,6 @@
 const io = @import("io.zig");
 
-pub const batch_word_count = 4;
+pub const batch_word_count = 8;
 
 pub const CommandQueue = struct {
     buffer: *align(8) [batch_word_count]u32,
