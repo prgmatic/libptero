@@ -79,6 +79,15 @@ fn addToolTests(b: *std.Build) void {
     const run_command_queue_tests = b.addRunArtifact(command_queue_tests);
     test_step.dependOn(&run_command_queue_tests.step);
 
+    const rsp_overlay_link_tests = b.addTest(.{
+        .name = "rsp-overlay-link-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/build/rsp_overlay_link.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(rsp_overlay_link_tests).step);
+
     const test_protocol_tests = b.addTest(.{
         .name = "test-protocol-tests",
         .root_module = b.createModule(.{
@@ -104,22 +113,25 @@ fn addGeneratedN64Assets(
     n64_module.addAnonymousImport("fill_dmem_rsp", .{
         .root_source_file = buildRspUcode(b, tools, "fill_dmem", "src/n64/rsp/ucode/fill_dmem.zsp"),
     });
-    n64_module.addAnonymousImport("command_dispatcher_rsp", .{
-        .root_source_file = buildRspUcodeWithLinkerScript(
-            b,
-            tools,
-            "command_dispatcher",
-            "src/n64/rsp/ucode/command_dispatcher.zsp",
-            "src/n64/rsp/resident.ld",
-        ),
-    });
+    const resident_rsp = buildRspUcodeWithLinkerScript(
+        b,
+        tools,
+        "command_dispatcher",
+        "src/n64/rsp/ucode/command_dispatcher.zsp",
+        "src/n64/rsp/resident.ld",
+    );
+    n64_module.addAnonymousImport("command_dispatcher_rsp", .{ .root_source_file = resident_rsp });
+
+    const overlay_link = b.addRunArtifact(tools.rsp_overlay_link);
+    overlay_link.addFileArg(resident_rsp);
+    const overlay_linker_script = overlay_link.addOutputFileArg("overlay.ld");
     n64_module.addAnonymousImport("static_overlay_rsp", .{
-        .root_source_file = buildRspUcodeWithLinkerScript(
+        .root_source_file = buildRspUcodeFromPath(
             b,
             tools,
             "static_overlay",
-            "src/n64/rsp/ucode/static_overlay.zsp",
-            "src/n64/rsp/overlay.ld",
+            b.path("src/n64/rsp/ucode/static_overlay.zsp"),
+            overlay_linker_script,
         ),
     });
 }

@@ -85,7 +85,6 @@ pub fn submitCommands(queue: *const CommandQueue) void {
 pub fn submitOverlay(
     overlay_id: u8,
     program: UCode,
-    imem_offset: u32,
     dmem_offset: u32,
 ) void {
     if (overlay_id != 1) {
@@ -94,6 +93,7 @@ pub fn submitOverlay(
     if (program.text.len == 0 or program.text.len & 7 != 0) {
         @panic("RSP overlay text must have a nonzero DMA-aligned size");
     }
+    const imem_offset = program.text_offset;
     if (imem_offset > io.imem_len or
         program.text.len > @as(usize, io.imem_len - imem_offset))
     {

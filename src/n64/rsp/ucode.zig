@@ -1,11 +1,12 @@
 const std = @import("std");
 
-const header_size = 8;
+const header_size = 16;
 
 pub const UCode = struct {
     text: []const u8,
     data: []const u8 = &.{},
     pc_start: u16 = 0,
+    text_offset: u16 = 0,
 
     pub fn fromBlob(blob: []const u8) UCode {
         if (blob.len < header_size) {
@@ -26,6 +27,7 @@ pub const UCode = struct {
             .text = blob[text_start..text_end],
             .data = blob[data_start..data_end],
             .pc_start = header.pc_start,
+            .text_offset = header.text_offset,
         };
     }
 };
@@ -35,6 +37,7 @@ const Header = struct {
     data_len: u16,
     data_offset: u16,
     pc_start: u16,
+    text_offset: u16,
 
     fn read(bytes: *const [header_size]u8) Header {
         return .{
@@ -42,6 +45,7 @@ const Header = struct {
             .data_len = std.mem.readInt(u16, bytes[2..4], .big),
             .data_offset = std.mem.readInt(u16, bytes[4..6], .big),
             .pc_start = std.mem.readInt(u16, bytes[6..8], .big),
+            .text_offset = std.mem.readInt(u16, bytes[8..10], .big),
         };
     }
 };

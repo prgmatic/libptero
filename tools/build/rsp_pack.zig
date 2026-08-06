@@ -1,7 +1,7 @@
 const std = @import("std");
 const elf = std.elf;
 
-const header_size = 8;
+const header_size = 16;
 const imem_base = 0x1000;
 
 pub fn main(init: std.process.Init) !void {
@@ -52,7 +52,10 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
 
     if (header.entry < text.sh_addr or header.entry >= text.sh_addr + text.sh_size) return error.EntryOutsideText;
     const pc_start = header.entry - imem_base;
+    if (text.sh_addr < imem_base) return error.TextOutsideImem;
+    const text_start = text.sh_addr - imem_base;
     if (pc_start > std.math.maxInt(u16)) return error.ProgramCounterTooLarge;
+    if (text_start > std.math.maxInt(u16)) return error.TextOutsideImem;
     if (text.sh_size > 0x1000) return error.TextTooLarge;
     if (data) |d| {
         if (d.sh_size > 0x1000) return error.DataTooLarge;
@@ -77,6 +80,7 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     w16(out, 2, @intCast(padded_data_size));
     w16(out, 4, @intCast(data_offset));
     w16(out, 6, @intCast(pc_start));
+    w16(out, 8, @intCast(text_start));
 
     copySection(out[header_size..][0..text_size], bytes, text) catch |err| {
         alloc.free(out);
