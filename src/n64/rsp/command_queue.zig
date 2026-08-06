@@ -24,18 +24,30 @@ pub const CommandQueue = struct {
     }
 
     pub fn writeDmem(self: *CommandQueue, offset: u32, value: u32) void {
+        if (offset & 3 != 0 or offset > io.dmem_len - @sizeOf(u32)) {
+            @panic("RSP command queue DMEM offset is invalid");
+        }
+        self.writeCommand(0x01, offset, value);
+    }
+
+    pub fn writeCommand(
+        self: *CommandQueue,
+        command_id: u8,
+        inline_argument: u32,
+        argument: u32,
+    ) void {
         if (self.stopped) {
             @panic("cannot append to a stopped RSP command queue");
         }
-        if (offset & 3 != 0 or offset > io.dmem_len - @sizeOf(u32)) {
-            @panic("RSP command queue DMEM offset is invalid");
+        if (inline_argument > 0x00ffffff) {
+            @panic("RSP command queue inline argument is too large");
         }
         if (self.index + 2 >= self.buffer.len) {
             @panic("RSP command queue is full");
         }
 
-        self.buffer[self.index] = 0x01000000 | offset;
-        self.buffer[self.index + 1] = value;
+        self.buffer[self.index] = @as(u32, command_id) << 24 | inline_argument;
+        self.buffer[self.index + 1] = argument;
         self.index += 2;
 
         // Keep a STOP after the last complete command while the queue is open.

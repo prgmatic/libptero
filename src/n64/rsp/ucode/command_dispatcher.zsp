@@ -1,5 +1,9 @@
 const dma = @import("dma.zsp");
 
+fn dispatch(reg($t6) handler_address: u32) noreturn {
+    @jump(handler_address);
+}
+
 // Dispatcher/handler ABI, matching libdragon's RSPQ convention:
 //   $gp: address immediately after the current command
 //   $a0-$a3: first four command words
@@ -31,6 +35,7 @@ export fn _start() noreturn {
     reg($a2) argument_2: u32 = 0;
     reg($a3) argument_3: u32 = 0;
     reg($t7) command_size: u32 = 0;
+    reg($t6) handler_address: u32 = 0;
     reg command_id: u32 = 0;
     command_id = command_header >> 24;
 
@@ -44,8 +49,13 @@ export fn _start() noreturn {
         if(command_id == 1) {
             write_dmem(command_header, argument_1);
         } else {
-            store(u32, 4, command_id);
-            @break();
+            if(command_id == 0x10) {
+                handler_address = 0x1800;
+                dispatch(handler_address);
+            } else {
+                store(u32, 4, command_id);
+                @break();
+            }
         }
 
         command_header = load(u32, command_address);

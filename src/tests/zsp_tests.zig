@@ -49,6 +49,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: vector operations", .run = vectorOperations },
     .{ .name = "ZSP: DMA in", .run = dmaIn },
     .{ .name = "ZSP: command dispatcher", .run = commandDispatcher },
+    .{ .name = "ZSP: static overlay dispatch", .run = staticOverlayDispatch },
     .{ .name = "ZSP: command dispatcher invalid command", .run = commandDispatcherInvalid },
 };
 
@@ -227,6 +228,21 @@ fn commandDispatcher() !void {
 
     try expectDmemWord(u32, 4, 0);
     try expectDmemWord(u32, 0x100, 0x12345678);
+}
+
+fn staticOverlayDispatch() !void {
+    var queue = rsp.CommandQueue.init(&command_queue_buffer);
+    queue.writeCommand(0x10, 0x104, 0xcafebabe);
+    queue.stop();
+
+    rsp.halt();
+    rsp.waitHalted();
+    rsp.loadText(rsp.programs.static_overlay.text, 0x800);
+    rsp.submitCommands(&queue);
+    try run(rsp.programs.command_dispatcher);
+
+    try expectDmemWord(u32, 4, 0);
+    try expectDmemWord(u32, 0x104, 0xcafebabe);
 }
 
 fn commandDispatcherInvalid() !void {

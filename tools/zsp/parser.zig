@@ -365,6 +365,13 @@ pub const Parser = struct {
         const name = try self.expect(.ident);
         _ = try self.expect(.l_paren);
 
+        if (std.mem.eql(u8, name.text, "jump")) {
+            const address = try self.parseValueRef();
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .builtin = .{ .jump = address } };
+        }
+
         _ = try self.expect(.r_paren);
         _ = try self.expect(.semicolon);
 

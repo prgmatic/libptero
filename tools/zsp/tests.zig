@@ -1081,6 +1081,24 @@ test "gp can be explicitly pinned but is not automatically allocated" {
     );
 }
 
+test "jump transfers control through a scalar register" {
+    try expectAsm(
+        \\fn dispatch(reg($t0) handler: u32) noreturn {
+        \\  @jump(handler);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\dispatch:
+        \\  jr $t0
+        \\  nop
+        \\
+        \\
+    );
+}
+
 test "function calls verify fixed-register arguments without moves" {
     try expectAsm(
         \\fn callee(

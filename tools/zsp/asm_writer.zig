@@ -176,7 +176,7 @@ fn writeStatements(
             .assignment => |assignment| try writeAssignment(writer, context, assignment),
             .store => |store| try writeStore(writer, context, store),
             .call => |call| try writeCall(writer, functions, context, call),
-            .builtin => |builtin| try writeBuiltin(writer, builtin),
+            .builtin => |builtin| try writeBuiltin(writer, context, builtin),
             .while_loop => |loop| try writeWhile(writer, functions, context, loop),
             .if_statement => |if_statement| try writeIf(writer, functions, context, if_statement),
             .asm_line => |asm_line| try writer.print("  {s}\n", .{asm_line}),
@@ -1136,10 +1136,15 @@ fn writeCall(
     try writer.writeAll("  nop\n");
 }
 
-fn writeBuiltin(writer: *std.Io.Writer, builtin: ast.Builtin) !void {
+fn writeBuiltin(writer: *std.Io.Writer, context: *FunctionContext, builtin: ast.Builtin) !void {
     switch (builtin) {
         .nop => try writer.writeAll("  nop\n"),
         .breakpoint => try writer.writeAll("  break\n"),
+        .jump => |address| {
+            const address_reg = try valueAsAddressReg(writer, context, address);
+            try writer.print("  jr {s}\n", .{regName(address_reg)});
+            try writer.writeAll("  nop\n");
+        },
     }
 }
 

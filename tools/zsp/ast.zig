@@ -196,9 +196,10 @@ pub const VarDecl = struct {
     value: Value,
 };
 
-pub const Builtin = enum {
+pub const Builtin = union(enum) {
     nop,
     breakpoint,
+    jump: ValueRef,
 };
 
 pub const AssignOp = enum {

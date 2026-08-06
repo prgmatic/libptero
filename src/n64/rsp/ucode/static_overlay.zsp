@@ -1,0 +1,10 @@
+// Fixed-address proof overlay. The resident dispatcher enters at _start with
+// the normal command-handler ABI and the handler returns through $ra.
+export fn _start(
+    reg($a0) command: u32,
+    reg($a1) value: u32,
+) {
+    reg dmem_address: u32 = 0;
+    dmem_address = command & 0x00ffffff;
+    store(u32, dmem_address, value);
+}

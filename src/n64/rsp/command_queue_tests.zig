@@ -28,3 +28,18 @@ test "clear reopens and empties a command queue" {
     try testing.expect(!queue.isStopped());
     try testing.expectEqualSlices(u32, &.{ 0, 0, 0, 0 }, queue.words());
 }
+
+test "writeCommand encodes a static overlay command" {
+    var buffer: [4]u32 align(8) = undefined;
+    var queue = CommandQueue.init(&buffer);
+
+    queue.writeCommand(0x10, 0x104, 0xcafebabe);
+    queue.stop();
+
+    try testing.expectEqualSlices(u32, &.{
+        0x10000104,
+        0xcafebabe,
+        0x00000000,
+        0x00000000,
+    }, queue.words());
+}

@@ -105,11 +105,21 @@ fn addGeneratedN64Assets(
         .root_source_file = buildRspUcode(b, tools, "fill_dmem", "src/n64/rsp/ucode/fill_dmem.zsp"),
     });
     n64_module.addAnonymousImport("command_dispatcher_rsp", .{
-        .root_source_file = buildRspUcode(
+        .root_source_file = buildRspUcodeWithLinkerScript(
             b,
             tools,
             "command_dispatcher",
             "src/n64/rsp/ucode/command_dispatcher.zsp",
+            "src/n64/rsp/resident.ld",
+        ),
+    });
+    n64_module.addAnonymousImport("static_overlay_rsp", .{
+        .root_source_file = buildRspUcodeWithLinkerScript(
+            b,
+            tools,
+            "static_overlay",
+            "src/n64/rsp/ucode/static_overlay.zsp",
+            "src/n64/rsp/overlay.ld",
         ),
     });
 }
@@ -199,7 +209,17 @@ fn buildRspUcode(
     name: []const u8,
     source: []const u8,
 ) std.Build.LazyPath {
-    return buildRspUcodeFromPath(b, tools, name, b.path(source));
+    return buildRspUcodeFromPath(b, tools, name, b.path(source), b.path("src/n64/rsp/link.ld"));
+}
+
+fn buildRspUcodeWithLinkerScript(
+    b: *std.Build,
+    tools: @import("build/tools.zig").Tools,
+    name: []const u8,
+    source: []const u8,
+    linker_script: []const u8,
+) std.Build.LazyPath {
+    return buildRspUcodeFromPath(b, tools, name, b.path(source), b.path(linker_script));
 }
 
 fn buildRspUcodeFromPath(
@@ -207,6 +227,7 @@ fn buildRspUcodeFromPath(
     tools: @import("build/tools.zig").Tools,
     name: []const u8,
     source: std.Build.LazyPath,
+    linker_script: std.Build.LazyPath,
 ) std.Build.LazyPath {
     const zsp = b.addRunArtifact(tools.zsp);
     zsp.addFileArg(source);
@@ -224,7 +245,7 @@ fn buildRspUcodeFromPath(
         }),
     });
     elf.root_module.addAssemblyFile(asm_file);
-    elf.setLinkerScript(b.path("src/n64/rsp/link.ld"));
+    elf.setLinkerScript(linker_script);
     elf.entry = .{ .symbol_name = "_start" };
     elf.bundle_compiler_rt = false;
     elf.bundle_ubsan_rt = false;
