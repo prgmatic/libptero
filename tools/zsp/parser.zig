@@ -44,8 +44,19 @@ pub const Parser = struct {
         var inline_call = false;
         var export_symbol = false;
         var public = false;
+        var command_index: ?u4 = null;
         while (true) {
             const prefix = try self.expect(.ident);
+            if (std.mem.eql(u8, prefix.text, "command")) {
+                if (command_index != null) return self.fail(prefix, .invalid_command_index);
+                _ = try self.expect(.l_paren);
+                const index_token = try self.expect(.number);
+                const index = try self.parseNumberValue(index_token);
+                if (index < 0 or index > 15) return self.fail(index_token, .invalid_command_index);
+                command_index = @intCast(index);
+                _ = try self.expect(.r_paren);
+                continue;
+            }
             if (std.mem.eql(u8, prefix.text, "export")) {
                 export_symbol = true;
                 continue;
@@ -64,7 +75,7 @@ pub const Parser = struct {
             break;
         }
 
-        return self.parseFunction(export_symbol, inline_call, public);
+        return self.parseFunction(export_symbol, inline_call, public, command_index);
     }
 
     fn parseTopLevelBlock(self: *Parser) !ast.Function {
@@ -76,12 +87,19 @@ pub const Parser = struct {
             .public = false,
             .inline_call = false,
             .no_return = true,
+            .command_index = null,
             .parameters = &.{},
             .statements = try self.parseTopLevelStatements(),
         };
     }
 
-    fn parseFunction(self: *Parser, export_symbol: bool, inline_call: bool, public: bool) !ast.Function {
+    fn parseFunction(
+        self: *Parser,
+        export_symbol: bool,
+        inline_call: bool,
+        public: bool,
+        command_index: ?u4,
+    ) !ast.Function {
         const name = try self.expect(.ident);
         _ = try self.expect(.l_paren);
         const parameters = try self.parseParameters();
@@ -106,6 +124,7 @@ pub const Parser = struct {
             .public = public,
             .inline_call = inline_call,
             .no_return = no_return,
+            .command_index = command_index,
             .parameters = parameters,
             .statements = statements,
         };
@@ -732,6 +751,7 @@ pub const Parser = struct {
         return std.mem.eql(u8, self.current.text, "export") or
             std.mem.eql(u8, self.current.text, "inline") or
             std.mem.eql(u8, self.current.text, "pub") or
+            std.mem.eql(u8, self.current.text, "command") or
             std.mem.eql(u8, self.current.text, "fn");
     }
 
@@ -808,6 +828,7 @@ pub const ErrorType = enum {
     undefined_data_initializer,
     expected_struct_declaration,
     invalid_array_length,
+    invalid_command_index,
     incorrect_array_initializer_count,
     unexpected_token,
     invalid_number,
@@ -847,6 +868,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .undefined_data_initializer => "data declarations must contain initialized bytes; reserve storage in a bss block",
         .expected_struct_declaration => "expected packed struct declaration",
         .invalid_array_length => "invalid array length",
+        .invalid_command_index => "command index must be between 0 and 15",
         .incorrect_array_initializer_count => "array initializer must contain exactly the declared element count",
         .unexpected_token => "unexpected token",
         .invalid_number => "invalid number",

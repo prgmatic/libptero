@@ -3,6 +3,8 @@ const elf = std.elf;
 
 const header_size = 16;
 const imem_base = 0x1000;
+const command_source_size = 8;
+const command_packed_size = 4;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.smp_allocator;
@@ -49,6 +51,7 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
 
     const text = (try findSection(bytes, header, ".text")) orelse return error.MissingTextSection;
     const data = try findSection(bytes, header, ".data");
+    const commands = try findSection(bytes, header, ".zsp_commands");
 
     if (header.entry < text.sh_addr or header.entry >= text.sh_addr + text.sh_size) return error.EntryOutsideText;
     const pc_start = header.entry - imem_base;
@@ -66,12 +69,19 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const padded_text_size = std.mem.alignForward(usize, text_size, 8);
     const padded_data_size = std.mem.alignForward(usize, data_size, 8);
     const data_offset = header_size + padded_text_size;
+    const command_count: usize = if (commands) |section| blk: {
+        if (section.sh_size % command_source_size != 0) return error.InvalidCommandSection;
+        const count: usize = @intCast(section.sh_size / command_source_size);
+        if (count > 16) return error.TooManyCommands;
+        break :blk count;
+    } else 0;
+    const commands_offset = data_offset + padded_data_size;
     if (padded_text_size > 0x1000) return error.TextTooLarge;
     if (padded_data_size > 0x1000) return error.DataTooLarge;
     if (padded_text_size > std.math.maxInt(u16)) return error.TextTooLarge;
     if (padded_data_size > std.math.maxInt(u16)) return error.DataTooLarge;
     if (data_offset > std.math.maxInt(u16)) return error.DataOffsetTooLarge;
-    const out_size = data_offset + padded_data_size;
+    const out_size = commands_offset + command_count * command_packed_size;
 
     const out = try alloc.alloc(u8, out_size);
     @memset(out, 0);
@@ -81,6 +91,8 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     w16(out, 4, @intCast(data_offset));
     w16(out, 6, @intCast(pc_start));
     w16(out, 8, @intCast(text_start));
+    w16(out, 10, @intCast(commands_offset));
+    w16(out, 12, @intCast(command_count));
 
     copySection(out[header_size..][0..text_size], bytes, text) catch |err| {
         alloc.free(out);
@@ -92,8 +104,44 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
             return err;
         };
     }
+    if (commands) |section| {
+        try packCommands(out[commands_offset..], bytes, section, text);
+    }
 
     return out;
+}
+
+fn packCommands(
+    destination: []u8,
+    elf_bytes: []const u8,
+    section: elf.Elf64_Shdr,
+    text: elf.Elf64_Shdr,
+) !void {
+    const offset: usize = @intCast(section.sh_offset);
+    const size: usize = @intCast(section.sh_size);
+    if (offset + size > elf_bytes.len) return error.BadElf;
+    const source = elf_bytes[offset..][0..size];
+    var seen: u16 = 0;
+    for (0..size / command_source_size) |record_index| {
+        const record = source[record_index * command_source_size ..][0..command_source_size];
+        const handler = std.mem.readInt(u32, record[0..4], .big);
+        const index = record[4];
+        const command_size = record[5];
+        if (index >= 16 or seen & (@as(u16, 1) << @intCast(index)) != 0) {
+            return error.InvalidCommandIndex;
+        }
+        seen |= @as(u16, 1) << @intCast(index);
+        if (command_size == 0 or command_size & 3 != 0) return error.InvalidCommandSize;
+        if (handler < text.sh_addr or handler >= text.sh_addr + text.sh_size or handler & 3 != 0) {
+            return error.InvalidCommandHandler;
+        }
+        const handler_offset = handler - imem_base;
+        if (handler_offset >> 2 > 0x7ff) return error.InvalidCommandHandler;
+        const output_record = destination[record_index * command_packed_size ..][0..command_packed_size];
+        output_record[0] = index;
+        output_record[1] = command_size;
+        std.mem.writeInt(u16, output_record[2..4], @intCast(handler_offset), .big);
+    }
 }
 
 fn copySection(dest: []u8, bytes: []const u8, section: elf.Elf64_Shdr) !void {

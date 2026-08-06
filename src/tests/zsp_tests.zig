@@ -252,7 +252,7 @@ fn rspLoadedOverlayDispatch() !void {
     loadCommandDispatcher();
     var queue = rsp.CommandQueue.init(&command_queue_buffer);
     queue.writeCommand(0x10, 0x104, 0xcafebabe);
-    queue.writeCommand(0x10, 0x108, 0xdeadbeef);
+    queue.writeCommand(0x11, 0x108, 0xdeadbeef);
     queue.writeCommand(0x20, 0x10c, 0xcafebabe);
     queue.writeCommand(0x20, 0x110, 0xdeadbeef);
     queue.writeCommand(0x10, 0x114, 0x12345678);
@@ -266,7 +266,7 @@ fn rspLoadedOverlayDispatch() !void {
 
     try expectDmemWord(u32, rsp.command_status_dmem, 0);
     try expectDmemWord(u32, 0x104, 0x4f564c31);
-    try expectDmemWord(u32, 0x108, 0x4f564c31);
+    try expectDmemWord(u32, 0x108, 0xdeadbeef);
     try expectDmemWord(u32, 0x10c, 0x4f564c32);
     try expectDmemWord(u32, 0x110, 0x4f564c32);
     try expectDmemWord(u32, 0x114, 0x4f564c31);
@@ -277,6 +277,9 @@ fn rspLoadedOverlayDispatch() !void {
     try expectDmemWord(u16, 0x812, rsp.io.dma_imem_addr + rsp.programs.static_overlay.text_offset);
     const descriptor = @as(u16, 8 << 8) | rsp.programs.static_overlay.pc_start >> 2;
     try expectDmemWord(u16, 0x81c, descriptor);
+    const argument_descriptor = @as(u16, 8 << 8) |
+        rsp.programs.static_overlay.commandAt(1).handler_offset >> 2;
+    try expectDmemWord(u16, 0x81e, argument_descriptor);
 }
 
 fn commandDispatcherInvalid() !void {

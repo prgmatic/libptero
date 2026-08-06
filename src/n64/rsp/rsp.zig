@@ -54,8 +54,13 @@ pub const OverlayHeader = extern struct {
     }
 };
 
-const overlay_command_table_len = 4;
-const overlay_payload_offset = OverlayHeader.byte_len + overlay_command_table_len;
+const overlay_command_count = 16;
+const overlay_command_table_len = overlay_command_count * @sizeOf(u16);
+const overlay_payload_offset = std.mem.alignForward(
+    usize,
+    OverlayHeader.byte_len + overlay_command_table_len,
+    16,
+);
 
 pub fn runUCode(program: UCode) void {
     halt();
@@ -96,6 +101,9 @@ pub fn submitOverlay(
     if (program.data.len == 0 or program.data.len & 7 != 0) {
         @panic("RSP overlay data must have a nonzero DMA-aligned size");
     }
+    if (program.commandCount() == 0) {
+        @panic("RSP overlay does not define any commands");
+    }
     const overlay_data_len = overlay_payload_offset + program.data.len;
     if (overlay_data_len > io.dmem_len - overlay_dmem_offset) {
         @panic("RSP overlay data does not fit in DMEM");
@@ -116,12 +124,17 @@ pub fn submitOverlay(
         .text_start = @intCast(imem_address),
     };
     header.write(overlay_data[0..OverlayHeader.byte_len]);
-    if (program.pc_start & 3 != 0 or program.pc_start >> 2 > 0x7ff) {
-        @panic("RSP overlay handler cannot be encoded in a command descriptor");
+    for (0..program.commandCount()) |command_index| {
+        const command = program.commandAt(command_index);
+        if (command.index >= overlay_command_count or command.handler_offset & 3 != 0 or
+            command.handler_offset >> 2 > 0x7ff)
+        {
+            @panic("RSP overlay command metadata cannot be encoded");
+        }
+        const descriptor = @as(u16, command.size) << 8 | command.handler_offset >> 2;
+        const descriptor_offset = OverlayHeader.byte_len + @as(usize, command.index) * @sizeOf(u16);
+        std.mem.writeInt(u16, overlay_data[descriptor_offset..][0..2], descriptor, .big);
     }
-    const command_descriptor = @as(u16, 8 << 8) | program.pc_start >> 2;
-    std.mem.writeInt(u16, overlay_data[28..30], command_descriptor, .big);
-    std.mem.writeInt(u16, overlay_data[30..32], 0, .big);
 
     assertRspDma(program.text, imem_address);
     assertRspDma(overlay_data, dmem_address);

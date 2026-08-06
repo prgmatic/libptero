@@ -7,6 +7,7 @@ pub const UCode = struct {
     data: []const u8 = &.{},
     pc_start: u16 = 0,
     text_offset: u16 = 0,
+    commands: []const u8 = &.{},
 
     pub fn fromBlob(blob: []const u8) UCode {
         if (blob.len < header_size) {
@@ -18,8 +19,10 @@ pub const UCode = struct {
         const text_end = text_start + header.text_len;
         const data_start = header.data_offset;
         const data_end = data_start + header.data_len;
+        const commands_start = header.commands_offset;
+        const commands_end = commands_start + header.command_count * Command.encoded_len;
 
-        if (text_end > blob.len or data_end > blob.len) {
+        if (text_end > blob.len or data_end > blob.len or commands_end > blob.len) {
             @panic("RSP program blob has invalid segment bounds");
         }
 
@@ -28,6 +31,32 @@ pub const UCode = struct {
             .data = blob[data_start..data_end],
             .pc_start = header.pc_start,
             .text_offset = header.text_offset,
+            .commands = blob[commands_start..commands_end],
+        };
+    }
+
+    pub fn commandCount(self: UCode) usize {
+        return self.commands.len / Command.encoded_len;
+    }
+
+    pub fn commandAt(self: UCode, index: usize) Command {
+        if (index >= self.commandCount()) @panic("RSP command metadata index is out of bounds");
+        return Command.read(self.commands[index * Command.encoded_len ..][0..Command.encoded_len]);
+    }
+};
+
+pub const Command = struct {
+    index: u8,
+    size: u8,
+    handler_offset: u16,
+
+    const encoded_len = 4;
+
+    fn read(bytes: *const [encoded_len]u8) Command {
+        return .{
+            .index = bytes[0],
+            .size = bytes[1],
+            .handler_offset = std.mem.readInt(u16, bytes[2..4], .big),
         };
     }
 };
@@ -38,6 +67,8 @@ const Header = struct {
     data_offset: u16,
     pc_start: u16,
     text_offset: u16,
+    commands_offset: u16,
+    command_count: u16,
 
     fn read(bytes: *const [header_size]u8) Header {
         return .{
@@ -46,6 +77,8 @@ const Header = struct {
             .data_offset = std.mem.readInt(u16, bytes[4..6], .big),
             .pc_start = std.mem.readInt(u16, bytes[6..8], .big),
             .text_offset = std.mem.readInt(u16, bytes[8..10], .big),
+            .commands_offset = std.mem.readInt(u16, bytes[10..12], .big),
+            .command_count = std.mem.readInt(u16, bytes[12..14], .big),
         };
     }
 };

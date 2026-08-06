@@ -4,11 +4,21 @@ data {
 
 // The resident dispatcher enters at _start with the normal command-handler
 // ABI and the handler returns through $ra.
-export fn _start(
+command(0) fn _start(
     reg($a0) command: u32,
+    reg($a1) unused: u32,
 ) {
     reg dmem_address: u32 = 0;
     dmem_address = command & 0x00ffffff;
     reg value: u32 = load(u32, overlay_value);
+    store(u32, dmem_address, value);
+}
+
+command(1) fn write_argument(
+    reg($a0) command: u32,
+    reg($a1) value: u32,
+) {
+    reg dmem_address: u32 = 0;
+    dmem_address = command & 0x00ffffff;
     store(u32, dmem_address, value);
 }

@@ -27,7 +27,7 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     try writer.writeAll(".text\n\n");
     for (functions) |function| {
         if (function.inline_call) continue;
-        if (function.export_symbol and function.emit_label) {
+        if ((function.export_symbol or function.command_index != null) and function.emit_label) {
             try writer.print(".globl {s}\n", .{function.name});
         }
         if (function.emit_label) {
@@ -43,6 +43,35 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
         }
         try writer.writeByte('\n');
     }
+    try writeCommandManifest(writer, functions);
+}
+
+fn writeCommandManifest(writer: *std.Io.Writer, functions: []const ast.Function) !void {
+    var seen: u16 = 0;
+    var wrote_section = false;
+    for (functions) |function| {
+        const index = function.command_index orelse continue;
+        const bit = @as(u16, 1) << index;
+        if (seen & bit != 0) return error.DuplicateCommandIndex;
+        seen |= bit;
+        if (function.inline_call or function.no_return) return error.InvalidCommandFunction;
+        if (function.parameters.len == 0 or function.parameters.len > 4) return error.InvalidCommandParameters;
+        for (function.parameters, 0..) |parameter, parameter_index| {
+            if (isVectorType(parameter.data_type)) return error.InvalidCommandParameters;
+            const expected: Register = @enumFromInt(@intFromEnum(Register.a0) + parameter_index);
+            if (parameter.reg != expected) return error.InvalidCommandParameters;
+        }
+        if (!wrote_section) {
+            try writer.writeAll(".section .zsp_commands,\"\",@progbits\n");
+            wrote_section = true;
+        }
+        try writer.print("  .word {s}\n  .byte {d}\n  .byte {d}\n  .short 0\n", .{
+            function.name,
+            index,
+            function.parameters.len * 4,
+        });
+    }
+    if (wrote_section) try writer.writeByte('\n');
 }
 
 fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) !void {

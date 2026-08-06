@@ -8,10 +8,13 @@ test "parse packed blob" {
         0x00, 0x18, // data offset
         0x00, 0x08, // initial PC
         0x00, 0x04, // IMEM text offset
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // reserved
+        0x00, 0x1a, // command metadata offset
+        0x00, 0x01, // command count
+        0x00, 0x00, // reserved
         0xaa, 0xbb, 0xcc, 0xdd, // text
         0x00, 0x00, 0x00, 0x00, // padding
         0x12, 0x34, // data
+        0x03, 0x08, 0x02, 0x40, // command 3, 8 bytes, handler at IMEM offset 0x240
     };
     const ucode = UCode.fromBlob(&blob);
 
@@ -21,4 +24,9 @@ test "parse packed blob" {
     try testing.expectEqual(@as(u16, 4), ucode.text_offset);
     try testing.expectEqual(@as(u8, 0xaa), ucode.text[0]);
     try testing.expectEqual(@as(u8, 0x34), ucode.data[1]);
+    try testing.expectEqual(@as(usize, 1), ucode.commandCount());
+    const command = ucode.commandAt(0);
+    try testing.expectEqual(@as(u8, 3), command.index);
+    try testing.expectEqual(@as(u8, 8), command.size);
+    try testing.expectEqual(@as(u16, 0x240), command.handler_offset);
 }

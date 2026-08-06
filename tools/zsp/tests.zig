@@ -1372,6 +1372,51 @@ test "syntax rejects unsupported function modifier" {
     , .unsupported_function_modifier, 1, 11);
 }
 
+test "command functions emit indexed handler metadata" {
+    try expectAsm(
+        \\command(0) fn first(reg($a0) header: u32, reg($a1) value: u32) {
+        \\}
+        \\command(1) fn second(reg($a0) header: u32) {
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.globl first
+        \\first:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\.globl second
+        \\second:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word first
+        \\  .byte 0
+        \\  .byte 8
+        \\  .short 0
+        \\  .word second
+        \\  .byte 1
+        \\  .byte 4
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "command functions require unique indices and ABI parameters" {
+    try expectAsmError(
+        \\command(0) fn first(reg($a0) header: u32) {}
+        \\command(0) fn second(reg($a0) header: u32) {}
+    , error.DuplicateCommandIndex);
+    try expectAsmError(
+        \\command(0) fn bad(reg($a1) header: u32) {}
+    , error.InvalidCommandParameters);
+}
+
 test "syntax rejects invalid number literal" {
     try expectParseError(
         \\fn test() {

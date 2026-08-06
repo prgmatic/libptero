@@ -3,7 +3,7 @@ const std = @import("std");
 const rsp_header_len = 16;
 const imem_base = 0x1000;
 const imem_end = 0x2000;
-const overlay_dmem_start = 0x0820;
+const overlay_dmem_start = 0x0840;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.smp_allocator;
@@ -63,6 +63,10 @@ fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16) !void {
         \\    .text 0x{x:0>4} : {{
         \\        *(.text*)
         \\    }} > IMEM
+        \\
+        \\    .zsp_commands 0 : {{
+        \\        KEEP(*(.zsp_commands))
+        \\    }}
         \\
         \\    /DISCARD/ : {{
         \\        *(.MIPS.abiflags)
