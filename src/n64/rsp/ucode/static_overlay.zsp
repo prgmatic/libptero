@@ -6,7 +6,6 @@ data {
 // ABI and the handler returns through $ra.
 command(0) fn _start(
     reg($a0) command: u32,
-    reg($a1) unused: u32,
 ) {
     reg dmem_address: u32 = 0;
     dmem_address = command & 0x00ffffff;

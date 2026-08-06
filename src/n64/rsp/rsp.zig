@@ -127,7 +127,7 @@ pub fn submitOverlay(
     for (0..program.commandCount()) |command_index| {
         const command = program.commandAt(command_index);
         if (command.index >= overlay_command_count or command.handler_offset & 3 != 0 or
-            command.handler_offset >> 2 > 0x7ff)
+            command.handler_offset >> 2 > 0x3ff)
         {
             @panic("RSP overlay command metadata cannot be encoded");
         }

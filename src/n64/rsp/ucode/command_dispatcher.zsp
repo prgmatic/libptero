@@ -127,7 +127,8 @@ export fn _start() noreturn {
                 dma_size = dma_size >> dma_pitch;
                 dma_size = dma_size & 0xffff;
                 command_size = dma_size >> 8;
-                handler_address = dma_size & 0x07ff;
+                command_size = command_size & 0xfc;
+                handler_address = dma_size & 0x03ff;
                 handler_address = handler_address << 2;
                 handler_address += 0x1000;
                 command_address += command_size;

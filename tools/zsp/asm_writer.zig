@@ -87,6 +87,7 @@ fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) 
             }
             if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
         }
+        if (std.mem.eql(u8, parameter.name, "_")) continue;
         try context.add(.{
             .name = parameter.name,
             .data_type = parameter.data_type,

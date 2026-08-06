@@ -1374,7 +1374,7 @@ test "syntax rejects unsupported function modifier" {
 
 test "command functions emit indexed handler metadata" {
     try expectAsm(
-        \\command(0) fn first(reg($a0) header: u32, reg($a1) value: u32) {
+        \\command(0) fn first(reg($a0) header: u32, reg($a1) _: u32) {
         \\}
         \\command(1) fn second(reg($a0) header: u32) {
         \\}
@@ -1415,6 +1415,14 @@ test "command functions require unique indices and ABI parameters" {
     try expectAsmError(
         \\command(0) fn bad(reg($a1) header: u32) {}
     , error.InvalidCommandParameters);
+}
+
+test "discard parameters contribute to command size without defining symbols" {
+    try expectAsmError(
+        \\command(0) fn bad(reg($a0) _: u32) {
+        \\  reg($t0) value: u32 = _;
+        \\}
+    , error.UnknownSymbol);
 }
 
 test "syntax rejects invalid number literal" {

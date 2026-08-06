@@ -34,7 +34,7 @@ test "writeCommand encodes a static overlay command" {
     var buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
     var queue = CommandQueue.init(&buffer);
 
-    queue.writeCommand(0x10, 0x104, 0xcafebabe);
+    queue.writeCommand(0x10, 0x104, &.{0xcafebabe});
     queue.stop();
 
     const expected = [_]u32{
@@ -44,12 +44,27 @@ test "writeCommand encodes a static overlay command" {
     try testing.expectEqualSlices(u32, &expected, queue.words());
 }
 
+test "writeCommand encodes a four-byte command without arguments" {
+    var buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var queue = CommandQueue.init(&buffer);
+
+    queue.writeCommand(0x10, 0x104, &.{});
+    queue.writeCommand(0x20, 0x108, &.{});
+    queue.stop();
+
+    const expected = [_]u32{
+        0x10000104,
+        0x20000108,
+    } ++ [_]u32{0} ** (command_queue.batch_word_count - 2);
+    try testing.expectEqualSlices(u32, &expected, queue.words());
+}
+
 test "a fixed queue holds two overlay commands and stop" {
     var buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
     var queue = CommandQueue.init(&buffer);
 
-    queue.writeCommand(0x10, 0x104, 0xcafebabe);
-    queue.writeCommand(0x10, 0x108, 0xdeadbeef);
+    queue.writeCommand(0x10, 0x104, &.{0xcafebabe});
+    queue.writeCommand(0x10, 0x108, &.{0xdeadbeef});
     queue.stop();
 
     const expected = [_]u32{

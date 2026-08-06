@@ -136,7 +136,7 @@ fn packCommands(
             return error.InvalidCommandHandler;
         }
         const handler_offset = handler - imem_base;
-        if (handler_offset >> 2 > 0x7ff) return error.InvalidCommandHandler;
+        if (handler_offset >> 2 > 0x3ff) return error.InvalidCommandHandler;
         const output_record = destination[record_index * command_packed_size ..][0..command_packed_size];
         output_record[0] = index;
         output_record[1] = command_size;
