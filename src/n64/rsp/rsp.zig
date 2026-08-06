@@ -16,13 +16,7 @@ const overlay_table_dmem = 0x08;
 const overlay_idmap_dmem = 0x48;
 const queue_address_dmem = 0x58;
 const current_overlay_id_dmem = 0x60;
-const overlay_text_address_dmem = 0x68;
-const overlay_text_size_dmem = 0x6c;
-const overlay_imem_address_dmem = 0x70;
-const overlay_handler_address_dmem = 0x74;
-const overlay_data_address_dmem = 0x78;
-const overlay_data_size_dmem = 0x7c;
-const overlay_dmem_address_dmem = 0x80;
+const overlay_dmem_offset = 0x800;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
 // Temporary single-overlay backing store. This also lets submitOverlay fill the
@@ -85,7 +79,6 @@ pub fn submitCommands(queue: *const CommandQueue) void {
 pub fn submitOverlay(
     overlay_id: u8,
     program: UCode,
-    dmem_offset: u32,
 ) void {
     if (overlay_id != 1) {
         @panic("only static RSP overlay 1 is currently supported");
@@ -103,14 +96,12 @@ pub fn submitOverlay(
         @panic("RSP overlay data must have a nonzero DMA-aligned size");
     }
     const overlay_data_len = overlay_payload_offset + program.data.len;
-    if (dmem_offset > io.dmem_len or
-        overlay_data_len > @as(usize, io.dmem_len - dmem_offset))
-    {
+    if (overlay_data_len > io.dmem_len - overlay_dmem_offset) {
         @panic("RSP overlay data does not fit in DMEM");
     }
 
     const imem_address = io.dma_imem_addr + imem_offset;
-    const dmem_address = io.dma_dmem_addr + dmem_offset;
+    const dmem_address = io.dma_dmem_addr + overlay_dmem_offset;
     const overlay_data = overlay_data_staging[0..overlay_data_len];
     @memset(overlay_data, 0);
     @memcpy(overlay_data[overlay_payload_offset..], program.data);
@@ -123,7 +114,11 @@ pub fn submitOverlay(
         .text_start = @intCast(imem_address),
     };
     header.write(overlay_data[0..OverlayHeader.byte_len]);
-    std.mem.writeInt(u16, overlay_data[28..30], 0x0a00, .big);
+    if (program.pc_start & 3 != 0 or program.pc_start >> 2 > 0x7ff) {
+        @panic("RSP overlay handler cannot be encoded in a command descriptor");
+    }
+    const command_descriptor = @as(u16, 8 << 8) | program.pc_start >> 2;
+    std.mem.writeInt(u16, overlay_data[28..30], command_descriptor, .big);
     std.mem.writeInt(u16, overlay_data[30..32], 0, .big);
 
     assertRspDma(program.text, imem_address);
@@ -134,15 +129,8 @@ pub fn submitOverlay(
     cache.writebackData(program.text);
     cache.writebackData(overlay_data);
 
-    io.readDmem(u32, overlay_text_address_dmem).* = physicalAddress(@intFromPtr(program.text.ptr));
-    io.readDmem(u32, overlay_text_size_dmem).* = @intCast(program.text.len - 1);
-    io.readDmem(u32, overlay_imem_address_dmem).* = imem_address;
-    io.readDmem(u32, overlay_handler_address_dmem).* = io.dma_imem_addr + program.pc_start;
     io.readDmem(u32, current_overlay_id_dmem).* = 0;
     io.readDmem(u32, overlay_load_count_dmem).* = 0;
-    io.readDmem(u32, overlay_data_address_dmem).* = physicalAddress(@intFromPtr(overlay_data.ptr));
-    io.readDmem(u32, overlay_data_size_dmem).* = @intCast(overlay_data.len - 1);
-    io.readDmem(u32, overlay_dmem_address_dmem).* = dmem_address;
 
     const packed_data = physicalAddress(@intFromPtr(overlay_data.ptr)) & 0x00ffffff |
         @as(u32, @intCast((overlay_data.len - 1) >> 4)) << 24;
@@ -153,6 +141,21 @@ pub fn submitOverlay(
 pub fn load(program: UCode) void {
     loadText(program.text, 0);
     loadData(program.data, 0);
+}
+
+pub fn loadResident(program: UCode) void {
+    halt();
+    waitHalted();
+    clearDmem();
+    load(program);
+}
+
+// The RSP must already be halted before directly accessing DMEM.
+pub fn clearDmem() void {
+    var offset: u32 = 0;
+    while (offset < io.dmem_len) : (offset += @sizeOf(u32)) {
+        io.readDmem(u32, offset).* = 0;
+    }
 }
 
 pub fn loadText(text: []const u8, imem_offset: u32) void {
