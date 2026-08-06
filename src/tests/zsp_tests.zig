@@ -226,10 +226,10 @@ fn dataBlocks() !void {
     try expectDmemWord(u32, 0x11c, 0xcafe);
 
     try expectDmemWord(u32, 0x120, 0x00);
-    try expectDmemWord(u32, 0x124, 0x04);
-    try expectDmemWord(u32, 0x128, 0x08);
-    try expectDmemWord(u32, 0x12c, 0x0c);
-    try expectDmemWord(u32, 0x130, 0x14);
+    try expectDmemWord(u32, 0x124, 0x10);
+    try expectDmemWord(u32, 0x128, 0x04);
+    try expectDmemWord(u32, 0x12c, 0x14);
+    try expectDmemWord(u32, 0x130, 0x08);
 }
 
 fn dmaIn() !void {

@@ -23,7 +23,7 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     try writer.writeAll(".set noat\n");
 
     var top_level_context = FunctionContext{ .label_prefix = "top_level" };
-    try writeDataBlocks(writer, functions, &top_level_context);
+    try writeStorageBlocks(writer, functions, &top_level_context);
     try writer.writeAll(".text\n\n");
     for (functions) |function| {
         if (function.inline_call) continue;
@@ -176,6 +176,7 @@ fn writeStatements(
         switch (statement) {
             .packed_struct_decl => {},
             .data_block => {},
+            .bss_block => {},
             .var_decl => |decl| try writeVarDecl(writer, context, decl),
             .assignment => |assignment| try writeAssignment(writer, context, assignment),
             .store => |store| try writeStore(writer, context, store),
@@ -188,13 +189,11 @@ fn writeStatements(
     }
 }
 
-fn writeDataBlocks(
+fn writeStorageBlocks(
     writer: *std.Io.Writer,
     functions: []const ast.Function,
     context: *FunctionContext,
 ) !void {
-    var offset: usize = 0;
-    var wrote_data = false;
     var packed_structs = PackedStructRegistry{};
     for (functions) |function| {
         for (function.statements) |statement| switch (statement) {
@@ -202,21 +201,24 @@ fn writeDataBlocks(
             else => {},
         };
     }
-    for (functions) |function| {
-        for (function.statements) |statement| {
+    inline for (.{ .data_block, .bss_block }) |block_tag| {
+        var offset: usize = 0;
+        var wrote_section = false;
+        for (functions) |function| for (function.statements) |statement| {
+            if (std.meta.activeTag(statement) != block_tag) continue;
             const declarations = switch (statement) {
-                .data_block => |declarations| declarations,
-                else => continue,
+                .data_block => |items| items,
+                .bss_block => |items| items,
+                else => unreachable,
             };
-            if (!wrote_data) {
-                try writer.writeAll(".data\n");
-                wrote_data = true;
+            if (!wrote_section) {
+                try writer.writeAll(if (block_tag == .data_block) ".data\n" else ".bss\n");
+                wrote_section = true;
             }
             for (declarations) |declaration| {
                 const element_size = switch (declaration.storage_type) {
                     .scalar => |data_type| try scalarDataSize(data_type),
                     .packed_struct => |name| blk: {
-                        if (declaration.is_array) return error.PackedStructArraysUnsupported;
                         break :blk try packed_structs.sizeOf(name);
                     },
                 };
@@ -227,39 +229,34 @@ fn writeDataBlocks(
                 offset = std.mem.alignForward(usize, offset, alignment);
                 if (alignment > 1) try writer.print(".balign {d}\n", .{alignment});
                 try writer.print("{s}:\n", .{declaration.name});
-                switch (declaration.storage_type) {
+                if (!declaration.initialized) {
+                    try writer.print("  .space {d}\n", .{declaration.array_len * element_size});
+                } else switch (declaration.storage_type) {
                     .scalar => |data_type| for (declaration.values) |value| {
                         try validateDataValue(data_type, value);
                         try writer.print("  {s} {d}\n", .{ dataDirective(data_type), value });
                     },
                     .packed_struct => |name| {
                         const layout = try packed_structs.lookup(name);
-                        if (declaration.zero_fill) {
-                            if (declaration.values.len != layout.fields.len) {
-                                return error.IncorrectPackedStructInitializerCount;
-                            }
-                            for (declaration.values, layout.fields) |value, field| {
-                                try validateDataValue(field.data_type, value);
-                                try writer.print("  {s} {d}\n", .{ dataDirective(field.data_type), value });
-                            }
+                        if (declaration.is_array) return error.PackedStructArraysUnsupported;
+                        if (declaration.values.len != layout.fields.len) {
+                            return error.IncorrectPackedStructInitializerCount;
+                        }
+                        for (declaration.values, layout.fields) |value, field| {
+                            try validateDataValue(field.data_type, value);
+                            try writer.print("  {s} {d}\n", .{ dataDirective(field.data_type), value });
                         }
                     },
                 }
-                switch (declaration.storage_type) {
+                if (declaration.initialized) switch (declaration.storage_type) {
                     .scalar => {
                         const remaining = declaration.array_len - declaration.values.len;
                         if (remaining > 0) {
-                            if (declaration.zero_fill) {
-                                try writer.print("  .space {d}, 0\n", .{remaining * element_size});
-                            } else {
-                                try writer.print("  .space {d}\n", .{remaining * element_size});
-                            }
+                            try writer.print("  .space {d}, 0\n", .{remaining * element_size});
                         }
                     },
-                    .packed_struct => {
-                        if (!declaration.zero_fill) try writer.print("  .space {d}\n", .{element_size});
-                    },
-                }
+                    .packed_struct => {},
+                };
                 try context.add(.{
                     .name = declaration.name,
                     .data_type = .u32,
@@ -269,9 +266,9 @@ fn writeDataBlocks(
                 });
                 offset += declaration.array_len * element_size;
             }
-        }
+        };
+        if (wrote_section) try writer.writeByte('\n');
     }
-    if (wrote_data) try writer.writeByte('\n');
 }
 
 const PackedStructRegistry = struct {

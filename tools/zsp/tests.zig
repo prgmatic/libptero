@@ -151,10 +151,12 @@ test "data blocks emit scalar arrays and expose DMEM addresses" {
     try expectAsm(
         \\data {
         \\  shift_constants: [8]u8 = .{ 0x80, 0x40, 0x20, 0x10, 8, 4, 2, 1 };
-        \\  overlay_data_rdram: [16]u32 = undefined;
-        \\  overlay_idmap: [16]u8 = undefined;
         \\  queue_address: u32 = 0x12345678;
-        \\  status: u32 = undefined;
+        \\}
+        \\bss {
+        \\  overlay_data_rdram: [16]u32;
+        \\  overlay_idmap: [16]u8;
+        \\  status: u32;
         \\}
         \\export fn _start() noreturn {
         \\  reg($t0) table: u32 = overlay_data_rdram;
@@ -176,13 +178,15 @@ test "data blocks emit scalar arrays and expose DMEM addresses" {
         \\  .byte 2
         \\  .byte 1
         \\.balign 4
+        \\queue_address:
+        \\  .word 305419896
+        \\
+        \\.bss
+        \\.balign 4
         \\overlay_data_rdram:
         \\  .space 64
         \\overlay_idmap:
         \\  .space 16
-        \\.balign 4
-        \\queue_address:
-        \\  .word 305419896
         \\.balign 4
         \\status:
         \\  .space 4
@@ -219,7 +223,10 @@ test "packed structs emit fields without padding" {
         \\}
         \\data {
         \\  header: Header = .{ 8, 0x12345678, -1 };
-        \\  scratch: Header = undefined;
+        \\}
+        \\bss {
+        \\  scratch: Header;
+        \\  headers: [2]Header;
         \\}
         \\export fn _start() noreturn {
         \\  reg($t0) address: u32 = header;
@@ -233,8 +240,12 @@ test "packed structs emit fields without padding" {
         \\  .short 8
         \\  .word 305419896
         \\  .byte -1
+        \\
+        \\.bss
         \\scratch:
         \\  .space 7
+        \\headers:
+        \\  .space 14
         \\
         \\.text
         \\
@@ -246,6 +257,14 @@ test "packed structs emit fields without padding" {
         \\
         \\
     );
+}
+
+test "data blocks reject undefined storage" {
+    try expectParseError(
+        \\data {
+        \\  scratch: u32 = undefined;
+        \\}
+    , .undefined_data_initializer, 2, 18);
 }
 
 test "scalar assignment operators support every data type" {

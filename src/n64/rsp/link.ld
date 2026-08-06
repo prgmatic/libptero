@@ -8,11 +8,11 @@ MEMORY {
 
 SECTIONS {
     .data 0x0000 : {
-        *(.data*)
-        *(.rodata*)
+        KEEP(*(.data*))
+        KEEP(*(.rodata*))
     } > DMEM
 
-    .bss (NOLOAD) : {
+    .bss (NOLOAD) : SUBALIGN(1) {
         *(.bss*)
     } > DMEM
 
@@ -22,5 +22,6 @@ SECTIONS {
 
     /DISCARD/ : {
         *(.MIPS.abiflags)
+        *(.got*)
     }
 }

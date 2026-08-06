@@ -29,6 +29,39 @@ var dma_staging: [io.dmem_len]u8 align(8) = undefined;
 // runtime-dependent fields in the overlay's packed header before RSP DMA.
 var overlay_data_staging: [io.dmem_len]u8 align(16) = undefined;
 
+pub const OverlayHeader = extern struct {
+    state_start: u16 = 0,
+    state_size: u16 = 0,
+    state_rdram: u32 = 0,
+    command_base: u16,
+    overlay_id: u16,
+    text_rdram: u32,
+    text_size: u16,
+    text_start: u16,
+    extra_rdram: u32 = 0,
+    extra_size: u16 = 0,
+    extra_start: u16 = 0,
+
+    const byte_len = 28;
+
+    fn write(self: OverlayHeader, destination: *[byte_len]u8) void {
+        std.mem.writeInt(u16, destination[0..2], self.state_start, .big);
+        std.mem.writeInt(u16, destination[2..4], self.state_size, .big);
+        std.mem.writeInt(u32, destination[4..8], self.state_rdram, .big);
+        std.mem.writeInt(u16, destination[8..10], self.command_base, .big);
+        std.mem.writeInt(u16, destination[10..12], self.overlay_id, .big);
+        std.mem.writeInt(u32, destination[12..16], self.text_rdram, .big);
+        std.mem.writeInt(u16, destination[16..18], self.text_size, .big);
+        std.mem.writeInt(u16, destination[18..20], self.text_start, .big);
+        std.mem.writeInt(u32, destination[20..24], self.extra_rdram, .big);
+        std.mem.writeInt(u16, destination[24..26], self.extra_size, .big);
+        std.mem.writeInt(u16, destination[26..28], self.extra_start, .big);
+    }
+};
+
+const overlay_command_table_len = 4;
+const overlay_payload_offset = OverlayHeader.byte_len + overlay_command_table_len;
+
 pub fn runUCode(program: UCode) void {
     halt();
     waitHalted();
@@ -69,28 +102,29 @@ pub fn submitOverlay(
     if (program.data.len == 0 or program.data.len & 7 != 0) {
         @panic("RSP overlay data must have a nonzero DMA-aligned size");
     }
-    if (program.data.len < 28) {
-        @panic("RSP overlay data must contain a packed overlay header");
-    }
+    const overlay_data_len = overlay_payload_offset + program.data.len;
     if (dmem_offset > io.dmem_len or
-        program.data.len > @as(usize, io.dmem_len - dmem_offset))
+        overlay_data_len > @as(usize, io.dmem_len - dmem_offset))
     {
         @panic("RSP overlay data does not fit in DMEM");
     }
 
     const imem_address = io.dma_imem_addr + imem_offset;
     const dmem_address = io.dma_dmem_addr + dmem_offset;
-    const overlay_data = overlay_data_staging[0..program.data.len];
-    @memcpy(overlay_data, program.data);
+    const overlay_data = overlay_data_staging[0..overlay_data_len];
+    @memset(overlay_data, 0);
+    @memcpy(overlay_data[overlay_payload_offset..], program.data);
 
-    // Match libdragon's rspq_overlay_header layout. Sizes use the RSP DMA
-    // length convention (byte count minus one), and IDs use their encoded
-    // command/id-map representation.
-    std.mem.writeInt(u16, overlay_data[8..10], @as(u16, overlay_id) << 5, .big);
-    std.mem.writeInt(u16, overlay_data[10..12], @as(u16, overlay_id) << 2, .big);
-    std.mem.writeInt(u32, overlay_data[12..16], physicalAddress(@intFromPtr(program.text.ptr)), .big);
-    std.mem.writeInt(u16, overlay_data[16..18], @intCast(program.text.len - 1), .big);
-    std.mem.writeInt(u16, overlay_data[18..20], @intCast(imem_address), .big);
+    const header = OverlayHeader{
+        .command_base = @as(u16, overlay_id) << 5,
+        .overlay_id = @as(u16, overlay_id) << 2,
+        .text_rdram = physicalAddress(@intFromPtr(program.text.ptr)),
+        .text_size = @intCast(program.text.len - 1),
+        .text_start = @intCast(imem_address),
+    };
+    header.write(overlay_data[0..OverlayHeader.byte_len]);
+    std.mem.writeInt(u16, overlay_data[28..30], 0x0a00, .big);
+    std.mem.writeInt(u16, overlay_data[30..32], 0, .big);
 
     assertRspDma(program.text, imem_address);
     assertRspDma(overlay_data, dmem_address);

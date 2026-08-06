@@ -198,7 +198,11 @@ pub const Parser = struct {
         }
 
         if (std.mem.eql(u8, first.text, "data")) {
-            return .{ .data_block = try self.parseDataBlock() };
+            return .{ .data_block = try self.parseStorageBlock(true) };
+        }
+
+        if (std.mem.eql(u8, first.text, "bss")) {
+            return .{ .bss_block = try self.parseStorageBlock(false) };
         }
 
         if (std.mem.eql(u8, first.text, "asm")) {
@@ -381,7 +385,7 @@ pub const Parser = struct {
         };
     }
 
-    fn parseDataBlock(self: *Parser) ![]const ast.DataDecl {
+    fn parseStorageBlock(self: *Parser, initialized: bool) ![]const ast.DataDecl {
         _ = try self.expect(.l_brace);
         var declarations: std.ArrayList(ast.DataDecl) = .empty;
         errdefer {
@@ -407,27 +411,20 @@ pub const Parser = struct {
                 if (isVectorType(data_type)) return self.fail(name, .expected_scalar_data_type);
                 break :blk .{ .scalar = data_type };
             } else .{ .packed_struct = type_token.text };
-            _ = try self.expect(.equal);
-
             var values: std.ArrayList(i64) = .empty;
             errdefer values.deinit(self.allocator);
-            var zero_fill = true;
-            const aggregate_initializer = is_array or storage_type == .packed_struct;
-            if (!aggregate_initializer) {
+            if (initialized) {
+                _ = try self.expect(.equal);
                 if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "undefined")) {
-                    _ = try self.expect(.ident);
-                    zero_fill = false;
-                } else {
+                    return self.fail(self.current, .undefined_data_initializer);
+                }
+                const aggregate_initializer = is_array or storage_type == .packed_struct;
+                if (!aggregate_initializer) {
                     const value = try self.parseValueRef();
                     switch (value) {
                         .number => |number| try values.append(self.allocator, number),
                         else => return self.fail(self.current, .expected_data_literal),
                     }
-                }
-            } else {
-                if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "undefined")) {
-                    _ = try self.expect(.ident);
-                    zero_fill = false;
                 } else {
                     _ = try self.eat(.dot);
                     _ = try self.expect(.l_brace);
@@ -445,7 +442,7 @@ pub const Parser = struct {
                     }
                 }
             }
-            if (is_array and storage_type == .scalar and zero_fill and values.items.len != array_len_value) {
+            if (initialized and is_array and storage_type == .scalar and values.items.len != array_len_value) {
                 return self.fail(name, .incorrect_array_initializer_count);
             }
             _ = try self.expect(.semicolon);
@@ -455,7 +452,7 @@ pub const Parser = struct {
                 .array_len = @intCast(array_len_value),
                 .is_array = is_array,
                 .values = try values.toOwnedSlice(self.allocator),
-                .zero_fill = zero_fill,
+                .initialized = initialized,
             });
         }
         return declarations.toOwnedSlice(self.allocator);
@@ -808,6 +805,7 @@ pub const ErrorType = enum {
     expected_literal_offset,
     expected_scalar_data_type,
     expected_data_literal,
+    undefined_data_initializer,
     expected_struct_declaration,
     invalid_array_length,
     incorrect_array_initializer_count,
@@ -846,6 +844,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .expected_literal_offset => "expected literal memory offset",
         .expected_scalar_data_type => "expected scalar data type",
         .expected_data_literal => "expected data initializer literal",
+        .undefined_data_initializer => "data declarations must contain initialized bytes; reserve storage in a bss block",
         .expected_struct_declaration => "expected packed struct declaration",
         .invalid_array_length => "invalid array length",
         .incorrect_array_initializer_count => "array initializer must contain exactly the declared element count",

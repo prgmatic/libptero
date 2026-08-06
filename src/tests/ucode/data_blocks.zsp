@@ -1,9 +1,12 @@
 data {
     initialized_scalar: u32 = 0x12345678;
-    undefined_scalar: u32 = undefined;
     initialized_bytes: [4]u8 = .{ 0x11, 0x22, 0x33, 0x44 };
-    undefined_halfwords: [3]u16 = undefined;
     initialized_words: [2]u32 = .{ 0x89abcdef, 0x76543210 };
+}
+
+bss {
+    undefined_scalar: u32;
+    undefined_halfwords: [3]u16;
 }
 
 export fn _start() noreturn {

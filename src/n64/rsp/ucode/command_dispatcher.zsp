@@ -2,21 +2,25 @@ const dma = @import("dma.zsp");
 
 data {
     shift_constants: [8]u8 = .{ 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 };
-    overlay_data_rdram: [16]u32 = undefined;
-    overlay_idmap: [16]u8 = undefined;
+}
 
-    queue_rdram_address: u32 = undefined;
-    command_status: u32 = undefined;
-    current_overlay_id: u32 = undefined;
-    overlay_load_count: u32 = undefined;
+// Resident queue state is addressable DMEM, but is not part of the ucode image.
+bss {
+    overlay_data_rdram: [16]u32;
+    overlay_idmap: [16]u8;
 
-    overlay_text_address: u32 = undefined;
-    overlay_text_size: u32 = undefined;
-    overlay_imem_address: u32 = undefined;
-    overlay_handler_address: u32 = undefined;
-    overlay_data_address: u32 = undefined;
-    overlay_data_size: u32 = undefined;
-    overlay_dmem_address: u32 = undefined;
+    queue_rdram_address: u32;
+    command_status: u32;
+    current_overlay_id: u32;
+    overlay_load_count: u32;
+
+    overlay_text_address: u32;
+    overlay_text_size: u32;
+    overlay_imem_address: u32;
+    overlay_handler_address: u32;
+    overlay_data_address: u32;
+    overlay_data_size: u32;
+    overlay_dmem_address: u32;
 }
 
 fn dispatch(reg($t6) handler_address: u32) noreturn {

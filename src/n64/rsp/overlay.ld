@@ -7,12 +7,13 @@ MEMORY {
 }
 
 SECTIONS {
-    .data 0x0800 : {
+    /* Leave room for the CPU-created overlay header and command table. */
+    .data 0x0820 : {
         KEEP(*(.data*))
         KEEP(*(.rodata*))
     } > DMEM
 
-    .bss (NOLOAD) : {
+    .bss (NOLOAD) : SUBALIGN(1) {
         *(.bss*)
     } > DMEM
 
@@ -22,5 +23,6 @@ SECTIONS {
 
     /DISCARD/ : {
         *(.MIPS.abiflags)
+        *(.got*)
     }
 }
