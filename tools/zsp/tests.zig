@@ -703,6 +703,83 @@ test "partial-product multiply and accumulate families emit their function codes
     );
 }
 
+test "accumulator reads select high middle and low portions" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) high: vec16 = accumulator(.high);
+        \\  reg($v02) middle: vec16 = accumulator(.middle);
+        \\  reg($v03) low: vec16 = 0;
+        \\  low = accumulator(.low);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4b00005d # vsar $v01, $v00, $v00
+        \\  .word 0x4b20009d # vsar $v02, $v00, $v00
+        \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
+        \\  .word 0x4b4000dd # vsar $v03, $v00, $v00
+        \\
+        \\
+    );
+}
+
+test "indexed vector lanes support halfword memory transfers" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) ptr: u32 = 0;
+        \\  reg($v01) value: vec16 = 0;
+        \\  value[2] = load(vec16, ptr, 6);
+        \\  store(vec16, ptr, value[5], -4);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 0
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0xc9010a03 # lsv $v01[2], 6($t0)
+        \\  .word 0xe9010d7e # ssv $v01[5], -4($t0)
+        \\
+        \\
+    );
+}
+
+test "vector comparison and merge instructions expose VCC-backed primitives" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) left: vec16 = 0;
+        \\  reg($v02) right: vec16 = 0;
+        \\  reg($v03) result: vec16 = 0;
+        \\  result = vlt(left, right);
+        \\  result = veq(left, right);
+        \\  result = vne(left, right);
+        \\  result = vge(left, right);
+        \\  result = vmrg(left, right);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
+        \\  .word 0x4a0208e0 # vlt $v03, $v01, $v02
+        \\  .word 0x4a0208e1 # veq $v03, $v01, $v02
+        \\  .word 0x4a0208e2 # vne $v03, $v01, $v02
+        \\  .word 0x4a0208e3 # vge $v03, $v01, $v02
+        \\  .word 0x4a0208e7 # vmrg $v03, $v01, $v02
+        \\
+        \\
+    );
+}
+
 test "store emits byte halfword and word writes" {
     try expectAsm(
         \\fn test() {

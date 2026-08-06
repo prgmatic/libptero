@@ -53,6 +53,11 @@ export fn _start() noreturn {
     mul_result.sfract = vmacf(b.sfract, zero_factor.yyyyyyyy);
     mul_result.ufract = vmulu(a.ufract, zero_factor);
     mul_result.ufract = vmacu(b.ufract, zero_factor);
+    mul_result = vmudh(a, zero_factor);
+    mul_result = vmadh(b, zero_factor);
+    mul_result = accumulator(.high);
+    mul_result = accumulator(.middle);
+    mul_result = accumulator(.low);
 
     store(vec16, input, add_result, 0x100);
     store(vec16, input, sub_result, 0x110);

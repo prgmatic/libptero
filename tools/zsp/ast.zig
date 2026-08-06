@@ -28,8 +28,15 @@ pub const Value = union(enum) {
     ident: []const u8,
     vector_access: VectorAccess,
     vector_operation: VectorOperation,
+    accumulator_read: AccumulatorPart,
     number: i64,
     load: Load,
+};
+
+pub const AccumulatorPart = enum(u4) {
+    high = 8,
+    middle = 9,
+    low = 10,
 };
 
 pub const VectorOp = enum(u6) {
@@ -45,6 +52,11 @@ pub const VectorOp = enum(u6) {
     vmadm = 0b001101,
     vmadn = 0b001110,
     vmadh = 0b001111,
+    vlt = 0b100000,
+    veq = 0b100001,
+    vne = 0b100010,
+    vge = 0b100011,
+    vmrg = 0b100111,
 };
 
 pub const VectorOperation = struct {

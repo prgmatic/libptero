@@ -448,6 +448,17 @@ pub const Parser = struct {
             return .{ .load = .{ .data_type = data_type, .address = address, .offset = offset } };
         }
 
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "accumulator")) {
+            _ = try self.expect(.ident);
+            _ = try self.expect(.l_paren);
+            _ = try self.expect(.dot);
+            const part_token = try self.expect(.ident);
+            const part = parseAccumulatorPart(part_token.text) orelse
+                return self.fail(part_token, .invalid_accumulator_part);
+            _ = try self.expect(.r_paren);
+            return .{ .accumulator_read = part };
+        }
+
         if (self.current.tag == .ident and parseVectorOp(self.current.text) != null) {
             const op_token = try self.expect(.ident);
             const op = parseVectorOp(op_token.text).?;
@@ -668,6 +679,7 @@ pub const ErrorType = enum {
     invalid_vector_swizzle,
     unsupported_destination_swizzle,
     expected_vector_operand,
+    invalid_accumulator_part,
     expected_fixed_register_parameter,
     expected_import,
     expected_value,
@@ -700,6 +712,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .invalid_vector_swizzle => "unsupported vector swizzle",
         .unsupported_destination_swizzle => "only a single lane or typed view is allowed on an assignment destination",
         .expected_vector_operand => "expected vector operand",
+        .invalid_accumulator_part => "expected accumulator part .high, .middle, or .low",
         .expected_fixed_register_parameter => "expected fixed-register parameter",
         .expected_import => "expected import",
         .expected_value => "expected value",
@@ -738,6 +751,13 @@ fn parseVectorView(text: []const u8) ?ast.VectorView {
 
 fn parseVectorOp(text: []const u8) ?ast.VectorOp {
     inline for (std.meta.fields(ast.VectorOp)) |field| {
+        if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
+    }
+    return null;
+}
+
+fn parseAccumulatorPart(text: []const u8) ?ast.AccumulatorPart {
+    inline for (std.meta.fields(ast.AccumulatorPart)) |field| {
         if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
     }
     return null;
