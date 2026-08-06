@@ -193,6 +193,10 @@ pub const Parser = struct {
 
         const first = try self.expect(.ident);
 
+        if (std.mem.eql(u8, first.text, "data")) {
+            return .{ .data_block = try self.parseDataBlock() };
+        }
+
         if (std.mem.eql(u8, first.text, "asm")) {
             _ = try self.expect(.l_paren);
             const asm_text = try self.expect(.string);
@@ -345,6 +349,81 @@ pub const Parser = struct {
         }
 
         return self.fail(first, .unsupported_statement);
+    }
+
+    fn parseDataBlock(self: *Parser) ![]const ast.DataDecl {
+        _ = try self.expect(.l_brace);
+        var declarations: std.ArrayList(ast.DataDecl) = .empty;
+        errdefer {
+            for (declarations.items) |declaration| self.allocator.free(declaration.values);
+            declarations.deinit(self.allocator);
+        }
+
+        while (!try self.eat(.r_brace)) {
+            const name = try self.expect(.ident);
+            _ = try self.expect(.colon);
+            const is_array = try self.eat(.l_bracket);
+            const array_len_value: i64 = if (is_array) blk: {
+                const array_len_token = try self.expect(.number);
+                const value = try self.parseNumberValue(array_len_token);
+                if (value <= 0 or value > std.math.maxInt(usize)) {
+                    return self.fail(array_len_token, .invalid_array_length);
+                }
+                _ = try self.expect(.r_bracket);
+                break :blk value;
+            } else 1;
+            const data_type = try self.parseDataType(try self.expect(.ident));
+            if (isVectorType(data_type)) return self.fail(name, .expected_scalar_data_type);
+            _ = try self.expect(.equal);
+
+            var values: std.ArrayList(i64) = .empty;
+            errdefer values.deinit(self.allocator);
+            var zero_fill = true;
+            if (!is_array) {
+                if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "undefined")) {
+                    _ = try self.expect(.ident);
+                    zero_fill = false;
+                } else {
+                    const value = try self.parseValueRef();
+                    switch (value) {
+                        .number => |number| try values.append(self.allocator, number),
+                        else => return self.fail(self.current, .expected_data_literal),
+                    }
+                }
+            } else {
+                if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "undefined")) {
+                    _ = try self.expect(.ident);
+                    zero_fill = false;
+                } else {
+                    _ = try self.eat(.dot);
+                    _ = try self.expect(.l_brace);
+                    if (!try self.eat(.r_brace)) {
+                        while (true) {
+                            const value = try self.parseValueRef();
+                            switch (value) {
+                                .number => |number| try values.append(self.allocator, number),
+                                else => return self.fail(self.current, .expected_data_literal),
+                            }
+                            if (try self.eat(.r_brace)) break;
+                            _ = try self.expect(.comma);
+                            if (try self.eat(.r_brace)) break;
+                        }
+                    }
+                }
+            }
+            if (is_array and zero_fill and values.items.len != array_len_value) {
+                return self.fail(name, .incorrect_array_initializer_count);
+            }
+            _ = try self.expect(.semicolon);
+            try declarations.append(self.allocator, .{
+                .name = name.text,
+                .data_type = data_type,
+                .array_len = @intCast(array_len_value),
+                .values = try values.toOwnedSlice(self.allocator),
+                .zero_fill = zero_fill,
+            });
+        }
+        return declarations.toOwnedSlice(self.allocator);
     }
 
     fn parseCallArguments(self: *Parser) ![]const ast.ValueRef {
@@ -692,6 +771,10 @@ pub const ErrorType = enum {
     expected_value,
     expected_comparison_operator,
     expected_literal_offset,
+    expected_scalar_data_type,
+    expected_data_literal,
+    invalid_array_length,
+    incorrect_array_initializer_count,
     unexpected_token,
     invalid_number,
 };
@@ -725,6 +808,10 @@ pub fn errorString(code: ErrorType) []const u8 {
         .expected_value => "expected value",
         .expected_comparison_operator => "expected comparison operator",
         .expected_literal_offset => "expected literal memory offset",
+        .expected_scalar_data_type => "expected scalar data type",
+        .expected_data_literal => "expected data initializer literal",
+        .invalid_array_length => "invalid array length",
+        .incorrect_array_initializer_count => "array initializer must contain exactly the declared element count",
         .unexpected_token => "unexpected token",
         .invalid_number => "invalid number",
     };

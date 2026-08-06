@@ -1,5 +1,24 @@
 const dma = @import("dma.zsp");
 
+data {
+    shift_constants: [8]u8 = .{ 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 };
+    overlay_data_rdram: [16]u32 = undefined;
+    overlay_idmap: [16]u8 = undefined;
+
+    queue_rdram_address: u32 = undefined;
+    command_status: u32 = undefined;
+    current_overlay_id: u32 = undefined;
+    overlay_load_count: u32 = undefined;
+
+    overlay_text_address: u32 = undefined;
+    overlay_text_size: u32 = undefined;
+    overlay_imem_address: u32 = undefined;
+    overlay_handler_address: u32 = undefined;
+    overlay_data_address: u32 = undefined;
+    overlay_data_size: u32 = undefined;
+    overlay_dmem_address: u32 = undefined;
+}
+
 fn dispatch(reg($t6) handler_address: u32) noreturn {
     @jump(handler_address);
 }
@@ -22,16 +41,16 @@ fn write_dmem(
 
 // Resident command queue dispatcher.
 export fn _start() noreturn {
-    const command_buffer: u32 = 0x40;
+    const command_buffer: u32 = 0xa0;
 
-    reg($s0) rdram: u32 = load(u32, 0);
+    reg($s0) rdram: u32 = load(u32, queue_rdram_address);
     reg($t0) dma_size: u32 = 31;
     reg($t1) dma_pitch: u32 = 0;
     reg($s4) dma_destination: u32 = command_buffer;
     reg($t2) dma_flags: u32 = 0x0c;
     dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
 
-    store(u32, 4, 0);
+    store(u32, command_status, 0);
 
     reg($gp) command_address: u32 = command_buffer;
     reg($a0) command_header: u32 = load(u32, command_address);
@@ -54,32 +73,32 @@ export fn _start() noreturn {
             write_dmem(command_header, argument_1);
         } else {
             if(command_id == 0x10) {
-                reg current_overlay: u32 = load(u32, 0x18);
+                reg current_overlay: u32 = load(u32, current_overlay_id);
                 if(current_overlay != 1) {
-                    rdram = load(u32, 0x20);
-                    dma_size = load(u32, 0x24);
-                    dma_destination = load(u32, 0x28);
+                    rdram = load(u32, overlay_data_address);
+                    dma_size = load(u32, overlay_data_size);
+                    dma_destination = load(u32, overlay_dmem_address);
                     dma_pitch = 0;
                     dma_flags = 0x0c;
                     dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
 
-                    rdram = load(u32, 0x08);
-                    dma_size = load(u32, 0x0c);
-                    dma_destination = load(u32, 0x10);
+                    rdram = load(u32, overlay_text_address);
+                    dma_size = load(u32, overlay_text_size);
+                    dma_destination = load(u32, overlay_imem_address);
                     dma_pitch = 0;
                     dma_flags = 0x0c;
                     dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
 
-                    current_overlay = load(u32, 0x1c);
+                    current_overlay = load(u32, overlay_load_count);
                     current_overlay += 1;
-                    store(u32, 0x1c, current_overlay);
-                    store(u32, 0x18, 1);
+                    store(u32, overlay_load_count, current_overlay);
+                    store(u32, current_overlay_id, 1);
                 }
 
-                handler_address = load(u32, 0x14);
+                handler_address = load(u32, overlay_handler_address);
                 dispatch(handler_address);
             } else {
-                store(u32, 4, command_id);
+                store(u32, command_status, command_id);
                 @break();
             }
         }

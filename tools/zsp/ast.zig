@@ -196,6 +196,14 @@ pub const VarDecl = struct {
     value: Value,
 };
 
+pub const DataDecl = struct {
+    name: []const u8,
+    data_type: DataType,
+    array_len: usize,
+    values: []const i64,
+    zero_fill: bool,
+};
+
 pub const Builtin = union(enum) {
     nop,
     breakpoint,
@@ -234,6 +242,7 @@ pub const Call = struct {
 };
 
 pub const Statement = union(enum) {
+    data_block: []const DataDecl,
     var_decl: VarDecl,
     assignment: Assignment,
     store: struct {
@@ -267,6 +276,10 @@ pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) 
 fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
     for (statements) |statement| {
         switch (statement) {
+            .data_block => |declarations| {
+                for (declarations) |declaration| allocator.free(declaration.values);
+                allocator.free(declarations);
+            },
             .while_loop => |loop| freeStatements(allocator, loop.statements),
             .if_statement => |if_statement| {
                 freeStatements(allocator, if_statement.then_statements);

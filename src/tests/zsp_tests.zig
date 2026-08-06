@@ -47,6 +47,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: load u32", .run = loadU32 },
     .{ .name = "ZSP: load i32", .run = loadI32 },
     .{ .name = "ZSP: vector operations", .run = vectorOperations },
+    .{ .name = "ZSP: data blocks", .run = dataBlocks },
     .{ .name = "ZSP: DMA in", .run = dmaIn },
     .{ .name = "ZSP: command dispatcher", .run = commandDispatcher },
     .{ .name = "ZSP: RSP-loaded overlay dispatch", .run = rspLoadedOverlayDispatch },
@@ -211,6 +212,26 @@ fn vectorOperations() !void {
     try expectDmemWords(0x160, &wide_expected);
 }
 
+fn dataBlocks() !void {
+    try run(zsp_programs.data_blocks);
+
+    try expectDmemWord(u32, 0x100, 0x12345678);
+    try expectDmemWord(u32, 0x104, 0x11);
+    try expectDmemWord(u32, 0x108, 0x44);
+    try expectDmemWord(u32, 0x10c, 0x89abcdef);
+    try expectDmemWord(u32, 0x110, 0x76543210);
+
+    try expectDmemWord(u32, 0x114, 0xdeadbeef);
+    try expectDmemWord(u32, 0x118, 0xbeef);
+    try expectDmemWord(u32, 0x11c, 0xcafe);
+
+    try expectDmemWord(u32, 0x120, 0x00);
+    try expectDmemWord(u32, 0x124, 0x04);
+    try expectDmemWord(u32, 0x128, 0x08);
+    try expectDmemWord(u32, 0x12c, 0x0c);
+    try expectDmemWord(u32, 0x130, 0x14);
+}
+
 fn dmaIn() !void {
     submitCommandBatch(&dma_in_batch);
     try run(zsp_programs.dma_in);
@@ -220,17 +241,19 @@ fn dmaIn() !void {
 }
 
 fn commandDispatcher() !void {
+    loadCommandDispatcher();
     var queue = rsp.CommandQueue.init(&command_queue_buffer);
     queue.writeDmem(0x100, 0x12345678);
     queue.stop();
     rsp.submitCommands(&queue);
-    try run(rsp.programs.command_dispatcher);
+    try runLoadedCommandDispatcher();
 
-    try expectDmemWord(u32, 4, 0);
+    try expectDmemWord(u32, rsp.command_status_dmem, 0);
     try expectDmemWord(u32, 0x100, 0x12345678);
 }
 
 fn rspLoadedOverlayDispatch() !void {
+    loadCommandDispatcher();
     var queue = rsp.CommandQueue.init(&command_queue_buffer);
     queue.writeCommand(0x10, 0x104, 0xcafebabe);
     queue.writeCommand(0x10, 0x108, 0xdeadbeef);
@@ -238,19 +261,40 @@ fn rspLoadedOverlayDispatch() !void {
 
     rsp.submitOverlay(1, rsp.programs.static_overlay, 0x800, 0x800);
     rsp.submitCommands(&queue);
-    try run(rsp.programs.command_dispatcher);
+    try runLoadedCommandDispatcher();
 
-    try expectDmemWord(u32, 4, 0);
+    try expectDmemWord(u32, rsp.command_status_dmem, 0);
     try expectDmemWord(u32, 0x104, 0x4f564c31);
     try expectDmemWord(u32, 0x108, 0x4f564c31);
     try expectDmemWord(u32, rsp.overlay_load_count_dmem, 1);
 }
 
 fn commandDispatcherInvalid() !void {
-    submitCommandBatch(&invalid_command_batch);
-    try run(rsp.programs.command_dispatcher);
+    loadCommandDispatcher();
+    submitDispatcherBatch(&invalid_command_batch);
+    try runLoadedCommandDispatcher();
 
-    try expectDmemWord(u32, 4, 0xff);
+    try expectDmemWord(u32, rsp.command_status_dmem, 0xff);
+}
+
+fn loadCommandDispatcher() void {
+    rsp.halt();
+    rsp.waitHalted();
+    rsp.load(rsp.programs.command_dispatcher);
+}
+
+fn runLoadedCommandDispatcher() !void {
+    rsp.runAsync(rsp.programs.command_dispatcher.pc_start);
+    try waitBrokeTimeout();
+}
+
+fn submitDispatcherBatch(batch: *[4]u32) void {
+    n64.cache.writebackData(batch);
+
+    rsp.halt();
+    rsp.waitHalted();
+    const physical_address: u32 = @truncate(@intFromPtr(batch) & 0x1fffffff);
+    rsp.io.readDmem(u32, 0x58).* = physical_address;
 }
 
 fn submitCommandBatch(batch: *[4]u32) void {

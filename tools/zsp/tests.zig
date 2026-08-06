@@ -147,6 +147,69 @@ test "syntax numbers and scalar variables emit addiu" {
     );
 }
 
+test "data blocks emit scalar arrays and expose DMEM addresses" {
+    try expectAsm(
+        \\data {
+        \\  shift_constants: [8]u8 = .{ 0x80, 0x40, 0x20, 0x10, 8, 4, 2, 1 };
+        \\  overlay_data_rdram: [16]u32 = undefined;
+        \\  overlay_idmap: [16]u8 = undefined;
+        \\  queue_address: u32 = 0x12345678;
+        \\  status: u32 = undefined;
+        \\}
+        \\export fn _start() noreturn {
+        \\  reg($t0) table: u32 = overlay_data_rdram;
+        \\  reg($t1) idmap: u32 = overlay_idmap;
+        \\  reg($t2) first: u32 = load(u32, overlay_data_rdram);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.data
+        \\shift_constants:
+        \\  .byte 128
+        \\  .byte 64
+        \\  .byte 32
+        \\  .byte 16
+        \\  .byte 8
+        \\  .byte 4
+        \\  .byte 2
+        \\  .byte 1
+        \\.balign 4
+        \\overlay_data_rdram:
+        \\  .space 64
+        \\overlay_idmap:
+        \\  .space 16
+        \\.balign 4
+        \\queue_address:
+        \\  .word 305419896
+        \\.balign 4
+        \\status:
+        \\  .space 4
+        \\
+        \\.text
+        \\
+        \\
+        \\.globl _start
+        \\_start:
+        \\  addiu $t0, $zero, %lo(overlay_data_rdram)
+        \\  addiu $t1, $zero, %lo(overlay_idmap)
+        \\  addiu $at, $zero, %lo(overlay_data_rdram)
+        \\  lw $t2, 0($at)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "initialized data arrays require every element" {
+    try expectParseError(
+        \\data {
+        \\  values: [2]u32 = .{ 1 };
+        \\}
+    , .incorrect_array_initializer_count, 2, 3);
+}
+
 test "scalar assignment operators support every data type" {
     const data_types = [_][]const u8{ "u8", "u16", "u32", "i8", "i16", "i32" };
     const expected =

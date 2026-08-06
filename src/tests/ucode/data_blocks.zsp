@@ -1,0 +1,46 @@
+data {
+    initialized_scalar: u32 = 0x12345678;
+    undefined_scalar: u32 = undefined;
+    initialized_bytes: [4]u8 = .{ 0x11, 0x22, 0x33, 0x44 };
+    undefined_halfwords: [3]u16 = undefined;
+    initialized_words: [2]u32 = .{ 0x89abcdef, 0x76543210 };
+}
+
+export fn _start() noreturn {
+    reg initialized_scalar_value: u32 = load(u32, initialized_scalar);
+    store(u32, 0x100, initialized_scalar_value);
+
+    reg initialized_byte_0: u8 = load(u8, initialized_bytes);
+    reg initialized_byte_3: u8 = load(u8, initialized_bytes, 3);
+    store(u32, 0x104, initialized_byte_0);
+    store(u32, 0x108, initialized_byte_3);
+
+    reg initialized_word_0: u32 = load(u32, initialized_words);
+    reg initialized_word_1: u32 = load(u32, initialized_words, 4);
+    store(u32, 0x10c, initialized_word_0);
+    store(u32, 0x110, initialized_word_1);
+
+    store(u32, undefined_scalar, 0xdeadbeef);
+    reg undefined_scalar_value: u32 = load(u32, undefined_scalar);
+    store(u32, 0x114, undefined_scalar_value);
+
+    store(u16, undefined_halfwords, 0xbeef);
+    store(u16, undefined_halfwords, 0xcafe, 4);
+    reg undefined_halfword_0: u16 = load(u16, undefined_halfwords);
+    reg undefined_halfword_2: u16 = load(u16, undefined_halfwords, 4);
+    store(u32, 0x118, undefined_halfword_0);
+    store(u32, 0x11c, undefined_halfword_2);
+
+    reg initialized_scalar_address: u32 = initialized_scalar;
+    reg undefined_scalar_address: u32 = undefined_scalar;
+    reg initialized_bytes_address: u32 = initialized_bytes;
+    reg undefined_halfwords_address: u32 = undefined_halfwords;
+    reg initialized_words_address: u32 = initialized_words;
+    store(u32, 0x120, initialized_scalar_address);
+    store(u32, 0x124, undefined_scalar_address);
+    store(u32, 0x128, initialized_bytes_address);
+    store(u32, 0x12c, undefined_halfwords_address);
+    store(u32, 0x130, initialized_words_address);
+
+    @break();
+}

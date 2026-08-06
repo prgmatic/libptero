@@ -21,9 +21,10 @@ const alloc_vector_registers = [_]ast.VectorRegister{
 pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     try writer.writeAll(".set noreorder\n");
     try writer.writeAll(".set noat\n");
-    try writer.writeAll(".text\n\n");
 
     var top_level_context = FunctionContext{ .label_prefix = "top_level" };
+    try writeDataBlocks(writer, functions, &top_level_context);
+    try writer.writeAll(".text\n\n");
     for (functions) |function| {
         if (function.inline_call) continue;
         if (function.export_symbol and function.emit_label) {
@@ -73,6 +74,7 @@ const Symbol = struct {
     reg: ?Register,
     vector_reg: ?ast.VectorRegister = null,
     constant: ?i64,
+    data_label: ?[]const u8 = null,
 };
 
 const FunctionContext = struct {
@@ -172,6 +174,7 @@ fn writeStatements(
 ) anyerror!void {
     for (statements) |statement| {
         switch (statement) {
+            .data_block => {},
             .var_decl => |decl| try writeVarDecl(writer, context, decl),
             .assignment => |assignment| try writeAssignment(writer, context, assignment),
             .store => |store| try writeStore(writer, context, store),
@@ -182,6 +185,85 @@ fn writeStatements(
             .asm_line => |asm_line| try writer.print("  {s}\n", .{asm_line}),
         }
     }
+}
+
+fn writeDataBlocks(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+) !void {
+    var offset: usize = 0;
+    var wrote_data = false;
+    for (functions) |function| {
+        for (function.statements) |statement| {
+            const declarations = switch (statement) {
+                .data_block => |declarations| declarations,
+                else => continue,
+            };
+            if (!wrote_data) {
+                try writer.writeAll(".data\n");
+                wrote_data = true;
+            }
+            for (declarations) |declaration| {
+                const element_size = try scalarDataSize(declaration.data_type);
+                offset = std.mem.alignForward(usize, offset, element_size);
+                if (element_size > 1) try writer.print(".balign {d}\n", .{element_size});
+                try writer.print("{s}:\n", .{declaration.name});
+                for (declaration.values) |value| {
+                    try validateDataValue(declaration.data_type, value);
+                    try writer.print("  {s} {d}\n", .{ dataDirective(declaration.data_type), value });
+                }
+                const remaining = declaration.array_len - declaration.values.len;
+                if (remaining > 0) {
+                    if (declaration.zero_fill) {
+                        try writer.print("  .space {d}, 0\n", .{remaining * element_size});
+                    } else {
+                        try writer.print("  .space {d}\n", .{remaining * element_size});
+                    }
+                }
+                try context.add(.{
+                    .name = declaration.name,
+                    .data_type = .u32,
+                    .reg = null,
+                    .constant = null,
+                    .data_label = declaration.name,
+                });
+                offset += declaration.array_len * element_size;
+            }
+        }
+    }
+    if (wrote_data) try writer.writeByte('\n');
+}
+
+fn scalarDataSize(data_type: DataType) !usize {
+    return switch (data_type) {
+        .u8, .i8 => 1,
+        .u16, .i16 => 2,
+        .u32, .i32 => 4,
+        .vec16, .vec32 => error.ExpectedScalarType,
+    };
+}
+
+fn dataDirective(data_type: DataType) []const u8 {
+    return switch (data_type) {
+        .u8, .i8 => ".byte",
+        .u16, .i16 => ".short",
+        .u32, .i32 => ".word",
+        .vec16, .vec32 => unreachable,
+    };
+}
+
+fn validateDataValue(data_type: DataType, value: i64) !void {
+    const valid = switch (data_type) {
+        .u8 => value >= 0 and value <= std.math.maxInt(u8),
+        .u16 => value >= 0 and value <= std.math.maxInt(u16),
+        .u32 => value >= 0 and value <= std.math.maxInt(u32),
+        .i8 => value >= std.math.minInt(i8) and value <= std.math.maxInt(i8),
+        .i16 => value >= std.math.minInt(i16) and value <= std.math.maxInt(i16),
+        .i32 => value >= std.math.minInt(i32) and value <= std.math.maxInt(i32),
+        .vec16, .vec32 => false,
+    };
+    if (!valid) return error.DataInitializerOutOfRange;
 }
 
 fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.VarDecl) !void {
@@ -222,6 +304,14 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         .load => |load| {
             if (decl.data_type != load.data_type) return error.RegisterTypeMismatch;
             try writeLoadInto(writer, context, reg, load);
+        },
+        .ident => |name| {
+            const source = try context.lookup(name);
+            if (source.data_label) |label| {
+                try loadDataAddress(writer, reg, label);
+            } else {
+                try loadImmediateInto(writer, reg, source.constant orelse return error.ExpectedConstant);
+            }
         },
         else => try loadImmediateInto(writer, reg, try valueAsImmediate(context, decl.value)),
     }
@@ -1335,7 +1425,15 @@ fn valueAsAddressReg(writer: *std.Io.Writer, context: *FunctionContext, value: a
     switch (value) {
         .ident => |name| {
             const symbol = try context.lookup(name);
-            return symbol.reg orelse error.AddressMustBeRegister;
+            if (symbol.reg) |reg| return reg;
+            if (symbol.data_label) |label| {
+                try loadDataAddress(writer, compiler_scratch, label);
+                return compiler_scratch;
+            }
+            const address = symbol.constant orelse return error.AddressMustBeRegister;
+            if (address == 0) return .zero;
+            try loadImmediateInto(writer, compiler_scratch, address);
+            return compiler_scratch;
         },
         .number => |number| {
             if (number == 0) return .zero;
@@ -1344,6 +1442,10 @@ fn valueAsAddressReg(writer: *std.Io.Writer, context: *FunctionContext, value: a
         },
         .vector_access => return error.AddressMustBeRegister,
     }
+}
+
+fn loadDataAddress(writer: *std.Io.Writer, reg: Register, label: []const u8) !void {
+    try writer.print("  addiu {s}, $zero, %lo({s})\n", .{ regName(reg), label });
 }
 
 fn valueAsStoreReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.ValueRef) !Register {

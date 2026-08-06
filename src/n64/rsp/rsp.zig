@@ -9,16 +9,20 @@ pub const UCode = ucode.UCode;
 pub const Ucode = UCode;
 pub const CommandQueue = @import("command_queue.zig").CommandQueue;
 
-pub const overlay_load_count_dmem = 0x1c;
+pub const command_status_dmem = 0x5c;
+pub const overlay_load_count_dmem = 0x64;
 
-const overlay_text_address_dmem = 0x08;
-const overlay_text_size_dmem = 0x0c;
-const overlay_imem_address_dmem = 0x10;
-const overlay_handler_address_dmem = 0x14;
-const current_overlay_id_dmem = 0x18;
-const overlay_data_address_dmem = 0x20;
-const overlay_data_size_dmem = 0x24;
-const overlay_dmem_address_dmem = 0x28;
+const overlay_table_dmem = 0x08;
+const overlay_idmap_dmem = 0x48;
+const queue_address_dmem = 0x58;
+const current_overlay_id_dmem = 0x60;
+const overlay_text_address_dmem = 0x68;
+const overlay_text_size_dmem = 0x6c;
+const overlay_imem_address_dmem = 0x70;
+const overlay_handler_address_dmem = 0x74;
+const overlay_data_address_dmem = 0x78;
+const overlay_data_size_dmem = 0x7c;
+const overlay_dmem_address_dmem = 0x80;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
 
@@ -39,7 +43,7 @@ pub fn submitCommands(queue: *const CommandQueue) void {
 
     const words = queue.words();
     cache.writebackData(words);
-    io.readDmem(u32, 0).* = physicalAddress(@intFromPtr(words.ptr));
+    io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(words.ptr));
 }
 
 pub fn submitOverlay(
@@ -87,6 +91,11 @@ pub fn submitOverlay(
     io.readDmem(u32, overlay_data_address_dmem).* = physicalAddress(@intFromPtr(program.data.ptr));
     io.readDmem(u32, overlay_data_size_dmem).* = @intCast(program.data.len - 1);
     io.readDmem(u32, overlay_dmem_address_dmem).* = dmem_address;
+
+    const packed_data = physicalAddress(@intFromPtr(program.data.ptr)) & 0x00ffffff |
+        @as(u32, @intCast((program.data.len - 1) >> 4)) << 24;
+    io.readDmem(u32, overlay_table_dmem + @as(u32, overlay_id) * @sizeOf(u32)).* = packed_data;
+    io.readDmem(u8, overlay_idmap_dmem + overlay_id).* = overlay_id << 2;
 }
 
 pub fn load(program: UCode) void {
