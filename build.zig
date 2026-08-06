@@ -134,6 +134,15 @@ fn addGeneratedN64Assets(
             overlay_linker_script,
         ),
     });
+    n64_module.addAnonymousImport("static_overlay_2_rsp", .{
+        .root_source_file = buildRspUcodeFromPath(
+            b,
+            tools,
+            "static_overlay_2",
+            b.path("src/n64/rsp/ucode/static_overlay_2.zsp"),
+            overlay_linker_script,
+        ),
+    });
 }
 
 fn addZspTestPrograms(

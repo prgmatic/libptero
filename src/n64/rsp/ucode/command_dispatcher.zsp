@@ -42,7 +42,7 @@ export fn _start() noreturn {
     const overlay_idmap_address: u32 = 0x48;
 
     reg($s0) rdram: u32 = load(u32, queue_rdram_address);
-    reg($t0) dma_size: u32 = 31;
+    reg($t0) dma_size: u32 = 63;
     reg($t1) dma_pitch: u32 = 0;
     reg($s4) dma_destination: u32 = command_buffer;
     reg($t2) dma_flags: u32 = 0x0c;

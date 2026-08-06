@@ -7,7 +7,8 @@ pub const ucode = @import("ucode.zig");
 
 pub const UCode = ucode.UCode;
 pub const Ucode = UCode;
-pub const CommandQueue = @import("command_queue.zig").CommandQueue;
+pub const command_queue = @import("command_queue.zig");
+pub const CommandQueue = command_queue.CommandQueue;
 
 pub const command_status_dmem = 0x5c;
 pub const overlay_load_count_dmem = 0x64;
@@ -21,7 +22,7 @@ const overlay_dmem_offset = 0x800;
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
 // Temporary single-overlay backing store. This also lets submitOverlay fill the
 // runtime-dependent fields in the overlay's packed header before RSP DMA.
-var overlay_data_staging: [io.dmem_len]u8 align(16) = undefined;
+var overlay_data_staging: [2][io.dmem_len]u8 align(16) = undefined;
 
 pub const OverlayHeader = extern struct {
     state_start: u16 = 0,
@@ -80,8 +81,8 @@ pub fn submitOverlay(
     overlay_id: u8,
     program: UCode,
 ) void {
-    if (overlay_id != 1) {
-        @panic("only static RSP overlay 1 is currently supported");
+    if (overlay_id == 0 or overlay_id > overlay_data_staging.len) {
+        @panic("RSP overlay ID is outside the supported registration range");
     }
     if (program.text.len == 0 or program.text.len & 7 != 0) {
         @panic("RSP overlay text must have a nonzero DMA-aligned size");
@@ -102,7 +103,8 @@ pub fn submitOverlay(
 
     const imem_address = io.dma_imem_addr + imem_offset;
     const dmem_address = io.dma_dmem_addr + overlay_dmem_offset;
-    const overlay_data = overlay_data_staging[0..overlay_data_len];
+    const staging = &overlay_data_staging[overlay_id - 1];
+    const overlay_data = staging[0..overlay_data_len];
     @memset(overlay_data, 0);
     @memcpy(overlay_data[overlay_payload_offset..], program.data);
 
@@ -129,13 +131,19 @@ pub fn submitOverlay(
     cache.writebackData(program.text);
     cache.writebackData(overlay_data);
 
-    io.readDmem(u32, current_overlay_id_dmem).* = 0;
-    io.readDmem(u32, overlay_load_count_dmem).* = 0;
-
     const packed_data = physicalAddress(@intFromPtr(overlay_data.ptr)) & 0x00ffffff |
         @as(u32, @intCast((overlay_data.len - 1) >> 4)) << 24;
     io.readDmem(u32, overlay_table_dmem + @as(u32, overlay_id) * @sizeOf(u32)).* = packed_data;
-    io.readDmem(u8, overlay_idmap_dmem + overlay_id).* = overlay_id << 2;
+    writeDmemByte(overlay_idmap_dmem + overlay_id, overlay_id << 2);
+}
+
+fn writeDmemByte(offset: u32, value: u8) void {
+    const word_offset = offset & ~@as(u32, 3);
+    const byte_offset = offset & 3;
+    const shift: u5 = @intCast((3 - byte_offset) * 8);
+    const value_mask = @as(u32, 0xff) << shift;
+    const word = io.readDmem(u32, word_offset).*;
+    io.readDmem(u32, word_offset).* = word & ~value_mask | @as(u32, value) << shift;
 }
 
 pub fn load(program: UCode) void {

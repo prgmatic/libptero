@@ -14,14 +14,10 @@ var dma_in_batch align(8) = [_]u32{
     0x00000000,
 };
 
-var invalid_command_batch align(8) = [_]u32{
-    0xff000000,
-    0x00000000,
-    0x00000000,
-    0x00000000,
-};
+var invalid_command_batch: [rsp.command_queue.batch_word_count]u32 align(8) = .{0xff000000} ++
+    .{0x00000000} ** (rsp.command_queue.batch_word_count - 1);
 
-var command_queue_buffer: [8]u32 align(8) = undefined;
+var command_queue_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
 
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
@@ -257,16 +253,24 @@ fn rspLoadedOverlayDispatch() !void {
     var queue = rsp.CommandQueue.init(&command_queue_buffer);
     queue.writeCommand(0x10, 0x104, 0xcafebabe);
     queue.writeCommand(0x10, 0x108, 0xdeadbeef);
+    queue.writeCommand(0x20, 0x10c, 0xcafebabe);
+    queue.writeCommand(0x20, 0x110, 0xdeadbeef);
+    queue.writeCommand(0x10, 0x114, 0x12345678);
     queue.stop();
 
     rsp.submitOverlay(1, rsp.programs.static_overlay);
+    rsp.submitOverlay(2, rsp.programs.static_overlay_2);
+    try expectDmemWord(u32, 0x48, 0x00040800);
     rsp.submitCommands(&queue);
     try runLoadedCommandDispatcher();
 
     try expectDmemWord(u32, rsp.command_status_dmem, 0);
     try expectDmemWord(u32, 0x104, 0x4f564c31);
     try expectDmemWord(u32, 0x108, 0x4f564c31);
-    try expectDmemWord(u32, rsp.overlay_load_count_dmem, 1);
+    try expectDmemWord(u32, 0x10c, 0x4f564c32);
+    try expectDmemWord(u32, 0x110, 0x4f564c32);
+    try expectDmemWord(u32, 0x114, 0x4f564c31);
+    try expectDmemWord(u32, rsp.overlay_load_count_dmem, 3);
     try expectDmemWord(u16, 0x808, 1 << 5);
     try expectDmemWord(u16, 0x80a, 1 << 2);
     try expectDmemWord(u16, 0x810, @intCast(rsp.programs.static_overlay.text.len - 1));
@@ -294,7 +298,7 @@ fn runLoadedCommandDispatcher() !void {
     try waitBrokeTimeout();
 }
 
-fn submitDispatcherBatch(batch: *[4]u32) void {
+fn submitDispatcherBatch(batch: *[rsp.command_queue.batch_word_count]u32) void {
     n64.cache.writebackData(batch);
 
     rsp.halt();
