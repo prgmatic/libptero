@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const asm_writer = @import("asm_writer.zig");
+const asm_optimizer = @import("asm_optimizer.zig");
 const parser_mod = @import("parser.zig");
 
 const ModuleState = enum {
@@ -178,6 +179,7 @@ pub fn main(init: std.process.Init) !void {
     var output: ?[]const u8 = null;
     var module_dir: ?[]const u8 = null;
     var depfile: ?[]const u8 = null;
+    var optimize = true;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--module-dir")) {
@@ -188,6 +190,8 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return usage();
             depfile = args[i];
+        } else if (std.mem.eql(u8, args[i], "--no-optimize")) {
+            optimize = false;
         } else if (input == null) {
             input = args[i];
         } else if (output == null) {
@@ -217,21 +221,29 @@ pub fn main(init: std.process.Init) !void {
         var out_file = try std.Io.Dir.cwd().createFile(init.io, output_path, .{});
         defer out_file.close(init.io);
         var writer = out_file.writer(init.io, &out_buf);
-        try asm_writer.write(&writer.interface, functions);
+        try writeAssembly(allocator, &writer.interface, functions, optimize);
         try writer.interface.flush();
     } else {
         var writer = std.Io.File.stdout().writer(init.io, &out_buf);
-        try asm_writer.write(&writer.interface, functions);
+        try writeAssembly(allocator, &writer.interface, functions, optimize);
         try writer.interface.flush();
     }
 }
 
 fn usage() error{InvalidArgs} {
     std.debug.print(
-        "usage: zsp <input.zsp> [--module-dir <dir>] [--depfile <file>] [output.s]\n",
+        "usage: zsp <input.zsp> [--module-dir <dir>] [--depfile <file>] [--no-optimize] [output.s]\n",
         .{},
     );
     return error.InvalidArgs;
+}
+
+fn writeAssembly(allocator: std.mem.Allocator, writer: *std.Io.Writer, functions: []const ast.Function, optimize: bool) !void {
+    if (!optimize) return asm_writer.write(writer, functions);
+    var unoptimized = std.Io.Writer.Allocating.init(allocator);
+    defer unoptimized.deinit();
+    try asm_writer.write(&unoptimized.writer, functions);
+    try asm_optimizer.writeOptimized(allocator, writer, unoptimized.written());
 }
 
 fn writeDepfile(io: std.Io, path: []const u8, target: []const u8, modules: []const Module) !void {

@@ -1237,6 +1237,21 @@ fn writeConditionBranchFalse(
         },
         .lt, .le, .gt, .ge => {
             if (rhs_immediate) |immediate| {
+                // Unsigned comparisons at the sign-bit boundary are exactly
+                // signed zero tests and need no materialized constant or SLTU.
+                if (!isSigned(lhs.data_type) and immediate == 0x80000000 and
+                    (condition.op == .lt or condition.op == .ge))
+                {
+                    try writer.print("  {s} {s}, LABEL_{s}_{s}_{d}\n", .{
+                        if (condition.op == .lt) "bltz" else "bgez",
+                        regName(lhs_reg),
+                        context.label_prefix,
+                        label_suffix,
+                        label,
+                    });
+                    try writer.writeAll("  nop\n");
+                    return;
+                }
                 const adjusted = if (condition.op == .gt or condition.op == .le)
                     std.math.add(i64, immediate, 1) catch null
                 else

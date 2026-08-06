@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const asm_writer = @import("asm_writer.zig");
+const asm_optimizer = @import("asm_optimizer.zig");
 const parser_mod = @import("parser.zig");
 
 const testing = std.testing;
@@ -37,6 +38,89 @@ fn expectAsmError(source: []const u8, expected_err: anyerror) !void {
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
     try testing.expectError(expected_err, asm_writer.write(&output.writer, functions));
+}
+
+fn expectOptimizedAsm(input: []const u8, expected: []const u8) !void {
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    try asm_optimizer.writeOptimized(testing.allocator, &output.writer, input);
+    const actual = try output.toOwnedSlice();
+    defer testing.allocator.free(actual);
+    try testing.expectEqualStrings(expected, actual);
+}
+
+test "optimizer fills a branch delay slot with an independent instruction" {
+    try expectOptimizedAsm(
+        "  addiu $t0, $zero, 1\n  addiu $t1, $zero, 2\n  bne $t0, $zero, done\n  nop\ndone:\n",
+        "  addiu $t0, $zero, 1\n  bne $t0, $zero, done\n  addiu $t1, $zero, 2\ndone:\n",
+    );
+}
+
+test "optimizer does not move a branch dependency into its delay slot" {
+    const assembly = "  addiu $t0, $zero, 1\n  bne $t0, $zero, done\n  nop\ndone:\n";
+    try expectOptimizedAsm(assembly, assembly);
+}
+
+test "optimizer never steals an already filled delay slot" {
+    try expectOptimizedAsm(
+        "  addiu $t0, $zero, 1\n  addiu $t1, $zero, 2\n  bne $t0, $zero, first\n  nop\n  jal helper\n  nop\nfirst:\n",
+        "  addiu $t0, $zero, 1\n  bne $t0, $zero, first\n  addiu $t1, $zero, 2\n  jal helper\n  nop\nfirst:\n",
+    );
+}
+
+test "optimizer hides scalar load latency with independent work" {
+    try expectOptimizedAsm(
+        "  lw $t0, 0($a0)\n  addu $t1, $t0, $a1\n  addiu $t2, $zero, 1\n  addiu $t3, $zero, 2\n",
+        "  lw $t0, 0($a0)\n  addiu $t2, $zero, 1\n  addiu $t3, $zero, 2\n  addu $t1, $t0, $a1\n",
+    );
+}
+
+test "optimizer pairs independent scalar and vector pipeline instructions" {
+    try expectOptimizedAsm(
+        "  addiu $t0, $zero, 1\n  addiu $t1, $zero, 2\n  .word 0x4a0208d0 # vadd $v03, $v01, $v02\n",
+        "  addiu $t0, $zero, 1\n  .word 0x4a0208d0 # vadd $v03, $v01, $v02\n  addiu $t1, $zero, 2\n",
+    );
+}
+
+test "optimizer preserves memory order and treats unknown asm as a barrier" {
+    const assembly = "  lw $t0, 0($a0)\n  sw $t1, 0($a1)\n  custom $t2, $t3\n  bne $t0, $zero, done\n  nop\ndone:\n";
+    try expectOptimizedAsm(assembly, assembly);
+}
+
+test "optimizer folds a CP0 polling while loop into a conditional back edge" {
+    try expectOptimizedAsm(
+        "  addiu $t3, $zero, 0\n  mfc0 $t3, $5\nloop:\n  beq $t3, $zero, end\n  nop\n  mfc0 $t3, $5\n  j loop\n  nop\nend:\n  andi $t3, $t0, 4095\n",
+        "loop:\n  mfc0 $t3, $5\n  bne $t3, $zero, loop\n  andi $t3, $t0, 4095\nend:\n",
+    );
+}
+
+test "optimizer rotates a two-operation CP0 polling recurrence" {
+    try expectOptimizedAsm(
+        "  mfc0 $t3, $4\n  and $t3, $t3, $t2\nloop:\n  beq $t3, $zero, end\n  nop\n  mfc0 $t3, $4\n  and $t3, $t3, $t2\n  j loop\n  nop\nend:\n  jr $ra\n  nop\n",
+        "  mfc0 $t3, $4\nloop:\n  and $t3, $t3, $t2\n  bne $t3, $zero, loop\n  mfc0 $t3, $4\nend:\n  jr $ra\n  nop\n",
+    );
+}
+
+test "unsigned high-bit comparison emits a signed zero branch" {
+    try expectAsm(
+        \\fn test(reg($t2) flags: u32) {
+        \\  if(flags < 0x80000000) { @nop(); }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  bltz $t2, LABEL_test_ifend_0
+        \\  nop
+        \\  nop
+        \\LABEL_test_ifend_0:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
 }
 
 test "syntax numbers and scalar variables emit addiu" {
