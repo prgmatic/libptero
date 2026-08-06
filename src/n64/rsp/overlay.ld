@@ -8,8 +8,8 @@ MEMORY {
 
 SECTIONS {
     .data 0x0800 : {
-        *(.data*)
-        *(.rodata*)
+        KEEP(*(.data*))
+        KEEP(*(.rodata*))
     } > DMEM
 
     .bss (NOLOAD) : {

@@ -16,6 +16,9 @@ const overlay_text_size_dmem = 0x0c;
 const overlay_imem_address_dmem = 0x10;
 const overlay_handler_address_dmem = 0x14;
 const current_overlay_id_dmem = 0x18;
+const overlay_data_address_dmem = 0x20;
+const overlay_data_size_dmem = 0x24;
+const overlay_dmem_address_dmem = 0x28;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
 
@@ -39,7 +42,12 @@ pub fn submitCommands(queue: *const CommandQueue) void {
     io.readDmem(u32, 0).* = physicalAddress(@intFromPtr(words.ptr));
 }
 
-pub fn submitOverlay(overlay_id: u8, program: UCode, imem_offset: u32) void {
+pub fn submitOverlay(
+    overlay_id: u8,
+    program: UCode,
+    imem_offset: u32,
+    dmem_offset: u32,
+) void {
     if (overlay_id != 1) {
         @panic("only static RSP overlay 1 is currently supported");
     }
@@ -51,13 +59,24 @@ pub fn submitOverlay(overlay_id: u8, program: UCode, imem_offset: u32) void {
     {
         @panic("RSP overlay text does not fit in IMEM");
     }
+    if (program.data.len == 0 or program.data.len & 7 != 0) {
+        @panic("RSP overlay data must have a nonzero DMA-aligned size");
+    }
+    if (dmem_offset > io.dmem_len or
+        program.data.len > @as(usize, io.dmem_len - dmem_offset))
+    {
+        @panic("RSP overlay data does not fit in DMEM");
+    }
 
     const imem_address = io.dma_imem_addr + imem_offset;
+    const dmem_address = io.dma_dmem_addr + dmem_offset;
     assertRspDma(program.text, imem_address);
+    assertRspDma(program.data, dmem_address);
 
     halt();
     waitHalted();
     cache.writebackData(program.text);
+    cache.writebackData(program.data);
 
     io.readDmem(u32, overlay_text_address_dmem).* = physicalAddress(@intFromPtr(program.text.ptr));
     io.readDmem(u32, overlay_text_size_dmem).* = @intCast(program.text.len - 1);
@@ -65,6 +84,9 @@ pub fn submitOverlay(overlay_id: u8, program: UCode, imem_offset: u32) void {
     io.readDmem(u32, overlay_handler_address_dmem).* = io.dma_imem_addr + program.pc_start;
     io.readDmem(u32, current_overlay_id_dmem).* = 0;
     io.readDmem(u32, overlay_load_count_dmem).* = 0;
+    io.readDmem(u32, overlay_data_address_dmem).* = physicalAddress(@intFromPtr(program.data.ptr));
+    io.readDmem(u32, overlay_data_size_dmem).* = @intCast(program.data.len - 1);
+    io.readDmem(u32, overlay_dmem_address_dmem).* = dmem_address;
 }
 
 pub fn load(program: UCode) void {

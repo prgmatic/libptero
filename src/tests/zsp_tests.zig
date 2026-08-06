@@ -236,13 +236,13 @@ fn rspLoadedOverlayDispatch() !void {
     queue.writeCommand(0x10, 0x108, 0xdeadbeef);
     queue.stop();
 
-    rsp.submitOverlay(1, rsp.programs.static_overlay, 0x800);
+    rsp.submitOverlay(1, rsp.programs.static_overlay, 0x800, 0x800);
     rsp.submitCommands(&queue);
     try run(rsp.programs.command_dispatcher);
 
     try expectDmemWord(u32, 4, 0);
-    try expectDmemWord(u32, 0x104, 0xcafebabe);
-    try expectDmemWord(u32, 0x108, 0xdeadbeef);
+    try expectDmemWord(u32, 0x104, 0x4f564c31);
+    try expectDmemWord(u32, 0x108, 0x4f564c31);
     try expectDmemWord(u32, rsp.overlay_load_count_dmem, 1);
 }
 

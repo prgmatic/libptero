@@ -56,6 +56,13 @@ export fn _start() noreturn {
             if(command_id == 0x10) {
                 reg current_overlay: u32 = load(u32, 0x18);
                 if(current_overlay != 1) {
+                    rdram = load(u32, 0x20);
+                    dma_size = load(u32, 0x24);
+                    dma_destination = load(u32, 0x28);
+                    dma_pitch = 0;
+                    dma_flags = 0x0c;
+                    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+
                     rdram = load(u32, 0x08);
                     dma_size = load(u32, 0x0c);
                     dma_destination = load(u32, 0x10);
