@@ -198,10 +198,26 @@ pub const VarDecl = struct {
 
 pub const DataDecl = struct {
     name: []const u8,
-    data_type: DataType,
+    storage_type: DataStorageType,
     array_len: usize,
+    is_array: bool,
     values: []const i64,
     zero_fill: bool,
+};
+
+pub const DataStorageType = union(enum) {
+    scalar: DataType,
+    packed_struct: []const u8,
+};
+
+pub const PackedStructDecl = struct {
+    name: []const u8,
+    fields: []const PackedStructField,
+};
+
+pub const PackedStructField = struct {
+    name: []const u8,
+    data_type: DataType,
 };
 
 pub const Builtin = union(enum) {
@@ -242,6 +258,7 @@ pub const Call = struct {
 };
 
 pub const Statement = union(enum) {
+    packed_struct_decl: PackedStructDecl,
     data_block: []const DataDecl,
     var_decl: VarDecl,
     assignment: Assignment,
@@ -276,6 +293,7 @@ pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) 
 fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
     for (statements) |statement| {
         switch (statement) {
+            .packed_struct_decl => |declaration| allocator.free(declaration.fields),
             .data_block => |declarations| {
                 for (declarations) |declaration| allocator.free(declaration.values);
                 allocator.free(declarations);

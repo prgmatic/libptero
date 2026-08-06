@@ -193,6 +193,10 @@ pub const Parser = struct {
 
         const first = try self.expect(.ident);
 
+        if (std.mem.eql(u8, first.text, "packed")) {
+            return .{ .packed_struct_decl = try self.parsePackedStructDecl() };
+        }
+
         if (std.mem.eql(u8, first.text, "data")) {
             return .{ .data_block = try self.parseDataBlock() };
         }
@@ -351,6 +355,32 @@ pub const Parser = struct {
         return self.fail(first, .unsupported_statement);
     }
 
+    fn parsePackedStructDecl(self: *Parser) !ast.PackedStructDecl {
+        const struct_keyword = try self.expect(.ident);
+        if (!std.mem.eql(u8, struct_keyword.text, "struct")) {
+            return self.fail(struct_keyword, .expected_struct_declaration);
+        }
+        const name = try self.expect(.ident);
+        _ = try self.expect(.l_brace);
+        var fields: std.ArrayList(ast.PackedStructField) = .empty;
+        errdefer fields.deinit(self.allocator);
+        while (!try self.eat(.r_brace)) {
+            const field_name = try self.expect(.ident);
+            _ = try self.expect(.colon);
+            const data_type = try self.parseDataType(try self.expect(.ident));
+            if (isVectorType(data_type)) return self.fail(field_name, .expected_scalar_data_type);
+            _ = try self.expect(.semicolon);
+            try fields.append(self.allocator, .{
+                .name = field_name.text,
+                .data_type = data_type,
+            });
+        }
+        return .{
+            .name = name.text,
+            .fields = try fields.toOwnedSlice(self.allocator),
+        };
+    }
+
     fn parseDataBlock(self: *Parser) ![]const ast.DataDecl {
         _ = try self.expect(.l_brace);
         var declarations: std.ArrayList(ast.DataDecl) = .empty;
@@ -372,14 +402,18 @@ pub const Parser = struct {
                 _ = try self.expect(.r_bracket);
                 break :blk value;
             } else 1;
-            const data_type = try self.parseDataType(try self.expect(.ident));
-            if (isVectorType(data_type)) return self.fail(name, .expected_scalar_data_type);
+            const type_token = try self.expect(.ident);
+            const storage_type: ast.DataStorageType = if (parseDataTypeName(type_token.text)) |data_type| blk: {
+                if (isVectorType(data_type)) return self.fail(name, .expected_scalar_data_type);
+                break :blk .{ .scalar = data_type };
+            } else .{ .packed_struct = type_token.text };
             _ = try self.expect(.equal);
 
             var values: std.ArrayList(i64) = .empty;
             errdefer values.deinit(self.allocator);
             var zero_fill = true;
-            if (!is_array) {
+            const aggregate_initializer = is_array or storage_type == .packed_struct;
+            if (!aggregate_initializer) {
                 if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "undefined")) {
                     _ = try self.expect(.ident);
                     zero_fill = false;
@@ -411,14 +445,15 @@ pub const Parser = struct {
                     }
                 }
             }
-            if (is_array and zero_fill and values.items.len != array_len_value) {
+            if (is_array and storage_type == .scalar and zero_fill and values.items.len != array_len_value) {
                 return self.fail(name, .incorrect_array_initializer_count);
             }
             _ = try self.expect(.semicolon);
             try declarations.append(self.allocator, .{
                 .name = name.text,
-                .data_type = data_type,
+                .storage_type = storage_type,
                 .array_len = @intCast(array_len_value),
+                .is_array = is_array,
                 .values = try values.toOwnedSlice(self.allocator),
                 .zero_fill = zero_fill,
             });
@@ -773,6 +808,7 @@ pub const ErrorType = enum {
     expected_literal_offset,
     expected_scalar_data_type,
     expected_data_literal,
+    expected_struct_declaration,
     invalid_array_length,
     incorrect_array_initializer_count,
     unexpected_token,
@@ -810,6 +846,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .expected_literal_offset => "expected literal memory offset",
         .expected_scalar_data_type => "expected scalar data type",
         .expected_data_literal => "expected data initializer literal",
+        .expected_struct_declaration => "expected packed struct declaration",
         .invalid_array_length => "invalid array length",
         .incorrect_array_initializer_count => "array initializer must contain exactly the declared element count",
         .unexpected_token => "unexpected token",

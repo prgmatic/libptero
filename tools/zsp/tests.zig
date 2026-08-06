@@ -210,6 +210,44 @@ test "initialized data arrays require every element" {
     , .incorrect_array_initializer_count, 2, 3);
 }
 
+test "packed structs emit fields without padding" {
+    try expectAsm(
+        \\packed struct Header {
+        \\  state_start: u16;
+        \\  state_rdram: u32;
+        \\  marker: i8;
+        \\}
+        \\data {
+        \\  header: Header = .{ 8, 0x12345678, -1 };
+        \\  scratch: Header = undefined;
+        \\}
+        \\export fn _start() noreturn {
+        \\  reg($t0) address: u32 = header;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.data
+        \\header:
+        \\  .short 8
+        \\  .word 305419896
+        \\  .byte -1
+        \\scratch:
+        \\  .space 7
+        \\
+        \\.text
+        \\
+        \\
+        \\.globl _start
+        \\_start:
+        \\  addiu $t0, $zero, %lo(header)
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "scalar assignment operators support every data type" {
     const data_types = [_][]const u8{ "u8", "u16", "u32", "i8", "i16", "i32" };
     const expected =

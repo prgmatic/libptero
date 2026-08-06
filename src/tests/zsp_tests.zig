@@ -267,6 +267,11 @@ fn rspLoadedOverlayDispatch() !void {
     try expectDmemWord(u32, 0x104, 0x4f564c31);
     try expectDmemWord(u32, 0x108, 0x4f564c31);
     try expectDmemWord(u32, rsp.overlay_load_count_dmem, 1);
+    try expectDmemWord(u16, 0x808, 1 << 5);
+    try expectDmemWord(u16, 0x80a, 1 << 2);
+    try expectDmemWord(u16, 0x810, @intCast(rsp.programs.static_overlay.text.len - 1));
+    try expectDmemWord(u16, 0x812, 0x1800);
+    try expectDmemWord(u16, 0x81c, 0x0a00);
 }
 
 fn commandDispatcherInvalid() !void {

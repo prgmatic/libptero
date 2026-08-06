@@ -25,6 +25,9 @@ const overlay_data_size_dmem = 0x7c;
 const overlay_dmem_address_dmem = 0x80;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
+// Temporary single-overlay backing store. This also lets submitOverlay fill the
+// runtime-dependent fields in the overlay's packed header before RSP DMA.
+var overlay_data_staging: [io.dmem_len]u8 align(16) = undefined;
 
 pub fn runUCode(program: UCode) void {
     halt();
@@ -66,6 +69,9 @@ pub fn submitOverlay(
     if (program.data.len == 0 or program.data.len & 7 != 0) {
         @panic("RSP overlay data must have a nonzero DMA-aligned size");
     }
+    if (program.data.len < 28) {
+        @panic("RSP overlay data must contain a packed overlay header");
+    }
     if (dmem_offset > io.dmem_len or
         program.data.len > @as(usize, io.dmem_len - dmem_offset))
     {
@@ -74,13 +80,25 @@ pub fn submitOverlay(
 
     const imem_address = io.dma_imem_addr + imem_offset;
     const dmem_address = io.dma_dmem_addr + dmem_offset;
+    const overlay_data = overlay_data_staging[0..program.data.len];
+    @memcpy(overlay_data, program.data);
+
+    // Match libdragon's rspq_overlay_header layout. Sizes use the RSP DMA
+    // length convention (byte count minus one), and IDs use their encoded
+    // command/id-map representation.
+    std.mem.writeInt(u16, overlay_data[8..10], @as(u16, overlay_id) << 5, .big);
+    std.mem.writeInt(u16, overlay_data[10..12], @as(u16, overlay_id) << 2, .big);
+    std.mem.writeInt(u32, overlay_data[12..16], physicalAddress(@intFromPtr(program.text.ptr)), .big);
+    std.mem.writeInt(u16, overlay_data[16..18], @intCast(program.text.len - 1), .big);
+    std.mem.writeInt(u16, overlay_data[18..20], @intCast(imem_address), .big);
+
     assertRspDma(program.text, imem_address);
-    assertRspDma(program.data, dmem_address);
+    assertRspDma(overlay_data, dmem_address);
 
     halt();
     waitHalted();
     cache.writebackData(program.text);
-    cache.writebackData(program.data);
+    cache.writebackData(overlay_data);
 
     io.readDmem(u32, overlay_text_address_dmem).* = physicalAddress(@intFromPtr(program.text.ptr));
     io.readDmem(u32, overlay_text_size_dmem).* = @intCast(program.text.len - 1);
@@ -88,12 +106,12 @@ pub fn submitOverlay(
     io.readDmem(u32, overlay_handler_address_dmem).* = io.dma_imem_addr + program.pc_start;
     io.readDmem(u32, current_overlay_id_dmem).* = 0;
     io.readDmem(u32, overlay_load_count_dmem).* = 0;
-    io.readDmem(u32, overlay_data_address_dmem).* = physicalAddress(@intFromPtr(program.data.ptr));
-    io.readDmem(u32, overlay_data_size_dmem).* = @intCast(program.data.len - 1);
+    io.readDmem(u32, overlay_data_address_dmem).* = physicalAddress(@intFromPtr(overlay_data.ptr));
+    io.readDmem(u32, overlay_data_size_dmem).* = @intCast(overlay_data.len - 1);
     io.readDmem(u32, overlay_dmem_address_dmem).* = dmem_address;
 
-    const packed_data = physicalAddress(@intFromPtr(program.data.ptr)) & 0x00ffffff |
-        @as(u32, @intCast((program.data.len - 1) >> 4)) << 24;
+    const packed_data = physicalAddress(@intFromPtr(overlay_data.ptr)) & 0x00ffffff |
+        @as(u32, @intCast((overlay_data.len - 1) >> 4)) << 24;
     io.readDmem(u32, overlay_table_dmem + @as(u32, overlay_id) * @sizeOf(u32)).* = packed_data;
     io.readDmem(u8, overlay_idmap_dmem + overlay_id).* = overlay_id << 2;
 }

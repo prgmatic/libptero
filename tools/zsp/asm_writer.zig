@@ -174,6 +174,7 @@ fn writeStatements(
 ) anyerror!void {
     for (statements) |statement| {
         switch (statement) {
+            .packed_struct_decl => {},
             .data_block => {},
             .var_decl => |decl| try writeVarDecl(writer, context, decl),
             .assignment => |assignment| try writeAssignment(writer, context, assignment),
@@ -194,6 +195,13 @@ fn writeDataBlocks(
 ) !void {
     var offset: usize = 0;
     var wrote_data = false;
+    var packed_structs = PackedStructRegistry{};
+    for (functions) |function| {
+        for (function.statements) |statement| switch (statement) {
+            .packed_struct_decl => |declaration| try packed_structs.add(declaration),
+            else => {},
+        };
+    }
     for (functions) |function| {
         for (function.statements) |statement| {
             const declarations = switch (statement) {
@@ -205,21 +213,52 @@ fn writeDataBlocks(
                 wrote_data = true;
             }
             for (declarations) |declaration| {
-                const element_size = try scalarDataSize(declaration.data_type);
-                offset = std.mem.alignForward(usize, offset, element_size);
-                if (element_size > 1) try writer.print(".balign {d}\n", .{element_size});
+                const element_size = switch (declaration.storage_type) {
+                    .scalar => |data_type| try scalarDataSize(data_type),
+                    .packed_struct => |name| blk: {
+                        if (declaration.is_array) return error.PackedStructArraysUnsupported;
+                        break :blk try packed_structs.sizeOf(name);
+                    },
+                };
+                const alignment: usize = switch (declaration.storage_type) {
+                    .scalar => element_size,
+                    .packed_struct => 1,
+                };
+                offset = std.mem.alignForward(usize, offset, alignment);
+                if (alignment > 1) try writer.print(".balign {d}\n", .{alignment});
                 try writer.print("{s}:\n", .{declaration.name});
-                for (declaration.values) |value| {
-                    try validateDataValue(declaration.data_type, value);
-                    try writer.print("  {s} {d}\n", .{ dataDirective(declaration.data_type), value });
+                switch (declaration.storage_type) {
+                    .scalar => |data_type| for (declaration.values) |value| {
+                        try validateDataValue(data_type, value);
+                        try writer.print("  {s} {d}\n", .{ dataDirective(data_type), value });
+                    },
+                    .packed_struct => |name| {
+                        const layout = try packed_structs.lookup(name);
+                        if (declaration.zero_fill) {
+                            if (declaration.values.len != layout.fields.len) {
+                                return error.IncorrectPackedStructInitializerCount;
+                            }
+                            for (declaration.values, layout.fields) |value, field| {
+                                try validateDataValue(field.data_type, value);
+                                try writer.print("  {s} {d}\n", .{ dataDirective(field.data_type), value });
+                            }
+                        }
+                    },
                 }
-                const remaining = declaration.array_len - declaration.values.len;
-                if (remaining > 0) {
-                    if (declaration.zero_fill) {
-                        try writer.print("  .space {d}, 0\n", .{remaining * element_size});
-                    } else {
-                        try writer.print("  .space {d}\n", .{remaining * element_size});
-                    }
+                switch (declaration.storage_type) {
+                    .scalar => {
+                        const remaining = declaration.array_len - declaration.values.len;
+                        if (remaining > 0) {
+                            if (declaration.zero_fill) {
+                                try writer.print("  .space {d}, 0\n", .{remaining * element_size});
+                            } else {
+                                try writer.print("  .space {d}\n", .{remaining * element_size});
+                            }
+                        }
+                    },
+                    .packed_struct => {
+                        if (!declaration.zero_fill) try writer.print("  .space {d}\n", .{element_size});
+                    },
                 }
                 try context.add(.{
                     .name = declaration.name,
@@ -234,6 +273,41 @@ fn writeDataBlocks(
     }
     if (wrote_data) try writer.writeByte('\n');
 }
+
+const PackedStructRegistry = struct {
+    declarations: [32]ast.PackedStructDecl = undefined,
+    len: usize = 0,
+
+    fn add(self: *PackedStructRegistry, declaration: ast.PackedStructDecl) !void {
+        if (self.len >= self.declarations.len) return error.TooManyPackedStructs;
+        if (self.find(declaration.name) != null) return error.SymbolAlreadyDefined;
+        for (declaration.fields, 0..) |field, index| {
+            for (declaration.fields[0..index]) |previous| {
+                if (std.mem.eql(u8, field.name, previous.name)) return error.SymbolAlreadyDefined;
+            }
+        }
+        self.declarations[self.len] = declaration;
+        self.len += 1;
+    }
+
+    fn lookup(self: *const PackedStructRegistry, name: []const u8) !ast.PackedStructDecl {
+        return self.find(name) orelse error.UnknownPackedStruct;
+    }
+
+    fn find(self: *const PackedStructRegistry, name: []const u8) ?ast.PackedStructDecl {
+        for (self.declarations[0..self.len]) |declaration| {
+            if (std.mem.eql(u8, declaration.name, name)) return declaration;
+        }
+        return null;
+    }
+
+    fn sizeOf(self: *const PackedStructRegistry, name: []const u8) !usize {
+        const declaration = try self.lookup(name);
+        var size: usize = 0;
+        for (declaration.fields) |field| size += try scalarDataSize(field.data_type);
+        return size;
+    }
+};
 
 fn scalarDataSize(data_type: DataType) !usize {
     return switch (data_type) {

@@ -1,6 +1,20 @@
+packed struct OverlayHeader {
+    state_start: u16;
+    state_size: u16;
+    state_rdram: u32;
+    command_base: u16;
+    overlay_id: u16;
+    text_rdram: u32;
+    text_size: u16;
+    text_start: u16;
+    extra_rdram: u32;
+    extra_size: u16;
+    extra_start: u16;
+}
+
 data {
-    // TODO: Prefix this data with the libdragon-compatible packed overlay
-    // header once ZSP supports packed structs.
+    overlay_header: OverlayHeader = .{ 0, 0, 0, 0, 0, 0, 0, 0x1800, 0, 0, 0 };
+    overlay_commands: [2]u16 = .{ 0x0a00, 0 };
     overlay_value: [4]u32 = .{ 0x4f564c31, 0, 0, 0 };
 }
 
