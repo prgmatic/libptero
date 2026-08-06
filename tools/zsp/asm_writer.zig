@@ -47,13 +47,12 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
 }
 
 fn writeCommandManifest(writer: *std.Io.Writer, functions: []const ast.Function) !void {
-    var seen: u16 = 0;
+    var seen = std.StaticBitSet(256).initEmpty();
     var wrote_section = false;
     for (functions) |function| {
         const index = function.command_index orelse continue;
-        const bit = @as(u16, 1) << index;
-        if (seen & bit != 0) return error.DuplicateCommandIndex;
-        seen |= bit;
+        if (seen.isSet(index)) return error.DuplicateCommandIndex;
+        seen.set(index);
         if (function.inline_call or function.no_return) return error.InvalidCommandFunction;
         if (function.parameters.len == 0 or function.parameters.len > 4) return error.InvalidCommandParameters;
         for (function.parameters, 0..) |parameter, parameter_index| {

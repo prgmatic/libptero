@@ -3,7 +3,7 @@ const std = @import("std");
 const rsp_header_len = 24;
 const imem_base = 0x1000;
 const imem_end = 0x2000;
-const overlay_dmem_start = 0x0840;
+const overlay_dmem_start = 0x0a00;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.smp_allocator;

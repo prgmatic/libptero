@@ -1,4 +1,5 @@
 const io = @import("io.zig");
+const Overlay = @import("overlay.zig").Overlay;
 
 pub const batch_word_count = 16;
 
@@ -56,6 +57,30 @@ pub const CommandQueue = struct {
 
         // Keep a STOP after the last complete command while the queue is open.
         self.buffer[self.index] = 0;
+    }
+
+    pub fn writeOverlay(
+        self: *CommandQueue,
+        registered: *const Overlay,
+        command_index: u8,
+        inline_argument: u32,
+        arguments: []const u32,
+    ) void {
+        var command_size: ?u8 = null;
+        for (0..registered.program.commandCount()) |metadata_index| {
+            const candidate = registered.program.commandAt(metadata_index);
+            if (candidate.index == command_index) {
+                command_size = candidate.size;
+                break;
+            }
+        }
+        if (command_size == null) {
+            @panic("RSP overlay command is not defined");
+        }
+        if (command_size.? != (1 + arguments.len) * @sizeOf(u32)) {
+            @panic("RSP overlay command arguments do not match its declared size");
+        }
+        self.writeCommand(registered.commandId(command_index), inline_argument, arguments);
     }
 
     pub fn stop(self: *CommandQueue) void {

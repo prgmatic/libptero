@@ -18,6 +18,8 @@ var invalid_command_batch: [rsp.command_queue.batch_word_count]u32 align(8) = .{
     .{0x00000000} ** (rsp.command_queue.batch_word_count - 1);
 
 var command_queue_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
+var overlay_1: rsp.Overlay = undefined;
+var overlay_2: rsp.Overlay = undefined;
 
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
@@ -250,17 +252,19 @@ fn commandDispatcher() !void {
 
 fn rspLoadedOverlayDispatch() !void {
     loadCommandDispatcher();
+    overlay_1.init(rsp.programs.static_overlay);
+    overlay_2.init(rsp.programs.static_overlay_2);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&overlay_1));
+    try testing.expectEqual(@as(u8, 2), rsp.registerOverlay(&overlay_2));
     var queue = rsp.CommandQueue.init(&command_queue_buffer);
-    queue.writeCommand(0x10, 0x104, &.{});
-    queue.writeCommand(0x11, 0x108, &.{0xdeadbeef});
-    queue.writeCommand(0x10, 0x10c, &.{});
-    queue.writeCommand(0x20, 0x110, &.{});
-    queue.writeCommand(0x20, 0x114, &.{});
-    queue.writeCommand(0x10, 0x118, &.{});
+    queue.writeOverlay(&overlay_1, 0, 0x104, &.{});
+    queue.writeOverlay(&overlay_1, 1, 0x108, &.{0xdeadbeef});
+    queue.writeOverlay(&overlay_1, 0, 0x10c, &.{});
+    queue.writeOverlay(&overlay_2, 0, 0x110, &.{});
+    queue.writeOverlay(&overlay_2, 0, 0x114, &.{});
+    queue.writeOverlay(&overlay_1, 0, 0x118, &.{});
     queue.stop();
 
-    rsp.submitOverlay(1, rsp.programs.static_overlay);
-    rsp.submitOverlay(2, rsp.programs.static_overlay_2);
     try expectDmemWord(u32, 0x48, 0x00040800);
     rsp.submitCommands(&queue);
     try runLoadedCommandDispatcher();

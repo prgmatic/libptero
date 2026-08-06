@@ -9,6 +9,8 @@ pub const UCode = ucode.UCode;
 pub const Ucode = UCode;
 pub const command_queue = @import("command_queue.zig");
 pub const CommandQueue = command_queue.CommandQueue;
+pub const overlay = @import("overlay.zig");
+pub const Overlay = overlay.Overlay;
 
 pub const command_status_dmem = 0x5c;
 pub const overlay_load_count_dmem = 0x64;
@@ -17,13 +19,9 @@ const overlay_table_dmem = 0x08;
 const overlay_idmap_dmem = 0x48;
 const queue_address_dmem = 0x58;
 const current_overlay_id_dmem = 0x60;
-const overlay_dmem_offset = 0x800;
+const overlay_dmem_offset = overlay.dmem_offset;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
-// Temporary single-overlay backing store. This also lets submitOverlay fill the
-// runtime-dependent fields in the overlay's packed header before RSP DMA.
-var overlay_data_staging: [2][io.dmem_len]u8 align(16) = undefined;
-var overlay_state_staging: [2][io.dmem_len]u8 align(16) = undefined;
 
 pub const OverlayHeader = extern struct {
     state_start: u16 = 0,
@@ -55,13 +53,7 @@ pub const OverlayHeader = extern struct {
     }
 };
 
-const overlay_command_count = 16;
-const overlay_command_table_len = overlay_command_count * @sizeOf(u16);
-const overlay_payload_offset = std.mem.alignForward(
-    usize,
-    OverlayHeader.byte_len + overlay_command_table_len,
-    16,
-);
+const overlay_payload_offset = overlay.payload_offset;
 
 pub fn runUCode(program: UCode) void {
     halt();
@@ -83,13 +75,19 @@ pub fn submitCommands(queue: *const CommandQueue) void {
     io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(words.ptr));
 }
 
-pub fn submitOverlay(
-    overlay_id: u8,
-    program: UCode,
-) void {
-    if (overlay_id == 0 or overlay_id > overlay_data_staging.len) {
-        @panic("RSP overlay ID is outside the supported registration range");
+pub fn registerOverlay(registered: *Overlay) u8 {
+    return registerOverlayInternal(registered, null);
+}
+
+pub fn registerOverlayStatic(registered: *Overlay, overlay_id: u8) void {
+    _ = registerOverlayInternal(registered, overlay_id);
+}
+
+fn registerOverlayInternal(registered: *Overlay, static_id: ?u8) u8 {
+    if (registered.id != 0) {
+        @panic("RSP overlay is already registered");
     }
+    const program = registered.program;
     if (program.text.len == 0 or program.text.len & 7 != 0) {
         @panic("RSP overlay text must have a nonzero DMA-aligned size");
     }
@@ -105,6 +103,11 @@ pub fn submitOverlay(
     if (program.commandCount() == 0) {
         @panic("RSP overlay does not define any commands");
     }
+    var highest_command_index: u8 = 0;
+    for (0..program.commandCount()) |metadata_index| {
+        highest_command_index = @max(highest_command_index, program.commandAt(metadata_index).index);
+    }
+    const slot_count: u8 = highest_command_index / overlay.commands_per_id + 1;
     if (program.state_len == 0 or program.state_offset & 7 != 0 or program.state_len & 7 != 0 or
         @as(u32, program.state_offset) + program.state_len > io.dmem_len)
     {
@@ -117,13 +120,26 @@ pub fn submitOverlay(
 
     const imem_address = io.dma_imem_addr + imem_offset;
     const dmem_address = io.dma_dmem_addr + overlay_dmem_offset;
-    const staging = &overlay_data_staging[overlay_id - 1];
-    const overlay_data = staging[0..overlay_data_len];
+
+    halt();
+    waitHalted();
+    const overlay_id = static_id orelse findFreeOverlayId(slot_count);
+    if (overlay_id == 0 or @as(u16, overlay_id) + slot_count > overlay.max_id + 1) {
+        @panic("RSP overlay ID range is outside the overlay table");
+    }
+    for (0..slot_count) |slot| {
+        if (io.readDmem(u32, overlay_table_dmem + (@as(u32, overlay_id) + @as(u32, @intCast(slot))) * @sizeOf(u32)).* != 0) {
+            @panic("RSP overlay table slot is already occupied");
+        }
+    }
+    registered.id = overlay_id;
+    registered.slot_count = slot_count;
+    const overlay_data = registered.data[0..overlay_data_len];
+    registered.data_len = overlay_data_len;
     @memset(overlay_data, 0);
     @memcpy(overlay_data[overlay_payload_offset..], program.data);
 
-    const state = overlay_state_staging[overlay_id - 1][0..program.state_len];
-    @memset(state, 0);
+    const state = registered.state[0..program.state_len];
     const header = OverlayHeader{
         .state_start = program.state_offset,
         .state_size = program.state_len - 1,
@@ -137,9 +153,7 @@ pub fn submitOverlay(
     header.write(overlay_data[0..OverlayHeader.byte_len]);
     for (0..program.commandCount()) |command_index| {
         const command = program.commandAt(command_index);
-        if (command.index >= overlay_command_count or command.handler_offset & 3 != 0 or
-            command.handler_offset >> 2 > 0x3ff)
-        {
+        if (command.handler_offset & 3 != 0 or command.handler_offset >> 2 > 0x3ff) {
             @panic("RSP overlay command metadata cannot be encoded");
         }
         const descriptor = @as(u16, command.size) << 8 | command.handler_offset >> 2;
@@ -150,16 +164,34 @@ pub fn submitOverlay(
     assertRspDma(program.text, imem_address);
     assertRspDma(overlay_data, dmem_address);
 
-    halt();
-    waitHalted();
     cache.writebackData(program.text);
     cache.writebackData(overlay_data);
     cache.writebackData(state);
 
     const packed_data = physicalAddress(@intFromPtr(overlay_data.ptr)) & 0x00ffffff |
         @as(u32, @intCast((overlay_data.len - 1) >> 4)) << 24;
-    io.readDmem(u32, overlay_table_dmem + @as(u32, overlay_id) * @sizeOf(u32)).* = packed_data;
-    writeDmemByte(overlay_idmap_dmem + overlay_id, overlay_id << 2);
+    for (0..slot_count) |slot| {
+        const slot_id = overlay_id + @as(u8, @intCast(slot));
+        io.readDmem(u32, overlay_table_dmem + @as(u32, slot_id) * @sizeOf(u32)).* = packed_data;
+        writeDmemByte(overlay_idmap_dmem + slot_id, overlay_id << 2);
+    }
+    return overlay_id;
+}
+
+fn findFreeOverlayId(slot_count: u8) u8 {
+    var candidate: u8 = 1;
+    while (@as(u16, candidate) + slot_count <= overlay.max_id + 1) : (candidate += 1) {
+        var free = true;
+        for (0..slot_count) |slot| {
+            const slot_id = candidate + @as(u8, @intCast(slot));
+            if (io.readDmem(u32, overlay_table_dmem + @as(u32, slot_id) * @sizeOf(u32)).* != 0) {
+                free = false;
+                break;
+            }
+        }
+        if (free) return candidate;
+    }
+    @panic("RSP overlay table does not have enough consecutive slots");
 }
 
 fn writeDmemByte(offset: u32, value: u8) void {

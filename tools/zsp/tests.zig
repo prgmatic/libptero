@@ -1450,6 +1450,30 @@ test "command functions require unique indices and ABI parameters" {
     , error.InvalidCommandParameters);
 }
 
+test "command functions support indices spanning overlay IDs" {
+    try expectAsm(
+        \\command(16) fn extended(reg($a0) header: u32) {
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.globl extended
+        \\extended:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word extended
+        \\  .byte 16
+        \\  .byte 4
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
 test "discard parameters contribute to command size without defining symbols" {
     try expectAsmError(
         \\command(0) fn bad(reg($a0) _: u32) {

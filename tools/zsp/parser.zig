@@ -44,7 +44,7 @@ pub const Parser = struct {
         var inline_call = false;
         var export_symbol = false;
         var public = false;
-        var command_index: ?u4 = null;
+        var command_index: ?u8 = null;
         while (true) {
             const prefix = try self.expect(.ident);
             if (std.mem.eql(u8, prefix.text, "command")) {
@@ -52,7 +52,7 @@ pub const Parser = struct {
                 _ = try self.expect(.l_paren);
                 const index_token = try self.expect(.number);
                 const index = try self.parseNumberValue(index_token);
-                if (index < 0 or index > 15) return self.fail(index_token, .invalid_command_index);
+                if (index < 0 or index > 239) return self.fail(index_token, .invalid_command_index);
                 command_index = @intCast(index);
                 _ = try self.expect(.r_paren);
                 continue;
@@ -98,7 +98,7 @@ pub const Parser = struct {
         export_symbol: bool,
         inline_call: bool,
         public: bool,
-        command_index: ?u4,
+        command_index: ?u8,
     ) !ast.Function {
         const name = try self.expect(.ident);
         _ = try self.expect(.l_paren);
@@ -872,7 +872,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .undefined_data_initializer => "data declarations must contain initialized bytes; reserve storage in a bss block",
         .expected_struct_declaration => "expected packed struct declaration",
         .invalid_array_length => "invalid array length",
-        .invalid_command_index => "command index must be between 0 and 15",
+        .invalid_command_index => "command index must be between 0 and 239",
         .incorrect_array_initializer_count => "array initializer must contain exactly the declared element count",
         .unexpected_token => "unexpected token",
         .invalid_number => "invalid number",

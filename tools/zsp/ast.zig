@@ -8,7 +8,7 @@ pub const Function = struct {
     public: bool,
     inline_call: bool,
     no_return: bool,
-    command_index: ?u4 = null,
+    command_index: ?u8 = null,
     parameters: []const Parameter,
     statements: []Statement,
 };

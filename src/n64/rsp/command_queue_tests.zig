@@ -1,5 +1,7 @@
 const command_queue = @import("command_queue.zig");
 const CommandQueue = command_queue.CommandQueue;
+const Overlay = @import("overlay.zig").Overlay;
+const UCode = @import("ucode.zig").UCode;
 const testing = @import("std").testing;
 
 test "writeDmem encodes a fixed command batch" {
@@ -74,4 +76,29 @@ test "a fixed queue holds two overlay commands and stop" {
         0xdeadbeef,
     } ++ [_]u32{0} ** (command_queue.batch_word_count - 4);
     try testing.expectEqualSlices(u32, &expected, queue.words());
+}
+
+test "writeOverlay derives the command ID and validates metadata" {
+    const commands = [_]u8{
+        0x00, 0x04, 0x02, 0x00,
+        0x03, 0x08, 0x02, 0x40,
+        0x10, 0x04, 0x02, 0x80,
+    };
+    var registered: Overlay = undefined;
+    registered.init(UCode{ .text = &.{}, .commands = &commands });
+    registered.id = 2;
+    registered.slot_count = 2;
+    var buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var queue = CommandQueue.init(&buffer);
+
+    queue.writeOverlay(&registered, 3, 0x1234, &.{0xcafebabe});
+    queue.stop();
+
+    try testing.expectEqual(@as(u32, 0x23001234), buffer[0]);
+    try testing.expectEqual(@as(u32, 0xcafebabe), buffer[1]);
+
+    queue.clear();
+    queue.writeOverlay(&registered, 16, 0x5678, &.{});
+    queue.stop();
+    try testing.expectEqual(@as(u32, 0x30005678), buffer[0]);
 }
