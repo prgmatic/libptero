@@ -207,6 +207,7 @@ fn writeStatements(
             .packed_struct_decl => {},
             .data_block => {},
             .bss_block => {},
+            .state_block => {},
             .var_decl => |decl| try writeVarDecl(writer, context, decl),
             .assignment => |assignment| try writeAssignment(writer, context, assignment),
             .store => |store| try writeStore(writer, context, store),
@@ -231,7 +232,7 @@ fn writeStorageBlocks(
             else => {},
         };
     }
-    inline for (.{ .data_block, .bss_block }) |block_tag| {
+    inline for (.{ .data_block, .bss_block, .state_block }) |block_tag| {
         var offset: usize = 0;
         var wrote_section = false;
         for (functions) |function| for (function.statements) |statement| {
@@ -239,10 +240,16 @@ fn writeStorageBlocks(
             const declarations = switch (statement) {
                 .data_block => |items| items,
                 .bss_block => |items| items,
+                .state_block => |items| items,
                 else => unreachable,
             };
             if (!wrote_section) {
-                try writer.writeAll(if (block_tag == .data_block) ".data\n" else ".bss\n");
+                try writer.writeAll(switch (block_tag) {
+                    .data_block => ".data\n",
+                    .bss_block => ".bss\n",
+                    .state_block => ".section .state,\"aw\",@nobits\n",
+                    else => unreachable,
+                });
                 wrote_section = true;
             }
             for (declarations) |declaration| {
@@ -297,7 +304,10 @@ fn writeStorageBlocks(
                 offset += declaration.array_len * element_size;
             }
         };
-        if (wrote_section) try writer.writeByte('\n');
+        if (wrote_section) {
+            if (block_tag == .state_block) try writer.writeAll(".balign 8\n");
+            try writer.writeByte('\n');
+        }
     }
 }
 

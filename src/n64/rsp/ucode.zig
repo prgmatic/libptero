@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const header_size = 16;
+const header_size = 24;
 
 pub const UCode = struct {
     text: []const u8,
@@ -8,6 +8,8 @@ pub const UCode = struct {
     pc_start: u16 = 0,
     text_offset: u16 = 0,
     commands: []const u8 = &.{},
+    state_offset: u16 = 0,
+    state_len: u16 = 0,
 
     pub fn fromBlob(blob: []const u8) UCode {
         if (blob.len < header_size) {
@@ -32,6 +34,8 @@ pub const UCode = struct {
             .pc_start = header.pc_start,
             .text_offset = header.text_offset,
             .commands = blob[commands_start..commands_end],
+            .state_offset = header.state_offset,
+            .state_len = header.state_len,
         };
     }
 
@@ -69,6 +73,8 @@ const Header = struct {
     text_offset: u16,
     commands_offset: u16,
     command_count: u16,
+    state_offset: u16,
+    state_len: u16,
 
     fn read(bytes: *const [header_size]u8) Header {
         return .{
@@ -79,6 +85,8 @@ const Header = struct {
             .text_offset = std.mem.readInt(u16, bytes[8..10], .big),
             .commands_offset = std.mem.readInt(u16, bytes[10..12], .big),
             .command_count = std.mem.readInt(u16, bytes[12..14], .big),
+            .state_offset = std.mem.readInt(u16, bytes[14..16], .big),
+            .state_len = std.mem.readInt(u16, bytes[16..18], .big),
         };
     }
 };

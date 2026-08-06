@@ -224,6 +224,10 @@ pub const Parser = struct {
             return .{ .bss_block = try self.parseStorageBlock(false) };
         }
 
+        if (std.mem.eql(u8, first.text, "state")) {
+            return .{ .state_block = try self.parseStorageBlock(false) };
+        }
+
         if (std.mem.eql(u8, first.text, "asm")) {
             _ = try self.expect(.l_paren);
             const asm_text = try self.expect(.string);

@@ -2,6 +2,10 @@ data {
     overlay_value: [4]u32 = .{ 0x4f564c31, 0, 0, 0 };
 }
 
+state {
+    persistent_counter: u32;
+}
+
 // The resident dispatcher enters at _start with the normal command-handler
 // ABI and the handler returns through $ra.
 command(0) fn _start(
@@ -9,7 +13,9 @@ command(0) fn _start(
 ) {
     reg dmem_address: u32 = 0;
     dmem_address = command & 0x00ffffff;
-    reg value: u32 = load(u32, overlay_value);
+    reg value: u32 = load(u32, persistent_counter);
+    value += 1;
+    store(u32, persistent_counter, value);
     store(u32, dmem_address, value);
 }
 

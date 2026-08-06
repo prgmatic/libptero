@@ -267,6 +267,39 @@ test "data blocks reject undefined storage" {
     , .undefined_data_initializer, 2, 18);
 }
 
+test "state blocks reserve addressable DMA-aligned storage" {
+    try expectAsm(
+        \\state {
+        \\  counter: u32;
+        \\  flags: [3]u8;
+        \\}
+        \\export fn _start() noreturn {
+        \\  reg($t0) address: u32 = counter;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.section .state,"aw",@nobits
+        \\.balign 4
+        \\counter:
+        \\  .space 4
+        \\flags:
+        \\  .space 3
+        \\.balign 8
+        \\
+        \\.text
+        \\
+        \\
+        \\.globl _start
+        \\_start:
+        \\  addiu $t0, $zero, %lo(counter)
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "scalar assignment operators support every data type" {
     const data_types = [_][]const u8{ "u8", "u16", "u32", "i8", "i16", "i32" };
     const expected =

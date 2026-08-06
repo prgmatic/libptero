@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const rsp_header_len = 16;
+const rsp_header_len = 24;
 const imem_base = 0x1000;
 const imem_end = 0x2000;
 const overlay_dmem_start = 0x0840;
@@ -58,6 +58,10 @@ fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16) !void {
         \\
         \\    .bss (NOLOAD) : SUBALIGN(1) {{
         \\        *(.bss*)
+        \\    }} > DMEM
+        \\
+        \\    .state (NOLOAD) : SUBALIGN(1) {{
+        \\        KEEP(*(.state*))
         \\    }} > DMEM
         \\
         \\    .text 0x{x:0>4} : {{

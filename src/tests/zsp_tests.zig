@@ -253,9 +253,10 @@ fn rspLoadedOverlayDispatch() !void {
     var queue = rsp.CommandQueue.init(&command_queue_buffer);
     queue.writeCommand(0x10, 0x104, &.{});
     queue.writeCommand(0x11, 0x108, &.{0xdeadbeef});
-    queue.writeCommand(0x20, 0x10c, &.{});
+    queue.writeCommand(0x10, 0x10c, &.{});
     queue.writeCommand(0x20, 0x110, &.{});
-    queue.writeCommand(0x10, 0x114, &.{});
+    queue.writeCommand(0x20, 0x114, &.{});
+    queue.writeCommand(0x10, 0x118, &.{});
     queue.stop();
 
     rsp.submitOverlay(1, rsp.programs.static_overlay);
@@ -265,12 +266,15 @@ fn rspLoadedOverlayDispatch() !void {
     try runLoadedCommandDispatcher();
 
     try expectDmemWord(u32, rsp.command_status_dmem, 0);
-    try expectDmemWord(u32, 0x104, 0x4f564c31);
+    try expectDmemWord(u32, 0x104, 1);
     try expectDmemWord(u32, 0x108, 0xdeadbeef);
-    try expectDmemWord(u32, 0x10c, 0x4f564c32);
-    try expectDmemWord(u32, 0x110, 0x4f564c32);
-    try expectDmemWord(u32, 0x114, 0x4f564c31);
+    try expectDmemWord(u32, 0x10c, 2);
+    try expectDmemWord(u32, 0x110, 1);
+    try expectDmemWord(u32, 0x114, 2);
+    try expectDmemWord(u32, 0x118, 3);
     try expectDmemWord(u32, rsp.overlay_load_count_dmem, 3);
+    try expectDmemWord(u16, 0x800, rsp.programs.static_overlay.state_offset);
+    try expectDmemWord(u16, 0x802, rsp.programs.static_overlay.state_len - 1);
     try expectDmemWord(u16, 0x808, 1 << 5);
     try expectDmemWord(u16, 0x80a, 1 << 2);
     try expectDmemWord(u16, 0x810, @intCast(rsp.programs.static_overlay.text.len - 1));

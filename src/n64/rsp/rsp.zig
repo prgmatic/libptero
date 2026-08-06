@@ -23,6 +23,7 @@ var dma_staging: [io.dmem_len]u8 align(8) = undefined;
 // Temporary single-overlay backing store. This also lets submitOverlay fill the
 // runtime-dependent fields in the overlay's packed header before RSP DMA.
 var overlay_data_staging: [2][io.dmem_len]u8 align(16) = undefined;
+var overlay_state_staging: [2][io.dmem_len]u8 align(16) = undefined;
 
 pub const OverlayHeader = extern struct {
     state_start: u16 = 0,
@@ -104,6 +105,11 @@ pub fn submitOverlay(
     if (program.commandCount() == 0) {
         @panic("RSP overlay does not define any commands");
     }
+    if (program.state_len == 0 or program.state_offset & 7 != 0 or program.state_len & 7 != 0 or
+        @as(u32, program.state_offset) + program.state_len > io.dmem_len)
+    {
+        @panic("RSP overlay must define DMA-aligned persistent state");
+    }
     const overlay_data_len = overlay_payload_offset + program.data.len;
     if (overlay_data_len > io.dmem_len - overlay_dmem_offset) {
         @panic("RSP overlay data does not fit in DMEM");
@@ -116,7 +122,12 @@ pub fn submitOverlay(
     @memset(overlay_data, 0);
     @memcpy(overlay_data[overlay_payload_offset..], program.data);
 
+    const state = overlay_state_staging[overlay_id - 1][0..program.state_len];
+    @memset(state, 0);
     const header = OverlayHeader{
+        .state_start = program.state_offset,
+        .state_size = program.state_len - 1,
+        .state_rdram = physicalAddress(@intFromPtr(state.ptr)),
         .command_base = @as(u16, overlay_id) << 5,
         .overlay_id = @as(u16, overlay_id) << 2,
         .text_rdram = physicalAddress(@intFromPtr(program.text.ptr)),
@@ -143,6 +154,7 @@ pub fn submitOverlay(
     waitHalted();
     cache.writebackData(program.text);
     cache.writebackData(overlay_data);
+    cache.writebackData(state);
 
     const packed_data = physicalAddress(@intFromPtr(overlay_data.ptr)) & 0x00ffffff |
         @as(u32, @intCast((overlay_data.len - 1) >> 4)) << 24;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const elf = std.elf;
 
-const header_size = 16;
+const header_size = 24;
 const imem_base = 0x1000;
 const command_source_size = 8;
 const command_packed_size = 4;
@@ -52,6 +52,7 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const text = (try findSection(bytes, header, ".text")) orelse return error.MissingTextSection;
     const data = try findSection(bytes, header, ".data");
     const commands = try findSection(bytes, header, ".zsp_commands");
+    const state = try findSection(bytes, header, ".state");
 
     if (header.entry < text.sh_addr or header.entry >= text.sh_addr + text.sh_size) return error.EntryOutsideText;
     const pc_start = header.entry - imem_base;
@@ -76,6 +77,15 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
         break :blk count;
     } else 0;
     const commands_offset = data_offset + padded_data_size;
+    var state_offset: u16 = 0;
+    var state_size: u16 = 0;
+    if (state) |section| {
+        if (section.sh_addr + section.sh_size > 0x1000 or section.sh_addr & 7 != 0 or section.sh_size & 7 != 0) {
+            return error.InvalidStateSection;
+        }
+        state_offset = @intCast(section.sh_addr);
+        state_size = @intCast(section.sh_size);
+    }
     if (padded_text_size > 0x1000) return error.TextTooLarge;
     if (padded_data_size > 0x1000) return error.DataTooLarge;
     if (padded_text_size > std.math.maxInt(u16)) return error.TextTooLarge;
@@ -93,6 +103,8 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     w16(out, 8, @intCast(text_start));
     w16(out, 10, @intCast(commands_offset));
     w16(out, 12, @intCast(command_count));
+    w16(out, 14, state_offset);
+    w16(out, 16, state_size);
 
     copySection(out[header_size..][0..text_size], bytes, text) catch |err| {
         alloc.free(out);

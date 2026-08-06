@@ -84,6 +84,16 @@ export fn _start() noreturn {
             if(handler_address != 0) {
                 reg current_overlay: u32 = load(u32, current_overlay_id);
                 if(current_overlay != handler_address) {
+                    if(current_overlay != 0) {
+                        dma_destination = load(u32, 0x800);
+                        rdram = load(u32, 0x804);
+                        dma_size = dma_destination & 0xffff;
+                        dma_destination = dma_destination >> 16;
+                        dma_pitch = 0;
+                        dma_flags = 0x8000000c;
+                        dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+                    }
+
                     rdram = overlay_table_address;
                     rdram += handler_address;
                     dma_destination = load(u32, rdram);
@@ -100,6 +110,14 @@ export fn _start() noreturn {
                     dma_destination = load(u32, 0x810);
                     dma_size = dma_destination >> 16;
                     dma_destination = dma_destination & 0xffff;
+                    dma_pitch = 0;
+                    dma_flags = 0x0c;
+                    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+
+                    dma_destination = load(u32, 0x800);
+                    rdram = load(u32, 0x804);
+                    dma_size = dma_destination & 0xffff;
+                    dma_destination = dma_destination >> 16;
                     dma_pitch = 0;
                     dma_flags = 0x0c;
                     dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
