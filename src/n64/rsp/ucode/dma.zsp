@@ -17,9 +17,9 @@ pub fn exec(
     reg($t2) flags: u32,
 ) {
     reg($t3) scratch: u32 = 0;
-    cp0.get_dma_full(scratch);
+    cp0.getDmaFull(scratch);
     while(scratch != 0) {
-        cp0.get_dma_full(scratch);
+        cp0.getDmaFull(scratch);
     }
 
     scratch = size & 0x0fff;
@@ -28,22 +28,22 @@ pub fn exec(
     scratch <<= 20;
     scratch |= size;
 
-    cp0.set_dma_addr_rdram(rdram);
-    cp0.set_dma_addr_rsp(dmem);
+    cp0.setDmaAddrRdram(rdram);
+    cp0.setDmaAddrRsp(dmem);
     if(flags < 0x80000000) {
-        cp0.set_dma_read(scratch);
+        cp0.setDmaRead(scratch);
     } else {
-        cp0.set_dma_write(scratch);
+        cp0.setDmaWrite(scratch);
     }
 
     scratch = rdram & 7;
     dmem += scratch;
     flags &= 0x0f;
 
-    cp0.get_sp_status(scratch);
+    cp0.getSpStatus(scratch);
     scratch &= flags;
     while(scratch != 0) {
-        cp0.get_sp_status(scratch);
+        cp0.getSpStatus(scratch);
         scratch &= flags;
     }
 }

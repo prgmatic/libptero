@@ -19,7 +19,7 @@ command(0) fn _start(
     store(u32, dmem_address, value);
 }
 
-command(1) fn write_argument(
+command(1) fn writeArgument(
     reg($a0) command: u32,
     reg($a1) value: u32,
 ) {

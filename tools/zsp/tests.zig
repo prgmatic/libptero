@@ -1418,12 +1418,14 @@ test "command functions emit indexed handler metadata" {
         \\
         \\.globl first
         \\first:
-        \\  jr $ra
+        \\  or $k1, $zero, $ra
+        \\  jr $k1
         \\  nop
         \\
         \\.globl second
         \\second:
-        \\  jr $ra
+        \\  or $k1, $zero, $ra
+        \\  jr $k1
         \\  nop
         \\
         \\.section .zsp_commands,"",@progbits
@@ -1433,6 +1435,61 @@ test "command functions emit indexed handler metadata" {
         \\  .short 0
         \\  .word second
         \\  .byte 1
+        \\  .byte 4
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "command table materializes handlers, sizes, and empty slots" {
+    try expectAsm(
+        \\const commands = @commandTable();
+        \\command(0) fn wait() {
+        \\}
+        \\command(2) fn jump(reg($a0) target: u32) {
+        \\}
+        \\export fn _start() noreturn {
+        \\  reg($t0) table: u32 = commands;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.data
+        \\.balign 4
+        \\commands:
+        \\  .word wait + 0x00000000
+        \\  .word 0
+        \\  .word jump + 0x04000000
+        \\
+        \\.text
+        \\
+        \\
+        \\.globl wait
+        \\wait:
+        \\  or $k1, $zero, $ra
+        \\  jr $k1
+        \\  nop
+        \\
+        \\.globl jump
+        \\jump:
+        \\  or $k1, $zero, $ra
+        \\  jr $k1
+        \\  nop
+        \\
+        \\.globl _start
+        \\_start:
+        \\  addiu $t0, $zero, %lo(commands)
+        \\  break
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word wait
+        \\  .byte 0
+        \\  .byte 0
+        \\  .short 0
+        \\  .word jump
+        \\  .byte 2
         \\  .byte 4
         \\  .short 0
         \\
@@ -1461,7 +1518,8 @@ test "command functions support indices spanning overlay IDs" {
         \\
         \\.globl extended
         \\extended:
-        \\  jr $ra
+        \\  or $k1, $zero, $ra
+        \\  jr $k1
         \\  nop
         \\
         \\.section .zsp_commands,"",@progbits

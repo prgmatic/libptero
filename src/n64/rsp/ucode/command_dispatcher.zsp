@@ -1,4 +1,5 @@
 const dma = @import("dma.zsp");
+const cp0 = @import("cp0.zsp");
 
 data {
     shift_constants: [8]u8 = .{ 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 };
@@ -8,12 +9,15 @@ data {
 bss {
     overlay_data_rdram: [16]u32;
     overlay_idmap: [16]u8;
+    pointer_stack: [10]u32;
 
     queue_rdram_address: u32;
     command_status: u32;
     current_overlay_id: u32;
     overlay_load_count: u32;
 }
+
+const internal_commands = @commandTable();
 
 fn dispatch(reg($t6) handler_address: u32) noreturn {
     @jump(handler_address);
@@ -26,7 +30,31 @@ fn dispatch(reg($t6) handler_address: u32) noreturn {
 //   $ra: return address in the resident dispatcher
 //
 // $gp is the only scalar register handlers must preserve.
-fn write_dmem(
+command(0) fn waitForInput() {
+    const command_buffer: u32 = 0xc0;
+    const status_signal_more: u32 = 0x00004000;
+    const status_clear_signal_more: u32 = 0x00800000;
+
+    reg($t3) status_value: u32 = 0;
+    cp0.getSpStatus(status_value);
+    status_value &= status_signal_more;
+    if(status_value == 0) {
+        @break();
+    }
+    status_value = status_clear_signal_more;
+    cp0.setSpStatus(status_value);
+
+    reg($s0) rdram: u32 = load(u32, queue_rdram_address);
+    reg($t0) dma_size: u32 = 255;
+    reg($t1) dma_pitch: u32 = 0;
+    reg($s4) dma_destination: u32 = command_buffer;
+    reg($t2) dma_flags: u32 = 0x0c;
+    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+
+    reg($gp) command_address: u32 = command_buffer;
+}
+
+command(1) fn writeDmem(
     reg($a0) command: u32,
     reg($a1) value: u32,
 ) {
@@ -35,14 +63,161 @@ fn write_dmem(
     store(u32, dmem_address, value);
 }
 
+command(2) fn jump(reg($a0) command: u32) {
+    const command_buffer: u32 = 0xc0;
+    reg($s0) rdram: u32 = 0;
+    rdram = command & 0x00ffffff;
+    reg($t0) dma_size: u32 = 255;
+    reg($t1) dma_pitch: u32 = 0;
+    reg($s4) dma_destination: u32 = command_buffer;
+    reg($t2) dma_flags: u32 = 0x0c;
+    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+    store(u32, queue_rdram_address, rdram);
+    reg($gp) command_address: u32 = command_buffer;
+}
+
+command(3) fn call(
+    reg($a0) command: u32,
+    reg($a1) stack_offset: u32,
+) {
+    const command_buffer: u32 = 0xc0;
+
+    // Capture the dispatcher-owned command pointer before reusing $gp.
+    reg($t4) return_offset: u32 = 0;
+    asm("or $t4, $zero, $gp");
+    return_offset -= command_buffer;
+    reg($t5) return_address: u32 = load(u32, queue_rdram_address);
+    return_address += return_offset;
+    reg($t6) stack_address: u32 = pointer_stack;
+    stack_address += stack_offset;
+    store(u32, stack_address, return_address);
+
+    reg($s0) rdram: u32 = 0;
+    rdram = command & 0x00ffffff;
+    reg($t0) dma_size: u32 = 255;
+    reg($t1) dma_pitch: u32 = 0;
+    reg($s4) dma_destination: u32 = command_buffer;
+    reg($t2) dma_flags: u32 = 0x0c;
+    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+    store(u32, queue_rdram_address, rdram);
+    reg($gp) command_address: u32 = command_buffer;
+}
+
+command(4) fn returnFromCall(reg($a0) command: u32) {
+    const command_buffer: u32 = 0xc0;
+
+    reg($t4) stack_offset: u32 = 0;
+    stack_offset = command & 0x00ffffff;
+    reg($t5) stack_address: u32 = pointer_stack;
+    stack_address += stack_offset;
+    reg($s0) rdram: u32 = load(u32, stack_address);
+    reg($t6) return_offset: u32 = 0;
+    return_offset = rdram & 7;
+    rdram &= 0xfffffff8;
+    store(u32, queue_rdram_address, rdram);
+
+    reg($t0) dma_size: u32 = 255;
+    reg($t1) dma_pitch: u32 = 0;
+    reg($s4) dma_destination: u32 = command_buffer;
+    reg($t2) dma_flags: u32 = 0x0c;
+    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+    reg($gp) command_address: u32 = command_buffer;
+    command_address += return_offset;
+}
+
+command(5) fn runDma(
+    reg($a0) rdram_address: u32,
+    reg($a1) dmem_address: u32,
+    reg($a2) size: u32,
+    reg($a3) flags: u32,
+) {
+    reg($s0) rdram: u32 = 0;
+    reg($t0) dma_size: u32 = 0;
+    reg($t1) dma_pitch: u32 = 0;
+    reg($s4) dma_destination: u32 = 0;
+    reg($t2) dma_flags: u32 = 0;
+    rdram = rdram_address;
+    dma_size = size;
+    dma_destination = dmem_address;
+    dma_flags = flags;
+    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+}
+
+command(6) fn writeStatus(reg($a0) status: u32) {
+    reg($t3) status_value: u32 = 0;
+    status_value = status;
+    cp0.setSpStatus(status_value);
+}
+
+command(7) fn swapBuffers(
+    reg($a0) command: u32,
+    reg($a1) save_slot: u32,
+    reg($a2) status: u32,
+) {
+    const command_buffer: u32 = 0xc0;
+
+    reg($t3) status_value: u32 = 0;
+    status_value = status;
+    cp0.setSpStatus(status_value);
+
+    reg($t4) return_offset: u32 = 0;
+    asm("or $t4, $zero, $gp");
+    return_offset -= command_buffer;
+    reg($t5) return_address: u32 = load(u32, queue_rdram_address);
+    return_address += return_offset;
+    reg($t6) stack_address: u32 = pointer_stack;
+    stack_address += save_slot;
+    store(u32, stack_address, return_address);
+
+    reg($t7) restore_slot: u32 = 0;
+    restore_slot = command & 0x00ffffff;
+    stack_address = pointer_stack;
+    stack_address += restore_slot;
+    reg($s0) rdram: u32 = load(u32, stack_address);
+    reg($s1) return_alignment: u32 = 0;
+    return_alignment = rdram & 7;
+    rdram &= 0xfffffff8;
+    store(u32, queue_rdram_address, rdram);
+
+    reg($t0) dma_size: u32 = 255;
+    reg($t1) dma_pitch: u32 = 0;
+    reg($s4) dma_destination: u32 = command_buffer;
+    reg($t2) dma_flags: u32 = 0x0c;
+    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+    reg($gp) command_address: u32 = command_buffer;
+    command_address += return_alignment;
+}
+
+command(8) fn waitThenWriteStatus(
+    reg($a0) status: u32,
+    reg($a1) mask: u32,
+) {
+    reg($t3) status_value: u32 = 0;
+    cp0.getSpStatus(status_value);
+    status_value &= mask;
+    while(status_value != 0) {
+        cp0.getSpStatus(status_value);
+        status_value &= mask;
+    }
+    status_value = status;
+    cp0.setSpStatus(status_value);
+}
+
 // Resident command queue dispatcher.
 export fn _start() noreturn {
-    const command_buffer: u32 = 0xa0;
-    const overlay_table_address: u32 = 0x08;
-    const overlay_idmap_address: u32 = 0x48;
+    const command_buffer: u32 = 0xc0;
+    const command_fetch_size: u32 = 256;
+    const command_refetch_offset: u32 = 240;
+    const overlay_table_address: u32 = 0x2c;
+    const overlay_idmap_address: u32 = 0x6c;
+    const command_stop: u32 = 0x0f;
+    const status_high_priority_running: u32 = 0x00000400;
+    const status_high_priority_requested: u32 = 0x00000800;
+    const status_high_priority_mask: u32 = 0x00000c00;
+    const status_enter_high_priority: u32 = 0x00030000;
 
     reg($s0) rdram: u32 = load(u32, queue_rdram_address);
-    reg($t0) dma_size: u32 = 63;
+    reg($t0) dma_size: u32 = 255;
     reg($t1) dma_pitch: u32 = 0;
     reg($s4) dma_destination: u32 = command_buffer;
     reg($t2) dma_flags: u32 = 0x0c;
@@ -57,19 +232,40 @@ export fn _start() noreturn {
     reg($a3) argument_3: u32 = 0;
     reg($t7) command_size: u32 = 0;
     reg($t6) handler_address: u32 = 0;
+    reg($t3) status_value: u32 = 0;
     reg command_id: u32 = 0;
     command_id = command_header >> 24;
 
-    while(command_id != 0) {
-        command_size = 8;
+    while(command_id != command_stop) {
+        cp0.getSpStatus(status_value);
+        status_value &= status_high_priority_mask;
+        if(status_value == status_high_priority_requested) {
+            command_header = 36;
+            argument_1 = 32;
+            argument_2 = status_enter_high_priority;
+            swapBuffers(command_header, argument_1, argument_2);
+            command_header = load(u32, command_address);
+            command_id = command_header >> 24;
+        }
         argument_1 = load(u32, command_address, 4);
         argument_2 = load(u32, command_address, 8);
         argument_3 = load(u32, command_address, 12);
-        if(command_id == 1) {
-            command_address += command_size;
-            write_dmem(command_header, argument_1);
+        handler_address = command_id >> 4;
+        if(handler_address == 0) {
+            handler_address = internal_commands;
+            command_size = command_id << 2;
+            handler_address += command_size;
+            handler_address = load(u32, handler_address);
+            if(handler_address != 0) {
+                command_size = handler_address >> 24;
+                handler_address &= 0x00ffffff;
+                command_address += command_size;
+                dispatch(handler_address);
+            } else {
+                store(u32, command_status, command_id);
+                @break();
+            }
         } else {
-            handler_address = command_id >> 4;
             rdram = overlay_idmap_address;
             dma_size = handler_address & 0xfffffffc;
             rdram += dma_size;
@@ -157,6 +353,22 @@ export fn _start() noreturn {
             }
         }
 
+        dma_size = command_address;
+        dma_size -= command_buffer;
+        if(dma_size >= command_refetch_offset) {
+            rdram = load(u32, queue_rdram_address);
+            rdram += dma_size;
+            dma_destination = rdram & 7;
+            rdram = rdram & 0xfffffff8;
+            store(u32, queue_rdram_address, rdram);
+            command_address = command_buffer;
+            command_address += dma_destination;
+            dma_size = 255;
+            dma_pitch = 0;
+            dma_destination = command_buffer;
+            dma_flags = 0x0c;
+            dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+        }
         command_header = load(u32, command_address);
         command_id = command_header >> 24;
     }

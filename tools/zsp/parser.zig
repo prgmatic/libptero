@@ -290,7 +290,7 @@ pub const Parser = struct {
         }
 
         if (std.mem.eql(u8, first.text, "const")) {
-            return .{ .var_decl = try self.parseConstDecl() };
+            return self.parseConstStatement();
         }
 
         if (std.mem.eql(u8, first.text, "var")) {
@@ -514,8 +514,19 @@ pub const Parser = struct {
         return self.fail(name, .unsupported_builtin);
     }
 
-    fn parseConstDecl(self: *Parser) !ast.VarDecl {
+    fn parseConstStatement(self: *Parser) !ast.Statement {
         const name = try self.expect(.ident);
+        if (try self.eat(.equal)) {
+            _ = try self.expect(.at);
+            const builtin = try self.expect(.ident);
+            if (!std.mem.eql(u8, builtin.text, "commandTable")) {
+                return self.fail(builtin, .unsupported_builtin);
+            }
+            _ = try self.expect(.l_paren);
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .command_table_decl = name.text };
+        }
         _ = try self.expect(.colon);
         const data_type_token = try self.expect(.ident);
         const data_type = try self.parseDataType(data_type_token);
@@ -524,13 +535,13 @@ pub const Parser = struct {
         const value = valueFromRef(try self.parseValueRef());
         _ = try self.expect(.semicolon);
 
-        return .{
+        return .{ .var_decl = .{
             .is_const = true,
             .data_type = data_type,
             .reg = null,
             .name = name.text,
             .value = value,
-        };
+        } };
     }
 
     fn parseRegDecl(self: *Parser) !ast.VarDecl {
@@ -764,7 +775,10 @@ pub const Parser = struct {
         var lexer = self.lexer;
         _ = lexer.next() catch return false;
         const separator = lexer.next() catch return false;
-        return separator.tag == .equal;
+        const at = lexer.next() catch return false;
+        const import_name = lexer.next() catch return false;
+        return separator.tag == .equal and at.tag == .at and
+            import_name.tag == .ident and std.mem.eql(u8, import_name.text, "import");
     }
 
     fn expect(self: *Parser, tag: token.Tag) !token.Token {

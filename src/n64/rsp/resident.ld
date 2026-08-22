@@ -12,7 +12,7 @@ SECTIONS {
         KEEP(*(.rodata*))
     } > DMEM
 
-    .bss 0x0008 (NOLOAD) : SUBALIGN(1) {
+    .bss 0x002c (NOLOAD) : SUBALIGN(1) {
         *(.bss*)
     } > DMEM
 

@@ -143,7 +143,7 @@ fn packCommands(
             return error.InvalidCommandIndex;
         }
         seen |= @as(u16, 1) << @intCast(index);
-        if (command_size == 0 or command_size & 3 != 0) return error.InvalidCommandSize;
+        if (command_size & 3 != 0) return error.InvalidCommandSize;
         if (handler < text.sh_addr or handler >= text.sh_addr + text.sh_size or handler & 3 != 0) {
             return error.InvalidCommandHandler;
         }

@@ -1,4 +1,4 @@
-inline fn add_vectors(
+inline fn addVectors(
     reg($v01) a: vec16,
     reg($v02) b: vec16,
     reg($v03) add_result: vec16,
@@ -41,7 +41,7 @@ export fn _start() noreturn {
     reg($v17) zero_factor: vec16 = 0;
 
     add_result = a;
-    add_vectors(a, b, add_result);
+    addVectors(a, b, add_result);
     sub_result = a - b;
     and_result = a;
     and_result &= b;

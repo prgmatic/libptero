@@ -18,6 +18,15 @@ var invalid_command_batch: [rsp.command_queue.batch_word_count]u32 align(8) = .{
     .{0x00000000} ** (rsp.command_queue.batch_word_count - 1);
 
 var command_queue_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
+var chained_queue_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
+var called_block_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
+var alternate_queue_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
+var continuous_queue: rsp.DoubleBufferedQueue = undefined;
+var queued_dma_queue: rsp.DoubleBufferedQueue = undefined;
+var syncpoint_queue: rsp.DoubleBufferedQueue = undefined;
+var high_priority_queue: rsp.Queue = undefined;
+var queue_dma_source: [4]u32 align(8) = .{ 0x12345678, 0x89abcdef, 0x0badcafe, 0xfeedface };
+var queue_dma_destination: [4]u32 align(8) = undefined;
 var overlay_1: rsp.Overlay = undefined;
 var overlay_2: rsp.Overlay = undefined;
 
@@ -48,6 +57,13 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: data blocks", .run = dataBlocks },
     .{ .name = "ZSP: DMA in", .run = dmaIn },
     .{ .name = "ZSP: command dispatcher", .run = commandDispatcher },
+    .{ .name = "ZSP: chained command buffers", .run = chainedCommandBuffers },
+    .{ .name = "ZSP: called command block", .run = calledCommandBlock },
+    .{ .name = "ZSP: swapped command buffers", .run = swappedCommandBuffers },
+    .{ .name = "ZSP: continuous double-buffered queue", .run = continuousDoubleBufferedQueue },
+    .{ .name = "ZSP: polling syncpoint", .run = pollingSyncpoint },
+    .{ .name = "ZSP: high-priority queue", .run = highPriorityQueue },
+    .{ .name = "ZSP: queued DMA command", .run = queuedDmaCommand },
     .{ .name = "ZSP: RSP-loaded overlay dispatch", .run = rspLoadedOverlayDispatch },
     .{ .name = "ZSP: command dispatcher invalid command", .run = commandDispatcherInvalid },
 };
@@ -240,7 +256,7 @@ fn dmaIn() !void {
 
 fn commandDispatcher() !void {
     loadCommandDispatcher();
-    var queue = rsp.CommandQueue.init(&command_queue_buffer);
+    var queue = rsp.CommandQueue.init(command_queue_buffer[0..]);
     queue.writeDmem(0x100, 0x12345678);
     queue.stop();
     rsp.submitCommands(&queue);
@@ -250,32 +266,194 @@ fn commandDispatcher() !void {
     try expectDmemWord(u32, 0x100, 0x12345678);
 }
 
+fn chainedCommandBuffers() !void {
+    loadCommandDispatcher();
+    var second = rsp.CommandQueue.init(chained_queue_buffer[0..]);
+    second.writeDmem(0x308, 0x89abcdef);
+    second.stop();
+    var first = rsp.CommandQueue.init(command_queue_buffer[0..]);
+    first.writeDmem(0x304, 0x12345678);
+    first.jump(&second);
+    rsp.submitCommands(&first);
+    try runLoadedCommandDispatcher();
+
+    try expectDmemWord(u32, rsp.command_status_dmem, 0);
+    try expectDmemWord(u32, 0x304, 0x12345678);
+    try expectDmemWord(u32, 0x308, 0x89abcdef);
+}
+
+fn calledCommandBlock() !void {
+    loadCommandDispatcher();
+    var block = rsp.CommandQueue.init(called_block_buffer[0..]);
+    block.writeDmem(0x30c, 0x89abcdef);
+    block.returnFromCall();
+
+    var queue = rsp.CommandQueue.init(command_queue_buffer[0..]);
+    queue.writeDmem(0x308, 0x12345678);
+    queue.call(&block);
+    queue.writeDmem(0x310, 0xcafebabe);
+    queue.stop();
+    rsp.submitCommands(&queue);
+    try runLoadedCommandDispatcher();
+
+    try expectDmemWord(u32, rsp.command_status_dmem, 0);
+    try expectDmemWord(u32, 0x308, 0x12345678);
+    try expectDmemWord(u32, 0x30c, 0x89abcdef);
+    try expectDmemWord(u32, 0x310, 0xcafebabe);
+}
+
+fn swappedCommandBuffers() !void {
+    loadCommandDispatcher();
+    var alternate = rsp.CommandQueue.init(alternate_queue_buffer[0..]);
+    alternate.writeDmem(0x318, 0x89abcdef);
+    alternate.swapBuffersToCaller(0);
+    alternate.stop();
+
+    var queue = rsp.CommandQueue.init(command_queue_buffer[0..]);
+    queue.writeDmem(0x314, 0x12345678);
+    queue.swapBuffers(&alternate, 0);
+    queue.writeDmem(0x31c, 0xcafebabe);
+    queue.stop();
+    rsp.submitCommands(&queue);
+    try runLoadedCommandDispatcher();
+
+    try expectDmemWord(u32, rsp.command_status_dmem, 0);
+    try expectDmemWord(u32, 0x314, 0x12345678);
+    try expectDmemWord(u32, 0x318, 0x89abcdef);
+    try expectDmemWord(u32, 0x31c, 0xcafebabe);
+}
+
+fn continuousDoubleBufferedQueue() !void {
+    loadCommandDispatcher();
+    continuous_queue.init(.low);
+    for (0..520) |index| {
+        continuous_queue.writeDmem(0x400, @intCast(index));
+    }
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+    try expectDmemWord(u32, 0x400, 519);
+
+    continuous_queue.writeDmem(0x404, 0x89abcdef);
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+    try expectDmemWord(u32, 0x404, 0x89abcdef);
+}
+
+fn pollingSyncpoint() !void {
+    loadCommandDispatcher();
+    syncpoint_queue.init(.low);
+    syncpoint_queue.writeDmem(0x320, 0x12345678);
+    syncpoint_queue.syncpoint();
+    if (!syncpoint_queue.waitSyncpointTimeout(rsp_timeout_attempts)) {
+        rsp.halt();
+        rsp.waitHalted();
+        return error.RspSignalTimeout;
+    }
+
+    try expectDmemWord(u32, 0x320, 0x12345678);
+    try testing.expect(!rsp.io.status_register_read.signal2);
+    try testing.expect(!syncpoint_queue.storage.syncpoint_pending);
+
+    syncpoint_queue.writeDmem(0x324, 0x89abcdef);
+    syncpoint_queue.syncpoint();
+    if (!syncpoint_queue.waitSyncpointTimeout(rsp_timeout_attempts)) {
+        rsp.halt();
+        rsp.waitHalted();
+        return error.RspSignalTimeout;
+    }
+    try expectDmemWord(u32, 0x324, 0x89abcdef);
+}
+
+fn highPriorityQueue() !void {
+    loadCommandDispatcher();
+    rsp.io.status_register_write.* = rsp.io.status_set_signal0 | rsp.io.status_set_signal1 |
+        rsp.io.status_clear_signal3 | rsp.io.status_clear_signal4 | rsp.io.status_clear_signal5;
+
+    continuous_queue.init(.low);
+    continuous_queue.writeDmem(0x330, 1);
+    continuous_queue.waitThenWriteStatus(rsp.io.status_signal0, 0);
+    continuous_queue.waitThenWriteStatus(rsp.io.status_signal1, 0);
+    continuous_queue.writeDmem(0x334, 3);
+    rsp.flush(&continuous_queue);
+    try waitDmemValueTimeout(0x330, 1);
+
+    high_priority_queue.init(.high);
+    high_priority_queue.writeDmem(0x334, 2);
+    rsp.submitHighPriority(&high_priority_queue);
+    rsp.io.status_register_write.* = rsp.io.status_clear_signal0;
+    if (!rsp.waitHighPriorityTimeout(&high_priority_queue, rsp_timeout_attempts)) {
+        rsp.halt();
+        rsp.waitHalted();
+        return error.RspSignalTimeout;
+    }
+
+    try expectDmemWord(u32, 0x334, 2);
+    try testing.expect(!rsp.io.status_register_read.signal3);
+    try testing.expect(!rsp.io.status_register_read.signal4);
+    rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
+    try waitQueueTimeout(&continuous_queue);
+    try expectDmemWord(u32, 0x334, 3);
+}
+
+fn queuedDmaCommand() !void {
+    loadCommandDispatcher();
+    queued_dma_queue.init(.low);
+    queued_dma_queue.dmaToDmem(0x600, std.mem.asBytes(&queue_dma_source), false);
+    queued_dma_queue.dmaToRdram(std.mem.asBytes(&queue_dma_destination), 0x600, false);
+    rsp.flush(&queued_dma_queue);
+    try waitQueueTimeout(&queued_dma_queue);
+    n64.cache.invalidateData(&queue_dma_destination);
+
+    try expectDmemWords(0x600, &queue_dma_source);
+    for (queue_dma_source, queue_dma_destination) |expected, actual| {
+        try testing.expectEqual(expected, actual);
+    }
+}
+
+fn waitQueueTimeout(queue: *const rsp.DoubleBufferedQueue) !void {
+    if (rsp.waitTimeout(queue, rsp_timeout_attempts)) return;
+    rsp.halt();
+    rsp.waitHalted();
+    return error.RspSignalTimeout;
+}
+
+fn waitDmemValueTimeout(offset: u32, expected: u32) !void {
+    var remaining = rsp_timeout_attempts;
+    while (readDmemInt(u32, offset) != expected) {
+        if (remaining == 0) {
+            rsp.halt();
+            rsp.waitHalted();
+            return error.RspSignalTimeout;
+        }
+        remaining -= 1;
+    }
+}
+
 fn rspLoadedOverlayDispatch() !void {
     loadCommandDispatcher();
     overlay_1.init(rsp.programs.static_overlay);
     overlay_2.init(rsp.programs.static_overlay_2);
     try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&overlay_1));
     try testing.expectEqual(@as(u8, 2), rsp.registerOverlay(&overlay_2));
-    var queue = rsp.CommandQueue.init(&command_queue_buffer);
-    queue.writeOverlay(&overlay_1, 0, 0x104, &.{});
-    queue.writeOverlay(&overlay_1, 1, 0x108, &.{0xdeadbeef});
-    queue.writeOverlay(&overlay_1, 0, 0x10c, &.{});
-    queue.writeOverlay(&overlay_2, 0, 0x110, &.{});
-    queue.writeOverlay(&overlay_2, 0, 0x114, &.{});
-    queue.writeOverlay(&overlay_1, 0, 0x118, &.{});
-    queue.stop();
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&overlay_1, 0, 0x504, &.{});
+    continuous_queue.writeOverlayCommand(&overlay_1, 1, 0x508, &.{0xdeadbeef});
+    continuous_queue.writeOverlayCommand(&overlay_1, 0, 0x50c, &.{});
+    continuous_queue.writeOverlayCommand(&overlay_2, 0, 0x510, &.{});
+    continuous_queue.writeOverlayCommand(&overlay_2, 0, 0x514, &.{});
+    continuous_queue.writeOverlayCommand(&overlay_1, 0, 0x518, &.{});
 
-    try expectDmemWord(u32, 0x48, 0x00040800);
-    rsp.submitCommands(&queue);
-    try runLoadedCommandDispatcher();
+    try expectDmemWord(u32, 0x6c, 0x00040800);
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
 
     try expectDmemWord(u32, rsp.command_status_dmem, 0);
-    try expectDmemWord(u32, 0x104, 1);
-    try expectDmemWord(u32, 0x108, 0xdeadbeef);
-    try expectDmemWord(u32, 0x10c, 2);
-    try expectDmemWord(u32, 0x110, 1);
-    try expectDmemWord(u32, 0x114, 2);
-    try expectDmemWord(u32, 0x118, 3);
+    try expectDmemWord(u32, 0x504, 1);
+    try expectDmemWord(u32, 0x508, 0xdeadbeef);
+    try expectDmemWord(u32, 0x50c, 2);
+    try expectDmemWord(u32, 0x510, 1);
+    try expectDmemWord(u32, 0x514, 2);
+    try expectDmemWord(u32, 0x518, 3);
     try expectDmemWord(u32, rsp.overlay_load_count_dmem, 3);
     try expectDmemWord(u16, 0x800, rsp.programs.static_overlay.state_offset);
     try expectDmemWord(u16, 0x802, rsp.programs.static_overlay.state_len - 1);
@@ -290,6 +468,20 @@ fn rspLoadedOverlayDispatch() !void {
     const argument_descriptor = @as(u16, argument_command.size) << 8 |
         argument_command.handler_offset >> 2;
     try expectDmemWord(u16, 0x81e, argument_descriptor);
+
+    const overlay_1_state = rsp.overlayState(&overlay_1);
+    try testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, overlay_1_state[0..4], .big));
+    std.mem.writeInt(u32, overlay_1_state[0..4], 9, .big);
+    rsp.writebackOverlayState(&overlay_1);
+    try expectDmemWord(u32, rsp.programs.static_overlay.state_offset, 9);
+    rsp.unregisterOverlay(&overlay_1);
+    rsp.unregisterOverlay(&overlay_2);
+    try expectDmemWord(u32, 0x30, 0);
+    try expectDmemWord(u32, 0x34, 0);
+    try expectDmemWord(u32, 0x6c, 0);
+
+    overlay_2.init(rsp.programs.static_overlay_2);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&overlay_2));
 }
 
 fn commandDispatcherInvalid() !void {
@@ -317,7 +509,7 @@ fn submitDispatcherBatch(batch: *[rsp.command_queue.batch_word_count]u32) void {
     rsp.halt();
     rsp.waitHalted();
     const physical_address: u32 = @truncate(@intFromPtr(batch) & 0x1fffffff);
-    rsp.io.readDmem(u32, 0x58).* = physical_address;
+    rsp.io.readDmem(u32, 0xa4).* = physical_address;
 }
 
 fn submitCommandBatch(batch: *[4]u32) void {

@@ -12,13 +12,127 @@ pub const CommandQueue = command_queue.CommandQueue;
 pub const overlay = @import("overlay.zig");
 pub const Overlay = overlay.Overlay;
 
-pub const command_status_dmem = 0x5c;
-pub const overlay_load_count_dmem = 0x64;
+pub const Priority = enum { low, high };
 
-const overlay_table_dmem = 0x08;
-const overlay_idmap_dmem = 0x48;
-const queue_address_dmem = 0x58;
-const current_overlay_id_dmem = 0x60;
+pub const Queue = struct {
+    storage: command_queue.DoubleBufferedQueue,
+    priority: Priority,
+
+    pub fn init(self: *Queue, priority: Priority) void {
+        self.storage.init();
+        self.priority = priority;
+    }
+
+    pub fn writeDmem(self: *Queue, offset: u32, value: u32) void {
+        self.ensureCapacity(2);
+        self.current().writeDmem(offset, value);
+    }
+
+    pub fn writeOverlayCommand(
+        self: *Queue,
+        registered: *const Overlay,
+        command_index: u8,
+        inline_argument: u32,
+        arguments: []const u32,
+    ) void {
+        self.ensureCapacity(1 + arguments.len);
+        self.current().writeOverlayCommand(registered, command_index, inline_argument, arguments);
+    }
+
+    pub fn dmaToDmem(
+        self: *Queue,
+        dmem_address: u32,
+        rdram_source: []const u8,
+        is_async: bool,
+    ) void {
+        validateQueueDma(rdram_source, dmem_address);
+        cache.writebackData(rdram_source);
+        self.ensureCapacity(4);
+        self.current().writeDmaCommand(
+            physicalAddress(@intFromPtr(rdram_source.ptr)),
+            dmem_address,
+            @intCast(rdram_source.len - 1),
+            if (is_async) 0 else io.status_dma_busy | io.status_dma_full,
+        );
+    }
+
+    pub fn dmaToRdram(
+        self: *Queue,
+        rdram_destination: []u8,
+        dmem_address: u32,
+        is_async: bool,
+    ) void {
+        validateQueueDma(rdram_destination, dmem_address);
+        cache.invalidateData(rdram_destination);
+        self.ensureCapacity(4);
+        self.current().writeDmaCommand(
+            physicalAddress(@intFromPtr(rdram_destination.ptr)),
+            dmem_address,
+            @intCast(rdram_destination.len - 1),
+            0xffff8000 | if (is_async) 0 else io.status_dma_busy | io.status_dma_full,
+        );
+    }
+
+    pub fn waitThenWriteStatus(self: *Queue, mask: u32, status: u32) void {
+        self.ensureCapacity(2);
+        self.current().waitThenWriteStatus(mask, status);
+    }
+
+    pub fn syncpoint(self: *Queue) void {
+        if (self.priority != .low) @panic("syncpoints require a low-priority RSP queue");
+        if (self.storage.syncpoint_pending) @panic("only one RSP syncpoint may be outstanding");
+        self.ensureCapacity(2);
+        io.status_register_write.* = io.status_clear_signal2;
+        self.current().waitThenWriteStatus(io.status_signal2, io.status_set_signal2);
+        flush(self);
+        self.storage.syncpoint_pending = true;
+    }
+
+    pub fn waitSyncpointTimeout(self: *Queue, max_attempts: u32) bool {
+        if (!self.storage.syncpoint_pending) return true;
+        var remaining = max_attempts;
+        while (!io.status_register_read.signal2) {
+            if (remaining == 0) return false;
+            remaining -= 1;
+        }
+        io.status_register_write.* = io.status_clear_signal2;
+        self.storage.syncpoint_pending = false;
+        return true;
+    }
+
+    fn current(self: *Queue) *CommandQueue {
+        return &self.storage.queues[self.storage.write_index];
+    }
+
+    fn ensureCapacity(self: *Queue, command_words: usize) void {
+        const epilogue_words: usize = if (self.priority == .low) 3 else 6;
+        if (self.current().index + command_words + epilogue_words <= self.current().buffer.len) return;
+        if (self.priority == .high) @panic("high-priority RSP command queue is full");
+        flush(self);
+    }
+};
+
+pub const DoubleBufferedQueue = Queue;
+
+fn validateQueueDma(rdram: anytype, dmem_address: u32) void {
+    if (rdram.len == 0 or rdram.len & 7 != 0 or @intFromPtr(rdram.ptr) & 7 != 0) {
+        @panic("RSP queue DMA buffer must have a nonzero 8-byte-aligned size and address");
+    }
+    if (dmem_address & 7 != 0 or dmem_address > io.dmem_len or
+        rdram.len > io.dmem_len - dmem_address)
+    {
+        @panic("RSP queue DMA transfer does not fit in DMEM");
+    }
+}
+
+pub const command_status_dmem = 0xa8;
+pub const overlay_load_count_dmem = 0xb0;
+
+const overlay_table_dmem = 0x2c;
+const overlay_idmap_dmem = 0x6c;
+const pointer_stack_dmem = 0x7c;
+const queue_address_dmem = 0xa4;
+const current_overlay_id_dmem = 0xac;
 const overlay_dmem_offset = overlay.dmem_offset;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
@@ -63,16 +177,127 @@ pub fn runUCode(program: UCode) void {
 }
 
 pub fn submitCommands(queue: *const CommandQueue) void {
-    if (!queue.isStopped()) {
-        @panic("RSP command queue must end with stop()");
+    if (!queue.sealed) {
+        @panic("RSP command queue must end with stop() or jump()");
     }
 
     halt();
     waitHalted();
 
-    const words = queue.words();
-    cache.writebackData(words);
-    io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(words.ptr));
+    writebackCommandGraph(queue, 0);
+    if (queue.swap_target) |alternate| {
+        io.readDmem(u32, pointer_stack_dmem + 9 * @sizeOf(u32)).* =
+            physicalAddress(@intFromPtr(alternate.buffer.ptr));
+    }
+    io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(queue.buffer.ptr));
+}
+
+fn writebackCommandGraph(queue: *const CommandQueue, depth: usize) void {
+    if (depth >= 256) @panic("RSP command queue graph is cyclic or too deep");
+    if (!queue.sealed) @panic("RSP command queue graph contains an incomplete batch");
+    cache.writebackData(queue.buffer[0..]);
+    if (queue.call_target) |block| writebackCommandGraph(block, depth + 1);
+    if (queue.swap_target) |alternate| writebackCommandGraph(alternate, depth + 1);
+    if (queue.next) |next| writebackCommandGraph(next, depth + 1);
+}
+
+pub fn flush(queue: *Queue) void {
+    if (queue.priority != .low) @panic("use submitHighPriority for a high-priority RSP queue");
+    const storage = &queue.storage;
+    const current = &storage.queues[storage.write_index];
+    if (current.index == 0) return;
+    const next_index: u1 = storage.write_index ^ 1;
+    const next = &storage.queues[next_index];
+
+    if (storage.submitted) {
+        while (!io.status_register_read.signal6) {}
+        io.status_register_write.* = io.status_clear_signal6;
+        next.clear();
+    }
+
+    current.writeRawCommand(
+        @intFromEnum(command_queue.InternalCommand.write_status),
+        io.status_set_signal6,
+        &.{},
+    );
+    current.jump(next);
+    cache.writebackData(current.buffer[0..]);
+    cache.writebackData(next.buffer[0..]);
+
+    if (!storage.submitted) {
+        halt();
+        waitHalted();
+        io.status_register_write.* = io.status_clear_signal6;
+        io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(current.buffer.ptr));
+        setProgramCounter(programs.command_dispatcher.pc_start);
+        wakeContinuous();
+    } else {
+        wakeContinuous();
+    }
+    storage.write_index = next_index;
+    storage.submitted = true;
+}
+
+pub fn wait(queue: *const Queue) void {
+    if (queue.priority != .low) @panic("use waitHighPriorityTimeout for a high-priority RSP queue");
+    if (!queue.storage.submitted) return;
+    while (!io.status_register_read.signal6) {}
+}
+
+pub fn waitTimeout(queue: *const Queue, max_attempts: u32) bool {
+    if (queue.priority != .low) @panic("use waitHighPriorityTimeout for a high-priority RSP queue");
+    if (!queue.storage.submitted) return true;
+    var remaining = max_attempts;
+    while (!io.status_register_read.signal6) {
+        if (remaining == 0) return false;
+        remaining -= 1;
+    }
+    return true;
+}
+
+pub fn submitHighPriority(queue: *Queue) void {
+    if (queue.priority != .high) @panic("high-priority submission requires a high-priority RSP queue");
+    if (queue.storage.submitted) @panic("high-priority RSP queue is already submitted");
+    queue.ensureCapacity(0);
+    const current = queue.current();
+    current.writeRawCommand(
+        @intFromEnum(command_queue.InternalCommand.write_status),
+        io.status_set_signal5,
+        &.{},
+    );
+    current.swapBuffersToCaller(io.status_clear_signal3);
+    current.stop();
+    cache.writebackData(current.buffer[0..]);
+
+    io.status_register_write.* = io.status_clear_signal5;
+    io.readDmem(u32, pointer_stack_dmem + 9 * @sizeOf(u32)).* =
+        physicalAddress(@intFromPtr(current.buffer.ptr));
+    io.status_register_write.* = io.status_set_signal4;
+    wakeContinuous();
+    queue.storage.submitted = true;
+}
+
+pub fn waitHighPriorityTimeout(queue: *Queue, max_attempts: u32) bool {
+    if (queue.priority != .high) @panic("high-priority wait requires a high-priority RSP queue");
+    if (!queue.storage.submitted) return true;
+    var remaining = max_attempts;
+    while (true) {
+        const status = io.status_register_read.*;
+        if (status.signal5 and !status.signal3 and !status.signal4) break;
+        if (remaining == 0) return false;
+        remaining -= 1;
+    }
+    io.status_register_write.* = io.status_clear_signal5;
+    queue.current().clear();
+    queue.storage.submitted = false;
+    return true;
+}
+
+fn wakeContinuous() void {
+    const wake_status = io.status_set_signal7 | io.status_clear_halt | io.status_clear_broke;
+    io.status_register_write.* = wake_status;
+    asm volatile ("nop; nop; nop; b 1f; 1: nop; nop; nop; nop; nop; nop");
+    io.status_register_write.* = wake_status;
 }
 
 pub fn registerOverlay(registered: *Overlay) u8 {
@@ -81,6 +306,71 @@ pub fn registerOverlay(registered: *Overlay) u8 {
 
 pub fn registerOverlayStatic(registered: *Overlay, overlay_id: u8) void {
     _ = registerOverlayInternal(registered, overlay_id);
+}
+
+pub fn unregisterOverlay(registered: *Overlay) void {
+    if (registered.id == 0) {
+        @panic("RSP overlay is not registered");
+    }
+
+    halt();
+    waitHalted();
+    syncOverlayState(registered);
+
+    const overlay_id = registered.id;
+    for (0..registered.slot_count) |slot| {
+        const slot_id = overlay_id + @as(u8, @intCast(slot));
+        io.readDmem(u32, overlay_table_dmem + @as(u32, slot_id) * @sizeOf(u32)).* = 0;
+        writeDmemByte(overlay_idmap_dmem + slot_id, 0);
+    }
+    if (io.readDmem(u32, current_overlay_id_dmem).* == @as(u32, overlay_id) << 2) {
+        io.readDmem(u32, current_overlay_id_dmem).* = 0;
+    }
+    std.mem.writeInt(u16, registered.data[8..10], 0, .big);
+    cache.writebackData(registered.data[0..registered.data_len]);
+    registered.id = 0;
+    registered.slot_count = 0;
+}
+
+pub fn overlayState(registered: *Overlay) []u8 {
+    halt();
+    waitHalted();
+    if (registered.id != 0) syncOverlayState(registered);
+    const state = registered.state[0..registered.program.state_len];
+    cache.invalidateData(state);
+    return state;
+}
+
+pub fn writebackOverlayState(registered: *Overlay) void {
+    halt();
+    waitHalted();
+    const state = registered.state[0..registered.program.state_len];
+    cache.writebackData(state);
+    if (registered.id == 0 or
+        io.readDmem(u32, current_overlay_id_dmem).* != @as(u32, registered.id) << 2)
+    {
+        return;
+    }
+    io.waitDmaReady();
+    io.dmaFromDram(
+        registered.program.state_offset,
+        physicalAddress(@intFromPtr(state.ptr)),
+        @intCast(state.len - 1),
+    );
+    io.waitDma();
+}
+
+fn syncOverlayState(registered: *Overlay) void {
+    if (io.readDmem(u32, current_overlay_id_dmem).* != @as(u32, registered.id) << 2) return;
+    const state = registered.state[0..registered.program.state_len];
+    io.waitDmaReady();
+    io.dmaToDram(
+        registered.program.state_offset,
+        physicalAddress(@intFromPtr(state.ptr)),
+        @intCast(state.len - 1),
+    );
+    io.waitDma();
+    cache.invalidateData(state);
 }
 
 fn registerOverlayInternal(registered: *Overlay, static_id: ?u8) u8 {

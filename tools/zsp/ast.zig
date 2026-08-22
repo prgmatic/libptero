@@ -260,6 +260,7 @@ pub const Call = struct {
 
 pub const Statement = union(enum) {
     packed_struct_decl: PackedStructDecl,
+    command_table_decl: []const u8,
     data_block: []const DataDecl,
     bss_block: []const DataDecl,
     state_block: []const DataDecl,

@@ -6,10 +6,11 @@ const DataType = ast.DataType;
 
 const compiler_scratch: Register = .at;
 const compiler_scratch_2: Register = .v1;
+const command_return: Register = .k1;
 const alloc_scalar_registers = [_]Register{
     .t0, .t1, .t2, .t3, .t4, .t5, .t6, .t7, .t8, .t9,
-    .k0, .k1, .sp, .fp, .s0, .s1, .s2, .s3, .s4, .s5,
-    .s6, .s7,
+    .k0, .sp, .fp, .s0, .s1, .s2, .s3, .s4, .s5, .s6,
+    .s7,
 };
 const alloc_vector_registers = [_]ast.VectorRegister{
     .v01, .v02, .v03, .v04, .v05, .v06, .v07,
@@ -24,6 +25,7 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
 
     var top_level_context = FunctionContext{ .label_prefix = "top_level" };
     try writeStorageBlocks(writer, functions, &top_level_context);
+    try writeCommandTable(writer, functions, &top_level_context);
     try writer.writeAll(".text\n\n");
     for (functions) |function| {
         if (function.inline_call) continue;
@@ -33,12 +35,21 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
         if (function.emit_label) {
             try writer.print("{s}:\n", .{function.name});
         }
+        if (function.command_index != null) {
+            try writer.print("  or {s}, {s}, {s}\n", .{
+                regName(command_return), regName(.zero), regName(.ra),
+            });
+        }
         var function_context = top_level_context.child(function.name);
         const context = if (function.emit_label) &function_context else &top_level_context;
         try bindParameters(context, function.parameters);
         try writeStatements(writer, functions, context, function.statements);
         if (!function.no_return) {
-            try writer.writeAll("  jr $ra\n");
+            if (function.command_index != null) {
+                try writer.print("  jr {s}\n", .{regName(command_return)});
+            } else {
+                try writer.writeAll("  jr $ra\n");
+            }
             try writer.writeAll("  nop\n");
         }
         try writer.writeByte('\n');
@@ -53,13 +64,7 @@ fn writeCommandManifest(writer: *std.Io.Writer, functions: []const ast.Function)
         const index = function.command_index orelse continue;
         if (seen.isSet(index)) return error.DuplicateCommandIndex;
         seen.set(index);
-        if (function.inline_call or function.no_return) return error.InvalidCommandFunction;
-        if (function.parameters.len == 0 or function.parameters.len > 4) return error.InvalidCommandParameters;
-        for (function.parameters, 0..) |parameter, parameter_index| {
-            if (isVectorType(parameter.data_type)) return error.InvalidCommandParameters;
-            const expected: Register = @enumFromInt(@intFromEnum(Register.a0) + parameter_index);
-            if (parameter.reg != expected) return error.InvalidCommandParameters;
-        }
+        try validateCommandFunction(function);
         if (!wrote_section) {
             try writer.writeAll(".section .zsp_commands,\"\",@progbits\n");
             wrote_section = true;
@@ -73,6 +78,64 @@ fn writeCommandManifest(writer: *std.Io.Writer, functions: []const ast.Function)
     if (wrote_section) try writer.writeByte('\n');
 }
 
+fn validateCommandFunction(function: ast.Function) !void {
+    if (function.inline_call or function.no_return) return error.InvalidCommandFunction;
+    if (function.parameters.len > 4) return error.InvalidCommandParameters;
+    for (function.parameters, 0..) |parameter, parameter_index| {
+        if (isVectorType(parameter.data_type)) return error.InvalidCommandParameters;
+        const expected: Register = @enumFromInt(@intFromEnum(Register.a0) + parameter_index);
+        if (parameter.reg != expected) return error.InvalidCommandParameters;
+    }
+}
+
+fn writeCommandTable(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+) !void {
+    var table_name: ?[]const u8 = null;
+    for (functions) |function| for (function.statements) |statement| switch (statement) {
+        .command_table_decl => |name| {
+            if (table_name != null) return error.MultipleCommandTables;
+            table_name = name;
+        },
+        else => {},
+    };
+    const name = table_name orelse return;
+
+    var commands: [240]?*const ast.Function = @splat(null);
+    var table_len: usize = 0;
+    for (functions) |*function| {
+        const index = function.command_index orelse continue;
+        try validateCommandFunction(function.*);
+        if (commands[index] != null) return error.DuplicateCommandIndex;
+        commands[index] = function;
+        table_len = @max(table_len, @as(usize, index) + 1);
+    }
+    if (table_len == 0) return error.EmptyCommandTable;
+
+    try writer.writeAll(".data\n.balign 4\n");
+    try writer.print("{s}:\n", .{name});
+    for (commands[0..table_len]) |command| {
+        if (command) |function| {
+            try writer.print("  .word {s} + 0x{x:0>8}\n", .{
+                function.name,
+                function.parameters.len * 4 << 24,
+            });
+        } else {
+            try writer.writeAll("  .word 0\n");
+        }
+    }
+    try writer.writeByte('\n');
+    try context.add(.{
+        .name = name,
+        .data_type = .u32,
+        .reg = null,
+        .constant = null,
+        .data_label = name,
+    });
+}
+
 fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) !void {
     for (parameters) |parameter| {
         if (isVectorType(parameter.data_type)) {
@@ -81,7 +144,7 @@ fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) 
         } else {
             const reg = parameter.reg orelse return error.InvalidScalarRegister;
             if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
-            if (reg == compiler_scratch or reg == compiler_scratch_2) {
+            if (reg == compiler_scratch or reg == compiler_scratch_2 or reg == command_return) {
                 return error.RegisterReservedForBackend;
             }
             if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
@@ -204,6 +267,7 @@ fn writeStatements(
     for (statements) |statement| {
         switch (statement) {
             .packed_struct_decl => {},
+            .command_table_decl => {},
             .data_block => {},
             .bss_block => {},
             .state_block => {},
@@ -406,7 +470,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
     if (decl.vector_reg != null) return error.InvalidScalarRegister;
     const reg = decl.reg orelse try context.allocRegister(decl.data_type);
     if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
-    if (reg == compiler_scratch or reg == compiler_scratch_2) {
+    if (reg == compiler_scratch or reg == compiler_scratch_2 or reg == command_return) {
         return error.RegisterReservedForBackend;
     }
     if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
@@ -840,6 +904,8 @@ fn writeSet(
                     regName(.zero),
                     regName(source_reg),
                 });
+            } else if (source.data_label) |label| {
+                try loadDataAddress(writer, destination_reg, label);
             } else {
                 try loadImmediateInto(writer, destination_reg, source.constant orelse return error.ExpectedConstant);
             }
