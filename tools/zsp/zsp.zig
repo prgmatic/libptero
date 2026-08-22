@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const asm_writer = @import("asm_writer.zig");
 const asm_optimizer = @import("asm_optimizer.zig");
+const diagnostics = @import("diagnostics.zig");
 const parser_mod = @import("parser.zig");
 
 const ModuleState = enum {
@@ -257,6 +258,7 @@ pub fn main(init: std.process.Init) !void {
     var module_dir: ?[]const u8 = null;
     var depfile: ?[]const u8 = null;
     var optimize = true;
+    var report = false;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--module-dir")) {
@@ -269,6 +271,8 @@ pub fn main(init: std.process.Init) !void {
             depfile = args[i];
         } else if (std.mem.eql(u8, args[i], "--no-optimize")) {
             optimize = false;
+        } else if (std.mem.eql(u8, args[i], "--report")) {
+            report = true;
         } else if (input == null) {
             input = args[i];
         } else if (output == null) {
@@ -285,12 +289,44 @@ pub fn main(init: std.process.Init) !void {
         .module_dir = module_dir,
     };
     defer loader.deinit();
-    const root = try loader.load(input_path);
-    const functions = try loader.link(root);
+    const root = loader.load(input_path) catch |err| {
+        reportCompileError(err);
+        return err;
+    };
+    const functions = loader.link(root) catch |err| {
+        reportCompileError(err);
+        return err;
+    };
     defer allocator.free(functions);
 
     if (depfile) |depfile_path| {
         try writeDepfile(init.io, depfile_path, output orelse "zsp-output", loader.modules.items);
+    }
+
+    var assembly = std.Io.Writer.Allocating.init(allocator);
+    defer assembly.deinit();
+    var backend_diagnostic: asm_writer.Diagnostic = .{};
+    writeAssembly(allocator, &assembly.writer, functions, optimize, &backend_diagnostic) catch |err| {
+        reportCompileErrorInFunction(
+            err,
+            backend_diagnostic.function_name,
+            backend_diagnostic.symbol_name,
+        );
+        return err;
+    };
+    const emitted = assembly.written();
+    const stats = diagnostics.analyzeAssembly(emitted);
+    if (stats.text_bytes > 4096) {
+        reportCompileError(error.ImemOverflow);
+        return error.ImemOverflow;
+    }
+    if (report) {
+        std.debug.print("zsp: {d} functions, {d} instructions, {d} IMEM bytes ({d} bytes free)\n", .{
+            functions.len,
+            stats.instruction_count,
+            stats.text_bytes,
+            4096 - stats.text_bytes,
+        });
     }
 
     var out_buf: [4096]u8 = undefined;
@@ -298,28 +334,67 @@ pub fn main(init: std.process.Init) !void {
         var out_file = try std.Io.Dir.cwd().createFile(init.io, output_path, .{});
         defer out_file.close(init.io);
         var writer = out_file.writer(init.io, &out_buf);
-        try writeAssembly(allocator, &writer.interface, functions, optimize);
+        try writer.interface.writeAll(emitted);
         try writer.interface.flush();
     } else {
         var writer = std.Io.File.stdout().writer(init.io, &out_buf);
-        try writeAssembly(allocator, &writer.interface, functions, optimize);
+        try writer.interface.writeAll(emitted);
         try writer.interface.flush();
     }
 }
 
 fn usage() error{InvalidArgs} {
     std.debug.print(
-        "usage: zsp <input.zsp> [--module-dir <dir>] [--depfile <file>] [--no-optimize] [output.s]\n",
+        "usage: zsp <input.zsp> [--module-dir <dir>] [--depfile <file>] [--no-optimize] [--report] [output.s]\n",
         .{},
     );
     return error.InvalidArgs;
 }
 
-fn writeAssembly(allocator: std.mem.Allocator, writer: *std.Io.Writer, functions: []const ast.Function, optimize: bool) !void {
-    if (!optimize) return asm_writer.write(writer, functions);
+fn reportCompileError(err: anyerror) void {
+    if (err == error.ParseError) return;
+    if (diagnostics.errorHint(err)) |hint| {
+        std.debug.print("zsp: error: {s} ({s})\n", .{ hint, @errorName(err) });
+    } else {
+        std.debug.print("zsp: error: compilation failed ({s})\n", .{@errorName(err)});
+    }
+}
+
+fn reportCompileErrorInFunction(
+    err: anyerror,
+    function_name: ?[]const u8,
+    symbol_name: ?[]const u8,
+) void {
+    if (err == error.ParseError) return;
+    if (diagnostics.errorHint(err)) |hint| {
+        if (function_name) |name| {
+            if (symbol_name) |symbol| {
+                std.debug.print("zsp: error in function '{s}' for '{s}': {s} ({s})\n", .{
+                    name,
+                    symbol,
+                    hint,
+                    @errorName(err),
+                });
+            } else {
+                std.debug.print("zsp: error in function '{s}': {s} ({s})\n", .{ name, hint, @errorName(err) });
+            }
+            return;
+        }
+    }
+    reportCompileError(err);
+}
+
+fn writeAssembly(
+    allocator: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    optimize: bool,
+    diagnostic: *asm_writer.Diagnostic,
+) !void {
+    if (!optimize) return asm_writer.writeWithDiagnostic(writer, functions, diagnostic);
     var unoptimized = std.Io.Writer.Allocating.init(allocator);
     defer unoptimized.deinit();
-    try asm_writer.write(&unoptimized.writer, functions);
+    try asm_writer.writeWithDiagnostic(&unoptimized.writer, functions, diagnostic);
     try asm_optimizer.writeOptimized(allocator, writer, unoptimized.written());
 }
 

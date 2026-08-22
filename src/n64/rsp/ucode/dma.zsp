@@ -16,7 +16,7 @@ pub fn out(
     reg($s4) dmem: u32,
 ) noreturn {
     reg($t2) flags: u32 = -32756;
-    @goto(exec);
+    tail exec(size, pitch, rdram, dmem, flags);
 }
 
 pub fn outAsync(
@@ -26,7 +26,7 @@ pub fn outAsync(
     reg($s4) dmem: u32,
 ) noreturn {
     reg($t2) flags: u32 = -32768;
-    @goto(exec);
+    tail exec(size, pitch, rdram, dmem, flags);
 }
 
 pub fn inAsync(
@@ -36,7 +36,7 @@ pub fn inAsync(
     reg($s4) dmem: u32,
 ) noreturn {
     reg($t2) flags: u32 = 0;
-    @goto(exec);
+    tail exec(size, pitch, rdram, dmem, flags);
 }
 
 pub fn in(
@@ -55,7 +55,7 @@ pub fn exec(
     reg($s4) dmem: u32,
     reg($t2) flags: u32,
 ) noreturn {
-    reg dma_full: u32 = undefined;
+    reg dma_full: u32;
     reg transfer_descriptor: u32;
     do {
         cp0.getDmaFullAt(dma_full);
@@ -82,7 +82,7 @@ pub fn exec(
 }
 
 pub fn waitStatus(reg($t2) flags: u32) noreturn {
-    reg status: u32 = undefined;
+    reg status: u32;
     cp0.getSpStatusAt(status);
     do {
         status &= flags;
@@ -99,10 +99,10 @@ pub fn returnToCaller() noreturn {
 
 pub fn waitIdle() noreturn {
     reg($t2) flags: u32 = 0x0c;
-    @goto(waitStatus);
+    tail waitStatus(flags);
 }
 
 pub fn waitOut() noreturn {
     reg($t2) flags: u32 = 0x08;
-    @goto(waitStatus);
+    tail waitStatus(flags);
 }

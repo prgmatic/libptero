@@ -13,6 +13,31 @@ flags OtherModeLow: u32 {
     cycle_two_enabled = 0x00004000;
 }
 
+flags OtherModeHigh: u32 {
+    pipeline_frozen = 0x00000008;
+}
+
+packed struct RdpModeState {
+    combiner_high: u32;
+    combiner_low: u32;
+    combiner_high_mask: u32;
+    combiner_low_mask: u32;
+    foreground_blend: u32;
+    background_blend: u32;
+    other_modes_high: u32;
+    other_modes_low: u32;
+}
+
+packed struct ScissorState {
+    first_word: u32;
+    second_word: u32;
+}
+
+packed struct OverlayRdpBufferState {
+    current: u32;
+    previous: u32;
+}
+
 abi rspq_command(
     reg($a0) argument_0: u32,
     reg($a1) argument_1: u32,
@@ -101,7 +126,7 @@ command(1) fn setLookupAddress(
 }
 
 fn fixupAddress(reg($a1) address: u32) {
-    reg table_offset: u32 = undefined;
+    reg table_offset: u32;
     table_offset = address >> 24;
     reg base: u32 = load(u32, table_offset, address_table);
     address += base;
@@ -111,7 +136,7 @@ command(61, 62) fn setFixupImage(
     reg($a0) word0: u32,
     reg($a1) address: u32,
 ) {
-    reg opcode: u32 = undefined;
+    reg opcode: u32;
     fixupAddress(address) delay {
         opcode = 0xf0000000;
     }
@@ -128,9 +153,9 @@ fn writeSetFillColor(reg($a1) color: u32) noreturn {
         word0 = 0xf7000000;
     }
 
-    reg green: u32 = undefined;
-    reg blue: u32 = undefined;
-    reg alpha: u32 = undefined;
+    reg green: u32;
+    reg blue: u32;
+    reg alpha: u32;
     bitdepth = color >> 16;
     green = color >> 13;
     blue = color >> 10;
@@ -139,14 +164,14 @@ fn writeSetFillColor(reg($a1) color: u32) noreturn {
     green &= 0x000007c0;
     blue &= 0x0000003e;
     alpha &= 0x00000001;
-    reg upper: u32 = undefined;
+    reg upper: u32;
     upper = bitdepth | green;
-    reg lower: u32 = undefined;
+    reg lower: u32;
     lower = blue | alpha;
     color = upper | lower;
     bitdepth = color << 16;
     color |= bitdepth;
-    @goto(rdp.write8);
+    tail rdp.write8(word0, color);
 }
 
 command(63) fn setColorImage(
@@ -154,7 +179,7 @@ command(63) fn setColorImage(
     reg($a1) address: u32,
 ) {
     reg previous_bitdepth: u32 = load(u8, rdp_target_bitdepth);
-    reg bitdepth: u32 = undefined;
+    reg bitdepth: u32;
     bitdepth = word0 >> 19;
     bitdepth &= 3;
     previous_bitdepth &= 0x80;
@@ -184,8 +209,8 @@ inline fn prepareSyncFull(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) {
-    reg rdram: u32 = undefined;
-    reg dmem: u32 = undefined;
+    reg rdram: u32;
+    reg dmem: u32;
 
     // Match libdragon's SpStatusWait: do not schedule another full sync while
     // its CPU callback or a queue syncpoint is still pending.
@@ -216,20 +241,20 @@ command(41) fn syncFull(
 ) {
     prepareSyncFull(word0, word1);
     rdp.write8(word0, word1);
-    reg staging: u32 = undefined;
-    reg staging_end: u32 = undefined;
+    reg staging: u32;
+    reg staging_end: u32;
     rdp.prepareStagedSend(staging, staging_end);
     rdp.sendStaged(staging, staging_end) delay {
         store(u8, rdp_syncfull_ongoing, 0);
     }
     reg busy: u32 = 0x40;
     store(u8, rdp_syncfull_ongoing, busy);
-    @goto(queue.resident_command_loop);
+    tail queue.resident_command_loop();
 }
 
 command(26) fn rdpWaitIdle(reg($a0) _: u32) {
-    reg status: u32 = undefined;
-    reg busy: u32 = undefined;
+    reg status: u32;
+    reg busy: u32;
     reg busy_mask: u32 = 0x40;
     cp0.getDpStatusT2(status);
     do {
@@ -245,7 +270,7 @@ command(58) fn setPrimitiveColor(
 ) noreturn {
     store(u32, primitive_color_ex, word0);
     store(u32, primitive_color_rgba, word1);
-    @goto(_start);
+    tail _start(word0, word1);
 }
 
 command(19) fn setPrimitiveColorComponent(
@@ -254,7 +279,7 @@ command(19) fn setPrimitiveColorComponent(
 ) noreturn {
     reg opcode: u32 = 0x29000000;
     word0 ^= opcode;
-    reg selection: u32 = undefined;
+    reg selection: u32;
     selection = word0 >> 16;
     selection &= 3;
     reg saved_ex: u32 = load(u32, primitive_color_ex);
@@ -270,7 +295,7 @@ command(19) fn setPrimitiveColorComponent(
     }
     word0 |= saved_ex;
     store(u32, primitive_color_ex, word0);
-    reg($s4) staging: u32 = primitive_color_ex;
+    reg staging: u32 = primitive_color_ex;
     reg($s3) staging_end: u32 = undefined;
     @goto(rdp.sendStaged) delay {
         @setDataAddress(staging_end, primitive_color_ex, 8);
@@ -281,21 +306,21 @@ fn writeSetScissor(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) noreturn {
-    store(u32, rdp_scissor_rect, word0);
+    store(ScissorState.first_word, rdp_scissor_rect, word0);
     reg modes_byte: i32 = load(i8, rdp_mode, 25);
     modes_byte &= 0x20;
-    store(u32, rdp_scissor_rect, word1, 4);
+    store(ScissorState.second_word, rdp_scissor_rect, word1);
     if(modes_byte != 0) {
         word1 -%= 0x1000;
     }
-    @goto(rdp.write8);
+    tail rdp.write8(word0, word1);
 }
 
 command(18) fn setScissorEx(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) {
-    reg scissor_mask: u32 = undefined;
+    reg scissor_mask: u32;
     ordered {
         scissor_mask = 0x3f000000;
         word0 ^= scissor_mask;
@@ -307,7 +332,7 @@ fn sendOtherModes(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) {
-    reg opcode: u32 = undefined;
+    reg opcode: u32;
     rdp.write8(word0, word1) delay {
         opcode = 0xef;
     }
@@ -320,8 +345,8 @@ fn finalizeOtherModes(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) noreturn {
-    word0 = load(u32, rdp_scissor_rect);
-    word1 = load(u32, rdp_scissor_rect, 4);
+    word0 = load(ScissorState.first_word, rdp_scissor_rect);
+    word1 = load(ScissorState.second_word, rdp_scissor_rect);
     call writeSetScissor() then rdp.finalize;
 }
 
@@ -329,10 +354,10 @@ command(47) fn setOtherModes(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) noreturn {
-    store(u32, rdp_mode, word0, 24);
+    store(RdpModeState.other_modes_high, rdp_mode, word0);
     store(u8, rdp_mode, 0, 24);
-    store(u32, rdp_mode, word1, 28);
-    @goto(sendOtherModes);
+    store(RdpModeState.other_modes_low, rdp_mode, word1);
+    tail sendOtherModes(word0, word1);
 }
 
 command(20) fn modifyOtherModes(
@@ -340,7 +365,7 @@ command(20) fn modifyOtherModes(
     reg($a1) inverse_mask: u32,
     reg($a2) value: u32,
 ) {
-    reg updated: u32 = undefined;
+    reg updated: u32;
     updated = load(u32, rdp_mode + command, 24);
     updated &= inverse_mask;
     updated |= value;
@@ -349,25 +374,25 @@ command(20) fn modifyOtherModes(
     if(command < 0) @goto(updateRenderMode) delay {
         command = load(i32, rdp_mode, 24);
     }
-    inverse_mask = load(u32, rdp_mode, 28);
+    inverse_mask = load(RdpModeState.other_modes_low, rdp_mode);
     tail sendOtherModes(command, inverse_mask);
 }
 
 fn updateRenderMode() {
     reg($a0) comb_hi: u32 = undefined;
     reg($a1) comb_lo: u32 = undefined;
-    reg($a2) som_hi: u32 = load(u32, rdp_mode, 24);
+    reg($a2) som_hi: u32 = load(RdpModeState.other_modes_high, rdp_mode);
     reg($a3) som_lo: u32 = undefined;
     reg selected_combiner: u32 = undefined;
-    reg mode_frozen: u32 = undefined;
-    mode_frozen = som_hi & 8;
+    reg mode_frozen: u32;
+    mode_frozen = som_hi & OtherModeHigh.pipeline_frozen;
     if(mode_frozen != 0) @goto(rdp.finalize) delay {
-        som_lo = load(u32, rdp_mode, 28);
+        som_lo = load(RdpModeState.other_modes_low, rdp_mode);
     }
-    reg fill_or_copy_cycle: u32 = undefined;
+    reg fill_or_copy_cycle: u32;
     fill_or_copy_cycle = som_hi << 10;
     if(fill_or_copy_cycle >= 0x80000000) delay {
-        comb_hi = load(u32, rdp_mode);
+        comb_hi = load(RdpModeState.combiner_high, rdp_mode);
     } {
         reg fill_combiner_mask: u32 = 0xff000000;
         comb_hi = som_hi | fill_combiner_mask;
@@ -376,14 +401,14 @@ fn updateRenderMode() {
         comb_lo = som_lo;
         call rdp.write8() then rdp.finalize;
     }
-    comb_lo = load(u32, rdp_mode, 4);
-    reg cycle_combiner_mask: u32 = undefined;
+    comb_lo = load(RdpModeState.combiner_low, rdp_mode);
+    reg cycle_combiner_mask: u32;
     store_combiner_2cycle: block {
     combiner_1cycle: block {
         if(comb_hi < 0x80000000) {
             break combiner_1cycle;
         }
-        reg invalid_cycle_flags: u32 = undefined;
+        reg invalid_cycle_flags: u32;
         invalid_cycle_flags = som_hi & 1;
         if(invalid_cycle_flags != 0) @goto(queue.resident_assertion_failed) delay {
             reg($at) assertion_code: u32 = 0xc0040000;
@@ -393,7 +418,7 @@ fn updateRenderMode() {
         cycle_combiner_mask = 0x04000000;
     }
     check_mipmap: block {
-        reg has_custom_combiner: u32 = undefined;
+        reg has_custom_combiner: u32;
         has_custom_combiner = som_hi & cycle_combiner_mask;
         reg comb_hi_no_id: u32 = undefined;
         if(has_custom_combiner == 0) {
@@ -431,13 +456,13 @@ fn updateRenderMode() {
         comb_hi = load(u32, selected_combiner);
         comb_lo = load(u32, selected_combiner, 4);
     }
-    reg mipmap_offset: u32 = undefined;
+    reg mipmap_offset: u32;
     mipmap_offset = som_hi & 3;
     if(mipmap_offset != 0) delay {
         mipmap_offset <<= 3;
     } {
-        reg combiner_high_mask: u32 = load(u32, rdp_mode, 8);
-        reg combiner_low_mask: u32 = load(u32, rdp_mode, 12);
+        reg combiner_high_mask: u32 = load(RdpModeState.combiner_high_mask, rdp_mode);
+        reg combiner_low_mask: u32 = load(RdpModeState.combiner_low_mask, rdp_mode);
         comb_hi &= combiner_high_mask;
         comb_lo &= combiner_low_mask;
         reg mipmap_high_bits: u32 = load(u32, mipmap_offset, combiner_mipmaps, -8);
@@ -451,7 +476,7 @@ fn updateRenderMode() {
         reg combiner_low_mask: u32 = load(u32, comb0_mask, 4);
         comb_hi &= combiner_high_mask;
         comb_lo &= combiner_low_mask;
-        reg lod_select_bit: u32 = undefined;
+        reg lod_select_bit: u32;
         lod_select_bit = som_hi >> 16 << 31;
         comb_hi |= lod_select_bit;
     }
@@ -459,10 +484,10 @@ fn updateRenderMode() {
     store(u32, mode_combiner_2cycle, comb_hi);
     store(u32, mode_combiner_2cycle, comb_lo, 4);
 
-    reg foreground_blend: u32 = load(u32, rdp_mode, 16);
-    reg background_blend: u32 = load(u32, rdp_mode, 20);
-    reg aa_requested: u32 = undefined;
-    reg background_blending: u32 = undefined;
+    reg foreground_blend: u32 = load(RdpModeState.foreground_blend, rdp_mode);
+    reg background_blend: u32 = load(RdpModeState.background_blend, rdp_mode);
+    reg aa_requested: u32;
+    reg background_blending: u32;
     background_blending = background_blend != 0;
     aa_requested = som_lo & OtherModeLow.antialias;
     if(background_blend == 0) {
@@ -476,7 +501,7 @@ fn updateRenderMode() {
     reg cycle_blend_mask: u32 = 0xccccc040;
     reg blend_input_mask: u32 = 0x3333c040;
     reg blend_1cycle: u32 = background_blend;
-    reg merged_blend: u32 = undefined;
+    reg merged_blend: u32;
     if(foreground_blend != 0) {
         blend_1cycle = foreground_blend;
     }
@@ -490,7 +515,7 @@ fn updateRenderMode() {
         }
     }
 
-    reg texture_filter_bits: u32 = undefined;
+    reg texture_filter_bits: u32;
     texture_filter_bits = som_hi & 0x3e00;
     reg yuv_filter_mode: u32 = 0x2000;
     if(texture_filter_bits == yuv_filter_mode) delay {
@@ -498,7 +523,7 @@ fn updateRenderMode() {
     } {
         som_hi |= texture_filter_bits;
     }
-    reg blend_bits_high: u32 = undefined;
+    reg blend_bits_high: u32;
     blend_bits_high = merged_blend << 16;
     reg combiner_with_blend: u32 = load(u32, mode_combiner_2cycle);
     combiner_with_blend |= blend_bits_high;
@@ -513,9 +538,9 @@ fn updateRenderMode() {
     som_hi |= cycle_type_mask;
     som_hi ^= cycle_type;
 
-    reg aa_table_index: u32 = undefined;
+    reg aa_table_index: u32;
     aa_table_index = som_lo & OtherModeLow.antialias;
-    reg background_blend_index: u32 = undefined;
+    reg background_blend_index: u32;
     background_blend_index = background_blending << 2;
     aa_table_index |= background_blend_index;
     reg aa_mode_bits: u32 = load(u32, aa_table_index, aa_blend_table);
@@ -527,7 +552,7 @@ fn updateRenderMode() {
     som_lo &= aa_mode_mask;
     som_lo |= aa_mode_bits;
     reg copy_mode_flags: u32 = 0x2001;
-    reg active_copy_flags: u32 = undefined;
+    reg active_copy_flags: u32;
     active_copy_flags = som_lo & copy_mode_flags;
     if(copy_mode_flags == active_copy_flags) {
         som_lo |= 0x3000;
@@ -536,9 +561,9 @@ fn updateRenderMode() {
             som_lo &= low_mode_clear_mask;
         }
     }
-    reg cycle_one_enabled: u32 = undefined;
+    reg cycle_one_enabled: u32;
     cycle_one_enabled = som_lo & OtherModeLow.cycle_one_enabled;
-    reg cycle_two_enabled: u32 = undefined;
+    reg cycle_two_enabled: u32;
     cycle_two_enabled = som_lo & OtherModeLow.cycle_two_enabled;
     if(cycle_one_enabled == 0) {
         som_lo |= 0x800;
@@ -550,26 +575,26 @@ fn updateRenderMode() {
     comb_lo = load(u32, selected_combiner, 4);
     comb_hi = (comb_hi | 0xff000000) ^ 0x03000000;
     reg saved_mode_byte: u32 = load(u8, rdp_mode, 24);
-    store(u32, rdp_mode, som_hi, 24);
-    store(u32, rdp_mode, som_lo, 28);
+    store(RdpModeState.other_modes_high, rdp_mode, som_hi);
+    store(RdpModeState.other_modes_low, rdp_mode, som_lo);
     store(u8, rdp_mode, saved_mode_byte, 24);
     call rdp.write16() then rdp.finalize;
 }
 
-command(24) fn setBlendingMode(reg($a0) _: u32, reg($a1) _: u32) noreturn {
-    @goto(rdpSetBlendingMode);
+command(24) fn setBlendingMode(reg($a0) command: u32, reg($a1) formula: u32) noreturn {
+    tail rdpSetBlendingMode(command, formula);
 }
 
-command(25) fn setFogMode(reg($a0) _: u32, reg($a1) _: u32) noreturn {
-    @goto(rdpSetFogMode);
+command(25) fn setFogMode(reg($a0) command: u32, reg($a1) formula: u32) noreturn {
+    tail rdpSetFogMode(command, formula);
 }
 
-command(27) fn setCombineMode1Pass(reg($a0) _: u32, reg($a1) _: u32, reg($a2) _: u32, reg($a3) _: u32) noreturn {
-    @goto(rdpSetCombineMode1Pass);
+command(27) fn setCombineMode1Pass(reg($a0) word0: u32, reg($a1) word1: u32, reg($a2) mask0: u32, reg($a3) mask1: u32) noreturn {
+    tail rdpSetCombineMode1Pass(word0, word1, mask0, mask1);
 }
 
-command(5) fn setCombineMode2Pass(reg($a0) _: u32, reg($a1) _: u32) noreturn {
-    @goto(rdpSetCombineMode2Pass);
+command(5) fn setCombineMode2Pass(reg($a0) word0: u32, reg($a1) word1: u32) noreturn {
+    tail rdpSetCombineMode2Pass(word0, word1);
 }
 
 command(4) fn resetMode(
@@ -578,32 +603,32 @@ command(4) fn resetMode(
     reg($a2) som_hi: u32,
     reg($a3) som_lo: u32,
 ) {
-    reg previous_som_hi: u32 = load(u32, rdp_mode, 24);
-    reg freeze: u32 = undefined;
-    freeze = previous_som_hi & 8;
+    reg previous_som_hi: u32 = load(RdpModeState.other_modes_high, rdp_mode);
+    reg freeze: u32;
+    freeze = previous_som_hi & OtherModeHigh.pipeline_frozen;
     som_hi |= freeze;
 
     reg mode: u32 = rdp_mode;
     reg($v00) zero_mode: vec16 = 0;
     store(vec16, mode, zero_mode);
     store(vec16, mode, zero_mode, 16);
-    store(u32, rdp_mode, som_hi, 24);
-    store(u32, rdp_mode, som_lo, 28);
+    store(RdpModeState.other_modes_high, rdp_mode, som_hi);
+    store(RdpModeState.other_modes_low, rdp_mode, som_lo);
 
     previous_som_hi ^= som_hi;
     previous_som_hi <<= 10;
-    reg saved_comb_hi: u32 = undefined;
-    reg saved_comb_lo: u32 = undefined;
+    reg saved_comb_hi: u32;
+    reg saved_comb_lo: u32;
     saved_comb_hi = comb_hi;
     if(previous_som_hi >= 0x80000000) {
         saved_comb_lo = comb_lo;
-        comb_hi = load(u32, rdp_scissor_rect);
-        comb_lo = load(u32, rdp_scissor_rect, 4);
+        comb_hi = load(ScissorState.first_word, rdp_scissor_rect);
+        comb_lo = load(ScissorState.second_word, rdp_scissor_rect);
         writeSetScissor(comb_hi, comb_lo);
         comb_hi = saved_comb_hi;
         comb_lo = saved_comb_lo;
     }
-    @goto(setCombineMode1Pass);
+    tail setCombineMode1Pass(comb_hi, comb_lo, som_hi, som_lo);
 }
 
 command(6) fn pushMode(reg($a0) _: u32) {
@@ -638,8 +663,8 @@ command(7) fn popMode(reg($a0) scissor0: u32) {
     store(vec16, stack, stack3, 16);
     store(vec16, stack, stack4, 32);
     store(vec16, stack, stack5, 48);
-    scissor0 = load(u32, rdp_scissor_rect);
-    reg($a1) scissor1: u32 = load(u32, rdp_scissor_rect, 4);
+    scissor0 = load(ScissorState.first_word, rdp_scissor_rect);
+    reg scissor1: u32 = load(ScissorState.second_word, rdp_scissor_rect);
     call writeSetScissor() then updateRenderMode;
 }
 
@@ -647,8 +672,8 @@ fn rdpSetBlendingMode(
     reg($a0) command: u32,
     reg($a1) formula: u32,
 ) {
-    reg first_step: u32 = load(u32, rdp_mode, 16);
-    store(u32, rdp_mode, formula, 20);
+    reg first_step: u32 = load(RdpModeState.foreground_blend, rdp_mode);
+    store(RdpModeState.background_blend, rdp_mode, formula);
     if(formula != 0) {
         first_step = formula;
     }
@@ -661,8 +686,8 @@ fn rdpSetFogMode(
     reg($a0) _: u32,
     reg($a1) formula: u32,
 ) {
-    store(u32, rdp_mode, formula, 16);
-    @goto(updateRenderMode);
+    store(RdpModeState.foreground_blend, rdp_mode, formula);
+    tail updateRenderMode();
 }
 
 fn rdpSetCombineMode1Pass(
@@ -673,8 +698,8 @@ fn rdpSetCombineMode1Pass(
 ) {
     reg high_bit: u32 = 0x80000000;
     word0 ^= high_bit;
-    store(u32, rdp_mode, mask0, 8);
-    store(u32, rdp_mode, mask1, 12);
+    store(RdpModeState.combiner_high_mask, rdp_mode, mask0);
+    store(RdpModeState.combiner_low_mask, rdp_mode, mask1);
     tail rdpSetCombineMode2Pass(word0, word1);
 }
 
@@ -686,8 +711,8 @@ fn rdpSetCombineMode2Pass(
     word0 |= command_mask;
     command_mask = 0x03000000;
     word0 ^= command_mask;
-    store(u32, rdp_mode, word0);
-    store(u32, rdp_mode, word1, 4);
+    store(RdpModeState.combiner_high, rdp_mode, word0);
+    store(RdpModeState.combiner_low, rdp_mode, word1);
     tail updateRenderMode();
 }
 
@@ -696,11 +721,11 @@ command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
 ) commandSize(32, 48, 96, 112, 96, 112, 160, 176) noreturn {
     reg($gp) relative_command_end: i32 = undefined;
     reg($t7) command_size: i32 = undefined;
-    reg command_end: i32 = undefined;
+    reg command_end: i32;
     ordered {
         command_end = relative_command_end + 0xe0;
     }
-    reg command_start: i32 = undefined;
+    reg command_start: i32;
     command_start = command_end - command_size;
     reg($s4) staging: u32 = undefined;
     staging = command_staging;
@@ -716,7 +741,7 @@ command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
         staging += 16;
     } while(command_start < command_end);
     rdp.setStagingEnd(staging);
-    @goto(rdp.finalize);
+    tail rdp.finalize();
 }
 
 command(30) fn triangle(
@@ -757,7 +782,7 @@ fn triangleAsync(
     reg clip1: i32 = load(u16, vertex1, 6);
     reg($v00) vector_zero: vec16 = undefined;
     reg($v30) shift_constants: vec16 = undefined;
-    reg negative_powers: vec16 = undefined;
+    reg negative_powers: vec16;
     negative_powers = vector_zero - shift_constants;
     reg y1: vec16 = all1.yyyyyyyy;
     all1[3] = load(vec16, output, 0);
@@ -765,18 +790,18 @@ fn triangleAsync(
     all2[3] = load(vec16, output, 2);
     reg y3: vec16 = all3.yyyyyyyy;
     all3[3] = load(vec16, output, 4);
-    reg vector_one: vec16 = undefined;
+    reg vector_one: vec16;
     vector_one = vector_zero + shift_constants.WWWWWWWW;
     reg clip3: i32 = load(u16, vertex3, 6);
     reg clip2: i32 = load(u16, vertex2, 6);
 
-    reg all_tmp1: vec16 = undefined;
-    reg all_tmp2: vec16 = undefined;
-    reg y_tmp1: vec16 = undefined;
-    reg y_tmp2: vec16 = undefined;
-    reg did_swap0: i32 = undefined;
-    reg did_swap1: i32 = undefined;
-    reg did_swap2: i32 = undefined;
+    reg all_tmp1: vec16;
+    reg all_tmp2: vec16;
+    reg y_tmp1: vec16;
+    reg y_tmp2: vec16;
+    reg did_swap0: i32;
+    reg did_swap1: i32;
+    reg did_swap2: i32;
 
     // VGE/VLT consume VCO for equality tie-breaking. Match the reference's
     // vaddc-with-K1 setup, which also guarantees VCO is clear before sorting.
@@ -821,12 +846,12 @@ fn triangleAsync(
         did_swap0 ^= did_swap1;
     }
 
-    reg hml: vec16 = undefined;
+    reg hml: vec16;
     reg($v29) negative_my: vec16 = undefined;
-    reg normal: vec32 = undefined;
-    reg x12: vec32 = undefined;
-    reg fy: vec32 = undefined;
-    reg slope: vec32 = undefined;
+    reg normal: vec32;
+    reg x12: vec32;
+    reg fy: vec32;
+    reg slope: vec32;
 
     // Preserve the reference's hand-scheduled scalar/vector pairing. The raw
     // vector words are required because each element selector is significant.
@@ -874,12 +899,12 @@ fn triangleAsync(
             slope.sfract[2] = vectorReciprocal(all_tmp2[1]);
         }
     }
-    reg attribute3: vec16 = undefined;
-    reg inverse_w: vec32 = undefined;
-    reg edges: vec32 = undefined;
-    reg attribute_delta_high: vec16 = undefined;
+    reg attribute3: vec16;
+    reg inverse_w: vec32;
+    reg edges: vec32;
+    reg attribute_delta_high: vec16;
     reg($v31) reciprocal_constants: vec16 = undefined;
-    reg large_offset: i32 = undefined;
+    reg large_offset: i32;
 
     ordered {
         slope.sint[2] = vectorReciprocalHigh(all_tmp2[1]);
@@ -1055,8 +1080,8 @@ fn triangleAsync(
             vertex3 = return_address;
             triangle_command = load(i32, rdp_buffers, 4);
             did_swap1 = load(i32, rdp_buffers);
-            store(u32, rdp_buffers, triangle_command);
-            store(u32, rdp_buffers, did_swap1, 4);
+            store(OverlayRdpBufferState.current, rdp_buffers, triangle_command);
+            store(OverlayRdpBufferState.previous, rdp_buffers, did_swap1);
             store(u8, clip2, clip1);
             ordered {
                 // Keep the reference's trapping add; generic large-immediate lowering
@@ -1108,7 +1133,7 @@ fn triangleAsync(
 }
 
 fn triangleSendEnd() noreturn {
-    reg dma_busy: u32 = undefined;
+    reg dma_busy: u32;
     do {
         cp0.getDmaBusyT0(dma_busy);
     } while(dma_busy != 0);
@@ -1126,12 +1151,12 @@ command(2, 16) fn rectangleExclusive(
     reg($a3) word3: i32 = undefined;
     reg modes_byte: i32 = load(i8, rdp_mode, 25);
     modes_byte &= 0x20;
-    reg opcode: i32 = undefined;
+    reg opcode: i32;
     opcode = 0x34000000;
     if(modes_byte != 0) {
         word0 -%= 0x4004;
         modes_byte = -65536;
-        reg derivative: i32 = undefined;
+        reg derivative: i32;
         derivative = word3 & modes_byte;
         derivative <<= 2;
         word3 &= 0x0000ffff;
@@ -1139,7 +1164,7 @@ command(2, 16) fn rectangleExclusive(
     }
     word0 ^= opcode;
     modes_byte = word0 << 3;
-    reg($s0) writer: fn(rspq_command) = &rdp.write8;
+    reg writer: fn(rspq_command) = &rdp.write8;
     if(modes_byte >= 0) {
         writer = &rdp.write16;
     }
@@ -1155,14 +1180,14 @@ command(3) fn clearZBuffer(
     reg($a2) temporary: u32,
     reg($a3) clear_value: u32,
 ) noreturn {
-    reg fill: vec16 = undefined;
+    reg fill: vec16;
     fill[0] = clear_value;
     reg($v00) vector_zero: vec16 = undefined;
     fill = vector_zero | fill.xxxxxxxx;
 
-    reg dmem: u32 = undefined;
+    reg dmem: u32;
 
-    reg overlay_data_end: i32 = undefined;
+    reg overlay_data_end: i32;
     @setDataAddress(overlay_data_end, triangle_padding2, 4);
     // Libdragon compares its zero-based data end against 0x500. Libptero's
     // corresponding overlay DMEM coordinate is shifted by 0x800.
@@ -1175,7 +1200,7 @@ command(3) fn clearZBuffer(
     }
 
     dmem = 1280;
-    reg fill_end: u32 = undefined;
+    reg fill_end: u32;
     fill_end = dmem +% 4096;
     do {
         store(vec16, dmem, fill);
@@ -1201,8 +1226,8 @@ fn clearZBackup(
     reg($t2) flags: i32,
     reg($a2) temporary: u32,
 ) noreturn {
-    reg($s4) dmem: u32 = 0;
-    reg($s0) rdram: u32 = temporary;
+    reg dmem: u32 = 0;
+    reg rdram: u32 = temporary;
     reg($t0) dma_size: i32 = undefined;
     @goto(dma.resident_dma_exec) delay {
         dma_size = backup_size -% 1;
@@ -1222,8 +1247,8 @@ command(17) fn setDebugMode(reg($a0) command: u32) {
 command(28) fn autoTmemSetAddress(reg($a0) command: i32) noreturn {
     command <<= 16;
     command >>= 16;
-    reg address: i32 = undefined;
-    reg limit: i32 = undefined;
+    reg address: i32;
+    reg limit: i32;
     reg($at) invalid: u32 = undefined;
     reg($ra) return_address: u32 = undefined;
     if(command < 0) @goto(autoTmemEnd) delay {
@@ -1279,9 +1304,9 @@ command(29) fn autoTmemSetTile(
     reg($a0) word0: u32,
     reg($a1) _: u32,
 ) noreturn {
-    reg use_previous: u32 = undefined;
+    reg use_previous: u32;
     reg mask: u32 = 0x00040000;
-    reg address: u32 = undefined;
+    reg address: u32;
     use_previous = word0 & mask;
     address = load(i16, autotmem_address);
     if(use_previous != 0) {

@@ -30,15 +30,29 @@ const expression_temporary_names = [_][]const u8{
     "__expression_temporary_7",
 };
 
+pub const Diagnostic = struct {
+    function_name: ?[]const u8 = null,
+    symbol_name: ?[]const u8 = null,
+};
+
 pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
+    return writeWithDiagnostic(writer, functions, null);
+}
+
+pub fn writeWithDiagnostic(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    diagnostic: ?*Diagnostic,
+) !void {
     try writer.writeAll(".set noreorder\n");
     try writer.writeAll(".set noat\n");
 
-    var clobbers = try FunctionClobberRegistry.init(functions);
+    var clobbers = try FunctionClobberRegistry.init(functions, diagnostic);
     var top_level_context = FunctionContext{
         .label_prefix = "top_level",
         .clobbers = &clobbers,
         .functions = functions,
+        .diagnostic = diagnostic,
     };
     try writeStorageBlocks(writer, functions, &top_level_context);
     try writeCommandTable(writer, functions, &top_level_context);
@@ -65,10 +79,16 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     }
     for (functions, 0..) |_, function_index| {
         if (tail_target[function_index]) continue;
-        try writeFunction(writer, functions, &top_level_context, &emitted, function_index);
+        writeFunction(writer, functions, &top_level_context, &emitted, function_index) catch |err| {
+            if (diagnostic) |value| value.function_name = functions[function_index].source_name;
+            return err;
+        };
     }
     for (functions, 0..) |_, function_index| {
-        try writeFunction(writer, functions, &top_level_context, &emitted, function_index);
+        writeFunction(writer, functions, &top_level_context, &emitted, function_index) catch |err| {
+            if (diagnostic) |value| value.function_name = functions[function_index].source_name;
+            return err;
+        };
     }
     try writeCommandManifest(writer, functions);
 }
@@ -366,7 +386,7 @@ const FunctionClobberRegistry = struct {
     entries: [1024]FunctionClobber = undefined,
     len: usize = 0,
 
-    fn init(functions: []const ast.Function) !FunctionClobberRegistry {
+    fn init(functions: []const ast.Function, diagnostic: ?*Diagnostic) !FunctionClobberRegistry {
         if (functions.len > 1024) return error.TooManyFunctions;
         var result = FunctionClobberRegistry{};
         var direct: [1024]FunctionClobber = undefined;
@@ -378,8 +398,15 @@ const FunctionClobberRegistry = struct {
             result.len += 1;
         }
         for (functions) |function| {
-            var context = FunctionContext{ .label_prefix = function.name, .functions = functions };
-            try context.prepareLifetimes(functions, function.parameters, function.statements);
+            var context = FunctionContext{
+                .label_prefix = function.name,
+                .functions = functions,
+                .diagnostic = diagnostic,
+            };
+            context.prepareLifetimes(functions, function.parameters, function.statements) catch |err| {
+                if (diagnostic) |value| value.function_name = function.source_name;
+                return err;
+            };
             for (context.lifetime_calls[0..context.lifetime_call_count]) |call| {
                 const target = result.findPtr(call.target) orelse continue;
                 const target_function = findFunction(functions, call.target) orelse continue;
@@ -428,16 +455,26 @@ const FunctionClobberRegistry = struct {
                     .label_prefix = function.name,
                     .clobbers = &previous,
                     .functions = functions,
+                    .diagnostic = diagnostic,
                     .function_forbidden_scalar = direct[index].forbidden_scalar,
                     .function_forbidden_vector = direct[index].forbidden_vector,
                 };
-                try context.prepareLifetimes(functions, function.parameters, function.statements);
+                context.prepareLifetimes(functions, function.parameters, function.statements) catch |err| {
+                    if (diagnostic) |value| value.function_name = function.source_name;
+                    return err;
+                };
                 for (context.lifetime_calls[0..context.lifetime_call_count]) |call| {
                     result.entries[index].scalar |= call.setup_scalar;
                     result.entries[index].vector |= call.setup_vector;
                 }
-                try bindParameters(&context, function.parameters);
-                try simulateAutomaticRegisters(&context, function.statements, &result.entries[index]);
+                bindParameters(&context, function.parameters) catch |err| {
+                    if (diagnostic) |value| value.function_name = function.source_name;
+                    return err;
+                };
+                simulateAutomaticRegisters(&context, function.statements, &result.entries[index]) catch |err| {
+                    if (diagnostic) |value| value.function_name = function.source_name;
+                    return err;
+                };
             }
             var changed = true;
             while (changed) {
@@ -843,6 +880,7 @@ const FlowLoop = struct { name: ?[]const u8, continue_position: usize, break_pos
 const FunctionContext = struct {
     label_prefix: []const u8,
     functions: []const ast.Function = &.{},
+    diagnostic: ?*Diagnostic = null,
     symbols: [128]Symbol = undefined,
     symbol_count: usize = 0,
     next_label: usize = 0,
@@ -888,6 +926,7 @@ const FunctionContext = struct {
             .label_prefix = label_prefix,
             .clobbers = self.clobbers,
             .functions = self.functions,
+            .diagnostic = self.diagnostic,
             .function_forbidden_scalar = self.function_forbidden_scalar,
             .function_forbidden_vector = self.function_forbidden_vector,
         };
@@ -974,6 +1013,7 @@ const FunctionContext = struct {
             if (lifetime.initially_defined) continue;
             var visited: [2049]bool = @splat(false);
             if (self.valueReadBeforeWrite(lifetime.name, lifetime.declaration, &visited)) {
+                if (self.diagnostic) |diagnostic| diagnostic.symbol_name = lifetime.name;
                 return error.RegisterReadBeforeAssignment;
             }
         }

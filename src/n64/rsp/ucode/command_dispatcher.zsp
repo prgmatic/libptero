@@ -47,7 +47,7 @@ bss {
 const internal_commands = @commandTable();
 
 fn fetchCommandBuffer() noreturn {
-    reg($s0) rdram: u32 = load(u32, queue_rdram_address);
+    reg rdram: u32 = load(u32, queue_rdram_address);
     reg($gp) command_address: u32 = undefined;
     rdram = rdram + command_address;
     tail fetchCommandBufferWithPointer(rdram);
@@ -57,12 +57,12 @@ fn fetchCommandBufferWithPointer(
     reg($s0) rdram: u32,
 ) noreturn {
     const command_buffer: u32 = 0xe0;
-    reg($s4) dma_destination: u32 = command_buffer;
+    reg dma_destination: u32 = command_buffer;
     reg($gp) command_address: u32 = undefined;
     command_address = rdram & 7;
     rdram = rdram - command_address;
     store(u32, queue_rdram_address, rdram);
-    reg($t0) dma_size: u32 = 255;
+    reg dma_size: u32 = 255;
     reg($t1) dma_pitch: u32 = undefined;
     dma.in(dma_size, dma_pitch, rdram, dma_destination);
     tail commandLoop();
@@ -79,7 +79,7 @@ command(0) fn waitForInput() noreturn {
     const status_signal_more: u32 = 0x00004000;
     const status_clear_signal_more: u32 = 0x00800000;
 
-    reg status_value: u32 = undefined;
+    reg status_value: u32;
     cp0.getSpStatusT0(status_value);
     status_value &= status_signal_more;
     if(status_value == 0) delay {
@@ -97,20 +97,20 @@ command(1) fn writeDmem(
     value: u32,
 ) using(rspq_command) noreturn {
     store(u32, command, value);
-    @goto(commandLoop);
+    tail commandLoop();
 }
 
 command(2) fn jump(command: u32) using(rspq_command) noreturn {
     reg($s0) rdram: u32 = undefined;
     rdram = command;
-    @goto(fetchCommandBufferWithPointer);
+    tail fetchCommandBufferWithPointer(rdram);
 }
 
 command(3) fn call(
     command: u32,
     stack_offset: u32,
 ) using(rspq_command) noreturn {
-    reg($s0) return_address: u32 = load(u32, queue_rdram_address);
+    reg return_address: u32 = load(u32, queue_rdram_address);
     reg($gp) command_address: u32 = undefined;
     if(stack_offset >= 0x80000000) {
         command = load(u32, command);
@@ -121,8 +121,8 @@ command(3) fn call(
 }
 
 command(4) fn returnFromCall(command: u32) using(rspq_command) noreturn {
-    reg($s0) rdram: u32 = load(u32, command, pointer_stack);
-    @goto(fetchCommandBufferWithPointer);
+    reg rdram: u32 = load(u32, command, pointer_stack);
+    tail fetchCommandBufferWithPointer(rdram);
 }
 
 command(5) fn runDma(
@@ -140,7 +140,7 @@ command(5) fn runDma(
     dma_destination = dmem_address;
     dma_size = size;
     dma_flags = flags;
-    @goto(dma.exec);
+    tail dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
 }
 
 command(7) fn swapBuffers(
@@ -163,7 +163,7 @@ command(8) fn waitThenWriteStatus(
 
 command(6) fn writeStatus(status: u32) using(rspq_command) noreturn {
     cp0.setSpStatusA0(status);
-    @goto(commandLoop);
+    tail commandLoop();
 }
 
 command(9) export fn rdpSetBuffer(
@@ -171,11 +171,11 @@ command(9) export fn rdpSetBuffer(
     start: u32,
     sentinel: u32,
 ) using(rspq_command) noreturn {
-    reg dp_value: u32 = undefined;
-    reg masked_status: u32 = undefined;
-    reg dp_status: u32 = undefined;
-    reg wait_mask: u32 = undefined;
-    reg saved_return: u32 = undefined;
+    reg dp_value: u32;
+    reg masked_status: u32;
+    reg dp_status: u32;
+    reg wait_mask: u32;
+    reg saved_return: u32;
     reg($ra) return_address: u32 = undefined;
     store(u32, rdp_sentinel, sentinel);
     if(sentinel == 0) @goto(dma.returnToCaller) delay {
