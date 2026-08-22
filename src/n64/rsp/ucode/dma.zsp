@@ -55,26 +55,28 @@ pub fn exec(
     reg($s4) dmem: u32,
     reg($t2) flags: u32,
 ) noreturn {
-    reg scratch: u32 = undefined;
+    reg dma_full: u32 = undefined;
+    reg transfer_descriptor: u32;
     do {
-        cp0.getDmaFullAt(scratch);
-    } while(scratch != 0) delay {
-        scratch = size & 0x0fff;
+        cp0.getDmaFullAt(dma_full);
+    } while(dma_full != 0) delay {
+        transfer_descriptor = size & 0x0fff;
     }
-    scratch = pitch - scratch;
-    scratch -= 1;
-    scratch <<= 20;
-    scratch |= size;
+    transfer_descriptor = pitch - transfer_descriptor;
+    transfer_descriptor -= 1;
+    transfer_descriptor <<= 20;
+    transfer_descriptor |= size;
     cp0.setDmaAddrRdram(rdram);
     if(flags < 0x80000000) delay {
         cp0.setDmaAddrRsp(dmem);
     } {
-        cp0.setDmaReadAt(scratch);
+        cp0.setDmaReadAt(transfer_descriptor);
     } else {
-        cp0.setDmaWriteAt(scratch);
+        cp0.setDmaWriteAt(transfer_descriptor);
     }
-    scratch = rdram & 7;
-    dmem = dmem + scratch;
+    reg rdram_alignment: u32;
+    rdram_alignment = rdram & 7;
+    dmem = dmem + rdram_alignment;
     flags &= 0x0f;
     tail waitStatus(flags);
 }

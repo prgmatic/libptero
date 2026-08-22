@@ -1,6 +1,26 @@
 const rdp = @import("rdp.zsp");
 const dma = @import("resident_dma.zsp");
 const cp0 = @import("cp0.zsp");
+
+enum RenderCycleType: u32 {
+    two_cycle = 0x10200000;
+    one_cycle = 0x10300000;
+}
+
+flags OtherModeLow: u32 {
+    antialias = 0x00000008;
+    cycle_one_enabled = 0x00000400;
+    cycle_two_enabled = 0x00004000;
+}
+
+abi rspq_command(
+    reg($a0) argument_0: u32,
+    reg($a1) argument_1: u32,
+    reg($a2) argument_2: u32,
+    reg($a3) argument_3: u32,
+);
+
+abi continuation();
 const queue = @import("resident_queue.zsp");
 
 // Libdragon deliberately maps these reserved command slots straight back to
@@ -61,7 +81,7 @@ command(0, 38, 39, 40, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52, 53, 54, 55, 56, 5
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) noreturn {
-    @callAndGoto(rdp.write8, rdp.finalize);
+    call rdp.write8() then rdp.finalize;
 }
 
 command(36, 37) fn passthrough16(
@@ -70,7 +90,7 @@ command(36, 37) fn passthrough16(
     reg($a2) word2: u32,
     reg($a3) word3: u32,
 ) noreturn {
-    @callAndGoto(rdp.write16, rdp.finalize);
+    call rdp.write16() then rdp.finalize;
 }
 
 command(1) fn setLookupAddress(
@@ -96,7 +116,7 @@ command(61, 62) fn setFixupImage(
         opcode = 0xf0000000;
     }
     word0 |= opcode;
-    @callAndGoto(rdp.write8, rdp.finalize);
+    call rdp.write8() then rdp.finalize;
 }
 
 fn writeSetFillColor(reg($a1) color: u32) noreturn {
@@ -150,14 +170,14 @@ command(63) fn setColorImage(
         }
     }
     address = load(u32, rdp_fill_color);
-    @callAndGoto(writeSetFillColor, rdp.finalize);
+    call writeSetFillColor() then rdp.finalize;
 }
 
 command(22) fn setFillColor32(
     reg($a0) _: u32,
     reg($a1) color: u32,
 ) {
-    @callAndGoto(writeSetFillColor, rdp.finalize);
+    call writeSetFillColor() then rdp.finalize;
 }
 
 inline fn prepareSyncFull(
@@ -280,7 +300,7 @@ command(18) fn setScissorEx(
         scissor_mask = 0x3f000000;
         word0 ^= scissor_mask;
     }
-    @callAndGoto(writeSetScissor, rdp.finalize);
+    call writeSetScissor() then rdp.finalize;
 }
 
 fn sendOtherModes(
@@ -302,7 +322,7 @@ fn finalizeOtherModes(
 ) noreturn {
     word0 = load(u32, rdp_scissor_rect);
     word1 = load(u32, rdp_scissor_rect, 4);
-    @callAndGoto(writeSetScissor, rdp.finalize);
+    call writeSetScissor() then rdp.finalize;
 }
 
 command(47) fn setOtherModes(
@@ -338,69 +358,71 @@ fn updateRenderMode() {
     reg($a1) comb_lo: u32 = undefined;
     reg($a2) som_hi: u32 = load(u32, rdp_mode, 24);
     reg($a3) som_lo: u32 = undefined;
-    reg scratch0: u32 = undefined;
     reg selected_combiner: u32 = undefined;
-    reg assembly_temporary: u32 = undefined;
-    scratch0 = som_hi & 8;
-    if(scratch0 != 0) @goto(rdp.finalize) delay {
+    reg mode_frozen: u32 = undefined;
+    mode_frozen = som_hi & 8;
+    if(mode_frozen != 0) @goto(rdp.finalize) delay {
         som_lo = load(u32, rdp_mode, 28);
     }
-    scratch0 = som_hi << 10;
-    if(scratch0 >= 0x80000000) delay {
+    reg fill_or_copy_cycle: u32 = undefined;
+    fill_or_copy_cycle = som_hi << 10;
+    if(fill_or_copy_cycle >= 0x80000000) delay {
         comb_hi = load(u32, rdp_mode);
     } {
-        assembly_temporary = 0xff000000;
-        comb_hi = som_hi | assembly_temporary;
-        assembly_temporary = 0x10000000;
-        comb_hi ^= assembly_temporary;
+        reg fill_combiner_mask: u32 = 0xff000000;
+        comb_hi = som_hi | fill_combiner_mask;
+        reg copy_cycle_bit: u32 = 0x10000000;
+        comb_hi ^= copy_cycle_bit;
         comb_lo = som_lo;
-        @callAndGoto(rdp.write8, rdp.finalize);
+        call rdp.write8() then rdp.finalize;
     }
     comb_lo = load(u32, rdp_mode, 4);
-    reg scratch1: u32 = undefined;
+    reg cycle_combiner_mask: u32 = undefined;
     store_combiner_2cycle: block {
     combiner_1cycle: block {
         if(comb_hi < 0x80000000) {
             break combiner_1cycle;
         }
-        scratch0 = som_hi & 1;
-        if(scratch0 != 0) @goto(queue.resident_assertion_failed) delay {
+        reg invalid_cycle_flags: u32 = undefined;
+        invalid_cycle_flags = som_hi & 1;
+        if(invalid_cycle_flags != 0) @goto(queue.resident_assertion_failed) delay {
             reg($at) assertion_code: u32 = 0xc0040000;
         }
         break store_combiner_2cycle;
     } exit delay {
-        scratch1 = 0x04000000;
+        cycle_combiner_mask = 0x04000000;
     }
     check_mipmap: block {
-        scratch0 = som_hi & scratch1;
+        reg has_custom_combiner: u32 = undefined;
+        has_custom_combiner = som_hi & cycle_combiner_mask;
         reg comb_hi_no_id: u32 = undefined;
-        if(scratch0 == 0) {
+        if(has_custom_combiner == 0) {
             break check_mipmap delay {
                 comb_hi_no_id = comb_hi << 8;
             }
         }
         comb_hi_no_id >>= 8;
-        scratch0 = load(u32, combiner_tex_shade);
+        reg combiner_word: u32 = load(u32, combiner_tex_shade);
         fog_change: block {
             check_fog_shade: block {
-                if(scratch0 != comb_hi_no_id) {
+                if(combiner_word != comb_hi_no_id) {
                     break check_fog_shade delay {
-                        scratch0 = load(u32, combiner_tex_shade, 4);
+                        combiner_word = load(u32, combiner_tex_shade, 4);
                     }
                 }
-                if(scratch0 == comb_lo) {
+                if(combiner_word == comb_lo) {
                     break fog_change delay {
                         selected_combiner = combiner_tex_shade_fog;
                     }
                 }
             }
-            scratch0 = load(u32, combiner_shade);
-            if(scratch0 != comb_hi_no_id) {
+            combiner_word = load(u32, combiner_shade);
+            if(combiner_word != comb_hi_no_id) {
                 break check_mipmap delay {
-                    scratch0 = load(u32, combiner_shade, 4);
+                    combiner_word = load(u32, combiner_shade, 4);
                 }
             }
-            if(scratch0 != comb_lo) {
+            if(combiner_word != comb_lo) {
                 break check_mipmap delay {
                     selected_combiner = combiner_shade_fog;
                 }
@@ -409,127 +431,129 @@ fn updateRenderMode() {
         comb_hi = load(u32, selected_combiner);
         comb_lo = load(u32, selected_combiner, 4);
     }
-    reg scratch2: u32 = undefined;
-    scratch2 = som_hi & 3;
-    if(scratch2 != 0) delay {
-        scratch2 <<= 3;
+    reg mipmap_offset: u32 = undefined;
+    mipmap_offset = som_hi & 3;
+    if(mipmap_offset != 0) delay {
+        mipmap_offset <<= 3;
     } {
-        scratch0 = load(u32, rdp_mode, 8);
-        scratch1 = load(u32, rdp_mode, 12);
-        comb_hi &= scratch0;
-        comb_lo &= scratch1;
-        scratch0 = load(u32, scratch2, combiner_mipmaps, -8);
-        scratch1 = load(u32, scratch2, combiner_mipmaps, -4);
-        comb_hi |= scratch0;
-        comb_lo |= scratch1;
+        reg combiner_high_mask: u32 = load(u32, rdp_mode, 8);
+        reg combiner_low_mask: u32 = load(u32, rdp_mode, 12);
+        comb_hi &= combiner_high_mask;
+        comb_lo &= combiner_low_mask;
+        reg mipmap_high_bits: u32 = load(u32, mipmap_offset, combiner_mipmaps, -8);
+        reg mipmap_low_bits: u32 = load(u32, mipmap_offset, combiner_mipmaps, -4);
+        comb_hi |= mipmap_high_bits;
+        comb_lo |= mipmap_low_bits;
     } else {
         store(u32, mode_combiner_1cycle, comb_hi);
         store(u32, mode_combiner_1cycle, comb_lo, 4);
-        scratch0 = load(u32, comb0_mask);
-        scratch1 = load(u32, comb0_mask, 4);
-        comb_hi &= scratch0;
-        comb_lo &= scratch1;
-        scratch0 = som_hi >> 16;
-        scratch0 <<= 31;
-        comb_hi |= scratch0;
+        reg combiner_high_mask: u32 = load(u32, comb0_mask);
+        reg combiner_low_mask: u32 = load(u32, comb0_mask, 4);
+        comb_hi &= combiner_high_mask;
+        comb_lo &= combiner_low_mask;
+        reg lod_select_bit: u32 = undefined;
+        lod_select_bit = som_hi >> 16 << 31;
+        comb_hi |= lod_select_bit;
     }
     }
     store(u32, mode_combiner_2cycle, comb_hi);
     store(u32, mode_combiner_2cycle, comb_lo, 4);
 
-    scratch0 = load(u32, rdp_mode, 16);
-    scratch1 = load(u32, rdp_mode, 20);
-    reg scratch2: u32 = undefined;
+    reg foreground_blend: u32 = load(u32, rdp_mode, 16);
+    reg background_blend: u32 = load(u32, rdp_mode, 20);
+    reg aa_requested: u32 = undefined;
     reg background_blending: u32 = undefined;
-    background_blending = scratch1 != 0;
-    scratch2 = som_lo & 8;
-    if(scratch1 == 0) {
-        if(scratch2 != 0) {
-            scratch1 = som_hi & 4;
-            scratch1 = load(u32, scratch1, aa_blend_default);
-            assembly_temporary = -16385;
-            scratch0 &= assembly_temporary;
+    background_blending = background_blend != 0;
+    aa_requested = som_lo & OtherModeLow.antialias;
+    if(background_blend == 0) {
+        if(aa_requested != 0) {
+            background_blend = som_hi & 4;
+            background_blend = load(u32, background_blend, aa_blend_default);
+            reg foreground_blend_mask: u32 = -16385;
+            foreground_blend &= foreground_blend_mask;
         }
     }
-    scratch2 = 0xccccc040;
-    reg scratch3: u32 = 0x3333c040;
-    reg blend_1cycle: u32 = scratch1;
+    reg cycle_blend_mask: u32 = 0xccccc040;
+    reg blend_input_mask: u32 = 0x3333c040;
+    reg blend_1cycle: u32 = background_blend;
     reg merged_blend: u32 = undefined;
-    if(scratch0 != 0) {
-        blend_1cycle = scratch0;
+    if(foreground_blend != 0) {
+        blend_1cycle = foreground_blend;
     }
-    merged_blend = blend_1cycle & scratch3;
-    blend_1cycle &= scratch2;
-    if(scratch0 != 0) {
-        if(scratch1 != 0) {
-            scratch0 &= scratch2;
-            scratch1 &= scratch3;
-            merged_blend = scratch0 | scratch1;
-            merged_blend |= 0x8000;
+    merged_blend = blend_1cycle & blend_input_mask;
+    blend_1cycle &= cycle_blend_mask;
+    if(foreground_blend != 0) {
+        if(background_blend != 0) {
+            foreground_blend &= cycle_blend_mask;
+            background_blend &= blend_input_mask;
+            merged_blend = foreground_blend | background_blend | 0x8000;
         }
     }
 
-    scratch0 = som_hi & 0x3e00;
-    scratch1 = 0x2000;
-    if(scratch0 == scratch1) delay {
-        scratch0 = 0x0a00;
+    reg texture_filter_bits: u32 = undefined;
+    texture_filter_bits = som_hi & 0x3e00;
+    reg yuv_filter_mode: u32 = 0x2000;
+    if(texture_filter_bits == yuv_filter_mode) delay {
+        texture_filter_bits = 0x0a00;
     } {
-        som_hi |= scratch0;
+        som_hi |= texture_filter_bits;
     }
-    scratch2 = merged_blend << 16;
-    scratch1 = load(u32, mode_combiner_2cycle);
-    scratch1 |= scratch2;
+    reg blend_bits_high: u32 = undefined;
+    blend_bits_high = merged_blend << 16;
+    reg combiner_with_blend: u32 = load(u32, mode_combiner_2cycle);
+    combiner_with_blend |= blend_bits_high;
     selected_combiner = mode_combiner_2cycle;
-    reg cycle_type: u32 = 0x10200000;
-    if(scratch1 < 0x80000000) {
+    reg cycle_type: u32 = RenderCycleType.two_cycle;
+    if(combiner_with_blend < 0x80000000) {
         selected_combiner = mode_combiner_1cycle;
         merged_blend = blend_1cycle;
-        cycle_type = 0x10300000;
+        cycle_type = RenderCycleType.one_cycle;
     }
-    assembly_temporary = 0xff300000;
-    som_hi |= assembly_temporary;
+    reg cycle_type_mask: u32 = 0xff300000;
+    som_hi |= cycle_type_mask;
     som_hi ^= cycle_type;
 
-    scratch0 = som_lo & 8;
-    scratch1 = background_blending << 2;
-    scratch0 |= scratch1;
-    scratch0 = load(u32, scratch0, aa_blend_table);
-    scratch1 = load(u32, aa_blend_mask);
-    scratch0 |= merged_blend;
-    scratch0 &= scratch1;
+    reg aa_table_index: u32 = undefined;
+    aa_table_index = som_lo & OtherModeLow.antialias;
+    reg background_blend_index: u32 = undefined;
+    background_blend_index = background_blending << 2;
+    aa_table_index |= background_blend_index;
+    reg aa_mode_bits: u32 = load(u32, aa_table_index, aa_blend_table);
+    reg aa_mode_mask: u32 = load(u32, aa_blend_mask);
+    aa_mode_bits = (aa_mode_bits | merged_blend) & aa_mode_mask;
     ordered {
-        scratch1 = ~scratch1;
+        aa_mode_mask = ~aa_mode_mask;
     }
-    som_lo &= scratch1;
-    som_lo |= scratch0;
-    scratch0 = 0x2001;
-    scratch1 = som_lo & scratch0;
-    if(scratch0 == scratch1) {
+    som_lo &= aa_mode_mask;
+    som_lo |= aa_mode_bits;
+    reg copy_mode_flags: u32 = 0x2001;
+    reg active_copy_flags: u32 = undefined;
+    active_copy_flags = som_lo & copy_mode_flags;
+    if(copy_mode_flags == active_copy_flags) {
         som_lo |= 0x3000;
         ordered {
-            assembly_temporary = -4;
-            som_lo &= assembly_temporary;
+            reg low_mode_clear_mask: u32 = -4;
+            som_lo &= low_mode_clear_mask;
         }
     }
-    scratch0 = som_lo & 0x400;
-    scratch1 = som_lo & 0x4000;
-    if(scratch0 == 0) {
+    reg cycle_one_enabled: u32 = undefined;
+    cycle_one_enabled = som_lo & OtherModeLow.cycle_one_enabled;
+    reg cycle_two_enabled: u32 = undefined;
+    cycle_two_enabled = som_lo & OtherModeLow.cycle_two_enabled;
+    if(cycle_one_enabled == 0) {
         som_lo |= 0x800;
-        if(scratch1 == 0) {
+        if(cycle_two_enabled == 0) {
             som_lo ^= 0x800;
         }
     }
     comb_hi = load(u32, selected_combiner);
     comb_lo = load(u32, selected_combiner, 4);
-    assembly_temporary = 0xff000000;
-    comb_hi |= assembly_temporary;
-    assembly_temporary = 0x03000000;
-    comb_hi ^= assembly_temporary;
-    scratch0 = load(u8, rdp_mode, 24);
+    comb_hi = (comb_hi | 0xff000000) ^ 0x03000000;
+    reg saved_mode_byte: u32 = load(u8, rdp_mode, 24);
     store(u32, rdp_mode, som_hi, 24);
     store(u32, rdp_mode, som_lo, 28);
-    store(u8, rdp_mode, scratch0, 24);
-    @callAndGoto(rdp.write16, rdp.finalize);
+    store(u8, rdp_mode, saved_mode_byte, 24);
+    call rdp.write16() then rdp.finalize;
 }
 
 command(24) fn setBlendingMode(reg($a0) _: u32, reg($a1) _: u32) noreturn {
@@ -616,7 +640,7 @@ command(7) fn popMode(reg($a0) scissor0: u32) {
     store(vec16, stack, stack5, 48);
     scissor0 = load(u32, rdp_scissor_rect);
     reg($a1) scissor1: u32 = load(u32, rdp_scissor_rect, 4);
-    @callAndGoto(writeSetScissor, updateRenderMode);
+    call writeSetScissor() then updateRenderMode;
 }
 
 fn rdpSetBlendingMode(
@@ -711,7 +735,7 @@ command(30) fn triangle(
 }
 
 fn triangleCull() noreturn {
-    @callAndGoto(triangleSendEnd, queue.resident_command_loop);
+    call triangleSendEnd() then queue.resident_command_loop;
 }
 
 fn triangleAsync(
@@ -1115,14 +1139,13 @@ command(2, 16) fn rectangleExclusive(
     }
     word0 ^= opcode;
     modes_byte = word0 << 3;
-    reg($s0) writer: u32 = undefined;
-    @setFunctionAddress(writer, rdp.write8);
+    reg($s0) writer: fn(rspq_command) = &rdp.write8;
     if(modes_byte >= 0) {
-        @setFunctionAddress(writer, rdp.write16);
+        writer = &rdp.write16;
     }
-    reg($ra) return_address: u32 = undefined;
-    @jump(writer) delay {
-        @setFunctionAddress(return_address, rdp.finalize);
+    reg($ra) return_address: fn(continuation);
+    jump(writer) delay {
+        return_address = &rdp.finalize;
     }
 }
 

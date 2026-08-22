@@ -10,6 +10,36 @@ pub const Parser = struct {
     diagnostic: ?Diagnostic = null,
     imports: std.ArrayList(ast.Import) = .empty,
     packed_structs: std.ArrayList(ast.PackedStructDecl) = .empty,
+    abi_definitions: std.ArrayList(AbiDefinition) = .empty,
+    type_symbols: [256]TypeSymbol = undefined,
+    type_symbol_count: usize = 0,
+    compile_time_members: [256]CompileTimeMember = undefined,
+    compile_time_member_count: usize = 0,
+    compile_time_types: [64][]const u8 = undefined,
+    compile_time_type_count: usize = 0,
+
+    const TypeSymbol = struct {
+        name: []const u8,
+        data_type: ast.DataType,
+        function_abi: ?[]const u8 = null,
+    };
+
+    const AbiDefinition = struct {
+        name: []const u8,
+        parameters: []const ast.Parameter,
+    };
+
+    const ParsedParameters = struct {
+        items: []ast.Parameter,
+        first_unpinned: ?token.Token,
+    };
+
+    const CompileTimeMember = struct {
+        type_name: []const u8,
+        member_name: []const u8,
+        data_type: ast.DataType,
+        value: i64,
+    };
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
         var parser = Parser{
@@ -24,9 +54,17 @@ pub const Parser = struct {
 
     pub fn parse(self: *Parser) ![]ast.Function {
         defer self.packed_structs.deinit(self.allocator);
+        defer {
+            for (self.abi_definitions.items) |definition| self.allocator.free(definition.parameters);
+            self.abi_definitions.deinit(self.allocator);
+        }
         var functions: std.ArrayList(ast.Function) = .empty;
         while (self.current.tag != .eof) {
-            if (self.isImportStart()) {
+            if (self.isCompileTimeTypeStart()) {
+                try self.parseCompileTimeType();
+            } else if (self.isAbiStart()) {
+                try self.parseAbiDefinition();
+            } else if (self.isImportStart()) {
                 try self.parseImport();
             } else if (self.isFunctionDeclarationStart()) {
                 try functions.append(self.allocator, try self.parseFunctionDeclaration());
@@ -112,9 +150,12 @@ pub const Parser = struct {
         external: bool,
         command_indices: []const u8,
     ) !ast.Function {
+        const function_scope = self.type_symbol_count;
+        defer self.type_symbol_count = function_scope;
         const name = try self.expect(.ident);
         _ = try self.expect(.l_paren);
-        const parameters = try self.parseParameters();
+        const parsed_parameters = try self.parseParameters(true);
+        const parameters = parsed_parameters.items;
         errdefer self.allocator.free(parameters);
         var no_return = false;
         var command_sizes: std.ArrayList(u8) = .empty;
@@ -124,6 +165,7 @@ pub const Parser = struct {
         var clobber_vector_regs: std.ArrayList(ast.VectorRegister) = .empty;
         errdefer clobber_vector_regs.deinit(self.allocator);
         var has_clobber_contract = false;
+        var abi_name: ?[]const u8 = null;
         while (self.current.tag == .ident) {
             const modifier = try self.expect(.ident);
             if (std.mem.eql(u8, modifier.text, "noreturn")) {
@@ -153,9 +195,19 @@ pub const Parser = struct {
                     if (try self.eat(.r_paren)) break;
                     _ = try self.expect(.comma);
                 };
+            } else if (std.mem.eql(u8, modifier.text, "using")) {
+                if (abi_name != null) return self.fail(modifier, .duplicate_abi_modifier);
+                _ = try self.expect(.l_paren);
+                abi_name = (try self.expect(.ident)).text;
+                _ = try self.expect(.r_paren);
             } else {
                 return self.fail(modifier, .unsupported_function_modifier);
             }
+        }
+        if (abi_name) |requested_abi| {
+            try self.applyAbi(parameters, requested_abi, name);
+        } else if (parsed_parameters.first_unpinned) |unpinned| {
+            return self.fail(unpinned, .expected_fixed_register_parameter);
         }
         if (external) {
             if (inline_call or export_symbol) return error.InvalidExternalFunction;
@@ -168,6 +220,7 @@ pub const Parser = struct {
                 .inline_call = false,
                 .external = true,
                 .no_return = no_return,
+                .abi_name = abi_name,
                 .command_indices = command_indices,
                 .command_sizes = try command_sizes.toOwnedSlice(self.allocator),
                 .has_clobber_contract = has_clobber_contract,
@@ -189,6 +242,7 @@ pub const Parser = struct {
             .inline_call = inline_call,
             .external = false,
             .no_return = no_return,
+            .abi_name = abi_name,
             .command_indices = command_indices,
             .command_sizes = try command_sizes.toOwnedSlice(self.allocator),
             .has_clobber_contract = has_clobber_contract,
@@ -218,30 +272,162 @@ pub const Parser = struct {
         });
     }
 
-    fn parseParameters(self: *Parser) ![]const ast.Parameter {
+    fn parseAbiDefinition(self: *Parser) !void {
+        _ = try self.expect(.ident);
+        const name = try self.expect(.ident);
+        for (self.abi_definitions.items) |definition| {
+            if (std.mem.eql(u8, definition.name, name.text)) {
+                return self.fail(name, .duplicate_abi_definition);
+            }
+        }
+        _ = try self.expect(.l_paren);
+        const type_scope = self.type_symbol_count;
+        defer self.type_symbol_count = type_scope;
+        const parsed = try self.parseParameters(false);
+        _ = try self.expect(.semicolon);
+        try self.abi_definitions.append(self.allocator, .{
+            .name = name.text,
+            .parameters = parsed.items,
+        });
+    }
+
+    fn parseCompileTimeType(self: *Parser) !void {
+        const kind = try self.expect(.ident);
+        const is_flags = std.mem.eql(u8, kind.text, "flags");
+        const type_name = try self.expect(.ident);
+        for (self.compile_time_types[0..self.compile_time_type_count]) |existing| {
+            if (std.mem.eql(u8, existing, type_name.text)) {
+                return self.fail(type_name, .duplicate_compile_time_type);
+            }
+        }
+        if (self.compile_time_type_count >= self.compile_time_types.len) return error.TooManyCompileTimeTypes;
+        self.compile_time_types[self.compile_time_type_count] = type_name.text;
+        self.compile_time_type_count += 1;
+        _ = try self.expect(.colon);
+        const data_type = try self.parseDataType(try self.expect(.ident));
+        if (isVectorType(data_type) or (is_flags and isSignedType(data_type))) {
+            return self.fail(type_name, .expected_unsigned_scalar_type);
+        }
+        _ = try self.expect(.l_brace);
+        var next_value: i64 = if (is_flags) 1 else 0;
+        while (!try self.eat(.r_brace)) {
+            const member = try self.expect(.ident);
+            var value = next_value;
+            if (try self.eat(.equal)) {
+                const parsed = try self.parseValueRef();
+                value = switch (parsed) {
+                    .number => |number| number,
+                    else => return self.fail(member, .expected_data_literal),
+                };
+            }
+            if (!literalFitsType(value, data_type)) return self.fail(member, .invalid_number);
+            _ = try self.expect(.semicolon);
+            for (self.compile_time_members[0..self.compile_time_member_count]) |existing| {
+                if (std.mem.eql(u8, existing.type_name, type_name.text) and
+                    std.mem.eql(u8, existing.member_name, member.text))
+                {
+                    return self.fail(member, .duplicate_compile_time_member);
+                }
+            }
+            if (self.compile_time_member_count >= self.compile_time_members.len) {
+                return error.TooManyCompileTimeMembers;
+            }
+            self.compile_time_members[self.compile_time_member_count] = .{
+                .type_name = type_name.text,
+                .member_name = member.text,
+                .data_type = data_type,
+                .value = value,
+            };
+            self.compile_time_member_count += 1;
+            next_value = if (is_flags)
+                std.math.mul(i64, value, 2) catch return self.fail(member, .invalid_number)
+            else
+                std.math.add(i64, value, 1) catch return self.fail(member, .invalid_number);
+        }
+    }
+
+    fn lookupCompileTimeMember(
+        self: *const Parser,
+        type_name: []const u8,
+        member_name: []const u8,
+    ) ?CompileTimeMember {
+        for (self.compile_time_members[0..self.compile_time_member_count]) |member| {
+            if (std.mem.eql(u8, member.type_name, type_name) and
+                std.mem.eql(u8, member.member_name, member_name)) return member;
+        }
+        return null;
+    }
+
+    fn applyAbi(
+        self: *Parser,
+        parameters: []ast.Parameter,
+        requested_name: []const u8,
+        function_name: token.Token,
+    ) !void {
+        const definition = self.findAbi(requested_name) orelse
+            return self.fail(function_name, .unknown_abi);
+        if (parameters.len > definition.parameters.len) {
+            return self.fail(function_name, .abi_parameter_count_mismatch);
+        }
+        for (parameters, definition.parameters[0..parameters.len]) |*parameter, abi_parameter| {
+            if (!abiTypesCompatible(parameter.data_type, abi_parameter.data_type)) {
+                return self.fail(function_name, .abi_parameter_type_mismatch);
+            }
+            if ((parameter.reg != null and parameter.reg != abi_parameter.reg) or
+                (parameter.vector_reg != null and parameter.vector_reg != abi_parameter.vector_reg))
+            {
+                return self.fail(function_name, .abi_parameter_register_mismatch);
+            }
+            parameter.reg = abi_parameter.reg;
+            parameter.vector_reg = abi_parameter.vector_reg;
+        }
+    }
+
+    fn findAbi(self: *const Parser, name: []const u8) ?AbiDefinition {
+        for (self.abi_definitions.items) |definition| {
+            if (std.mem.eql(u8, definition.name, name)) return definition;
+        }
+        return null;
+    }
+
+    fn parseParameters(self: *Parser, allow_unpinned: bool) !ParsedParameters {
         var parameters: std.ArrayList(ast.Parameter) = .empty;
         errdefer parameters.deinit(self.allocator);
-        if (try self.eat(.r_paren)) return parameters.toOwnedSlice(self.allocator);
+        var first_unpinned: ?token.Token = null;
+        if (try self.eat(.r_paren)) return .{
+            .items = try parameters.toOwnedSlice(self.allocator),
+            .first_unpinned = null,
+        };
 
         while (true) {
-            const reg_keyword = try self.expect(.ident);
-            if (!std.mem.eql(u8, reg_keyword.text, "reg")) {
-                return self.fail(reg_keyword, .expected_fixed_register_parameter);
-            }
-            _ = try self.expect(.l_paren);
-            const reg_token = try self.expect(.register);
-            _ = try self.expect(.r_paren);
-            const name = try self.expect(.ident);
+            var register_token: ?token.Token = null;
+            const name = if (self.current.tag == .ident and
+                std.mem.eql(u8, self.current.text, "reg")) blk: {
+                _ = try self.expect(.ident);
+                _ = try self.expect(.l_paren);
+                register_token = try self.expect(.register);
+                _ = try self.expect(.r_paren);
+                break :blk try self.expect(.ident);
+            } else blk: {
+                const unpinned = try self.expect(.ident);
+                if (!allow_unpinned) return self.fail(unpinned, .expected_fixed_register_parameter);
+                if (first_unpinned == null) first_unpinned = unpinned;
+                break :blk unpinned;
+            };
             _ = try self.expect(.colon);
             const data_type = try self.parseDataType(try self.expect(.ident));
-            const reg = if (!isVectorType(data_type))
-                parseRegister(reg_token) orelse
-                    return self.fail(reg_token, .expected_scalar_register)
+            const reg = if (register_token) |fixed|
+                if (!isVectorType(data_type))
+                    parseRegister(fixed) orelse return self.fail(fixed, .expected_scalar_register)
+                else
+                    null
             else
                 null;
-            const vector_reg = if (isVectorType(data_type))
-                parseVectorRegister(reg_token) orelse
-                    return self.fail(reg_token, .expected_vector_register)
+            const vector_reg = if (register_token) |fixed|
+                if (isVectorType(data_type))
+                    parseVectorRegister(fixed) orelse return self.fail(fixed, .expected_vector_register)
+                else
+                    null
             else
                 null;
             try parameters.append(self.allocator, .{
@@ -250,23 +436,31 @@ pub const Parser = struct {
                 .reg = reg,
                 .vector_reg = vector_reg,
             });
+            try self.addTypeSymbol(name.text, data_type);
 
             if (try self.eat(.r_paren)) break;
             _ = try self.expect(.comma);
             if (try self.eat(.r_paren)) break;
         }
-        return parameters.toOwnedSlice(self.allocator);
+        return .{
+            .items = try parameters.toOwnedSlice(self.allocator),
+            .first_unpinned = first_unpinned,
+        };
     }
 
     fn parseTopLevelStatements(self: *Parser) anyerror![]ast.Statement {
         var statements: std.ArrayList(ast.Statement) = .empty;
-        while (self.current.tag != .eof and !self.isFunctionDeclarationStart()) {
+        while (self.current.tag != .eof and !self.isFunctionDeclarationStart() and
+            !self.isAbiStart() and !self.isCompileTimeTypeStart())
+        {
             try statements.append(self.allocator, try self.parseStatement());
         }
         return statements.toOwnedSlice(self.allocator);
     }
 
     fn parseBlockStatements(self: *Parser) anyerror![]ast.Statement {
+        const scope = self.type_symbol_count;
+        defer self.type_symbol_count = scope;
         var statements: std.ArrayList(ast.Statement) = .empty;
         while (!try self.eat(.r_brace)) {
             try statements.append(self.allocator, try self.parseStatement());
@@ -372,6 +566,33 @@ pub const Parser = struct {
             const arguments = try self.parseCallArguments();
             _ = try self.expect(.semicolon);
             return .{ .builtin = .{ .tail = .{ .target = target, .arguments = arguments } } };
+        }
+
+        if (std.mem.eql(u8, first.text, "jump")) {
+            _ = try self.expect(.l_paren);
+            const address = try self.parseValueRef();
+            _ = try self.expect(.r_paren);
+            return .{ .builtin = .{ .jump = .{
+                .address = address,
+                .delay_slot = try self.parseOptionalDelaySlot(),
+                .typed = true,
+            } } };
+        }
+
+        if (std.mem.eql(u8, first.text, "call")) {
+            const callee = try self.parseFunctionReference();
+            _ = try self.expect(.l_paren);
+            _ = try self.expect(.r_paren);
+            const then_keyword = try self.expect(.ident);
+            if (!std.mem.eql(u8, then_keyword.text, "then")) {
+                return self.fail(then_keyword, .expected_continuation);
+            }
+            const continuation = try self.parseFunctionReference();
+            _ = try self.expect(.semicolon);
+            return .{ .builtin = .{ .call_and_goto = .{
+                .callee = callee,
+                .continuation = continuation,
+            } } };
         }
 
         if (std.mem.eql(u8, first.text, "asm") or std.mem.eql(u8, first.text, "asmExact")) {
@@ -523,9 +744,7 @@ pub const Parser = struct {
 
         if (std.mem.eql(u8, first.text, "store")) {
             _ = try self.expect(.l_paren);
-            const data_type = try self.expect(.ident);
-            const half_vector = std.mem.eql(u8, data_type.text, "vec64");
-            const quarter_vector = std.mem.eql(u8, data_type.text, "vec32lane");
+            const memory_type = try self.parseMemoryType();
             _ = try self.expect(.comma);
             var address = try self.parseValueRef();
             var label_offset: ?[]const u8 = null;
@@ -538,22 +757,22 @@ pub const Parser = struct {
             }
             _ = try self.expect(.comma);
             const value = try self.parseValueRef();
-            var offset: i64 = 0;
+            var offset: i64 = memory_type.offset;
             if (try self.eat(.comma)) {
                 if (self.current.tag == .ident) {
                     if (label_offset != null) return self.fail(self.current, .unexpected_token);
                     label_offset = (try self.expect(.ident)).text;
-                    if (try self.eat(.comma)) offset = try self.parseLiteralOffset();
+                    if (try self.eat(.comma)) offset += try self.parseLiteralOffset();
                 } else {
-                    offset = try self.parseLiteralOffset();
+                    offset += try self.parseLiteralOffset();
                 }
             }
             _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
             return .{ .store = .{
-                .data_type = if (half_vector or quarter_vector) .vec16 else try self.parseDataType(data_type),
-                .half_vector = half_vector,
-                .quarter_vector = quarter_vector,
+                .data_type = memory_type.data_type,
+                .half_vector = memory_type.half_vector,
+                .quarter_vector = memory_type.quarter_vector,
                 .address = address,
                 .value = value,
                 .offset = offset,
@@ -631,56 +850,21 @@ pub const Parser = struct {
                 } };
             }
 
-            if (try self.eat(.l_paren)) {
-                const lhs = try self.parseValue();
-                const first_op = (try self.parseBinaryAssignOp()) orelse
-                    return self.fail(self.current, .unexpected_token);
-                const first_rhs = valueFromRef(try self.parseValueRef());
-                var continuation: std.ArrayList(ast.BinaryStep) = .empty;
-                errdefer continuation.deinit(self.allocator);
-                while (!try self.eat(.r_paren)) {
-                    const op = (try self.parseBinaryAssignOp()) orelse
-                        return self.fail(self.current, .unexpected_token);
-                    try continuation.append(self.allocator, .{
-                        .op = op,
-                        .rhs = valueFromRef(try self.parseValueRef()),
-                    });
-                }
-                _ = try self.expect(.semicolon);
-                return .{ .assignment = .{
-                    .destination = first.text,
-                    .destination_lane = destination_lane,
-                    .destination_view = destination_view,
-                    .lhs = lhs,
-                    .op = first_op,
-                    .rhs = first_rhs,
-                    .continuation = try continuation.toOwnedSlice(self.allocator),
-                } };
-            }
-
-            const lhs = try self.parseValue();
+            const lhs = try self.parseScalarExpression(0);
             const comparison = try self.parseComparisonOperator();
             const assignment_lhs: ast.Value = if (comparison) |comparison_op| .{ .scalar_comparison = .{
                 .lhs = try valueRefFromValue(lhs),
                 .op = comparison_op,
                 .rhs = try self.parseValueRef(),
             } } else lhs;
-            var op: ast.AssignOp = .set;
-            var rhs: ?ast.Value = null;
-            if (comparison == null) {
-                if (try self.parseBinaryAssignOp()) |binary_op| {
-                    op = binary_op;
-                    rhs = valueFromRef(try self.parseValueRef());
-                }
-            }
             _ = try self.expect(.semicolon);
             return .{ .assignment = .{
                 .destination = first.text,
                 .destination_lane = destination_lane,
                 .destination_view = destination_view,
                 .lhs = assignment_lhs,
-                .op = op,
-                .rhs = rhs,
+                .op = .set,
+                .rhs = null,
             } };
         }
 
@@ -765,6 +949,42 @@ pub const Parser = struct {
         errdefer self.allocator.free(declaration.fields);
         try self.packed_structs.append(self.allocator, declaration);
         return declaration;
+    }
+
+    const MemoryType = struct {
+        data_type: ast.DataType,
+        offset: i64 = 0,
+        half_vector: bool = false,
+        quarter_vector: bool = false,
+    };
+
+    fn parseMemoryType(self: *Parser) !MemoryType {
+        const type_name = try self.expect(.ident);
+        if (try self.eat(.dot)) {
+            const field_name = try self.expect(.ident);
+            var offset: i64 = 0;
+            for (self.packed_structs.items) |declaration| {
+                if (!std.mem.eql(u8, declaration.name, type_name.text)) continue;
+                for (declaration.fields) |field| {
+                    if (std.mem.eql(u8, field.name, field_name.text)) {
+                        return .{ .data_type = field.data_type, .offset = offset };
+                    }
+                    offset += scalarTypeSize(field.data_type);
+                }
+                return self.fail(field_name, .unknown_packed_struct_field);
+            }
+            return self.fail(type_name, .unknown_packed_struct);
+        }
+        const half_vector = std.mem.eql(u8, type_name.text, "vec64");
+        const quarter_vector = std.mem.eql(u8, type_name.text, "vec32lane");
+        return .{
+            .data_type = if (half_vector or quarter_vector)
+                .vec16
+            else
+                try self.parseDataType(type_name),
+            .half_vector = half_vector,
+            .quarter_vector = quarter_vector,
+        };
     }
 
     fn parseStorageBlock(self: *Parser, initialized: bool) ![]const ast.DataDecl {
@@ -1045,6 +1265,7 @@ pub const Parser = struct {
         _ = try self.expect(.equal);
         const value = valueFromRef(try self.parseValueRef());
         _ = try self.expect(.semicolon);
+        try self.addTypeSymbol(name.text, data_type);
 
         return .{ .var_decl = .{
             .is_const = true,
@@ -1064,20 +1285,44 @@ pub const Parser = struct {
 
         const name = try self.expect(.ident);
         var explicit_data_type: ?ast.DataType = null;
+        var function_abi: ?[]const u8 = null;
         if (try self.eat(.colon)) {
-            explicit_data_type = try self.parseDataType(try self.expect(.ident));
+            const type_name = try self.expect(.ident);
+            if (std.mem.eql(u8, type_name.text, "fn")) {
+                _ = try self.expect(.l_paren);
+                function_abi = (try self.expect(.ident)).text;
+                _ = try self.expect(.r_paren);
+                if (self.findAbi(function_abi.?) == null) return self.fail(type_name, .unknown_abi);
+                explicit_data_type = .u32;
+            } else {
+                explicit_data_type = try self.parseDataType(type_name);
+            }
         }
         var value: ?ast.Value = null;
+        var allow_undefined_read = false;
         if (try self.eat(.equal)) {
             if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "undefined")) {
                 _ = try self.expect(.ident);
+                allow_undefined_read = true;
             } else {
                 value = try self.parseValue();
             }
         }
         _ = try self.expect(.semicolon);
         const data_type = explicit_data_type orelse if (value) |initial_value| switch (initial_value) {
+            .ident => |source_name| blk: {
+                const source = self.lookupTypeSymbolInfo(source_name) orelse
+                    return self.fail(name, .expected_data_type);
+                function_abi = source.function_abi;
+                break :blk source.data_type;
+            },
             .load => |load| load.data_type,
+            .number => |number| if (number < 0)
+                @as(ast.DataType, .i32)
+            else
+                @as(ast.DataType, .u32),
+            .accumulator_read => .vec16,
+            .vector_control_read, .hardware_read, .scalar_comparison, .signed_less_than => .u32,
             else => return self.fail(name, .expected_data_type),
         } else return self.fail(name, .expected_data_type);
         var reg: ?ast.Register = null;
@@ -1092,17 +1337,56 @@ pub const Parser = struct {
             }
         }
 
+        try self.addTypeSymbolWithAbi(name.text, data_type, function_abi);
         return .{
             .is_const = false,
+            .allow_undefined_read = allow_undefined_read,
             .data_type = data_type,
             .reg = reg,
             .vector_reg = vector_reg,
+            .function_abi = function_abi,
             .name = name.text,
             .value = value,
         };
     }
 
+    fn addTypeSymbol(self: *Parser, name: []const u8, data_type: ast.DataType) !void {
+        return self.addTypeSymbolWithAbi(name, data_type, null);
+    }
+
+    fn addTypeSymbolWithAbi(
+        self: *Parser,
+        name: []const u8,
+        data_type: ast.DataType,
+        function_abi: ?[]const u8,
+    ) !void {
+        if (self.type_symbol_count >= self.type_symbols.len) return error.TooManySymbols;
+        self.type_symbols[self.type_symbol_count] = .{
+            .name = name,
+            .data_type = data_type,
+            .function_abi = function_abi,
+        };
+        self.type_symbol_count += 1;
+    }
+
+    fn lookupTypeSymbol(self: *const Parser, name: []const u8) ?ast.DataType {
+        return if (self.lookupTypeSymbolInfo(name)) |symbol| symbol.data_type else null;
+    }
+
+    fn lookupTypeSymbolInfo(self: *const Parser, name: []const u8) ?TypeSymbol {
+        var index = self.type_symbol_count;
+        while (index > 0) {
+            index -= 1;
+            const symbol = self.type_symbols[index];
+            if (std.mem.eql(u8, symbol.name, name)) return symbol;
+        }
+        return null;
+    }
+
     fn parseValue(self: *Parser) !ast.Value {
+        if (try self.eat(.ampersand)) {
+            return .{ .function_address = try self.parseFunctionReference() };
+        }
         if (try self.eat(.at)) {
             const name = try self.expect(.ident);
             const register = vectorControlRegisterForBuiltin(name.text, "read") orelse
@@ -1158,13 +1442,18 @@ pub const Parser = struct {
             const unaligned = std.mem.eql(u8, self.current.text, "load_unaligned");
             _ = try self.expect(.ident);
             _ = try self.expect(.l_paren);
+            var field_offset: i64 = 0;
             const data_type: ast.DataType = if (packed_u8 or packed_unsigned_u8 or partial_u32) .vec16 else blk: {
-                const parsed = try self.parseDataType(try self.expect(.ident));
+                const memory_type = try self.parseMemoryType();
+                if (memory_type.half_vector or memory_type.quarter_vector) {
+                    return self.fail(self.current, .expected_data_type);
+                }
+                field_offset = memory_type.offset;
                 _ = try self.expect(.comma);
-                break :blk parsed;
+                break :blk memory_type.data_type;
             };
             var address = try self.parseValueRef();
-            var offset: i64 = 0;
+            var offset: i64 = field_offset;
             var label_offset: ?[]const u8 = null;
             if (try self.eat(.plus)) {
                 label_offset = switch (address) {
@@ -1178,9 +1467,9 @@ pub const Parser = struct {
                 if (self.current.tag == .ident) {
                     if (label_offset != null) return self.fail(self.current, .unexpected_token);
                     label_offset = (try self.expect(.ident)).text;
-                    if (try self.eat(.comma)) offset = try self.parseLiteralOffset();
+                    if (try self.eat(.comma)) offset += try self.parseLiteralOffset();
                 } else {
-                    offset = try self.parseLiteralOffset();
+                    offset += try self.parseLiteralOffset();
                 }
             }
             if (partial_u32 and try self.eat(.comma)) {
@@ -1281,6 +1570,35 @@ pub const Parser = struct {
         };
     }
 
+    fn parseFunctionReference(self: *Parser) !ast.FunctionRef {
+        const first = try self.expect(.ident);
+        if (try self.eat(.dot)) {
+            return .{
+                .module = first.text,
+                .name = (try self.expect(.ident)).text,
+            };
+        }
+        return .{ .name = first.text };
+    }
+
+    fn parseScalarExpression(self: *Parser, minimum_precedence: u4) !ast.Value {
+        var lhs = if (try self.eat(.l_paren)) blk: {
+            const grouped = try self.parseScalarExpression(0);
+            _ = try self.expect(.r_paren);
+            break :blk grouped;
+        } else try self.parseValue();
+
+        while (binaryPrecedence(self.current.tag)) |precedence| {
+            if (precedence < minimum_precedence) break;
+            const op = (try self.parseBinaryAssignOp()).?;
+            const rhs = try self.parseScalarExpression(precedence + 1);
+            const expression = try self.allocator.create(ast.ScalarExpression);
+            expression.* = .{ .lhs = lhs, .op = op, .rhs = rhs };
+            lhs = .{ .scalar_expression = expression };
+        }
+        return lhs;
+    }
+
     fn parseValueRef(self: *Parser) !ast.ValueRef {
         if (try self.eat(.minus)) {
             const tok = try self.expect(.number);
@@ -1291,6 +1609,17 @@ pub const Parser = struct {
         switch (self.current.tag) {
             .ident => {
                 const tok = try self.expect(.ident);
+                if (self.current.tag == .dot) {
+                    var lookahead = self.lexer;
+                    const member_token = try lookahead.next();
+                    if (member_token.tag == .ident) {
+                        if (self.lookupCompileTimeMember(tok.text, member_token.text)) |member| {
+                            _ = try self.expect(.dot);
+                            _ = try self.expect(.ident);
+                            return .{ .number = member.value };
+                        }
+                    }
+                }
                 if (self.current.tag == .l_bracket or self.isVectorDotSuffix()) {
                     return .{ .vector_access = try self.parseVectorAccess(tok.text) };
                 }
@@ -1478,6 +1807,16 @@ pub const Parser = struct {
             std.mem.eql(u8, self.current.text, "fn");
     }
 
+    fn isAbiStart(self: *const Parser) bool {
+        return self.current.tag == .ident and std.mem.eql(u8, self.current.text, "abi");
+    }
+
+    fn isCompileTimeTypeStart(self: *const Parser) bool {
+        return self.current.tag == .ident and
+            (std.mem.eql(u8, self.current.text, "enum") or
+                std.mem.eql(u8, self.current.text, "flags"));
+    }
+
     fn isImportStart(self: *const Parser) bool {
         if (self.current.tag != .ident or !std.mem.eql(u8, self.current.text, "const")) return false;
         var lexer = self.lexer;
@@ -1530,6 +1869,18 @@ fn valueFromRef(value_ref: ast.ValueRef) ast.Value {
     };
 }
 
+fn binaryPrecedence(tag: token.Tag) ?u4 {
+    return switch (tag) {
+        .pipe, .nor => 1,
+        .caret => 2,
+        .ampersand => 3,
+        .shift_left, .shift_right, .logical_shift_right => 4,
+        .plus, .plus_percent, .minus, .minus_percent => 5,
+        .star, .slash => 6,
+        else => null,
+    };
+}
+
 fn valueRefFromValue(value: ast.Value) !ast.ValueRef {
     return switch (value) {
         .ident => |name| .{ .ident = name },
@@ -1569,6 +1920,18 @@ pub const ErrorType = enum {
     invalid_command_index,
     invalid_hardware_register,
     duplicate_clobber_contract,
+    duplicate_abi_modifier,
+    duplicate_abi_definition,
+    unknown_abi,
+    abi_parameter_count_mismatch,
+    abi_parameter_type_mismatch,
+    abi_parameter_register_mismatch,
+    expected_continuation,
+    duplicate_compile_time_type,
+    duplicate_compile_time_member,
+    expected_unsigned_scalar_type,
+    unknown_packed_struct,
+    unknown_packed_struct_field,
     incorrect_array_initializer_count,
     unexpected_token,
     invalid_number,
@@ -1614,6 +1977,18 @@ pub fn errorString(code: ErrorType) []const u8 {
         .invalid_command_index => "command index must be between 0 and 239",
         .invalid_hardware_register => "hardware register index must be between 0 and 15",
         .duplicate_clobber_contract => "function has more than one clobber contract",
+        .duplicate_abi_modifier => "function has more than one ABI modifier",
+        .duplicate_abi_definition => "duplicate ABI definition",
+        .unknown_abi => "unknown ABI",
+        .abi_parameter_count_mismatch => "ABI has too few parameters",
+        .abi_parameter_type_mismatch => "function parameter type does not match ABI",
+        .abi_parameter_register_mismatch => "function parameter register does not match ABI",
+        .expected_continuation => "expected 'then' before continuation target",
+        .duplicate_compile_time_type => "duplicate compile-time type",
+        .duplicate_compile_time_member => "duplicate compile-time member",
+        .expected_unsigned_scalar_type => "expected unsigned scalar type",
+        .unknown_packed_struct => "unknown packed struct",
+        .unknown_packed_struct_field => "unknown packed struct field",
         .incorrect_array_initializer_count => "array initializer must contain exactly the declared element count",
         .unexpected_token => "unexpected token",
         .invalid_number => "invalid number",
@@ -1637,6 +2012,41 @@ fn parseVectorRegister(tok: token.Token) ?ast.VectorRegister {
 
 fn isVectorType(data_type: ast.DataType) bool {
     return data_type == .vec16 or data_type == .vec32;
+}
+
+fn isSignedType(data_type: ast.DataType) bool {
+    return data_type == .i8 or data_type == .i16 or data_type == .i32;
+}
+
+fn scalarTypeSize(data_type: ast.DataType) i64 {
+    return switch (data_type) {
+        .u8, .i8 => 1,
+        .u16, .i16 => 2,
+        .u32, .i32 => 4,
+        .vec16, .vec32 => unreachable,
+    };
+}
+
+fn literalFitsType(value: i64, data_type: ast.DataType) bool {
+    return switch (data_type) {
+        .u8 => value >= 0 and value <= std.math.maxInt(u8),
+        .u16 => value >= 0 and value <= std.math.maxInt(u16),
+        .u32 => value >= 0 and value <= std.math.maxInt(u32),
+        .i8 => value >= std.math.minInt(i8) and value <= std.math.maxInt(i8),
+        .i16 => value >= std.math.minInt(i16) and value <= std.math.maxInt(i16),
+        .i32 => value >= std.math.minInt(i32) and value <= std.math.maxInt(i32),
+        .vec16, .vec32 => false,
+    };
+}
+
+fn abiTypesCompatible(left: ast.DataType, right: ast.DataType) bool {
+    if (left == right) return true;
+    return switch (left) {
+        .u8, .i8 => right == .u8 or right == .i8,
+        .u16, .i16 => right == .u16 or right == .i16,
+        .u32, .i32 => right == .u32 or right == .i32,
+        .vec16, .vec32 => false,
+    };
 }
 
 fn parseVectorView(text: []const u8) ?ast.VectorView {

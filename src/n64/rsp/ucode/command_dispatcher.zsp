@@ -1,6 +1,21 @@
 const dma = @import("dma.zsp");
 const cp0 = @import("cp0.zsp");
 
+packed struct OverlaySection {
+    rdram_address: u32;
+    byte_count: u16;
+    dmem_address: u16;
+}
+
+abi rspq_command(
+    reg($a0) argument_0: u32,
+    reg($a1) argument_1: u32,
+    reg($a2) argument_2: u32,
+    reg($a3) argument_3: u32,
+);
+
+abi continuation();
+
 data {
     shift_constants: [8]u8 = .{ 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 };
 }
@@ -78,23 +93,23 @@ command(0) fn waitForInput() noreturn {
 }
 
 command(1) fn writeDmem(
-    reg($a0) command: u32,
-    reg($a1) value: u32,
-) noreturn {
+    command: u32,
+    value: u32,
+) using(rspq_command) noreturn {
     store(u32, command, value);
     @goto(commandLoop);
 }
 
-command(2) fn jump(reg($a0) command: u32) noreturn {
+command(2) fn jump(command: u32) using(rspq_command) noreturn {
     reg($s0) rdram: u32 = undefined;
     rdram = command;
     @goto(fetchCommandBufferWithPointer);
 }
 
 command(3) fn call(
-    reg($a0) command: u32,
-    reg($a1) stack_offset: u32,
-) noreturn {
+    command: u32,
+    stack_offset: u32,
+) using(rspq_command) noreturn {
     reg($s0) return_address: u32 = load(u32, queue_rdram_address);
     reg($gp) command_address: u32 = undefined;
     if(stack_offset >= 0x80000000) {
@@ -105,17 +120,17 @@ command(3) fn call(
     tail jump(command);
 }
 
-command(4) fn returnFromCall(reg($a0) command: u32) noreturn {
+command(4) fn returnFromCall(command: u32) using(rspq_command) noreturn {
     reg($s0) rdram: u32 = load(u32, command, pointer_stack);
     @goto(fetchCommandBufferWithPointer);
 }
 
 command(5) fn runDma(
-    reg($a0) rdram_address: u32,
-    reg($a1) dmem_address: u32,
-    reg($a2) size: u32,
-    reg($a3) flags: u32,
-) noreturn {
+    rdram_address: u32,
+    dmem_address: u32,
+    size: u32,
+    flags: u32,
+) using(rspq_command) noreturn {
     reg($s0) rdram: u32 = undefined;
     reg($t0) dma_size: u32 = undefined;
     reg($t1) dma_pitch: u32 = undefined;
@@ -129,33 +144,33 @@ command(5) fn runDma(
 }
 
 command(7) fn swapBuffers(
-    reg($a0) command: u32,
-    reg($a1) save_slot: u32,
-    reg($a2) status: u32,
-) noreturn {
+    command: u32,
+    save_slot: u32,
+    status: u32,
+) using(rspq_command) noreturn {
     cp0.setSpStatusA2(status);
     command = load(u32, command, pointer_stack);
     tail call(command, save_slot);
 }
 
 command(8) fn waitThenWriteStatus(
-    reg($a0) status: u32,
-    reg($a1) mask: u32,
-) noreturn {
+    status: u32,
+    mask: u32,
+) using(rspq_command) noreturn {
     reg wait_mask: u32 = mask;
     dma.waitStatus(wait_mask);
 }
 
-command(6) fn writeStatus(reg($a0) status: u32) noreturn {
+command(6) fn writeStatus(status: u32) using(rspq_command) noreturn {
     cp0.setSpStatusA0(status);
     @goto(commandLoop);
 }
 
 command(9) export fn rdpSetBuffer(
-    reg($a0) current: u32,
-    reg($a1) start: u32,
-    reg($a2) sentinel: u32,
-) noreturn {
+    current: u32,
+    start: u32,
+    sentinel: u32,
+) using(rspq_command) noreturn {
     reg dp_value: u32 = undefined;
     reg masked_status: u32 = undefined;
     reg dp_status: u32 = undefined;
@@ -197,7 +212,7 @@ command(9) export fn rdpSetBuffer(
     tail rdpAppendBuffer(current);
 }
 
-command(10) export fn rdpAppendBuffer(reg($a0) current: u32) noreturn {
+command(10) export fn rdpAppendBuffer(current: u32) using(rspq_command) noreturn {
     reg($ra) return_address: u32 = undefined;
     reg syncfull_ongoing: u32 = load(u8, rdp_syncfull_ongoing);
     if(syncfull_ongoing != 0) @goto(dma.returnToCaller) delay {
@@ -213,7 +228,7 @@ export fn _start() noreturn {
     tail waitForInput();
 }
 
-export fn commandLoop() noreturn {
+export fn commandLoop() using(continuation) noreturn {
     const command_buffer: u32 = 0xe0;
     const command_buffer_size: u32 = 256;
     const overlay_idmap_address: u32 = 0x78;
@@ -236,49 +251,84 @@ export fn commandLoop() noreturn {
     reg($t7) command_size: u32 = undefined;
     reg($s0) rdram: u32 = undefined;
     reg($s4) dma_destination: u32 = undefined;
-    reg($at) scratch: u32 = undefined;
     reg($v31) shift_vector: vec16 = undefined;
     reg($v30) shifted_vector: vec16 = undefined;
     reg($v00) vector_zero: vec16 = undefined;
-command_loop:
+switch_high_priority: block {
     cp0.getSpStatusT2(dma_flags);
     command_header = load(u32, command_address, command_buffer);
     dma_size = status_high_priority_requested;
     dma_flags &= status_high_priority_mask;
-    if(dma_flags == dma_size) goto switch_high_priority delay {
-        command_size = command_header >> 28;
+    if(dma_flags == dma_size) {
+        break switch_high_priority delay {
+            command_size = command_header >> 28;
+        }
     }
 
     command_index = command_header >> 23;
     command_index &= 0x01fe;
-    if(command_size == 0) goto execute_command delay {
-        command_descriptor = load(u16, command_index, internal_commands);
+    execute_command: block {
+        if(command_size == 0) {
+            break execute_command delay {
+                command_descriptor = load(u16, command_index, internal_commands);
+            }
+        }
+
+    resolve_overlay: do {
+        dma_pitch = load(u16, 0, 0x80a);
+        overlay_index = load(u8, command_size, overlay_idmap_address);
+        dma_size = load(u16, 0, 0x808);
+        shift_vector = load_vec_u8(0);
+        if(overlay_index == dma_pitch) {
+            break resolve_overlay delay {
+                command_index = command_index - dma_size;
+            }
+        }
+
+        command_index +%= dma_size;
+
+        dma_size = load(u16, 0, 0x802);
+        rdram = load(u32, 0, 0x804);
+        dma_destination = load(u16, 0, 0x800);
+        dma.outAsync(dma_size, dma_pitch, rdram, dma_destination);
+        if(overlay_index == 0) @goto(invalidCommand) delay {
+            reg($at) assertion_code: u32 = 0xff010000;
+        }
+
+        rdram = load(u32, overlay_index, overlay_data_rdram);
+        dma_destination = 0x800;
+        dma_pitch = 0x80c;
+        dma_size = rdram >> 20;
+        dma_size |= 0x0f;
+        dma.in(dma_size, dma_pitch, rdram, dma_destination);
+
+        do {
+            rdram = load(OverlaySection.rdram_address, dma_pitch);
+            dma_size = load(OverlaySection.byte_count, dma_pitch);
+            dma_destination = load(OverlaySection.dmem_address, dma_pitch);
+            dma.in(dma_size, dma_pitch, rdram, dma_destination);
+        } while(rdram >= 0x80000000) delay {
+            dma_pitch +%= 8;
+        }
+    } while(overlay_index != dma_pitch) delay {
+        argument_2 = status_enter_high_priority;
+    }
+        command_descriptor = load(u16, command_index, overlay_command_table);
     }
 
-overlay_check:
-    dma_pitch = load(u16, 0, 0x80a);
-    overlay_index = load(u8, command_size, overlay_idmap_address);
-    dma_size = load(u16, 0, 0x808);
-    shift_vector = load_vec_u8(0);
-    if(overlay_index != dma_pitch) goto load_overlay delay {
-        command_index = command_index - dma_size;
-    }
-    command_descriptor = load(u16, command_index, overlay_command_table);
-
-execute_command:
     argument_1 = load(u32, command_address, 0xe4);
     shifted_vector = shift_vector >>> 8;
     dma_pitch = command_buffer_size;
-    if(command_descriptor == 0) goto invalid_command delay {
-        scratch = 0xff020000;
+    if(command_descriptor == 0) @goto(invalidCommand) delay {
+        reg($at) assertion_code: u32 = 0xff020000;
     }
-descriptor_valid:
     command_size = command_descriptor >> 8;
     vector_zero = 0;
     command_size &= 0xfc;
     dma_size = command_address +% command_size;
-    scratch = signedLessThan(dma_size, dma_pitch);
-    if(scratch == 0) @goto(fetchCommandBuffer) delay {
+    reg($at) command_fits_buffer: u32 = undefined;
+    command_fits_buffer = signedLessThan(dma_size, dma_pitch);
+    if(command_fits_buffer == 0) @goto(fetchCommandBuffer) delay {
         argument_2 = load(u32, command_address, 0xe8);
     }
     argument_3 = load(u32, command_address, 0xec);
@@ -288,46 +338,14 @@ descriptor_valid:
         @setReturn(commandLoop);
     }
 
-invalid_command:
-    ordered {}
-invalid_loop: do {
-    } while(scratch != 0) delay {
-        @break(0xba);
-    }
-
-load_overlay:
-    command_index +%= dma_size;
-
-    dma_size = load(u16, 0, 0x802);
-    rdram = load(u32, 0, 0x804);
-    dma_destination = load(u16, 0, 0x800);
-    dma.outAsync(dma_size, dma_pitch, rdram, dma_destination);
-    if(overlay_index == 0) goto invalid_command delay {
-        scratch = 0xff010000;
-    }
-
-load_overlay_data:
-    rdram = load(u32, overlay_index, overlay_data_rdram);
-    dma_destination = 0x800;
-    dma_pitch = 0x80c;
-    dma_size = rdram >> 20;
-    dma_size |= 0x0f;
-    dma.in(dma_size, dma_pitch, rdram, dma_destination);
-
-    do {
-        rdram = load(u32, dma_pitch);
-        dma_size = load(u16, dma_pitch, 4);
-        dma_destination = load(u16, dma_pitch, 6);
-        dma.in(dma_size, dma_pitch, rdram, dma_destination);
-    } while(rdram >= 0x80000000) delay {
-        dma_pitch +%= 8;
-    }
-
-    goto overlay_check delay {
-switch_high_priority:
+} exit delay {
         argument_2 = status_enter_high_priority;
-    }
+}
     command_header = 36;
     argument_1 = 32;
     tail swapBuffers(command_header, argument_1, argument_2);
+}
+
+fn invalidCommand() noreturn {
+    @break(0xba);
 }

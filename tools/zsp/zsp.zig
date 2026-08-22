@@ -132,6 +132,13 @@ const Loader = struct {
     fn resolveCalls(self: *Loader, module_index: usize, statements: []ast.Statement) anyerror!void {
         for (statements) |*statement| {
             switch (statement.*) {
+                .var_decl => |*declaration| if (declaration.value) |*value| {
+                    try self.resolveValue(module_index, value);
+                },
+                .assignment => |*assignment| {
+                    try self.resolveValue(module_index, &assignment.lhs);
+                    if (assignment.rhs) |*rhs| try self.resolveValue(module_index, rhs);
+                },
                 .call => |*call| {
                     var target_module = module_index;
                     if (call.module) |alias| {
@@ -199,6 +206,17 @@ const Loader = struct {
                 },
                 else => {},
             }
+        }
+    }
+
+    fn resolveValue(self: *Loader, module_index: usize, value: *ast.Value) !void {
+        switch (value.*) {
+            .function_address => |*target| try self.resolveFunctionRef(module_index, target),
+            .scalar_expression => |expression| {
+                try self.resolveValue(module_index, &expression.lhs);
+                try self.resolveValue(module_index, &expression.rhs);
+            },
+            else => {},
         }
     }
 

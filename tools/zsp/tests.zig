@@ -361,6 +361,50 @@ test "parenthesized scalar expression chains reuse the destination register" {
     );
 }
 
+test "nested scalar expressions honor precedence and allocate predictable temporaries" {
+    try expectAsm(
+        \\fn test(
+        \\  reg($a0) a: u32,
+        \\  reg($a1) b: u32,
+        \\  reg($a2) c: u32,
+        \\  reg($t0) result: u32,
+        \\) noreturn {
+        \\  result = a | b & c;
+        \\  result = (a + b) & c;
+        \\  result = a + (b - c);
+        \\  result = (a + b) + result;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  and $t1, $a1, $a2
+        \\  or $t0, $a0, $t1
+        \\  add $t0, $a0, $a1
+        \\  and $t0, $t0, $a2
+        \\  sub $t1, $a1, $a2
+        \\  add $t0, $a0, $t1
+        \\  or $t1, $t0, $zero
+        \\  add $t0, $a0, $a1
+        \\  add $t0, $t0, $t1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "nested scalar expressions reject side effects" {
+    try expectAsmError(
+        \\fn test(reg($a0) address: u32, reg($t0) result: u32) noreturn {
+        \\  result = result + load(u32, address);
+        \\  @break();
+        \\}
+    , error.SideEffectsNotAllowedInScalarExpression);
+}
+
 test "optimizer folds a literal data-label address into a memory relocation" {
     try expectOptimizedAsm(
         \\  addiu $at, $zero, %lo(mode)
@@ -603,6 +647,49 @@ test "packed structs emit fields without padding" {
     );
 }
 
+test "compile-time enums and flags lower to qualified immediates" {
+    try expectAsm(
+        \\enum CycleType: u32 {
+        \\  one = 1;
+        \\  copy;
+        \\}
+        \\flags RenderFlags: u32 {
+        \\  antialias;
+        \\  z_compare;
+        \\  force_blend = 8;
+        \\  alpha_compare;
+        \\}
+        \\data {
+        \\  default_cycle: u32 = CycleType.copy;
+        \\}
+        \\fn test() noreturn {
+        \\  reg($t0) cycle: u32 = CycleType.copy;
+        \\  reg($t1) flags: u32;
+        \\  flags = RenderFlags.antialias | RenderFlags.force_blend | RenderFlags.alpha_compare;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.data
+        \\.balign 4
+        \\default_cycle:
+        \\  .word 2
+        \\
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 2
+        \\  addiu $t1, $zero, 1
+        \\  ori $t1, $t1, 8
+        \\  ori $t1, $t1, 16
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "packed struct field offsets are compile-time memory offsets" {
     try expectAsm(
         \\packed struct Header {
@@ -622,6 +709,35 @@ test "packed struct field offsets are compile-time memory offsets" {
         \\
         \\
         \\test:
+        \\  lw $t1, 3($t0)
+        \\  sh $t1, 1($t0)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "packed struct fields provide typed load and store operands" {
+    try expectAsm(
+        \\packed struct Header {
+        \\  opcode: u8;
+        \\  flags: u16;
+        \\  address: u32;
+        \\}
+        \\fn test(reg($t0) ptr: u32, reg($t1) value: u32) noreturn {
+        \\  reg($t2) opcode = load(Header.opcode, ptr);
+        \\  value = load(Header.address, ptr);
+        \\  store(Header.flags, ptr, value);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  lbu $t2, 0($t0)
         \\  lw $t1, 3($t0)
         \\  sh $t1, 1($t0)
         \\  break
@@ -1314,6 +1430,33 @@ test "callAndGoto emits the libdragon jump-and-continuation idiom" {
     );
 }
 
+test "call then syntax emits a stackless continuation transfer" {
+    try expectAsm(
+        \\fn append() {}
+        \\fn finish() noreturn { @break(); }
+        \\fn test() noreturn {
+        \\  call append() then finish;
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\append:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\finish:
+        \\  break
+        \\
+        \\test:
+        \\  j append
+        \\  addiu $ra, $zero, %lo(finish)
+        \\
+        \\
+    );
+}
+
 test "function call accepts one explicit delay-slot statement" {
     try expectAsm(
         \\fn helper(reg($a0) value: u32) {}
@@ -1501,6 +1644,7 @@ test "vector declarations validate fixed registers and register pairs" {
         \\fn test() {
         \\  reg($v01) a: vec32 = 0;
         \\  reg($v02) b: vec16 = 0;
+        \\  a = 0;
         \\}
     , error.RegisterAlreadyInUse);
 }
@@ -1936,6 +2080,56 @@ test "load emits signed and unsigned byte halfword and word reads" {
     );
 }
 
+test "register declarations infer intrinsic initializer types" {
+    try expectAsm(
+        \\fn test(reg($a0) left: u32, reg($a1) right: u32) noreturn {
+        \\  reg($t0) mask = 255;
+        \\  reg($t1) status = cp0.read(4);
+        \\  reg($t2) ordered = signedLessThan(left, right);
+        \\  reg($v01) accumulator = readVectorAccumulatorHigh();
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 255
+        \\  mfc0 $t1, $4
+        \\  slt $t2, $a0, $a1
+        \\  .word 0x4b00005d # vsar $v01, $v00, $v00
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "register declarations infer types from visible identifiers" {
+    try expectAsm(
+        \\fn test(reg($a0) signed_value: i32) noreturn {
+        \\  reg copy = signed_value;
+        \\  copy >>= 1;
+        \\  reg($v01) vector: vec16 = 0;
+        \\  reg vector_copy = vector;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  or $t0, $a0, $zero
+        \\  sra $t0, $t0, 1
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0108aa # vor $v02, $v01, $v01
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "memory offsets must fit the instruction immediate" {
     try expectAsmError(
         \\fn test() {
@@ -2077,10 +2271,158 @@ test "fixed-register parameters reject conflicting bindings" {
     );
 }
 
+test "pinned registers can be reused after their last use" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) dma_full: u32 = 1;
+        \\  dma_full += 1;
+        \\  reg($t0) transfer_descriptor: u32 = 2;
+        \\  transfer_descriptor += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 1
+        \\  addi $t0, $t0, 1
+        \\  addiu $t0, $zero, 2
+        \\  addi $t0, $t0, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "branch delay slots can reuse a condition's pinned register" {
+    try expectAsm(
+        \\fn target() noreturn { @break(); }
+        \\fn test() noreturn {
+        \\  reg($t0) dma_full: u32 = 0;
+        \\  if(dma_full == 0) @goto(target) delay {
+        \\    reg($t0) transfer_descriptor: u32 = 7;
+        \\  }
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\  break
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 0
+        \\  beqz $t0, target
+        \\  addiu $t0, $zero, 7
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "function parameters require explicit register bindings" {
     try expectParseError(
         \\fn invalid(value: u32) {}
     , .expected_fixed_register_parameter, 1, 12);
+}
+
+test "named ABIs assign reusable parameter registers" {
+    try expectAsm(
+        \\abi command_handler(
+        \\  reg($a0) argument_0: u32,
+        \\  reg($a1) argument_1: u32,
+        \\  reg($v01) vector_argument: vec16,
+        \\);
+        \\fn first(value: u32) using(command_handler) noreturn {
+        \\  value += 1;
+        \\  @break();
+        \\}
+        \\fn second(value: u32, mask: u32) using(command_handler) noreturn {
+        \\  value &= mask;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\first:
+        \\  addi $a0, $a0, 1
+        \\  break
+        \\
+        \\second:
+        \\  and $a0, $a0, $a1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "named ABIs validate parameter count type and explicit registers" {
+    try expectParseError(
+        \\abi one(reg($a0) value: u32);
+        \\fn test(first: u32, second: u32) using(one) {}
+    , .abi_parameter_count_mismatch, 2, 4);
+    try expectParseError(
+        \\abi one(reg($a0) value: u32);
+        \\fn test(value: u16) using(one) {}
+    , .abi_parameter_type_mismatch, 2, 4);
+    try expectParseError(
+        \\abi one(reg($a0) value: u32);
+        \\fn test(reg($a1) value: u32) using(one) {}
+    , .abi_parameter_register_mismatch, 2, 4);
+}
+
+test "typed function pointers validate addresses and support indirect jumps" {
+    try expectAsm(
+        \\abi continuation();
+        \\fn first() using(continuation) noreturn { @break(); }
+        \\fn second() using(continuation) noreturn { @break(); }
+        \\fn dispatch() noreturn {
+        \\  reg($t0) next: fn(continuation) = &first;
+        \\  next = &second;
+        \\  jump(next);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\first:
+        \\  break
+        \\
+        \\second:
+        \\  break
+        \\
+        \\dispatch:
+        \\  addiu $t0, $zero, %lo(first)
+        \\  addiu $t0, $zero, %lo(second)
+        \\  jr $t0
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "typed function pointers reject incompatible function ABIs" {
+    try expectAsmError(
+        \\abi first_abi();
+        \\abi second_abi();
+        \\fn target() using(second_abi) noreturn { @break(); }
+        \\fn dispatch() noreturn {
+        \\  reg next: fn(first_abi) = &target;
+        \\  jump(next);
+        \\}
+    , error.FunctionAbiMismatch);
+    try expectAsmError(
+        \\fn dispatch(reg($t0) address: u32) noreturn {
+        \\  jump(address);
+        \\}
+    , error.TypedJumpRequiresFunctionPointer);
 }
 
 test "gp can be explicitly pinned but is not automatically allocated" {
@@ -3107,6 +3449,82 @@ test "calls may define automatic output arguments in fixed registers" {
         \\test:
         \\  mfc0 $t2, $11
         \\  addi $t2, $t2, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "uninitialized registers require assignment before reads" {
+    try expectAsmError(
+        \\fn test() noreturn {
+        \\  reg value: u32;
+        \\  value += 1;
+        \\  @break();
+        \\}
+    , error.RegisterReadBeforeAssignment);
+
+    try expectAsmError(
+        \\fn test(reg($a0) flag: u32) noreturn {
+        \\  reg value: u32;
+        \\  if(flag != 0) {
+        \\    value = 1;
+        \\  }
+        \\  value += 1;
+        \\  @break();
+        \\}
+    , error.RegisterReadBeforeAssignment);
+}
+
+test "definite assignment accepts all-path and delay-slot definitions" {
+    try expectAsm(
+        \\fn test(reg($a0) flag: u32) noreturn {
+        \\  reg value: u32;
+        \\  if(flag != 0) delay {
+        \\    value = 3;
+        \\  } {
+        \\    value = 1;
+        \\  } else {
+        \\    value = 2;
+        \\  }
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  beq $a0, $zero, LABEL_test_ifelse_0
+        \\  addiu $t0, $zero, 3
+        \\  addiu $t0, $zero, 1
+        \\  j LABEL_test_ifend_0
+        \\  nop
+        \\LABEL_test_ifelse_0:
+        \\  addiu $t0, $zero, 2
+        \\LABEL_test_ifend_0:
+        \\  addi $t0, $t0, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "explicit undefined preserves unchecked register reads" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg value: u32 = undefined;
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addi $t0, $t0, 1
         \\  break
         \\
         \\

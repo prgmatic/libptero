@@ -1,12 +1,21 @@
-pub extern fn resident_command_loop() clobbers() noreturn;
+abi rspq_command(
+    reg($a0) argument_0: u32,
+    reg($a1) argument_1: u32,
+    reg($a2) argument_2: u32,
+    reg($a3) argument_3: u32,
+);
+
+abi continuation();
+
+pub extern fn resident_command_loop() using(continuation) clobbers() noreturn;
 
 pub extern fn resident_rdp_set_buffer(
-    reg($a0) current: i32,
-    reg($a1) start: i32,
-    reg($a2) sentinel: i32,
-) clobbers($at, $t0, $t1, $t2, $t3, $sp) noreturn;
+    current: i32,
+    start: i32,
+    sentinel: i32,
+) using(rspq_command) clobbers($at, $t0, $t1, $t2, $t3, $sp) noreturn;
 
-pub extern fn resident_rdp_append_buffer(reg($a0) current: u32) clobbers($t0) noreturn;
+pub extern fn resident_rdp_append_buffer(current: i32) using(rspq_command) clobbers($t0) noreturn;
 
 pub extern fn resident_return_to_caller() clobbers() noreturn;
 pub extern fn resident_assertion_failed() clobbers() noreturn;

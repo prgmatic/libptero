@@ -86,7 +86,7 @@ fn exportedSymbols(
                 "resident_rdp_append_buffer"
             else if (std.mem.endsWith(u8, name, "_dma__returnToCaller"))
                 "resident_return_to_caller"
-            else if (std.mem.eql(u8, name, "LABEL_commandLoop_invalid_command_0"))
+            else if (std.mem.eql(u8, name, "invalidCommand"))
                 "resident_assertion_failed"
             else
                 null;

@@ -9,6 +9,7 @@ pub const Function = struct {
     inline_call: bool,
     external: bool = false,
     no_return: bool,
+    abi_name: ?[]const u8 = null,
     command_indices: []const u8 = &.{},
     command_sizes: []const u8 = &.{},
     has_clobber_contract: bool = false,
@@ -42,6 +43,14 @@ pub const Value = union(enum) {
     signed_less_than: struct { lhs: ValueRef, rhs: ValueRef },
     number: i64,
     load: Load,
+    scalar_expression: *ScalarExpression,
+    function_address: FunctionRef,
+};
+
+pub const ScalarExpression = struct {
+    lhs: Value,
+    op: AssignOp,
+    rhs: Value,
 };
 
 pub const VectorShift = struct {
@@ -254,9 +263,11 @@ pub const VectorRegister = enum(u5) {
 pub const VarDecl = struct {
     is_const: bool,
     is_reserved: bool = false,
+    allow_undefined_read: bool = false,
     data_type: DataType,
     reg: ?Register,
     vector_reg: ?VectorRegister = null,
+    function_abi: ?[]const u8 = null,
     name: []const u8,
     value: ?Value,
 };
@@ -293,6 +304,7 @@ pub const Builtin = union(enum) {
     jump: struct {
         address: ValueRef,
         delay_slot: ?[]Statement,
+        typed: bool = false,
     },
     return_from_function: ?[]Statement,
     direct_goto: struct {
@@ -478,7 +490,13 @@ pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) 
 fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
     for (statements) |statement| {
         switch (statement) {
-            .assignment => |assignment| if (assignment.continuation.len != 0) allocator.free(assignment.continuation),
+            .assignment => |assignment| {
+                freeValue(allocator, assignment.lhs);
+                if (assignment.rhs) |rhs| freeValue(allocator, rhs);
+                for (assignment.continuation) |step| freeValue(allocator, step.rhs);
+                if (assignment.continuation.len != 0) allocator.free(assignment.continuation);
+            },
+            .var_decl => |declaration| if (declaration.value) |value| freeValue(allocator, value),
             .packed_struct_decl => |declaration| allocator.free(declaration.fields),
             .data_block, .bss_block, .state_block => |declarations| {
                 for (declarations) |declaration| allocator.free(declaration.values);
@@ -518,4 +536,15 @@ fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
         }
     }
     allocator.free(statements);
+}
+
+fn freeValue(allocator: std.mem.Allocator, value: Value) void {
+    switch (value) {
+        .scalar_expression => |expression| {
+            freeValue(allocator, expression.lhs);
+            freeValue(allocator, expression.rhs);
+            allocator.destroy(expression);
+        },
+        else => {},
+    }
 }

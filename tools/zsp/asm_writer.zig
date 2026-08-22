@@ -19,12 +19,27 @@ const alloc_vector_registers = [_]ast.VectorRegister{
     .v22, .v23, .v24, .v25, .v26, .v27, .v28,
 };
 
+const expression_temporary_names = [_][]const u8{
+    "__expression_temporary_0",
+    "__expression_temporary_1",
+    "__expression_temporary_2",
+    "__expression_temporary_3",
+    "__expression_temporary_4",
+    "__expression_temporary_5",
+    "__expression_temporary_6",
+    "__expression_temporary_7",
+};
+
 pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     try writer.writeAll(".set noreorder\n");
     try writer.writeAll(".set noat\n");
 
     var clobbers = try FunctionClobberRegistry.init(functions);
-    var top_level_context = FunctionContext{ .label_prefix = "top_level", .clobbers = &clobbers };
+    var top_level_context = FunctionContext{
+        .label_prefix = "top_level",
+        .clobbers = &clobbers,
+        .functions = functions,
+    };
     try writeStorageBlocks(writer, functions, &top_level_context);
     try writeCommandTable(writer, functions, &top_level_context);
     try writer.writeAll(".text\n\n");
@@ -304,7 +319,7 @@ fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) 
     for (parameters) |parameter| {
         if (isVectorType(parameter.data_type)) {
             const vector_reg = parameter.vector_reg orelse return error.ExpectedVectorRegister;
-            try validateVectorRegisterBinding(context, parameter.data_type, vector_reg);
+            try validateVectorRegisterBinding(context, parameter.data_type, vector_reg, null);
         } else {
             const reg = parameter.reg orelse return error.InvalidScalarRegister;
             if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
@@ -320,6 +335,8 @@ fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) 
             .reg = parameter.reg,
             .vector_reg = parameter.vector_reg,
             .constant = null,
+            .first_live = context.firstLive(parameter.name),
+            .last_use = context.lastUse(parameter.name),
         });
     }
 }
@@ -329,9 +346,11 @@ const Symbol = struct {
     data_type: DataType,
     reg: ?Register,
     vector_reg: ?ast.VectorRegister = null,
+    function_abi: ?[]const u8 = null,
     constant: ?i64,
     data_label: ?[]const u8 = null,
     automatic: bool = false,
+    first_live: usize = 0,
     last_use: usize = std.math.maxInt(usize),
 };
 
@@ -359,7 +378,7 @@ const FunctionClobberRegistry = struct {
             result.len += 1;
         }
         for (functions) |function| {
-            var context = FunctionContext{ .label_prefix = function.name };
+            var context = FunctionContext{ .label_prefix = function.name, .functions = functions };
             try context.prepareLifetimes(functions, function.parameters, function.statements);
             for (context.lifetime_calls[0..context.lifetime_call_count]) |call| {
                 const target = result.findPtr(call.target) orelse continue;
@@ -408,6 +427,7 @@ const FunctionClobberRegistry = struct {
                 var context = FunctionContext{
                     .label_prefix = function.name,
                     .clobbers = &previous,
+                    .functions = functions,
                     .function_forbidden_scalar = direct[index].forbidden_scalar,
                     .function_forbidden_vector = direct[index].forbidden_vector,
                 };
@@ -654,7 +674,7 @@ fn simulateAutomaticRegisters(
                     });
                 } else if (isVectorType(decl.data_type)) {
                     const reg = decl.vector_reg orelse try context.allocVectorRegister(decl.data_type, decl.name);
-                    try validateVectorRegisterBinding(context, decl.data_type, reg);
+                    try validateVectorRegisterBinding(context, decl.data_type, reg, decl.name);
                     clobber.vector |= vectorRegisterBit(reg);
                     if (decl.data_type == .vec32) {
                         clobber.vector |= vectorRegisterBit(nextVectorRegister(reg) orelse
@@ -665,22 +685,40 @@ fn simulateAutomaticRegisters(
                         .data_type = decl.data_type,
                         .reg = null,
                         .vector_reg = reg,
+                        .function_abi = decl.function_abi,
                         .constant = null,
                         .automatic = decl.vector_reg == null,
+                        .first_live = context.firstLive(decl.name),
                         .last_use = context.lastUse(decl.name),
                     });
                 } else {
                     const reg = decl.reg orelse try context.allocRegister(decl.data_type, decl.name);
-                    if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
+                    if (context.scalarLifetimeConflicts(decl.name, reg)) return error.RegisterAlreadyInUse;
                     clobber.scalar |= registerBit(reg);
                     try context.add(.{
                         .name = decl.name,
                         .data_type = decl.data_type,
                         .reg = reg,
+                        .function_abi = decl.function_abi,
                         .constant = null,
                         .automatic = decl.reg == null,
-                        .last_use = context.lastUse(decl.name),
+                        .first_live = if (decl.is_reserved) 0 else context.firstLive(decl.name),
+                        .last_use = if (decl.is_reserved)
+                            std.math.maxInt(usize)
+                        else
+                            context.lastUse(decl.name),
                     });
+                }
+            },
+            .assignment => |assignment| {
+                const destination = try context.lookup(assignment.destination);
+                if (!isVectorType(destination.data_type)) {
+                    try simulateExpressionTemporaries(
+                        context,
+                        assignment.lhs,
+                        destination,
+                        clobber,
+                    );
                 }
             },
             .goto => |branch| if (branch.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
@@ -727,11 +765,53 @@ fn simulateAutomaticRegisters(
     }
 }
 
+fn simulateExpressionTemporaries(
+    context: *FunctionContext,
+    value: ast.Value,
+    destination: Symbol,
+    clobber: *FunctionClobber,
+) !void {
+    const expression = switch (value) {
+        .scalar_expression => |expression| expression,
+        else => return,
+    };
+    if (!isPureScalarExpression(value)) return error.SideEffectsNotAllowedInScalarExpression;
+    try simulateExpressionTemporaries(context, expression.lhs, destination, clobber);
+    if (expression.rhs == .scalar_expression or
+        (expression.lhs == .scalar_expression and valueReadsName(expression.rhs, destination.name)))
+    {
+        const temporary = try context.pushExpressionTemporary(destination.data_type);
+        defer context.popExpressionTemporary(temporary[0]);
+        clobber.scalar |= registerBit(temporary[1].reg.?);
+        try simulateExpressionTemporaries(context, expression.rhs, temporary[1], clobber);
+    }
+}
+
+fn isPureScalarExpression(value: ast.Value) bool {
+    return switch (value) {
+        .ident, .number => true,
+        .scalar_expression => |expression| isPureScalarExpression(expression.lhs) and
+            isPureScalarExpression(expression.rhs),
+        else => false,
+    };
+}
+
+fn valueReadsName(value: ast.Value, name: []const u8) bool {
+    return switch (value) {
+        .ident => |identifier| std.mem.eql(u8, identifier, name),
+        .scalar_expression => |expression| valueReadsName(expression.lhs, name) or
+            valueReadsName(expression.rhs, name),
+        else => false,
+    };
+}
+
 const Lifetime = struct {
     name: []const u8,
     declaration: usize,
     last_use: usize,
     automatic: bool,
+    initially_defined: bool,
+    first_live: usize,
     data_type: DataType,
     fixed_reg: ?Register = null,
     fixed_vector_reg: ?ast.VectorRegister = null,
@@ -750,7 +830,7 @@ const LifetimeCall = struct {
     setup_scalar: u32 = 0,
     setup_vector: u32 = 0,
 };
-const LifetimeEventKind = enum { read, write };
+const LifetimeEventKind = enum { read, write, output_write };
 const LifetimeEvent = struct { name: []const u8, position: usize, kind: LifetimeEventKind };
 const EmissionLoop = struct {
     name: ?[]const u8,
@@ -762,6 +842,7 @@ const FlowLoop = struct { name: ?[]const u8, continue_position: usize, break_pos
 
 const FunctionContext = struct {
     label_prefix: []const u8,
+    functions: []const ast.Function = &.{},
     symbols: [128]Symbol = undefined,
     symbol_count: usize = 0,
     next_label: usize = 0,
@@ -793,6 +874,7 @@ const FunctionContext = struct {
     shared_exit_label: ?usize = null,
     shared_exit_delay: ?[]const ast.Statement = null,
     shared_exit_consumed: bool = false,
+    expression_temporary_depth: usize = 0,
 
     fn add(self: *FunctionContext, symbol: Symbol) !void {
         if (self.symbol_count >= self.symbols.len) return error.TooManySymbols;
@@ -805,6 +887,7 @@ const FunctionContext = struct {
         var result = FunctionContext{
             .label_prefix = label_prefix,
             .clobbers = self.clobbers,
+            .functions = self.functions,
             .function_forbidden_scalar = self.function_forbidden_scalar,
             .function_forbidden_vector = self.function_forbidden_vector,
         };
@@ -834,6 +917,7 @@ const FunctionContext = struct {
                 parameter.name,
                 0,
                 false,
+                true,
                 parameter.data_type,
                 parameter.reg,
                 parameter.vector_reg,
@@ -852,6 +936,7 @@ const FunctionContext = struct {
         buildStatementFlow(self, statements, &position, 0);
         position = 0;
         try applyCallRequirements(self, functions, statements, &position);
+        try self.validateDefiniteAssignments();
         self.applyCallClobbers();
     }
 
@@ -860,6 +945,7 @@ const FunctionContext = struct {
         name: []const u8,
         position: usize,
         automatic: bool,
+        initially_defined: bool,
         data_type: DataType,
         fixed_reg: ?Register,
         fixed_vector_reg: ?ast.VectorRegister,
@@ -873,11 +959,24 @@ const FunctionContext = struct {
             .declaration = position,
             .last_use = position,
             .automatic = automatic,
+            .initially_defined = initially_defined,
+            .first_live = if (initially_defined) position else std.math.maxInt(usize),
             .data_type = data_type,
             .fixed_reg = fixed_reg,
             .fixed_vector_reg = fixed_vector_reg,
         };
         self.lifetime_count += 1;
+    }
+
+    fn validateDefiniteAssignments(self: *const FunctionContext) !void {
+        if (!self.lifetime_reuse) return;
+        for (self.lifetimes[0..self.lifetime_count]) |lifetime| {
+            if (lifetime.initially_defined) continue;
+            var visited: [2049]bool = @splat(false);
+            if (self.valueReadBeforeWrite(lifetime.name, lifetime.declaration, &visited)) {
+                return error.RegisterReadBeforeAssignment;
+            }
+        }
     }
 
     fn addLifetimeLabel(self: *FunctionContext, name: []const u8, position: usize) void {
@@ -976,7 +1075,25 @@ const FunctionContext = struct {
 
     fn writeLifetime(self: *FunctionContext, name: []const u8, position: usize) void {
         self.addLifetimeEvent(name, position, .write);
+        self.startLifetime(name, position);
         self.extendLifetime(name, position);
+    }
+
+    fn writeOutputLifetime(self: *FunctionContext, name: []const u8, position: usize) void {
+        self.addLifetimeEvent(name, position, .output_write);
+        self.startLifetime(name, position);
+        self.extendLifetime(name, position);
+    }
+
+    fn startLifetime(self: *FunctionContext, name: []const u8, position: usize) void {
+        var index = self.lifetime_count;
+        while (index > 0) {
+            index -= 1;
+            if (std.mem.eql(u8, self.lifetimes[index].name, name)) {
+                self.lifetimes[index].first_live = @min(self.lifetimes[index].first_live, position);
+                return;
+            }
+        }
     }
 
     fn extendLifetime(self: *FunctionContext, name: []const u8, position: usize) void {
@@ -1014,9 +1131,13 @@ const FunctionContext = struct {
         if (position == 0 or position > self.flow_statement_count or visited[position]) return false;
         visited[position] = true;
         for (self.lifetime_events[0..self.lifetime_event_count]) |event| {
+            if (event.position == position and event.kind == .output_write and
+                std.mem.eql(u8, event.name, name)) return false;
+        }
+        for (self.lifetime_events[0..self.lifetime_event_count]) |event| {
             if (event.position != position or !std.mem.eql(u8, event.name, name)) continue;
             if (event.kind == .read) return true;
-            if (event.kind == .write) return false;
+            if (event.kind == .write or event.kind == .output_write) return false;
         }
         for (self.flow_successors[position][0..self.flow_successor_counts[position]]) |successor| {
             if (self.valueReadBeforeWrite(name, successor, visited)) return true;
@@ -1026,7 +1147,7 @@ const FunctionContext = struct {
 
     fn valueDefinedAt(self: *const FunctionContext, name: []const u8, position: usize) bool {
         for (self.lifetime_events[0..self.lifetime_event_count]) |event| {
-            if (event.position == position and event.kind == .write and
+            if (event.position == position and (event.kind == .write or event.kind == .output_write) and
                 std.mem.eql(u8, event.name, name)) return true;
         }
         return false;
@@ -1040,6 +1161,16 @@ const FunctionContext = struct {
             if (std.mem.eql(u8, self.lifetimes[index].name, name)) return self.lifetimes[index].last_use;
         }
         return std.math.maxInt(usize);
+    }
+
+    fn firstLive(self: *const FunctionContext, name: []const u8) usize {
+        if (!self.lifetime_reuse) return 0;
+        var index = self.lifetime_count;
+        while (index > 0) {
+            index -= 1;
+            if (std.mem.eql(u8, self.lifetimes[index].name, name)) return self.lifetimes[index].first_live;
+        }
+        return 0;
     }
 
     fn requireRegister(
@@ -1131,15 +1262,46 @@ const FunctionContext = struct {
                 return error.AutomaticRegisterClobberedByCall;
             }
             if (self.registerForbidden(name, reg)) return error.AutomaticRegisterClobberedByCall;
-            if (self.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
+            if (self.scalarLifetimeConflicts(name, reg)) return error.RegisterAlreadyInUse;
             return reg;
         }
         for (alloc_scalar_registers) |reg| {
             if ((self.function_forbidden_scalar & registerBit(reg)) != 0) continue;
             if (self.registerForbidden(name, reg)) continue;
-            if (!self.isRegisterInUse(reg)) return reg;
+            if (!self.scalarLifetimeConflicts(name, reg)) return reg;
         }
         return error.OutOfFreeRegisters;
+    }
+
+    fn allocExpressionRegister(self: *const FunctionContext) !Register {
+        for (alloc_scalar_registers) |reg| {
+            if ((self.function_forbidden_scalar & registerBit(reg)) != 0) continue;
+            if (!self.isRegisterInUse(reg)) return reg;
+        }
+        return error.OutOfFreeRegistersInExpression;
+    }
+
+    fn pushExpressionTemporary(self: *FunctionContext, data_type: DataType) !struct { usize, Symbol } {
+        if (self.expression_temporary_depth >= expression_temporary_names.len) {
+            return error.ExpressionNestingTooDeep;
+        }
+        const scope = self.pushScope();
+        const name = expression_temporary_names[self.expression_temporary_depth];
+        self.expression_temporary_depth += 1;
+        const symbol = Symbol{
+            .name = name,
+            .data_type = data_type,
+            .reg = try self.allocExpressionRegister(),
+            .constant = null,
+            .first_live = self.statement_position,
+        };
+        try self.add(symbol);
+        return .{ scope, symbol };
+    }
+
+    fn popExpressionTemporary(self: *FunctionContext, scope: usize) void {
+        self.popScope(scope);
+        self.expression_temporary_depth -= 1;
     }
 
     fn allocVectorRegister(self: *const FunctionContext, data_type: DataType, name: []const u8) !ast.VectorRegister {
@@ -1149,18 +1311,18 @@ const FunctionContext = struct {
                 return error.AutomaticRegisterClobberedByCall;
             }
             if (self.vectorRegisterForbidden(name, reg)) return error.AutomaticRegisterClobberedByCall;
-            try validateVectorRegisterBinding(self, data_type, reg);
+            try validateVectorRegisterBinding(self, data_type, reg, name);
             return reg;
         }
         for (alloc_vector_registers) |reg| {
             if ((self.function_forbidden_vector & vectorRegisterBit(reg)) != 0) continue;
             if (self.vectorRegisterForbidden(name, reg)) continue;
-            if (self.isVectorRegisterInUse(reg)) continue;
+            if (self.vectorLifetimeConflicts(name, reg)) continue;
             if (data_type == .vec32) {
                 const second = nextVectorRegister(reg) orelse continue;
                 if (@intFromEnum(second) >= 29) continue;
                 if (self.vectorRegisterForbidden(name, second)) continue;
-                if (self.isVectorRegisterInUse(second)) continue;
+                if (self.vectorLifetimeConflicts(name, second)) continue;
             }
             return reg;
         }
@@ -1169,7 +1331,7 @@ const FunctionContext = struct {
 
     fn isRegisterInUse(self: *const FunctionContext, reg: Register) bool {
         for (self.symbols[0..self.symbol_count]) |symbol| {
-            if (symbol.automatic and symbol.last_use < self.statement_position) continue;
+            if (symbol.last_use < self.statement_position) continue;
             if (symbol.reg) |symbol_reg| {
                 if (symbol_reg == reg) return true;
             }
@@ -1177,12 +1339,35 @@ const FunctionContext = struct {
         return false;
     }
 
+    fn scalarLifetimeConflicts(self: *const FunctionContext, name: []const u8, reg: Register) bool {
+        const first_live = self.firstLive(name);
+        const last_use = self.lastUse(name);
+        for (self.symbols[0..self.symbol_count]) |symbol| {
+            const symbol_reg = symbol.reg orelse continue;
+            if (symbol_reg != reg) continue;
+            if (first_live <= symbol.last_use and symbol.first_live <= last_use) return true;
+        }
+        return false;
+    }
+
     fn isVectorRegisterInUse(self: *const FunctionContext, reg: ast.VectorRegister) bool {
         for (self.symbols[0..self.symbol_count]) |symbol| {
-            if (symbol.automatic and symbol.last_use < self.statement_position) continue;
+            if (symbol.last_use < self.statement_position) continue;
             const symbol_reg = symbol.vector_reg orelse continue;
             if (symbol_reg == reg) return true;
             if (symbol.data_type == .vec32 and nextVectorRegister(symbol_reg) == reg) return true;
+        }
+        return false;
+    }
+
+    fn vectorLifetimeConflicts(self: *const FunctionContext, name: []const u8, reg: ast.VectorRegister) bool {
+        const first_live = self.firstLive(name);
+        const last_use = self.lastUse(name);
+        for (self.symbols[0..self.symbol_count]) |symbol| {
+            const symbol_reg = symbol.vector_reg orelse continue;
+            const occupies = symbol_reg == reg or
+                (symbol.data_type == .vec32 and nextVectorRegister(symbol_reg) == reg);
+            if (occupies and first_live <= symbol.last_use and symbol.first_live <= last_use) return true;
         }
         return false;
     }
@@ -1236,12 +1421,15 @@ fn scanStatementLifetimes(context: *FunctionContext, statements: []const ast.Sta
                     decl.name,
                     current,
                     decl.reg == null and decl.vector_reg == null,
+                    decl.value != null or decl.allow_undefined_read,
                     decl.data_type,
                     decl.reg,
                     decl.vector_reg,
                 );
                 if (decl.value) |value| scanValueLifetime(context, value, current);
-                context.writeLifetime(decl.name, current);
+                if (decl.value != null or decl.allow_undefined_read) {
+                    context.writeLifetime(decl.name, current);
+                }
             },
             .assignment => |assignment| {
                 scanValueLifetime(context, assignment.lhs, current);
@@ -1570,6 +1758,10 @@ fn scanValueLifetime(context: *FunctionContext, value: ast.Value, position: usiz
             scanValueRefLifetime(context, load.address, position);
             if (load.label_offset) |name| context.touchLifetime(name, position);
         },
+        .scalar_expression => |expression| {
+            scanValueLifetime(context, expression.lhs, position);
+            scanValueLifetime(context, expression.rhs, position);
+        },
         else => {},
     }
 }
@@ -1628,7 +1820,7 @@ fn applyCallRequirements(
                                                 parameter_index,
                                                 &visited,
                                                 &visited_count,
-                                            )) context.writeLifetime(name, current);
+                                            )) context.writeOutputLifetime(name, current);
                                         } else {
                                             addParameterSetupClobber(context, current, parameter);
                                         }
@@ -2122,7 +2314,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
     if (isVectorType(decl.data_type)) {
         if (decl.reg != null) return error.InvalidVectorRegister;
         const vector_reg = decl.vector_reg orelse try context.allocVectorRegister(decl.data_type, decl.name);
-        try validateVectorRegisterBinding(context, decl.data_type, vector_reg);
+        try validateVectorRegisterBinding(context, decl.data_type, vector_reg, decl.name);
         if (decl.value) |value| {
             try writeVectorInitialValue(writer, context, vector_reg, decl.data_type, value);
         }
@@ -2131,8 +2323,10 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
             .data_type = decl.data_type,
             .reg = null,
             .vector_reg = vector_reg,
+            .function_abi = decl.function_abi,
             .constant = null,
             .automatic = decl.vector_reg == null,
+            .first_live = context.firstLive(decl.name),
             .last_use = context.lastUse(decl.name),
         });
         return;
@@ -2145,7 +2339,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
     if ((!decl.is_reserved and reg == compiler_scratch_2) or reg == command_return) {
         return error.RegisterReservedForBackend;
     }
-    if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
+    if (context.scalarLifetimeConflicts(decl.name, reg)) return error.RegisterAlreadyInUse;
     if (decl.value) |value| switch (value) {
         .load => |load| {
             if (!isCompatibleScalarLoad(decl.data_type, load.data_type)) return error.RegisterTypeMismatch;
@@ -2164,10 +2358,16 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
                 try loadImmediateInto(writer, reg, source.constant orelse return error.ExpectedConstant);
             }
         },
-        .vector_control_read, .hardware_read, .scalar_comparison => try writeSet(
+        .vector_control_read, .hardware_read, .scalar_comparison, .signed_less_than, .function_address => try writeSet(
             writer,
             context,
-            .{ .name = decl.name, .data_type = decl.data_type, .reg = reg, .constant = null },
+            .{
+                .name = decl.name,
+                .data_type = decl.data_type,
+                .reg = reg,
+                .function_abi = decl.function_abi,
+                .constant = null,
+            },
             reg,
             value,
         ),
@@ -2177,9 +2377,14 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         .name = decl.name,
         .data_type = decl.data_type,
         .reg = reg,
+        .function_abi = decl.function_abi,
         .constant = null,
         .automatic = decl.reg == null,
-        .last_use = context.lastUse(decl.name),
+        .first_live = if (decl.is_reserved) 0 else context.firstLive(decl.name),
+        .last_use = if (decl.is_reserved)
+            std.math.maxInt(usize)
+        else
+            context.lastUse(decl.name),
     });
 }
 
@@ -2187,11 +2392,20 @@ fn validateVectorRegisterBinding(
     context: *const FunctionContext,
     data_type: DataType,
     vector_reg: ast.VectorRegister,
+    lifetime_name: ?[]const u8,
 ) !void {
-    if (context.isVectorRegisterInUse(vector_reg)) return error.RegisterAlreadyInUse;
+    const first_conflicts = if (lifetime_name) |name|
+        context.vectorLifetimeConflicts(name, vector_reg)
+    else
+        context.isVectorRegisterInUse(vector_reg);
+    if (first_conflicts) return error.RegisterAlreadyInUse;
     if (data_type == .vec32) {
         const second = nextVectorRegister(vector_reg) orelse return error.InvalidVectorRegisterPair;
-        if (context.isVectorRegisterInUse(second)) return error.RegisterAlreadyInUse;
+        const second_conflicts = if (lifetime_name) |name|
+            context.vectorLifetimeConflicts(name, second)
+        else
+            context.isVectorRegisterInUse(second);
+        if (second_conflicts) return error.RegisterAlreadyInUse;
     }
 }
 
@@ -2278,12 +2492,25 @@ fn writeVectorInitialValue(
                 try writeVectorOp(writer, .vxor, fraction, fraction, fraction, 0);
             }
         },
+        .scalar_expression => return error.UnsupportedScalarExpressionTree,
+        .function_address => return error.RegisterTypeMismatch,
     }
 }
 
 fn writeAssignment(writer: *std.Io.Writer, context: *FunctionContext, assignment: ast.Assignment) !void {
     const destination = try context.lookup(assignment.destination);
     if (isVectorType(destination.data_type)) {
+        if (assignment.lhs == .scalar_expression) {
+            const expression = assignment.lhs.scalar_expression;
+            if (expression.lhs == .scalar_expression or expression.rhs == .scalar_expression) {
+                return error.UnsupportedVectorExpressionTree;
+            }
+            var flattened = assignment;
+            flattened.lhs = expression.lhs;
+            flattened.op = expression.op;
+            flattened.rhs = expression.rhs;
+            return writeVectorAssignment(writer, context, destination, flattened);
+        }
         if (assignment.continuation.len != 0) return error.UnsupportedVectorExpressionTree;
         return writeVectorAssignment(writer, context, destination, assignment);
     }
@@ -2292,7 +2519,11 @@ fn writeAssignment(writer: *std.Io.Writer, context: *FunctionContext, assignment
     switch (assignment.op) {
         .set => {
             if (assignment.rhs != null) return error.InvalidAssignment;
-            try writeSet(writer, context, destination, destination_reg, assignment.lhs);
+            if (assignment.lhs == .scalar_expression) {
+                try writeScalarExpression(writer, context, destination, destination_reg, assignment.lhs.scalar_expression);
+            } else {
+                try writeSet(writer, context, destination, destination_reg, assignment.lhs);
+            }
         },
         .bit_not => {
             if (assignment.rhs != null) return error.InvalidAssignment;
@@ -2465,6 +2696,8 @@ fn writeVectorAssignment(
         .hardware_read => return error.InvalidAssignment,
         .scalar_comparison => return error.InvalidAssignment,
         .signed_less_than => return error.InvalidAssignment,
+        .scalar_expression => return error.UnsupportedVectorExpressionTree,
+        .function_address => return error.RegisterTypeMismatch,
         .number => return error.VectorImmediateUnsupported,
         .load => |load| {
             if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
@@ -2760,6 +2993,7 @@ fn writeSet(
             const source = try context.lookup(name);
             if (source.reg) |source_reg| {
                 try expectSameType(destination, source);
+                try expectSameFunctionAbi(destination, source);
                 try writer.print("  or {s}, {s}, {s}\n", .{
                     regName(destination_reg),
                     regName(source_reg),
@@ -2820,7 +3054,136 @@ fn writeSet(
             if (!isCompatibleScalarLoad(destination.data_type, load.data_type)) return error.RegisterTypeMismatch;
             try writeLoadInto(writer, context, destination_reg, load);
         },
+        .scalar_expression => return error.UnsupportedScalarExpressionTree,
+        .function_address => |target| {
+            const expected_abi = destination.function_abi orelse
+                return error.FunctionAddressRequiresTypedRegister;
+            if (target.module != null) return error.UnresolvedModuleCall;
+            const function = findFunction(context.functions, target.name) orelse
+                return error.UnknownFunction;
+            const actual_abi = function.abi_name orelse return error.FunctionHasNoAbi;
+            if (!std.mem.eql(u8, expected_abi, actual_abi)) return error.FunctionAbiMismatch;
+            try writer.print("  addiu {s}, $zero, %lo({s})\n", .{
+                regName(destination_reg), target.name,
+            });
+        },
     }
+}
+
+fn expectSameFunctionAbi(left: Symbol, right: Symbol) !void {
+    if (left.function_abi == null and right.function_abi == null) return;
+    if (left.function_abi == null or right.function_abi == null or
+        !std.mem.eql(u8, left.function_abi.?, right.function_abi.?))
+    {
+        return error.FunctionAbiMismatch;
+    }
+}
+
+fn writeScalarExpression(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    destination_reg: Register,
+    expression: *const ast.ScalarExpression,
+) anyerror!void {
+    if (!isPureScalarExpression(.{ .scalar_expression = @constCast(expression) })) {
+        return error.SideEffectsNotAllowedInScalarExpression;
+    }
+
+    const needs_rhs_temporary = expression.rhs == .scalar_expression or
+        (expression.lhs == .scalar_expression and valueReadsName(expression.rhs, destination.name));
+    if (needs_rhs_temporary) {
+        const temporary = try context.pushExpressionTemporary(destination.data_type);
+        defer context.popExpressionTemporary(temporary[0]);
+        const temporary_symbol = temporary[1];
+        const temporary_reg = temporary_symbol.reg.?;
+        if (expression.rhs == .scalar_expression) {
+            try writeScalarExpression(
+                writer,
+                context,
+                temporary_symbol,
+                temporary_reg,
+                expression.rhs.scalar_expression,
+            );
+        } else {
+            try writeSet(writer, context, temporary_symbol, temporary_reg, expression.rhs);
+        }
+        if (expression.lhs != .scalar_expression and expression.lhs != .number) {
+            return writeBinary(
+                writer,
+                context,
+                destination,
+                destination_reg,
+                expression.lhs,
+                expression.op,
+                .{ .ident = temporary_symbol.name },
+            );
+        }
+        try writeScalarExpressionLhs(writer, context, destination, destination_reg, expression.lhs);
+        return writeBinary(
+            writer,
+            context,
+            destination,
+            destination_reg,
+            .{ .ident = destination.name },
+            expression.op,
+            .{ .ident = temporary_symbol.name },
+        );
+    }
+
+    if (expression.lhs == .scalar_expression) {
+        try writeScalarExpression(
+            writer,
+            context,
+            destination,
+            destination_reg,
+            expression.lhs.scalar_expression,
+        );
+        return writeBinary(
+            writer,
+            context,
+            destination,
+            destination_reg,
+            .{ .ident = destination.name },
+            expression.op,
+            expression.rhs,
+        );
+    }
+
+    if (expression.lhs == .number) {
+        try writeSet(writer, context, destination, destination_reg, expression.lhs);
+        return writeBinary(
+            writer,
+            context,
+            destination,
+            destination_reg,
+            .{ .ident = destination.name },
+            expression.op,
+            expression.rhs,
+        );
+    }
+    return writeBinary(
+        writer,
+        context,
+        destination,
+        destination_reg,
+        expression.lhs,
+        expression.op,
+        expression.rhs,
+    );
+}
+
+fn writeScalarExpressionLhs(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    destination_reg: Register,
+    lhs: ast.Value,
+) anyerror!void {
+    if (lhs == .scalar_expression) {
+        return writeScalarExpression(writer, context, destination, destination_reg, lhs.scalar_expression);
+    }
+    return writeSet(writer, context, destination, destination_reg, lhs);
 }
 
 fn isCompatibleScalarLoad(destination: DataType, source: DataType) bool {
@@ -2924,6 +3287,8 @@ fn writeBitNot(
         .signed_less_than => return error.BitNotRequiresRegister,
         .number => return error.BitNotRequiresRegister,
         .load => return error.BitNotRequiresRegister,
+        .scalar_expression => return error.BitNotRequiresRegister,
+        .function_address => return error.BitNotRequiresRegister,
     };
     try expectSameType(destination, source);
     const source_reg = source.reg orelse return error.BitNotRequiresRegister;
@@ -2982,6 +3347,8 @@ fn writeBinary(
         .signed_less_than => return error.ArithmeticLhsMustBeRegister,
         .number => return error.ArithmeticLhsMustBeRegister,
         .load => return error.ArithmeticLhsMustBeRegister,
+        .scalar_expression => return error.ArithmeticLhsMustBeRegister,
+        .function_address => return error.ArithmeticLhsMustBeRegister,
     };
     try expectSameType(destination, lhs);
     const lhs_reg = lhs.reg orelse return error.ArithmeticLhsMustBeRegister;
@@ -3027,6 +3394,8 @@ fn writeBinary(
         .scalar_comparison => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .signed_less_than => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .load => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .scalar_expression => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .function_address => return error.ArithmeticRhsMustBeRegisterOrNumber,
     }
 }
 
@@ -3130,6 +3499,8 @@ fn writePowerOfTwoMath(
         .scalar_comparison => return error.PowerOfTwoConstantRequired,
         .signed_less_than => return error.PowerOfTwoConstantRequired,
         .load => return error.PowerOfTwoConstantRequired,
+        .scalar_expression => return error.PowerOfTwoConstantRequired,
+        .function_address => return error.PowerOfTwoConstantRequired,
     };
     if (value <= 0 or value > std.math.maxInt(u32)) return error.PowerOfTwoConstantRequired;
     const unsigned: u32 = @intCast(value);
@@ -3200,6 +3571,8 @@ fn writeShift(
         .scalar_comparison => return error.ShiftAmountMustBeRegisterOrNumber,
         .signed_less_than => return error.ShiftAmountMustBeRegisterOrNumber,
         .load => return error.ShiftAmountMustBeRegisterOrNumber,
+        .scalar_expression => return error.ShiftAmountMustBeRegisterOrNumber,
+        .function_address => return error.ShiftAmountMustBeRegisterOrNumber,
     }
 }
 
@@ -3615,6 +3988,7 @@ fn writeCall(
             .label_prefix = context.label_prefix,
             .next_label = context.next_label,
             .clobbers = context.clobbers,
+            .functions = functions,
             .function_forbidden_scalar = context.function_forbidden_scalar,
             .function_forbidden_vector = context.function_forbidden_vector,
         };
@@ -3704,6 +4078,14 @@ fn writeBuiltin(
         else
             try writer.print("  break 0x{x}\n", .{code}),
         .jump => |jump| {
+            if (jump.typed) {
+                const address_name = switch (jump.address) {
+                    .ident => |name| name,
+                    else => return error.TypedJumpRequiresFunctionPointer,
+                };
+                const address = try context.lookup(address_name);
+                if (address.function_abi == null) return error.TypedJumpRequiresFunctionPointer;
+            }
             const address_reg = try valueAsAddressReg(writer, context, jump.address);
             try writer.print("  jr {s}\n", .{regName(address_reg)});
             try writeDelaySlot(writer, functions, context, jump.delay_slot);
@@ -3942,6 +4324,7 @@ fn writeLabeledBlock(
         false
     else switch (block.statements[block.statements.len - 1]) {
         .conditional_direct_goto => |branch| branch.delay_slot == null,
+        .goto => |branch| branch.delay_slot == null,
         .break_loop => |transfer| transfer.delay_slot == null,
         else => false,
     };
@@ -4083,8 +4466,7 @@ fn writeIf(
             inverse.op = invertComparison(inverse.op);
             try writeConditionBranchFalse(writer, context, inverse, target.break_suffix, target.label, delay_slot == null);
             try writeStructuredDelaySlot(writer, functions, context, delay_slot);
-            if (context.track_statement_position) context.statement_position += 1 +
-                (if (transfer.delay_slot) |items| countFlowStatements(items) else 0);
+            if (context.track_statement_position) context.statement_position += 1;
             return;
         }
         return error.UnknownLoopLabel;
@@ -4180,6 +4562,8 @@ fn writeConditionBranchFalse(
             rhs_immediate = rhs.constant orelse return error.ExpectedConstant;
         },
         .load => return error.ConditionRhsMustBeRegisterOrNumber,
+        .scalar_expression => return error.ConditionRhsMustBeRegisterOrNumber,
+        .function_address => return error.ConditionRhsMustBeRegisterOrNumber,
     }
 
     switch (condition.op) {
@@ -4315,6 +4699,8 @@ fn valueAsImmediate(context: *FunctionContext, value: ast.Value) !i64 {
         .scalar_comparison => error.ExpectedConstant,
         .signed_less_than => error.ExpectedConstant,
         .load => error.ExpectedConstant,
+        .scalar_expression => error.ExpectedConstant,
+        .function_address => error.ExpectedConstant,
     };
 }
 
