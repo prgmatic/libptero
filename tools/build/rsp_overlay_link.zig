@@ -65,8 +65,35 @@ fn exportedSymbols(
         const value = std.mem.readInt(u32, entry[4..8], .big);
         const info = entry[12];
         const section_index = std.mem.readInt(u16, entry[14..16], .big);
-        if (info >> 4 != 1 or section_index == 0 or value >= imem_base or name_offset >= strings.len) continue;
+        if (section_index == 0 or name_offset >= strings.len) continue;
         const name = std.mem.sliceTo(strings[name_offset..], 0);
+        if (value >= imem_base and value < imem_end) {
+            const alias: ?[]const u8 = if (std.mem.endsWith(u8, name, "_dma__out"))
+                "resident_dma_out"
+            else if (std.mem.endsWith(u8, name, "_dma__in"))
+                "resident_dma_in"
+            else if (std.mem.endsWith(u8, name, "_dma__exec"))
+                "resident_dma_exec"
+            else if (std.mem.endsWith(u8, name, "_dma__waitStatus"))
+                "resident_dma_wait_status"
+            else if (std.mem.endsWith(u8, name, "_dma__waitOut"))
+                "resident_dma_wait_ready"
+            else if (std.mem.eql(u8, name, "commandLoop"))
+                "resident_command_loop"
+            else if (std.mem.eql(u8, name, "rdpSetBuffer"))
+                "resident_rdp_set_buffer"
+            else if (std.mem.eql(u8, name, "rdpAppendBuffer"))
+                "resident_rdp_append_buffer"
+            else if (std.mem.endsWith(u8, name, "_dma__returnToCaller"))
+                "resident_return_to_caller"
+            else if (std.mem.eql(u8, name, "LABEL_commandLoop_invalid_command_0"))
+                "resident_assertion_failed"
+            else
+                null;
+            if (alias) |resident_name| try symbols.append(alloc, .{ .name = resident_name, .value = value });
+            continue;
+        }
+        if (info >> 4 != 1 or value >= imem_base) continue;
         if (name.len == 0 or std.mem.eql(u8, name, "_start")) continue;
         try symbols.append(alloc, .{ .name = name, .value = value });
     }
@@ -131,7 +158,7 @@ fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, symbols: []const E
         \\        *(.bss*)
         \\    }} > DMEM
         \\
-        \\    .state (NOLOAD) : SUBALIGN(1) {{
+        \\    .state ALIGN(16) (NOLOAD) : SUBALIGN(1) {{
         \\        KEEP(*(.state*))
         \\    }} > DMEM
         \\

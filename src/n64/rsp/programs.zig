@@ -12,5 +12,8 @@ pub const static_overlay = UCode.fromBlob(&static_overlay_rsp);
 pub const static_overlay_2_rsp align(8) = @embedFile("static_overlay_2_rsp").*;
 pub const static_overlay_2 = UCode.fromBlob(&static_overlay_2_rsp);
 
+pub const multi_slot_overlay_rsp align(8) = @embedFile("multi_slot_overlay_rsp").*;
+pub const multi_slot_overlay = UCode.fromBlob(&multi_slot_overlay_rsp);
+
 pub const rdp_overlay_rsp align(8) = @embedFile("rdp_overlay_rsp").*;
 pub const rdp_overlay = UCode.fromBlob(&rdp_overlay_rsp);

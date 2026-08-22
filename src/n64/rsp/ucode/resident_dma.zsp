@@ -1,0 +1,24 @@
+pub extern fn resident_dma_out(
+    reg($t0) size: u32,
+    reg($t1) pitch: u32,
+    reg($s0) rdram: u32,
+    reg($s4) dmem: u32,
+) noreturn;
+
+pub extern fn resident_dma_in(
+    reg($t0) size: u32,
+    reg($t1) pitch: u32,
+    reg($s0) rdram: u32,
+    reg($s4) dmem: u32,
+) noreturn;
+
+pub extern fn resident_dma_exec(
+    reg($t0) size: u32,
+    reg($t1) pitch: u32,
+    reg($s0) rdram: u32,
+    reg($s4) dmem: u32,
+    reg($t2) flags: u32,
+) noreturn;
+
+pub extern fn resident_dma_wait_status(reg($t2) flags: u32) noreturn;
+pub extern fn resident_dma_wait_ready() noreturn;

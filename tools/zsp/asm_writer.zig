@@ -30,6 +30,29 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     var emitted = [_]bool{false} ** 1024;
     if (functions.len > emitted.len) return error.TooManyFunctions;
     var fallthrough_target = [_]bool{false} ** 1024;
+    var emission_order: [1024]usize = undefined;
+    var emission_count: usize = 0;
+    for (functions) |declaration| {
+        for (declaration.layout_entries) |entry| {
+            for (functions, 0..) |candidate, index| {
+                if (!std.mem.eql(u8, candidate.name, entry.name)) continue;
+                emission_order[emission_count] = index;
+                emission_count += 1;
+                break;
+            } else return error.UnknownFunction;
+        }
+    }
+    for (functions, 0..) |_, index| {
+        var listed = false;
+        for (emission_order[0..emission_count]) |listed_index| {
+            if (listed_index != index) continue;
+            listed = true;
+            break;
+        }
+        if (listed) continue;
+        emission_order[emission_count] = index;
+        emission_count += 1;
+    }
     for (functions) |function| {
         if (function.statements.len == 0) continue;
         const builtin = switch (function.statements[function.statements.len - 1]) {
@@ -47,11 +70,11 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
             break;
         } else return error.UnknownFunction;
     }
-    for (functions, 0..) |_, function_index| {
+    for (emission_order[0..functions.len]) |function_index| {
         if (fallthrough_target[function_index]) continue;
         try writeFunction(writer, functions, &top_level_context, &emitted, function_index);
     }
-    for (functions, 0..) |_, function_index| {
+    for (emission_order[0..functions.len]) |function_index| {
         try writeFunction(writer, functions, &top_level_context, &emitted, function_index);
     }
     try writeCommandManifest(writer, functions);
@@ -67,14 +90,24 @@ fn writeFunction(
     if (emitted[function_index]) return;
     emitted[function_index] = true;
     const function = functions[function_index];
+    if (function.external) return;
     if (!function.inline_call) {
-        if ((function.export_symbol or function.command_index != null) and function.emit_label) {
+        const terminal_jump = function.statements.len != 0 and switch (function.statements[function.statements.len - 1]) {
+            .builtin => |builtin| switch (builtin) {
+                .direct_goto, .call_and_goto, .fallthrough, .jump, .return_from_function => true,
+                else => false,
+            },
+            else => false,
+        };
+        const saves_command_return = function.command_indices.len != 0 and
+            statementsContainEmittedCall(functions, function.statements);
+        if ((function.export_symbol or function.command_indices.len != 0) and function.emit_label) {
             try writer.print(".globl {s}\n", .{function.name});
         }
         if (function.emit_label) {
             try writer.print("{s}:\n", .{function.name});
         }
-        if (function.command_index != null and !function.no_return) {
+        if (saves_command_return and !function.no_return and !terminal_jump) {
             try writer.print("  or {s}, {s}, {s}\n", .{
                 regName(command_return), regName(.ra), regName(.zero),
             });
@@ -83,9 +116,9 @@ fn writeFunction(
         const context = if (function.emit_label) &function_context else top_level_context;
         try bindParameters(context, function.parameters);
         try writeStatements(writer, functions, context, function.statements);
-        if (!function.no_return) {
-            if (function.command_index != null) {
-                try writer.print("  jr {s}\n", .{regName(command_return)});
+        if (!function.no_return and !terminal_jump) {
+            if (function.command_indices.len != 0) {
+                try writer.print("  jr {s}\n", .{regName(if (saves_command_return) command_return else .ra)});
             } else {
                 try writer.writeAll("  jr $ra\n");
             }
@@ -110,34 +143,100 @@ fn writeFunction(
     return error.UnknownFunction;
 }
 
+fn statementsContainEmittedCall(functions: []const ast.Function, statements: []const ast.Statement) bool {
+    for (statements) |statement| switch (statement) {
+        .call => |call| {
+            if (call.module != null) return true;
+            const callee = findFunction(functions, call.name) orelse return true;
+            if (!callee.inline_call) return true;
+            if (statementsContainEmittedCall(functions, callee.statements)) return true;
+            if (call.delay_slot) |delay_slot| {
+                if (statementsContainEmittedCall(functions, delay_slot)) return true;
+            }
+        },
+        .if_statement => |branch| {
+            if (statementsContainEmittedCall(functions, branch.then_statements)) return true;
+            if (branch.else_statements) |else_statements| {
+                if (statementsContainEmittedCall(functions, else_statements)) return true;
+            }
+        },
+        .while_loop => |loop| if (statementsContainEmittedCall(functions, loop.statements)) return true,
+        .ordered_block => |ordered| if (statementsContainEmittedCall(functions, ordered)) return true,
+        .goto => |branch| if (branch.delay_slot) |delay_slot| {
+            if (statementsContainEmittedCall(functions, delay_slot)) return true;
+        },
+        .conditional_goto => |branch| if (branch.delay_slot) |delay_slot| {
+            if (statementsContainEmittedCall(functions, delay_slot)) return true;
+        },
+        .conditional_direct_goto => |branch| if (branch.delay_slot) |delay_slot| {
+            if (statementsContainEmittedCall(functions, delay_slot)) return true;
+        },
+        .builtin => |builtin| switch (builtin) {
+            .jump => |jump| if (jump.delay_slot) |delay_slot| {
+                if (statementsContainEmittedCall(functions, delay_slot)) return true;
+            },
+            .direct_goto => |jump| if (jump.delay_slot) |delay_slot| {
+                if (statementsContainEmittedCall(functions, delay_slot)) return true;
+            },
+            .return_from_function => |delay_slot| if (delay_slot) |return_statements| {
+                if (statementsContainEmittedCall(functions, return_statements)) return true;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return false;
+}
+
 fn writeCommandManifest(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     var seen = std.StaticBitSet(256).initEmpty();
     var wrote_section = false;
     for (functions) |function| {
-        const index = function.command_index orelse continue;
-        if (seen.isSet(index)) return error.DuplicateCommandIndex;
-        seen.set(index);
+        if (function.command_indices.len == 0) continue;
         try validateCommandFunction(function);
-        if (!wrote_section) {
-            try writer.writeAll(".section .zsp_commands,\"\",@progbits\n");
-            wrote_section = true;
+        for (function.command_indices, 0..) |index, command_position| {
+            if (seen.isSet(index)) return error.DuplicateCommandIndex;
+            seen.set(index);
+            if (!wrote_section) {
+                try writer.writeAll(".section .zsp_commands,\"\",@progbits\n");
+                wrote_section = true;
+            }
+            try writer.print("  .word {s}\n  .byte {d}\n  .byte {d}\n  .short 0\n", .{
+                function.name,
+                index,
+                if (function.command_sizes.len == 0)
+                    @as(u8, @intCast(function.parameters.len * 4))
+                else if (function.command_sizes.len == 1)
+                    function.command_sizes[0]
+                else
+                    function.command_sizes[command_position],
+            });
         }
-        try writer.print("  .word {s}\n  .byte {d}\n  .byte {d}\n  .short 0\n", .{
-            function.name,
-            index,
-            function.parameters.len * 4,
-        });
     }
     if (wrote_section) try writer.writeByte('\n');
 }
 
 fn validateCommandFunction(function: ast.Function) !void {
     if (function.inline_call) return error.InvalidCommandFunction;
-    if (function.parameters.len > 4) return error.InvalidCommandParameters;
+    if (function.parameters.len > 63) return error.InvalidCommandParameters;
+    if (function.command_sizes.len != 0 and function.command_sizes.len != 1 and
+        function.command_sizes.len != function.command_indices.len)
+    {
+        return error.InvalidCommandParameters;
+    }
+    for (function.command_sizes) |size| {
+        if (size == 0 or size & 3 != 0 or size < function.parameters.len * 4) {
+            return error.InvalidCommandParameters;
+        }
+    }
     for (function.parameters, 0..) |parameter, parameter_index| {
         if (isVectorType(parameter.data_type)) return error.InvalidCommandParameters;
-        const expected: Register = @enumFromInt(@intFromEnum(Register.a0) + parameter_index);
-        if (parameter.reg != expected) return error.InvalidCommandParameters;
+        if (parameter_index < 4) {
+            const expected: Register = @enumFromInt(@intFromEnum(Register.a0) + parameter_index);
+            if (parameter.reg != expected) return error.InvalidCommandParameters;
+        } else if (!std.mem.eql(u8, parameter.name, "_")) {
+            return error.InvalidCommandParameters;
+        }
     }
 }
 
@@ -159,11 +258,13 @@ fn writeCommandTable(
     var commands: [240]?*const ast.Function = @splat(null);
     var table_len: usize = 0;
     for (functions) |*function| {
-        const index = function.command_index orelse continue;
+        if (function.command_indices.len == 0) continue;
         try validateCommandFunction(function.*);
-        if (commands[index] != null) return error.DuplicateCommandIndex;
-        commands[index] = function;
-        table_len = @max(table_len, @as(usize, index) + 1);
+        for (function.command_indices) |index| {
+            if (commands[index] != null) return error.DuplicateCommandIndex;
+            commands[index] = function;
+            table_len = @max(table_len, @as(usize, index) + 1);
+        }
     }
     if (table_len == 0) return error.EmptyCommandTable;
 
@@ -191,7 +292,7 @@ fn bindParameters(context: *FunctionContext, parameters: []const ast.Parameter) 
         } else {
             const reg = parameter.reg orelse return error.InvalidScalarRegister;
             if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
-            if (reg == compiler_scratch or reg == compiler_scratch_2 or reg == command_return) {
+            if (reg == compiler_scratch_2 or reg == command_return) {
                 return error.RegisterReservedForBackend;
             }
             if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
@@ -218,7 +319,7 @@ const Symbol = struct {
 
 const FunctionContext = struct {
     label_prefix: []const u8,
-    symbols: [64]Symbol = undefined,
+    symbols: [128]Symbol = undefined,
     symbol_count: usize = 0,
     next_label: usize = 0,
 
@@ -325,9 +426,14 @@ fn writeStatements(
             .builtin => |builtin| try writeBuiltin(writer, functions, context, builtin),
             .label => |name| try writer.print("LABEL_{s}_{s}_0:\n", .{ context.label_prefix, name }),
             .goto => |branch| {
-                try writer.print("  j LABEL_{s}_{s}_0\n", .{ context.label_prefix, branch.target });
+                try writer.print("  {s} LABEL_{s}_{s}_0\n", .{
+                    if (branch.encoding == .jump) "j" else "b",
+                    context.label_prefix,
+                    branch.target,
+                });
                 if (branch.delay_slot) |delay_slot| {
-                    if (delay_slot.len != 1) return error.InvalidDelaySlot;
+                    if (delay_slot.len != 1 and
+                        !(delay_slot.len == 2 and delay_slot[0] == .label)) return error.InvalidDelaySlot;
                     try writeStatements(writer, functions, context, delay_slot);
                 } else {
                     try writer.writeAll("  nop\n");
@@ -351,23 +457,112 @@ fn writeStatements(
             },
             .conditional_direct_goto => |branch| {
                 if (branch.target.module != null) return error.UnresolvedModuleCall;
-                if (branch.condition.op != .eq and branch.condition.op != .ne) {
-                    return error.ConditionalDirectGotoRequiresEquality;
-                }
                 const lhs = try context.lookup(branch.condition.lhs);
                 const lhs_reg = lhs.reg orelse return error.ConditionLhsMustBeRegister;
-                const rhs = switch (branch.condition.rhs) {
-                    .number => |number| number,
-                    else => return error.ConditionalDirectGotoRequiresZero,
-                };
-                if (rhs != 0) return error.ConditionalDirectGotoRequiresZero;
-                try writer.print("  {s} {s}, {s}\n", .{
-                    if (branch.condition.op == .eq) "beqz" else "bnez",
-                    regName(lhs_reg),
-                    branch.target.name,
-                });
+                if (branch.condition.op != .eq and branch.condition.op != .ne) {
+                    if (branch.condition.rhs == .number and branch.condition.rhs.number == 0 and
+                        isSigned(lhs.data_type))
+                    {
+                        try writer.print("  {s} {s}, {s}\n", .{
+                            switch (branch.condition.op) {
+                                .lt => "bltz",
+                                .le => "blez",
+                                .gt => "bgtz",
+                                .ge => "bgez",
+                                else => unreachable,
+                            },
+                            regName(lhs_reg),
+                            branch.target.name,
+                        });
+                        try writeDelaySlot(writer, functions, context, branch.delay_slot);
+                        continue;
+                    }
+                    if (branch.condition.rhs == .number) {
+                        const immediate = branch.condition.rhs.number;
+                        const adjusted = if (branch.condition.op == .gt or branch.condition.op == .le)
+                            std.math.add(i64, immediate, 1) catch null
+                        else
+                            immediate;
+                        if (adjusted) |value| {
+                            if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) {
+                                try writer.print("  {s} {s}, {s}, {d}\n", .{
+                                    if (isSigned(lhs.data_type)) "slti" else "sltiu",
+                                    regName(compiler_scratch),
+                                    regName(lhs_reg),
+                                    value,
+                                });
+                                try writer.print("  {s} {s}, {s}\n", .{
+                                    switch (branch.condition.op) {
+                                        .lt, .le => "bnez",
+                                        .gt, .ge => "beqz",
+                                        else => unreachable,
+                                    },
+                                    regName(compiler_scratch),
+                                    branch.target.name,
+                                });
+                                try writeDelaySlot(writer, functions, context, branch.delay_slot);
+                                continue;
+                            }
+                        }
+                    }
+                    const rhs_name = switch (branch.condition.rhs) {
+                        .ident => |name| name,
+                        else => return error.ConditionalDirectGotoRequiresRegisterOperands,
+                    };
+                    const rhs = try context.lookup(rhs_name);
+                    try expectSameType(lhs, rhs);
+                    const rhs_reg = rhs.reg orelse return error.ConditionRhsMustBeRegisterOrNumber;
+                    const reverse = branch.condition.op == .gt or branch.condition.op == .le;
+                    try writer.print("  {s} {s}, {s}, {s}\n", .{
+                        if (isSigned(lhs.data_type)) "slt" else "sltu",
+                        regName(compiler_scratch),
+                        regName(if (reverse) rhs_reg else lhs_reg),
+                        regName(if (reverse) lhs_reg else rhs_reg),
+                    });
+                    try writer.print("  {s} {s}, {s}\n", .{
+                        switch (branch.condition.op) {
+                            .lt, .gt => "bnez",
+                            .le, .ge => "beqz",
+                            else => unreachable,
+                        },
+                        regName(compiler_scratch),
+                        branch.target.name,
+                    });
+                    try writeDelaySlot(writer, functions, context, branch.delay_slot);
+                    continue;
+                }
+                var rhs_reg: ?Register = null;
+                var rhs_immediate: ?i64 = null;
+                switch (branch.condition.rhs) {
+                    .number => |number| rhs_immediate = number,
+                    .ident => |name| {
+                        const rhs = try context.lookup(name);
+                        try expectSameType(lhs, rhs);
+                        rhs_reg = rhs.reg orelse return error.ConditionRhsMustBeRegisterOrNumber;
+                    },
+                    else => return error.ConditionRhsMustBeRegisterOrNumber,
+                }
+                if (rhs_immediate != null and rhs_immediate.? == 0) {
+                    try writer.print("  {s} {s}, {s}\n", .{
+                        if (branch.condition.op == .eq) "beqz" else "bnez",
+                        regName(lhs_reg),
+                        branch.target.name,
+                    });
+                } else {
+                    if (rhs_reg == null) {
+                        try loadImmediateInto(writer, compiler_scratch, rhs_immediate.?);
+                        rhs_reg = compiler_scratch;
+                    }
+                    try writer.print("  {s} {s}, {s}, {s}\n", .{
+                        if (branch.condition.op == .eq) "beq" else "bne",
+                        regName(lhs_reg),
+                        regName(rhs_reg.?),
+                        branch.target.name,
+                    });
+                }
                 if (branch.delay_slot) |delay_slot| {
-                    if (delay_slot.len != 1) return error.InvalidDelaySlot;
+                    if (delay_slot.len != 1 and
+                        !(delay_slot.len == 2 and delay_slot[0] == .label)) return error.InvalidDelaySlot;
                     try writeStatements(writer, functions, context, delay_slot);
                 } else {
                     try writer.writeAll("  nop\n");
@@ -375,7 +570,16 @@ fn writeStatements(
             },
             .while_loop => |loop| try writeWhile(writer, functions, context, loop),
             .if_statement => |if_statement| try writeIf(writer, functions, context, if_statement),
+            .ordered_block => |ordered| {
+                try writer.writeAll("# zsp ordered block begin\n");
+                try writeStatements(writer, functions, context, ordered);
+                try writer.writeAll("# zsp ordered block end\n");
+            },
             .asm_line => |asm_line| try writer.print("  {s}\n", .{asm_line}),
+            .exact_asm_line => |asm_line| try writer.print(
+                "# zsp exact assembly barrier\n  {s}\n# zsp exact assembly barrier\n",
+                .{asm_line},
+            ),
         }
     }
 }
@@ -572,7 +776,8 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
     if (decl.vector_reg != null) return error.InvalidScalarRegister;
     const reg = decl.reg orelse try context.allocRegister(decl.data_type);
     if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
-    if (reg == compiler_scratch or reg == compiler_scratch_2 or reg == command_return) {
+    if (decl.is_reserved and reg != compiler_scratch_2) return error.InvalidReservedRegister;
+    if ((!decl.is_reserved and reg == compiler_scratch_2) or reg == command_return) {
         return error.RegisterReservedForBackend;
     }
     if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
@@ -583,8 +788,8 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         },
         .ident => |name| {
             const source = try context.lookup(name);
-            try expectSameType(.{ .name = decl.name, .data_type = decl.data_type, .reg = reg, .constant = null }, source);
             if (source.reg) |source_reg| {
+                try expectSameType(.{ .name = decl.name, .data_type = decl.data_type, .reg = reg, .constant = null }, source);
                 try writer.print("  or {s}, {s}, {s}\n", .{
                     regName(reg), regName(source_reg), regName(.zero),
                 });
@@ -594,6 +799,13 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
                 try loadImmediateInto(writer, reg, source.constant orelse return error.ExpectedConstant);
             }
         },
+        .vector_control_read, .hardware_read, .scalar_comparison => try writeSet(
+            writer,
+            context,
+            .{ .name = decl.name, .data_type = decl.data_type, .reg = reg, .constant = null },
+            reg,
+            value,
+        ),
         else => try loadImmediateInto(writer, reg, try valueAsImmediate(context, value)),
     };
     try context.add(.{
@@ -609,13 +821,9 @@ fn validateVectorRegisterBinding(
     data_type: DataType,
     vector_reg: ast.VectorRegister,
 ) !void {
-    if (vector_reg == .v00 or @intFromEnum(vector_reg) >= 29) {
-        return error.VectorRegisterReservedForBackend;
-    }
     if (context.isVectorRegisterInUse(vector_reg)) return error.RegisterAlreadyInUse;
     if (data_type == .vec32) {
         const second = nextVectorRegister(vector_reg) orelse return error.InvalidVectorRegisterPair;
-        if (@intFromEnum(second) >= 29) return error.VectorRegisterReservedForBackend;
         if (context.isVectorRegisterInUse(second)) return error.RegisterAlreadyInUse;
     }
 }
@@ -655,7 +863,7 @@ fn writeVectorInitialValue(
             if (data_type != .vec16 or source.data_type != .vec16) {
                 return error.RegisterTypeMismatch;
             }
-            try writeVectorOp(writer, .vor, destination, source_reg, source_reg, access.element);
+            try writeVectorOp(writer, .vor, destination, .v00, source_reg, access.element);
         },
         .vector_operation => |operation| {
             if (data_type != .vec16) return error.Vec32ViewRequired;
@@ -675,6 +883,10 @@ fn writeVectorInitialValue(
                 rhs.element,
             );
         },
+        .vector_shift => |shift| {
+            if (data_type != .vec16) return error.UnsupportedVectorShift;
+            try writeNamedVectorShift(writer, context, destination, shift);
+        },
         .accumulator_read => |part| {
             if (data_type != .vec16) return error.AccumulatorReadRequiresVec16;
             try writeEncodedVectorOp(
@@ -687,6 +899,10 @@ fn writeVectorInitialValue(
                 @intFromEnum(part),
             );
         },
+        .vector_control_read => return error.RegisterTypeMismatch,
+        .hardware_read => return error.RegisterTypeMismatch,
+        .scalar_comparison => return error.RegisterTypeMismatch,
+        .signed_less_than => return error.RegisterTypeMismatch,
         .number => |number| {
             if (number != 0) return error.VectorImmediateUnsupported;
             try writeVectorOp(writer, .vxor, destination, destination, destination, 0);
@@ -713,6 +929,10 @@ fn writeAssignment(writer: *std.Io.Writer, context: *FunctionContext, assignment
         .bit_not => {
             if (assignment.rhs != null) return error.InvalidAssignment;
             try writeBitNot(writer, context, destination, destination_reg, assignment.lhs);
+        },
+        .negate => {
+            if (assignment.rhs != null) return error.InvalidAssignment;
+            try writeNegate(writer, context, destination, destination_reg, assignment.lhs);
         },
         else => {
             const rhs = assignment.rhs orelse return error.InvalidAssignment;
@@ -758,8 +978,27 @@ fn writeVectorAssignment(
     }
     if (assignment.lhs == .vector_operation) {
         if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
-        if (assignment.destination_lane != null) return error.InvalidVectorLaneAssignment;
         const operation = assignment.lhs.vector_operation;
+        if (operation.op == .vrcp or operation.op == .vrcpl or operation.op == .vrcph or operation.op == .vmov) {
+            const destination_lane = assignment.destination_lane orelse return error.VectorLaneOperationRequiresLane;
+            const result_reg = try vectorRegisterForView(destination, assignment.destination_view);
+            if (destination.data_type == .vec32 and assignment.destination_view == null) {
+                return error.Vec32ViewRequired;
+            }
+            const source = try vectorOperand(context, operation.lhs);
+            if (source.data_type != .vec16 or source.element < 8 or operation.lhs.lane == null) {
+                return error.VectorLaneOperationRequiresLane;
+            }
+            return writeVectorLaneOp(
+                writer,
+                operation.op,
+                result_reg,
+                destination_lane + @as(u4, if (operation.explicit_lane_encoding) 8 else 0),
+                source.reg,
+                source.element,
+            );
+        }
+        if (assignment.destination_lane != null) return error.InvalidVectorLaneAssignment;
         const lhs = try vectorOperand(context, operation.lhs);
         const rhs = try vectorOperand(context, operation.rhs);
         if (lhs.data_type != .vec16 or rhs.data_type != .vec16) {
@@ -780,8 +1019,25 @@ fn writeVectorAssignment(
             rhs.element,
         );
     }
+    if (assignment.lhs == .vector_shift) {
+        if (assignment.op != .set or assignment.rhs != null or assignment.destination_lane != null or
+            (destination.data_type != .vec16 and assignment.destination_view == null))
+        {
+            return error.UnsupportedVectorShift;
+        }
+        return writeNamedVectorShift(
+            writer,
+            context,
+            try vectorRegisterForView(destination, assignment.destination_view),
+            assignment.lhs.vector_shift,
+        );
+    }
     if (assignment.destination_lane) |lane| {
         if (assignment.op != .set or assignment.rhs != null) return error.InvalidVectorLaneAssignment;
+        const result_reg = try vectorRegisterForView(destination, assignment.destination_view);
+        if (destination.data_type == .vec32 and assignment.destination_view == null) {
+            return error.Vec32ViewRequired;
+        }
         if (assignment.lhs == .load) {
             const load = assignment.lhs.load;
             if (load.data_type != .vec16) return error.PartialVectorMemoryRequiresVec16;
@@ -789,7 +1045,7 @@ fn writeVectorAssignment(
             return writeVectorLaneMemory(
                 writer,
                 true,
-                destination_reg,
+                result_reg,
                 lane,
                 address_reg,
                 load.offset,
@@ -798,15 +1054,38 @@ fn writeVectorAssignment(
         const source_reg = switch (assignment.lhs) {
             .ident => |name| (try context.lookup(name)).reg orelse
                 return error.VectorLaneSourceMustBeScalarRegister,
+            .vector_access => |access| {
+                const source = try vectorOperand(context, access);
+                if (source.data_type != .vec16 or source.element < 8 or access.lane == null) {
+                    return error.VectorLaneOperationRequiresLane;
+                }
+                return writeVectorLaneOp(
+                    writer,
+                    .vmov,
+                    result_reg,
+                    lane,
+                    source.reg,
+                    source.element,
+                );
+            },
             else => return error.VectorLaneSourceMustBeScalarRegister,
         };
-        return writeMtc2(writer, source_reg, destination_reg, lane);
+        return writeMtc2(writer, source_reg, result_reg, lane);
+    }
+    if (assignment.op == .set and assignment.lhs == .number) {
+        if (assignment.lhs.number != 0 or assignment.rhs != null) return error.VectorImmediateUnsupported;
+        return writeVectorOp(writer, .vxor, destination_reg, destination_reg, destination_reg, 0);
     }
     const lhs_operand = switch (assignment.lhs) {
         .ident => |name| try vectorOperand(context, .{ .name = name }),
         .vector_access => |access| try vectorOperand(context, access),
         .vector_operation => return error.InvalidAssignment,
+        .vector_shift => return error.InvalidAssignment,
         .accumulator_read => return error.InvalidAssignment,
+        .vector_control_read => return error.InvalidAssignment,
+        .hardware_read => return error.InvalidAssignment,
+        .scalar_comparison => return error.InvalidAssignment,
+        .signed_less_than => return error.InvalidAssignment,
         .number => return error.VectorImmediateUnsupported,
         .load => |load| {
             if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
@@ -821,7 +1100,14 @@ fn writeVectorAssignment(
 
     if (assignment.op == .set) {
         if (assignment.rhs != null) return error.InvalidAssignment;
-        try writeVectorOp(writer, .vor, destination_view_reg, lhs_reg, lhs_reg, lhs_operand.element);
+        try writeVectorOp(
+            writer,
+            .vor,
+            destination_view_reg,
+            if (lhs_operand.element == 0) lhs_reg else .v00,
+            lhs_reg,
+            lhs_operand.element,
+        );
         if (destination_type == .vec32) {
             try writeVectorOp(
                 writer,
@@ -849,6 +1135,39 @@ fn writeVectorAssignment(
             );
         }
         return;
+    }
+
+    if (assignment.op == .logical_shift_right or assignment.op == .shift_right or assignment.op == .shift_left) {
+        const amount = switch (assignment.rhs orelse return error.InvalidAssignment) {
+            .number => |number| number,
+            else => return error.UnsupportedVectorShift,
+        };
+        if (destination_type != .vec16) return error.UnsupportedVectorShift;
+        const shift_reg: ast.VectorRegister = .v31;
+        if ((assignment.op == .logical_shift_right or assignment.op == .shift_right) and amount >= 1 and amount <= 8) {
+            const op: ast.VectorOp = if (assignment.op == .shift_right) .vmudm else .vmudl;
+            return writeEncodedVectorOp(
+                writer,
+                if (assignment.op == .shift_right) "vsra" else "vsrl",
+                @intFromEnum(op),
+                destination_view_reg,
+                lhs_reg,
+                shift_reg,
+                @intCast(7 + amount),
+            );
+        }
+        if (assignment.op == .shift_left and amount >= 8 and amount <= 15) {
+            return writeEncodedVectorOp(
+                writer,
+                "vsll8",
+                @intFromEnum(ast.VectorOp.vmudn),
+                destination_view_reg,
+                lhs_reg,
+                shift_reg,
+                @intCast(23 - amount),
+            );
+        }
+        return error.UnsupportedVectorShift;
     }
 
     const rhs_value = assignment.rhs orelse return error.InvalidAssignment;
@@ -894,6 +1213,30 @@ fn writeVectorAssignment(
     try writeVectorOp(writer, op, destination_view_reg, lhs_reg, rhs_reg, element);
 }
 
+fn writeVectorLaneOp(
+    writer: *std.Io.Writer,
+    op: ast.VectorOp,
+    destination: ast.VectorRegister,
+    destination_element: u4,
+    source: ast.VectorRegister,
+    source_element: u4,
+) !void {
+    const word: u32 = 0x4a000000 |
+        (@as(u32, source_element) << 21) |
+        (@as(u32, @intFromEnum(source)) << 16) |
+        (@as(u32, destination_element) << 11) |
+        (@as(u32, @intFromEnum(destination)) << 6) |
+        @as(u32, @intFromEnum(op));
+    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], ${s}[{d}]\n", .{
+        word,
+        @tagName(op),
+        vectorRegName(destination),
+        if (destination_element >= 8) destination_element - 8 else destination_element,
+        vectorRegName(source),
+        source_element - 8,
+    });
+}
+
 const VectorOperand = struct {
     data_type: DataType,
     reg: ast.VectorRegister,
@@ -918,6 +1261,38 @@ fn vectorLogicOp(op: ast.AssignOp) VectorAluOp {
         .bit_nor => .vnor,
         else => unreachable,
     };
+}
+
+fn writeNamedVectorShift(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: ast.VectorRegister,
+    shift: ast.VectorShift,
+) !void {
+    const source = try vectorOperand(context, shift.source);
+    if (source.data_type != .vec16 or source.element != 0) return error.UnsupportedVectorShift;
+    const op: ast.VectorOp = switch (shift.kind) {
+        .left_8 => .vmudn,
+        .right_arithmetic => .vmudm,
+        .right_logical => .vmudl,
+    };
+    const element: u4 = switch (shift.kind) {
+        .left_8 => @intCast(23 - @as(u8, shift.amount)),
+        .right_arithmetic, .right_logical => @intCast(7 + @as(u8, shift.amount)),
+    };
+    try writeEncodedVectorOp(
+        writer,
+        switch (shift.kind) {
+            .left_8 => "vsll8",
+            .right_arithmetic => "vsra",
+            .right_logical => "vsrl",
+        },
+        @intFromEnum(op),
+        destination,
+        source.reg,
+        .v31,
+        element,
+    );
 }
 
 fn writeVectorOp(
@@ -1004,8 +1379,8 @@ fn writeSet(
         .number => |number| try loadImmediateInto(writer, destination_reg, number),
         .ident => |name| {
             const source = try context.lookup(name);
-            try expectSameType(destination, source);
             if (source.reg) |source_reg| {
+                try expectSameType(destination, source);
                 try writer.print("  or {s}, {s}, {s}\n", .{
                     regName(destination_reg),
                     regName(source_reg),
@@ -1029,7 +1404,39 @@ fn writeSet(
             }
         },
         .vector_operation => return error.RegisterTypeMismatch,
+        .vector_shift => return error.RegisterTypeMismatch,
         .accumulator_read => return error.RegisterTypeMismatch,
+        .vector_control_read => |control_register| {
+            if (destination.data_type != .u32 and destination.data_type != .i32) {
+                return error.RegisterTypeMismatch;
+            }
+            const word = @as(u32, 0x48400000) |
+                (@as(u32, @intFromEnum(destination_reg)) << 16) |
+                (@as(u32, @intFromEnum(control_register)) << 11);
+            try writer.print("  .word 0x{x:0>8} # cfc2 {s}, ${d}\n", .{
+                word, regName(destination_reg), @intFromEnum(control_register),
+            });
+        },
+        .hardware_read => {
+            if (destination.data_type != .u32 and destination.data_type != .i32) {
+                return error.RegisterTypeMismatch;
+            }
+            try writer.print("  mfc0 {s}, $6\n", .{regName(destination_reg)});
+        },
+        .scalar_comparison => |comparison| try writeScalarComparison(
+            writer,
+            context,
+            destination,
+            destination_reg,
+            comparison,
+        ),
+        .signed_less_than => |comparison| {
+            const lhs = try valueAsAddressReg(writer, context, comparison.lhs);
+            const rhs = try valueAsAddressReg(writer, context, comparison.rhs);
+            try writer.print("  slt {s}, {s}, {s}\n", .{
+                regName(destination_reg), regName(lhs), regName(rhs),
+            });
+        },
         .load => |load| {
             if (!isCompatibleScalarLoad(destination.data_type, load.data_type)) return error.RegisterTypeMismatch;
             try writeLoadInto(writer, context, destination_reg, load);
@@ -1039,7 +1446,84 @@ fn writeSet(
 
 fn isCompatibleScalarLoad(destination: DataType, source: DataType) bool {
     return destination == source or
-        (destination == .u32 and (source == .u8 or source == .u16));
+        ((destination == .u32 or destination == .i32) and
+            (source == .u8 or source == .u16 or source == .i8 or source == .i16));
+}
+
+fn writeScalarComparison(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    destination_reg: Register,
+    comparison: ast.ScalarComparison,
+) !void {
+    if (destination.data_type != .u32 and destination.data_type != .i32) return error.RegisterTypeMismatch;
+    const lhs_name = switch (comparison.lhs) {
+        .ident => |name| name,
+        else => return error.ComparisonLhsMustBeRegister,
+    };
+    const lhs = try context.lookup(lhs_name);
+    const lhs_reg = lhs.reg orelse return error.ComparisonLhsMustBeRegister;
+    if (isVectorType(lhs.data_type)) return error.ExpectedScalarType;
+
+    var rhs_reg: Register = undefined;
+    switch (comparison.rhs) {
+        .ident => |name| {
+            const rhs = try context.lookup(name);
+            try expectSameType(lhs, rhs);
+            rhs_reg = rhs.reg orelse blk: {
+                const immediate = rhs.constant orelse return error.ExpectedConstant;
+                if (immediate == 0) break :blk .zero;
+                const scratch = try backendScratch2(context);
+                try loadImmediateInto(writer, scratch, immediate);
+                break :blk scratch;
+            };
+        },
+        .number => |number| {
+            if (number == 0) {
+                rhs_reg = .zero;
+            } else {
+                const scratch = try backendScratch2(context);
+                try loadImmediateInto(writer, scratch, number);
+                rhs_reg = scratch;
+            }
+        },
+        .vector_access => return error.ExpectedScalarType,
+    }
+
+    const instruction = if (isSigned(lhs.data_type)) "slt" else "sltu";
+    switch (comparison.op) {
+        .lt, .gt, .le, .ge => {
+            const reverse = comparison.op == .gt or comparison.op == .le;
+            try writer.print("  {s} {s}, {s}, {s}\n", .{
+                instruction,
+                regName(destination_reg),
+                regName(if (reverse) rhs_reg else lhs_reg),
+                regName(if (reverse) lhs_reg else rhs_reg),
+            });
+            if (comparison.op == .le or comparison.op == .ge) {
+                try writer.print("  xori {s}, {s}, 1\n", .{ regName(destination_reg), regName(destination_reg) });
+            }
+        },
+        .eq, .ne => {
+            if (rhs_reg == .zero) {
+                if (comparison.op == .ne) {
+                    try writer.print("  sltu {s}, $zero, {s}\n", .{ regName(destination_reg), regName(lhs_reg) });
+                } else {
+                    try writer.print("  sltiu {s}, {s}, 1\n", .{ regName(destination_reg), regName(lhs_reg) });
+                }
+                return;
+            }
+            try writer.print("  xor {s}, {s}, {s}\n", .{
+                regName(destination_reg), regName(lhs_reg), regName(rhs_reg),
+            });
+            if (comparison.op == .ne) {
+                try writer.print("  sltu {s}, $zero, {s}\n", .{ regName(destination_reg), regName(destination_reg) });
+            } else {
+                try writer.print("  sltiu {s}, {s}, 1\n", .{ regName(destination_reg), regName(destination_reg) });
+            }
+        },
+    }
 }
 
 fn writeBitNot(
@@ -1053,7 +1537,12 @@ fn writeBitNot(
         .ident => |name| try context.lookup(name),
         .vector_access => return error.BitNotRequiresRegister,
         .vector_operation => return error.BitNotRequiresRegister,
+        .vector_shift => return error.BitNotRequiresRegister,
         .accumulator_read => return error.BitNotRequiresRegister,
+        .vector_control_read => return error.BitNotRequiresRegister,
+        .hardware_read => return error.BitNotRequiresRegister,
+        .scalar_comparison => return error.BitNotRequiresRegister,
+        .signed_less_than => return error.BitNotRequiresRegister,
         .number => return error.BitNotRequiresRegister,
         .load => return error.BitNotRequiresRegister,
     };
@@ -1061,7 +1550,34 @@ fn writeBitNot(
     const source_reg = source.reg orelse return error.BitNotRequiresRegister;
     try writer.print("  nor {s}, {s}, {s}\n", .{
         regName(destination_reg),
+        regName(source_reg),
         regName(.zero),
+    });
+}
+
+fn writeNegate(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    destination: Symbol,
+    destination_reg: Register,
+    value: ast.Value,
+) !void {
+    const name = switch (value) {
+        .number => |number| return loadImmediateInto(
+            writer,
+            destination_reg,
+            std.math.negate(number) catch return error.ImmediateOutOfRange,
+        ),
+        .ident => |name| name,
+        else => return error.NegateRequiresRegister,
+    };
+    const source = try context.lookup(name);
+    try expectSameType(destination, source);
+    if (isVectorType(destination.data_type)) return error.NegateRequiresRegister;
+    const source_reg = source.reg orelse return error.NegateRequiresRegister;
+    try writer.print("  {s} {s}, $zero, {s}\n", .{
+        if (isSigned(destination.data_type)) "sub" else "subu",
+        regName(destination_reg),
         regName(source_reg),
     });
 }
@@ -1079,7 +1595,12 @@ fn writeBinary(
         .ident => |name| try context.lookup(name),
         .vector_access => return error.ArithmeticLhsMustBeRegister,
         .vector_operation => return error.ArithmeticLhsMustBeRegister,
+        .vector_shift => return error.ArithmeticLhsMustBeRegister,
         .accumulator_read => return error.ArithmeticLhsMustBeRegister,
+        .vector_control_read => return error.ArithmeticLhsMustBeRegister,
+        .hardware_read => return error.ArithmeticLhsMustBeRegister,
+        .scalar_comparison => return error.ArithmeticLhsMustBeRegister,
+        .signed_less_than => return error.ArithmeticLhsMustBeRegister,
         .number => return error.ArithmeticLhsMustBeRegister,
         .load => return error.ArithmeticLhsMustBeRegister,
     };
@@ -1109,6 +1630,7 @@ fn writeBinary(
             } else {
                 try writeBinaryImmediate(
                     writer,
+                    context,
                     destination_reg,
                     lhs_reg,
                     op,
@@ -1116,27 +1638,34 @@ fn writeBinary(
                 );
             }
         },
-        .number => |number| try writeBinaryImmediate(writer, destination_reg, lhs_reg, op, number),
+        .number => |number| try writeBinaryImmediate(writer, context, destination_reg, lhs_reg, op, number),
         .vector_access => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .vector_operation => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .vector_shift => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .accumulator_read => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .vector_control_read => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .hardware_read => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .scalar_comparison => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .signed_less_than => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .load => return error.ArithmeticRhsMustBeRegisterOrNumber,
     }
 }
 
 fn writeBinaryImmediate(
     writer: *std.Io.Writer,
+    context: *FunctionContext,
     destination: Register,
     lhs: Register,
     op: ast.AssignOp,
     immediate: i64,
 ) !void {
     switch (op) {
-        .add, .sub => {
-            const addend = if (op == .add) immediate else std.math.negate(immediate) catch
+        .add, .sub, .add_wrap, .sub_wrap => {
+            const addend = if (op == .add or op == .add_wrap) immediate else std.math.negate(immediate) catch
                 return error.ImmediateOutOfRange;
             if (addend >= std.math.minInt(i16) and addend <= std.math.maxInt(i16)) {
-                try writer.print("  addiu {s}, {s}, {d}\n", .{
+                try writer.print("  {s} {s}, {s}, {d}\n", .{
+                    if (op == .add or op == .sub) "addi" else "addiu",
                     regName(destination),
                     regName(lhs),
                     addend,
@@ -1160,20 +1689,23 @@ fn writeBinaryImmediate(
         else => return error.UnsupportedOperator,
     }
 
-    try loadImmediateInto(writer, compiler_scratch_2, immediate);
+    const scratch = try backendScratch2(context);
+    try loadImmediateInto(writer, scratch, immediate);
     const instruction = registerBinaryInstruction(op) orelse return error.UnsupportedOperator;
     try writer.print("  {s} {s}, {s}, {s}\n", .{
         instruction,
         regName(destination),
         regName(lhs),
-        regName(compiler_scratch_2),
+        regName(scratch),
     });
 }
 
 fn registerBinaryInstruction(op: ast.AssignOp) ?[]const u8 {
     return switch (op) {
-        .add => "addu",
-        .sub => "subu",
+        .add => "add",
+        .add_wrap => "addu",
+        .sub => "sub",
+        .sub_wrap => "subu",
         .bit_and => "and",
         .bit_or => "or",
         .bit_xor => "xor",
@@ -1184,7 +1716,8 @@ fn registerBinaryInstruction(op: ast.AssignOp) ?[]const u8 {
 
 fn immediateBinaryInstruction(op: ast.AssignOp) ?[]const u8 {
     return switch (op) {
-        .add, .sub => "addiu",
+        .add, .sub => "addi",
+        .add_wrap, .sub_wrap => "addiu",
         .bit_and => "andi",
         .bit_or => "ori",
         .bit_xor => "xori",
@@ -1211,7 +1744,12 @@ fn writePowerOfTwoMath(
         },
         .vector_access => return error.PowerOfTwoConstantRequired,
         .vector_operation => return error.PowerOfTwoConstantRequired,
+        .vector_shift => return error.PowerOfTwoConstantRequired,
         .accumulator_read => return error.PowerOfTwoConstantRequired,
+        .vector_control_read => return error.PowerOfTwoConstantRequired,
+        .hardware_read => return error.PowerOfTwoConstantRequired,
+        .scalar_comparison => return error.PowerOfTwoConstantRequired,
+        .signed_less_than => return error.PowerOfTwoConstantRequired,
         .load => return error.PowerOfTwoConstantRequired,
     };
     if (value <= 0 or value > std.math.maxInt(u32)) return error.PowerOfTwoConstantRequired;
@@ -1276,7 +1814,12 @@ fn writeShift(
         },
         .vector_access => return error.ShiftAmountMustBeRegisterOrNumber,
         .vector_operation => return error.ShiftAmountMustBeRegisterOrNumber,
+        .vector_shift => return error.ShiftAmountMustBeRegisterOrNumber,
         .accumulator_read => return error.ShiftAmountMustBeRegisterOrNumber,
+        .vector_control_read => return error.ShiftAmountMustBeRegisterOrNumber,
+        .hardware_read => return error.ShiftAmountMustBeRegisterOrNumber,
+        .scalar_comparison => return error.ShiftAmountMustBeRegisterOrNumber,
+        .signed_less_than => return error.ShiftAmountMustBeRegisterOrNumber,
         .load => return error.ShiftAmountMustBeRegisterOrNumber,
     }
 }
@@ -1324,9 +1867,36 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
             .number => return error.ExpectedVectorRegister,
         };
         const value = try context.lookup(value_access.name);
-        if (value.data_type != store.data_type) return error.RegisterTypeMismatch;
+        const value_type: DataType = if (value_access.view != null) .vec16 else value.data_type;
+        if (value_type != store.data_type) return error.RegisterTypeMismatch;
         const vector_reg = try vectorRegisterForView(value, value_access.view);
         const address_reg = try valueAsAddressReg(writer, context, store.address);
+        if (store.quarter_vector) {
+            if (store.data_type != .vec16 or value_access.view != null) {
+                return error.PartialVectorMemoryRequiresVec16;
+            }
+            return writeQuarterVectorMemory(
+                writer,
+                false,
+                vector_reg,
+                value_access.lane orelse 0,
+                address_reg,
+                store.offset,
+            );
+        }
+        if (store.half_vector) {
+            if (store.data_type != .vec16 or value_access.view != null) {
+                return error.PartialVectorMemoryRequiresVec16;
+            }
+            return writeHalfVectorMemory(
+                writer,
+                false,
+                vector_reg,
+                value_access.lane orelse 0,
+                address_reg,
+                store.offset,
+            );
+        }
         if (value_access.lane) |lane| {
             if (store.data_type != .vec16) return error.PartialVectorMemoryRequiresVec16;
             return writeVectorLaneMemory(
@@ -1356,12 +1926,14 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
         const offset_symbol = try context.lookup(offset_name);
         const address_reg = try valueAsAddressReg(writer, context, store.address);
         if (offset_symbol.data_label) |label| {
-            try writer.print("  {s} {s}, %lo({s})({s})\n", .{
-                storeOp(store.data_type),
-                regName(value_reg),
-                label,
-                regName(address_reg),
-            });
+            if (store.offset == 0)
+                try writer.print("  {s} {s}, %lo({s})({s})\n", .{
+                    storeOp(store.data_type), regName(value_reg), label, regName(address_reg),
+                })
+            else
+                try writer.print("  {s} {s}, %lo({s} + {d})({s})\n", .{
+                    storeOp(store.data_type), regName(value_reg), label, store.offset, regName(address_reg),
+                });
         } else {
             const offset = offset_symbol.constant orelse return error.ExpectedConstant;
             try validateMemoryOffset(offset);
@@ -1374,21 +1946,83 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
         }
         return;
     }
-    if (store.offset == 0) {
-        if (memoryDataLabel(context, store.address)) |label| {
+    if (memoryDataLabel(context, store.address)) |label| {
+        if (store.offset == 0) {
             try writer.print("  {s} {s}, %lo({s})($zero)\n", .{
                 storeOp(store.data_type),
                 regName(value_reg),
                 label,
             });
-            return;
+        } else {
+            try writer.print("  {s} {s}, %lo({s} + {d})($zero)\n", .{
+                storeOp(store.data_type), regName(value_reg), label, store.offset,
+            });
         }
+        return;
     }
     const address_reg = try valueAsAddressReg(writer, context, store.address);
     try writer.print("  {s} {s}, {d}({s})\n", .{
         storeOp(store.data_type),
         regName(value_reg),
         store.offset,
+        regName(address_reg),
+    });
+}
+
+fn writeQuarterVectorMemory(
+    writer: *std.Io.Writer,
+    load: bool,
+    vector_reg: ast.VectorRegister,
+    lane: u3,
+    address_reg: Register,
+    offset: i64,
+) !void {
+    if (@mod(offset, 4) != 0) return error.VectorMemoryOffsetUnaligned;
+    const scaled_offset = @divExact(offset, 4);
+    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
+    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
+    const opcode: u32 = if (load) 0x32 else 0x3a;
+    const word = (opcode << 26) |
+        (@as(u32, @intFromEnum(address_reg)) << 21) |
+        (@as(u32, @intFromEnum(vector_reg)) << 16) |
+        (0b00010 << 11) |
+        (@as(u32, lane) << 8) |
+        encoded_offset;
+    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], {d}({s})\n", .{
+        word,
+        if (load) "llv" else "slv",
+        vectorRegName(vector_reg),
+        lane,
+        offset,
+        regName(address_reg),
+    });
+}
+
+fn writeHalfVectorMemory(
+    writer: *std.Io.Writer,
+    load: bool,
+    vector_reg: ast.VectorRegister,
+    lane: u3,
+    address_reg: Register,
+    offset: i64,
+) !void {
+    if (@mod(offset, 8) != 0) return error.VectorMemoryOffsetUnaligned;
+    const scaled_offset = @divExact(offset, 8);
+    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
+    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
+    const opcode: u32 = if (load) 0x32 else 0x3a;
+    const word = (opcode << 26) |
+        (@as(u32, @intFromEnum(address_reg)) << 21) |
+        (@as(u32, @intFromEnum(vector_reg)) << 16) |
+        (0b00011 << 11) |
+        (@as(u32, lane) << 8) |
+        encoded_offset;
+    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], {d}({s})\n", .{
+        word,
+        if (load) "ldv" else "sdv",
+        vectorRegName(vector_reg),
+        lane,
+        offset,
         regName(address_reg),
     });
 }
@@ -1430,7 +2064,36 @@ fn writeVectorLoad(
 ) !void {
     if (load.label_offset != null) return error.SymbolicOffsetRequiresScalarLoad;
     const address_reg = try valueAsAddressReg(writer, context, load.address);
+    if (load.packed_u8 or load.packed_unsigned_u8) {
+        if (@mod(load.offset, 8) != 0) return error.VectorMemoryOffsetUnaligned;
+        const scaled_offset = @divExact(load.offset, 8);
+        if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
+        const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
+        const word: u32 = (0x32 << 26) |
+            (@as(u32, @intFromEnum(address_reg)) << 21) |
+            (@as(u32, @intFromEnum(destination)) << 16) |
+            (@as(u32, if (load.packed_unsigned_u8) 0b00111 else 0b00110) << 11) | encoded_offset;
+        try writer.print("  .word 0x{x:0>8} # {s} ${s}, {d}({s})\n", .{
+            word, if (load.packed_unsigned_u8) "luv" else "lpv", vectorRegName(destination), load.offset, regName(address_reg),
+        });
+        return;
+    }
+    if (load.partial_u32_lane) |lane| {
+        if (@mod(load.offset, 4) != 0) return error.VectorMemoryOffsetUnaligned;
+        const scaled_offset = @divExact(load.offset, 4);
+        if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
+        const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
+        const word: u32 = (0x32 << 26) |
+            (@as(u32, @intFromEnum(address_reg)) << 21) |
+            (@as(u32, @intFromEnum(destination)) << 16) |
+            (0b00010 << 11) | (@as(u32, lane) << 8) | encoded_offset;
+        try writer.print("  .word 0x{x:0>8} # llv ${s}[{d}], {d}({s})\n", .{
+            word, vectorRegName(destination), lane, load.offset, regName(address_reg),
+        });
+        return;
+    }
     try writeVectorMemory(writer, true, destination, address_reg, load.offset);
+    if (load.unaligned) try writeVectorReverseLoad(writer, destination, address_reg, load.offset + 16);
     if (load.data_type == .vec32) {
         try writeVectorMemory(
             writer,
@@ -1439,7 +2102,32 @@ fn writeVectorLoad(
             address_reg,
             load.offset + 16,
         );
+        if (load.unaligned) try writeVectorReverseLoad(
+            writer,
+            nextVectorRegister(destination).?,
+            address_reg,
+            load.offset + 32,
+        );
     }
+}
+
+fn writeVectorReverseLoad(
+    writer: *std.Io.Writer,
+    vector_reg: ast.VectorRegister,
+    address_reg: Register,
+    offset: i64,
+) !void {
+    if (@mod(offset, 16) != 0) return error.VectorMemoryOffsetUnaligned;
+    const scaled_offset = @divExact(offset, 16);
+    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
+    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
+    const word: u32 = (0x32 << 26) |
+        (@as(u32, @intFromEnum(address_reg)) << 21) |
+        (@as(u32, @intFromEnum(vector_reg)) << 16) |
+        (0b00101 << 11) | encoded_offset;
+    try writer.print("  .word 0x{x:0>8} # lrv ${s}, {d}({s})\n", .{
+        word, vectorRegName(vector_reg), offset, regName(address_reg),
+    });
 }
 
 fn writeVectorMemory(
@@ -1469,17 +2157,20 @@ fn writeVectorMemory(
 }
 
 fn writeLoadInto(writer: *std.Io.Writer, context: *FunctionContext, destination_reg: Register, load: ast.Load) !void {
+    if (load.unaligned) return error.UnalignedLoadRequiresVectorType;
     try validateMemoryOffset(load.offset);
     if (load.label_offset) |offset_name| {
         const offset_symbol = try context.lookup(offset_name);
         const address_reg = try valueAsAddressReg(writer, context, load.address);
         if (offset_symbol.data_label) |label| {
-            try writer.print("  {s} {s}, %lo({s})({s})\n", .{
-                loadOp(load.data_type),
-                regName(destination_reg),
-                label,
-                regName(address_reg),
-            });
+            if (load.offset == 0)
+                try writer.print("  {s} {s}, %lo({s})({s})\n", .{
+                    loadOp(load.data_type), regName(destination_reg), label, regName(address_reg),
+                })
+            else
+                try writer.print("  {s} {s}, %lo({s} + {d})({s})\n", .{
+                    loadOp(load.data_type), regName(destination_reg), label, load.offset, regName(address_reg),
+                });
         } else {
             const offset = offset_symbol.constant orelse return error.ExpectedConstant;
             try validateMemoryOffset(offset);
@@ -1492,15 +2183,19 @@ fn writeLoadInto(writer: *std.Io.Writer, context: *FunctionContext, destination_
         }
         return;
     }
-    if (load.offset == 0) {
-        if (memoryDataLabel(context, load.address)) |label| {
+    if (memoryDataLabel(context, load.address)) |label| {
+        if (load.offset == 0) {
             try writer.print("  {s} {s}, %lo({s})($zero)\n", .{
                 loadOp(load.data_type),
                 regName(destination_reg),
                 label,
             });
-            return;
+        } else {
+            try writer.print("  {s} {s}, %lo({s} + {d})($zero)\n", .{
+                loadOp(load.data_type), regName(destination_reg), label, load.offset,
+            });
         }
+        return;
     }
     const address_reg = try valueAsAddressReg(writer, context, load.address);
     try writer.print("  {s} {s}, {d}({s})\n", .{
@@ -1586,7 +2281,7 @@ fn writeCall(
     }
 
     try writer.print("  jal {s}\n", .{call.name});
-    try writer.writeAll("  nop\n");
+    try writeDelaySlot(writer, functions, context, call.delay_slot);
 }
 
 fn writeBuiltin(
@@ -1597,11 +2292,18 @@ fn writeBuiltin(
 ) !void {
     switch (builtin) {
         .nop => try writer.writeAll("  nop\n"),
-        .breakpoint => try writer.writeAll("  break\n"),
+        .breakpoint => |code| if (code == 0)
+            try writer.writeAll("  break\n")
+        else
+            try writer.print("  break 0x{x}\n", .{code}),
         .jump => |jump| {
             const address_reg = try valueAsAddressReg(writer, context, jump.address);
             try writer.print("  jr {s}\n", .{regName(address_reg)});
             try writeDelaySlot(writer, functions, context, jump.delay_slot);
+        },
+        .return_from_function => |delay_slot| {
+            try writer.writeAll("  jr $ra\n");
+            try writeDelaySlot(writer, functions, context, delay_slot);
         },
         .direct_goto => |branch| {
             if (branch.target.module != null) return error.UnresolvedModuleCall;
@@ -1611,12 +2313,83 @@ fn writeBuiltin(
             });
             try writeDelaySlot(writer, functions, context, branch.delay_slot);
         },
+        .call_and_goto => |call| {
+            if (call.callee.module != null or call.continuation.module != null) {
+                return error.UnresolvedModuleCall;
+            }
+            // The continuation is written into $ra explicitly in the delay
+            // slot, matching libdragon's stackless tail-call idiom.
+            try writer.print("  j {s}\n", .{call.callee.name});
+            try writer.print("  addiu $ra, $zero, %lo({s})\n", .{call.continuation.name});
+        },
         .fallthrough => {},
         .set_return => |target| try writer.print("  addiu $ra, $zero, %lo({s})\n", .{target}),
-        .move => |move| try writer.print("  or {s}, {s}, $zero\n", .{
-            regName(move.destination),
-            regName(move.source),
-        }),
+        .set_function_address => |set_address| {
+            if (set_address.target.module != null) return error.UnresolvedModuleCall;
+            const destination = try context.lookup(set_address.destination);
+            const destination_reg = destination.reg orelse return error.ExpectedScalarRegister;
+            try writer.print("  addiu {s}, $zero, %lo({s})\n", .{
+                regName(destination_reg), set_address.target.name,
+            });
+        },
+        .set_data_address => |set_address| {
+            const destination = try context.lookup(set_address.destination);
+            const destination_reg = destination.reg orelse return error.ExpectedScalarRegister;
+            const data = try context.lookup(set_address.label);
+            const label = data.data_label orelse return error.ExpectedDataLabel;
+            if (set_address.offset == 0) {
+                try writer.print("  addiu {s}, $zero, %lo({s})\n", .{ regName(destination_reg), label });
+            } else {
+                try writer.print("  addiu {s}, $zero, %lo({s} + {d})\n", .{
+                    regName(destination_reg), label, set_address.offset,
+                });
+            }
+        },
+        .write_vector_control => |control_write| {
+            const source_reg = try valueAsAddressReg(writer, context, control_write.value);
+            const word = @as(u32, 0x48c00000) |
+                (@as(u32, @intFromEnum(source_reg)) << 16) |
+                (@as(u32, @intFromEnum(control_write.register)) << 11);
+            try writer.print("  .word 0x{x:0>8} # ctc2 {s}, ${d}\n", .{
+                word, regName(source_reg), @intFromEnum(control_write.register),
+            });
+        },
+        .vector_memory => |memory| {
+            const vector = try context.lookup(memory.vector.name);
+            if (memory.vector.lane != null) return error.PartialVectorMemoryRequiresVec16;
+            const vector_reg = try vectorRegisterForView(vector, memory.vector.view);
+            if (vector.data_type != .vec16 and memory.vector.view == null) {
+                return error.PartialVectorMemoryRequiresVec16;
+            }
+            const address_reg = try valueAsAddressReg(writer, context, memory.address);
+            switch (memory.operation) {
+                .load16 => try writeVectorLaneMemory(writer, true, vector_reg, memory.lane, address_reg, memory.offset),
+                .store16 => try writeVectorLaneMemory(writer, false, vector_reg, memory.lane, address_reg, memory.offset),
+                .load32 => try writeQuarterVectorMemory(writer, true, vector_reg, memory.lane, address_reg, memory.offset),
+                .store32 => try writeQuarterVectorMemory(writer, false, vector_reg, memory.lane, address_reg, memory.offset),
+                .load64 => try writeHalfVectorMemory(writer, true, vector_reg, memory.lane, address_reg, memory.offset),
+                .store64 => try writeHalfVectorMemory(writer, false, vector_reg, memory.lane, address_reg, memory.offset),
+                .load128 => try writeVectorMemory(writer, true, vector_reg, address_reg, memory.offset),
+                .store128 => try writeVectorMemory(writer, false, vector_reg, address_reg, memory.offset),
+                .load_packed_signed, .load_packed_unsigned => try writeVectorLoad(writer, context, vector_reg, .{
+                    .data_type = .vec16,
+                    .address = memory.address,
+                    .offset = memory.offset,
+                    .packed_u8 = memory.operation == .load_packed_signed,
+                    .packed_unsigned_u8 = memory.operation == .load_packed_unsigned,
+                }),
+            }
+        },
+        .hardware_write => |hardware_write| {
+            const source_reg = try valueAsAddressReg(writer, context, hardware_write.value);
+            const register: u4 = switch (hardware_write.operation) {
+                .rsp_dma_memory_address => 0,
+                .rsp_dma_rdram_address => 1,
+                .rsp_dma_write_length => 3,
+                .rdp_command_end => 9,
+            };
+            try writer.print("  mtc0 {s}, ${d}\n", .{ regName(source_reg), register });
+        },
     }
 }
 
@@ -1627,7 +2400,8 @@ fn writeDelaySlot(
     delay_slot: ?[]ast.Statement,
 ) !void {
     if (delay_slot) |statements| {
-        if (statements.len != 1) return error.InvalidDelaySlot;
+        if (statements.len != 1 and
+            !(statements.len == 2 and statements[0] == .label)) return error.InvalidDelaySlot;
         try writeStatements(writer, functions, context, statements);
     } else {
         try writer.writeAll("  nop\n");
@@ -1693,7 +2467,12 @@ fn writeConditionBranchFalse(
         .number => |number| rhs_immediate = number,
         .vector_access => return error.ConditionRhsMustBeRegisterOrNumber,
         .vector_operation => return error.ConditionRhsMustBeRegisterOrNumber,
+        .vector_shift => return error.ConditionRhsMustBeRegisterOrNumber,
         .accumulator_read => return error.ConditionRhsMustBeRegisterOrNumber,
+        .vector_control_read => return error.ConditionRhsMustBeRegisterOrNumber,
+        .hardware_read => return error.ConditionRhsMustBeRegisterOrNumber,
+        .scalar_comparison => return error.ConditionRhsMustBeRegisterOrNumber,
+        .signed_less_than => return error.ConditionRhsMustBeRegisterOrNumber,
         .ident => |name| blk: {
             const rhs = try context.lookup(name);
             try expectSameType(lhs, rhs);
@@ -1713,8 +2492,9 @@ fn writeConditionBranchFalse(
                 if (immediate == 0) {
                     rhs_reg = .zero;
                 } else {
-                    try loadImmediateInto(writer, compiler_scratch_2, immediate);
-                    rhs_reg = compiler_scratch_2;
+                    const scratch = try backendScratch2(context);
+                    try loadImmediateInto(writer, scratch, immediate);
+                    rhs_reg = scratch;
                 }
             }
             const branch = if (condition.op == .eq) "bne" else "beq";
@@ -1729,6 +2509,23 @@ fn writeConditionBranchFalse(
         },
         .lt, .le, .gt, .ge => {
             if (rhs_immediate) |immediate| {
+                if (isSigned(lhs.data_type) and immediate == 0) {
+                    try writer.print("  {s} {s}, LABEL_{s}_{s}_{d}\n", .{
+                        switch (condition.op) {
+                            .lt => "bgez",
+                            .le => "bgtz",
+                            .gt => "blez",
+                            .ge => "bltz",
+                            else => unreachable,
+                        },
+                        regName(lhs_reg),
+                        context.label_prefix,
+                        label_suffix,
+                        label,
+                    });
+                    if (emit_nop) try writer.writeAll("  nop\n");
+                    return;
+                }
                 // Unsigned comparisons at the sign-bit boundary are exactly
                 // signed zero tests and need no materialized constant or SLTU.
                 if (!isSigned(lhs.data_type) and immediate == 0x80000000 and
@@ -1775,8 +2572,9 @@ fn writeConditionBranchFalse(
                     }
                 }
 
-                try loadImmediateInto(writer, compiler_scratch_2, immediate);
-                rhs_reg = compiler_scratch_2;
+                const scratch = try backendScratch2(context);
+                try loadImmediateInto(writer, scratch, immediate);
+                rhs_reg = scratch;
             }
 
             const instruction = if (isSigned(lhs.data_type)) "slt" else "sltu";
@@ -1813,7 +2611,12 @@ fn valueAsImmediate(context: *FunctionContext, value: ast.Value) !i64 {
         .ident => |name| (try context.lookup(name)).constant orelse error.ExpectedConstant,
         .vector_access => error.ExpectedConstant,
         .vector_operation => error.ExpectedConstant,
+        .vector_shift => error.ExpectedConstant,
         .accumulator_read => error.ExpectedConstant,
+        .vector_control_read => error.ExpectedConstant,
+        .hardware_read => error.ExpectedConstant,
+        .scalar_comparison => error.ExpectedConstant,
+        .signed_less_than => error.ExpectedConstant,
         .load => error.ExpectedConstant,
     };
 }
@@ -1850,16 +2653,22 @@ fn valueAsStoreReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast
         .ident => |name| {
             const symbol = try context.lookup(name);
             if (symbol.reg) |reg| return reg;
-            return try loadImmediate(writer, symbol.constant orelse return error.StoreValueMustBeRegister);
+            return try loadImmediate(writer, context, symbol.constant orelse return error.StoreValueMustBeRegister);
         },
-        .number => |number| return try loadImmediate(writer, number),
+        .number => |number| return try loadImmediate(writer, context, number),
         .vector_access => return error.StoreValueMustBeRegister,
     }
 }
 
-fn loadImmediate(writer: *std.Io.Writer, value: i64) !Register {
+fn loadImmediate(writer: *std.Io.Writer, context: *FunctionContext, value: i64) !Register {
     if (value == 0) return .zero;
-    try loadImmediateInto(writer, compiler_scratch_2, value);
+    const scratch = try backendScratch2(context);
+    try loadImmediateInto(writer, scratch, value);
+    return scratch;
+}
+
+fn backendScratch2(context: *const FunctionContext) !Register {
+    if (context.isRegisterInUse(compiler_scratch_2)) return error.BackendScratchRegisterUnavailable;
     return compiler_scratch_2;
 }
 

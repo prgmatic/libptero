@@ -104,7 +104,7 @@ const Loader = struct {
             if (module_index == root) continue;
             const stem = std.fs.path.stem(module.path);
             for (module.functions) |*function| {
-                if (!function.emit_label) continue;
+                if (!function.emit_label or function.external) continue;
                 const generated = try std.fmt.allocPrint(
                     self.allocator,
                     "zsp_m{d}_{s}__{s}",
@@ -118,6 +118,23 @@ const Loader = struct {
         for (self.modules.items, 0..) |*module, module_index| {
             for (module.functions) |*function| {
                 try self.resolveCalls(module_index, function.statements);
+            }
+        }
+
+        var layout_seen = false;
+        for (self.modules.items, 0..) |*module, module_index| {
+            for (module.functions) |*declaration| {
+                if (declaration.layout_entries.len == 0) continue;
+                if (layout_seen) return error.DuplicateLayoutDeclaration;
+                layout_seen = true;
+                for (declaration.layout_entries, 0..) |*entry, entry_index| {
+                    try self.resolveFunctionRef(module_index, entry);
+                    for (declaration.layout_entries[0..entry_index]) |previous| {
+                        if (std.mem.eql(u8, previous.name, entry.name)) {
+                            return error.DuplicateLayoutEntry;
+                        }
+                    }
+                }
             }
         }
 
@@ -144,21 +161,33 @@ const Loader = struct {
                     if (call.module != null and !function.public) return error.PrivateFunction;
                     call.module = null;
                     call.name = function.name;
+                    if (call.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
                 },
                 .builtin => |*builtin| switch (builtin.*) {
                     .direct_goto => |*branch| {
                         try self.resolveFunctionRef(module_index, &branch.target);
                         if (branch.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
                     },
+                    .call_and_goto => |*call| {
+                        try self.resolveFunctionRef(module_index, &call.callee);
+                        try self.resolveFunctionRef(module_index, &call.continuation);
+                    },
                     .fallthrough => |*target| {
                         try self.resolveFunctionRef(module_index, target);
+                    },
+                    .set_function_address => |*set_address| {
+                        try self.resolveFunctionRef(module_index, &set_address.target);
                     },
                     .jump => |*jump| {
                         if (jump.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
                     },
+                    .return_from_function => |delay_slot| if (delay_slot) |return_statements| {
+                        try self.resolveCalls(module_index, return_statements);
+                    },
                     else => {},
                 },
                 .while_loop => |*loop| try self.resolveCalls(module_index, loop.statements),
+                .ordered_block => |ordered| try self.resolveCalls(module_index, ordered),
                 .goto => |*branch| if (branch.delay_slot) |delay_slot| {
                     try self.resolveCalls(module_index, delay_slot);
                 },

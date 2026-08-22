@@ -55,39 +55,46 @@ pub fn exec(
     reg($s4) dmem: u32,
     reg($t2) flags: u32,
 ) noreturn {
-    asm("dma_exec_wait:");
-    asm("mfc0 $at, $5");
-    asm("bnez $at, dma_exec_wait");
-    asm("andi $at, $t0, 0x0fff");
-    asm("sub $at, $t1, $at");
-    asm("addi $at, $at, -1");
-    asm("sll $at, $at, 20");
-    asm("or $at, $at, $t0");
-    asm("mtc0 $s0, $1");
-    asm("bgez $t2, dma_exec_read");
-    asm("mtc0 $s4, $0");
-    asm("b dma_exec_done");
-    asm("mtc0 $at, $3");
-    asm("dma_exec_read:");
-    asm("mtc0 $at, $2");
-    asm("dma_exec_done:");
-    asm("andi $at, $s0, 7");
-    asm("add $s4, $s4, $at");
-    asm("andi $t2, $t2, 0x0f");
+    reg($at) scratch: u32 = undefined;
+dma_exec_wait:
+    cp0.getDmaFullAt();
+    if(scratch != 0) goto dma_exec_wait delay {
+        scratch = size & 0x0fff;
+    }
+    scratch = pitch - scratch;
+    scratch -= 1;
+    scratch <<= 20;
+    scratch |= size;
+    cp0.setDmaAddrRdram(rdram);
+    if(flags < 0x80000000) goto dma_exec_read delay {
+        cp0.setDmaAddrRsp(dmem);
+    }
+    goto dma_exec_done, .branch delay {
+        cp0.setDmaWriteAt();
+    }
+dma_exec_read:
+    cp0.setDmaReadAt();
+dma_exec_done:
+    scratch = rdram & 7;
+    dmem = dmem + scratch;
+    flags &= 0x0f;
     @fallthrough(waitStatus);
 }
 
 pub fn waitStatus(reg($t2) flags: u32) noreturn {
-    asm("mfc0 $at, $4");
-    asm("dma_status_wait:");
-    asm("and $at, $at, $t2");
-    asm("bnez $at, dma_status_wait");
-    asm("mfc0 $at, $4");
+    reg($at) status: u32 = undefined;
+    cp0.getSpStatusAt();
+dma_status_wait:
+    status &= flags;
+    if(status != 0) goto dma_status_wait delay {
+        cp0.getSpStatusAt();
+    }
     @fallthrough(returnToCaller);
 }
 
 pub fn returnToCaller() noreturn {
-    reg($ra) return_address: u32 = undefined;    @jump(return_address);
+    reg($ra) return_address: u32 = undefined;
+    @jump(return_address);
 }
 
 pub fn waitIdle() noreturn {

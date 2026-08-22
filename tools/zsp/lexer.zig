@@ -52,10 +52,18 @@ pub const Lexer = struct {
                 return error.UnexpectedCharacter;
             },
             '+' => {
+                if (self.eatByte('%')) {
+                    if (self.eatByte('=')) return self.makeToken(.plus_percent_equal, start, start_line, start_column);
+                    return self.makeToken(.plus_percent, start, start_line, start_column);
+                }
                 if (self.eatByte('=')) return self.makeToken(.plus_equal, start, start_line, start_column);
                 return self.makeToken(.plus, start, start_line, start_column);
             },
             '-' => {
+                if (self.eatByte('%')) {
+                    if (self.eatByte('=')) return self.makeToken(.minus_percent_equal, start, start_line, start_column);
+                    return self.makeToken(.minus_percent, start, start_line, start_column);
+                }
                 if (self.eatByte('=')) return self.makeToken(.minus_equal, start, start_line, start_column);
                 return self.makeToken(.minus, start, start_line, start_column);
             },

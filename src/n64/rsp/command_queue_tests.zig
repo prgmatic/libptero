@@ -49,6 +49,16 @@ test "writeRawCommand encodes a command" {
     try testing.expectEqualSlices(u32, &expected, queue.buffer);
 }
 
+test "writeRawCommand encodes trailing overlay words" {
+    var buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var queue = CommandQueue.init(buffer[0..]);
+
+    queue.writeRawCommand(0xdf, 0x20, &.{ 1, 2, 3, 4, 5, 6 });
+    queue.stop();
+
+    try testing.expectEqualSlices(u32, &.{ 0xdf000020, 1, 2, 3, 4, 5, 6 }, buffer[0..7]);
+}
+
 test "writeRawCommand encodes a four-byte command without arguments" {
     var buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
     var queue = CommandQueue.init(buffer[0..]);

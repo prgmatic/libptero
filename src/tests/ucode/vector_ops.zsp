@@ -68,6 +68,37 @@ export fn _start() noreturn {
     store(vec16, input, nor_result, 0x180);
     store(vec16, input, mul_result, 0x1a0);
 
+    // Triangle assembly uses scalar lane moves and the RSP reciprocal unit.
+    // For an input of 1, the RSP reciprocal ROM produces 0x7fffc000:
+    // VRCP returns its low half and VRCPH retrieves its high half.
+    reg($v18) reciprocal_result: vec16 = 0;
+    reciprocal_result[0] = a[1];
+    reciprocal_result[1] = vrcp(a[0]);
+    reciprocal_result[2] = vrcph(a[0]);
+    store(vec16, input, reciprocal_result, 0x1b0);
+
+    reg($v19) unsigned_bytes: vec16 = load_vec_u8_unsigned(input, 0);
+    store(vec16, input, unsigned_bytes, 0x1c0);
+    reg($v20) partial_words: vec16 = 0;
+    partial_words = load_vec_u32(input, 0);
+    partial_words = load_vec_u32(input, 8, 4);
+    store(vec16, input, partial_words, 0x1d0);
+
+    seed = 0x80402010;
+    store(u32, input, seed, 0x70);
+    seed = 0x08040201;
+    store(u32, input, seed, 0x74);
+    reg($v31) shift_vector: vec16 = load_vec_u8(input, 0x70);
+    reg($v21) shifted_left: vec16 = undefined;
+    reg($v22) shifted_arithmetic: vec16 = undefined;
+    reg($v23) shifted_logical: vec16 = undefined;
+    shifted_left = a << 14;
+    shifted_arithmetic = a >> 2;
+    shifted_logical = a >>> 7;
+    store(vec16, input, shifted_left, 0x1e0);
+    store(vec16, input, shifted_arithmetic, 0x1f0);
+    store(vec16, input, shifted_logical, 0x200);
+
     // A vec32 is an integer vector followed by its fractional vector.
     seed = 0x00010001;
     store(u32, input, seed, 32);

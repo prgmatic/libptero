@@ -1,6 +1,1387 @@
 const rdp = @import("rdp.zsp");
+const dma = @import("resident_dma.zsp");
+const cp0 = @import("cp0.zsp");
+const queue = @import("resident_queue.zsp");
 
-// Minimal RDP overlay used to establish the overlay-to-resident emission ABI.
-command(0) fn _start(reg($a0) command: u32) {
-    rdp.send(0xe7000000, 0);
+// The reference overlay has a fixed IMEM ABI. Keep its exceptional layout in
+// one place; functions in ordinary ZSP modules otherwise follow source order.
+layout {
+    _start;
+    passthrough16;
+    setPrimitiveColor;
+    setPrimitiveColorComponent;
+    setOtherModes;
+    modifyOtherModes;
+    sendOtherModes;
+    finalizeOtherModes;
+    setFillColor32;
+    setScissorEx;
+    setFixupImage;
+    setColorImage;
+    rectangleExclusive;
+    passthroughTriangle;
+    setLookupAddress;
+    fixupAddress;
+    rdpWaitIdle;
+    syncFull;
+    pushMode;
+    popMode;
+    setBlendingMode;
+    setFogMode;
+    setCombineMode1Pass;
+    setCombineMode2Pass;
+    resetMode;
+    setTriangleData;
+    triangle;
+    triangleCull;
+    setDebugMode;
+    autoTmemSetAddress;
+    autoTmemSetTile;
+    clearZBuffer;
+    clearZBackup;
+    rdp.sendStaged;
+    rdp.finalize;
+    rdp.write8;
+    rdp.write16;
+    rdpSetBlendingMode;
+    rdpSetFogMode;
+    rdpSetCombineMode1Pass;
+    rdpSetCombineMode2Pass;
+    updateRenderMode;
+    writeSetScissor;
+    writeSetFillColor;
+    triangleAsync;
+    triangleSendEnd;
+}
+
+// Libdragon deliberately maps these reserved command slots straight back to
+// the resident queue loop. An external command target represents that table
+// alias without adding any overlay instructions.
+command(21, 23, 32, 33, 34, 35) extern fn resident_command_loop() commandSize(8) noreturn;
+
+data {
+    command_staging_ptr: u32 = 0x00000a60;
+    command_staging_ptr_padding: u32 = 0;
+    aa_blend_mask: u32 = 0xfffff3c0;
+    aa_blend_table: [4]u32 = .{ 0x00000200, 0x00000200, 0x00002000, 0x00000180 };
+    aa_blend_default: [2]u32 = .{ 0x00550040, 0x00550000 };
+    aa_blend_padding: u32 = 0;
+    comb0_mask: [2]u32 = .{ 0x00fffe00, 0xf003fe00 };
+    combiner_shade: [2]u32 = .{ 0x00887f10, 0x88fe793c };
+    combiner_shade_fog: [2]u32 = .{ 0x00887f10, 0x88fe7d3e };
+    combiner_tex_shade: [2]u32 = .{ 0x00121824, 0x8833ffff };
+    combiner_tex_shade_fog: [2]u32 = .{ 0x00127e24, 0x88fff3f9 };
+    combiner_mipmaps: [4]u32 = .{ 0x8026a000, 0x10009200, 0x8017fe00, 0x2003f400 };
+}
+
+state {
+    syncfull_command: [2]u32;
+    syncpoint_id: u32;
+    sync_padding: u32;
+    rdram_state_address: u32;
+    rdram_syncpoint_address: u32;
+    address_table: [16]u32;
+    autotmem_address: u16;
+    autotmem_previous_address: u16;
+    autotmem_limit: u16;
+    autotmem_enabled: u8;
+    autotmem_padding: u8;
+    primitive_color_ex: u32;
+    primitive_color_rgba: u32;
+    mode_alignment: [8]u8;
+    mode_stack: [96]u8;
+    triangle_data0: [7]u32;
+    triangle_padding0: u32;
+    triangle_data1: [7]u32;
+    triangle_padding1: u32;
+    triangle_data2: [7]u32;
+    triangle_padding2: u32;
+}
+
+bss {
+    extern rdp_syncfull_ongoing: u8;
+    extern rdp_target_bitdepth: i8;
+    extern rdp_fill_color: u32;
+    extern rdp_mode: [8]u32;
+    extern rdp_scissor_rect: [2]u32;
+}
+
+// Libdragon command slots 0xC0 and the direct 64-bit RDP opcodes that do not
+// require overlay-side state fixups share this exact handler.
+command(0, 38, 39, 40, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 59, 60) fn _start(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) noreturn {
+    @callAndGoto(rdp.write8, rdp.finalize);
+}
+
+command(36, 37) fn passthrough16(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+    reg($a2) word2: u32,
+    reg($a3) word3: u32,
+) noreturn {
+    @callAndGoto(rdp.write16, rdp.finalize);
+}
+
+command(1) fn setLookupAddress(
+    reg($a0) command: u32,
+    reg($a1) address: u32,
+) {
+    store(u32, command, address, address_table);
+}
+
+fn fixupAddress(reg($a1) address: u32) {
+    reg($t0) table_offset: u32 = undefined;
+    table_offset = address >> 24;
+    reg($t1) base: u32 = load(u32, table_offset, address_table);
+    address += base;
+}
+
+command(61, 62) fn setFixupImage(
+    reg($a0) word0: u32,
+    reg($a1) address: u32,
+) {
+    reg($t3) opcode: u32 = undefined;
+    fixupAddress(address) delay {
+        opcode = 0xf0000000;
+    }
+    word0 |= opcode;
+    @callAndGoto(rdp.write8, rdp.finalize);
+}
+
+fn writeSetFillColor(reg($a1) color: u32) noreturn {
+    store(u32, rdp_fill_color, color);
+    reg($t0) bitdepth: u32 = load(u8, rdp_target_bitdepth);
+    bitdepth &= 3;
+    ordered {}
+    reg($a0) word0: u32 = undefined;
+    if(bitdepth == 3) @goto(rdp.write8) delay {
+        word0 = 0xf7000000;
+    }
+
+    reg($t1) green: u32 = undefined;
+    reg($t2) blue: u32 = undefined;
+    reg($t3) alpha: u32 = undefined;
+    bitdepth = color >> 16;
+    green = color >> 13;
+    blue = color >> 10;
+    alpha = color >> 7;
+    bitdepth &= 0x0000f800;
+    green &= 0x000007c0;
+    blue &= 0x0000003e;
+    alpha &= 0x00000001;
+    reg($t4) upper: u32 = undefined;
+    upper = bitdepth | green;
+    reg($t5) lower: u32 = undefined;
+    lower = blue | alpha;
+    color = upper | lower;
+    bitdepth = color << 16;
+    color |= bitdepth;
+    @goto(rdp.write8);
+}
+
+command(63) fn setColorImage(
+    reg($a0) word0: u32,
+    reg($a1) address: u32,
+) {
+    reg($t1) previous_bitdepth: u32 = load(u8, rdp_target_bitdepth);
+    reg($t0) bitdepth: u32 = undefined;
+    bitdepth = word0 >> 19;
+    bitdepth &= 3;
+    previous_bitdepth &= 0x80;
+    bitdepth |= previous_bitdepth;
+    store(u8, rdp_target_bitdepth, bitdepth);
+    fixupAddress(address);
+    ordered {
+        previous_bitdepth = 0xf0000000;
+    }
+    rdp.write8(word0, address) delay {
+        ordered {
+            word0 |= previous_bitdepth;
+        }
+    }
+    address = load(u32, rdp_fill_color);
+    @callAndGoto(writeSetFillColor, rdp.finalize);
+}
+
+command(22) fn setFillColor32(
+    reg($a0) _: u32,
+    reg($a1) color: u32,
+) {
+    @callAndGoto(writeSetFillColor, rdp.finalize);
+}
+
+inline fn prepareSyncFull(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) {
+    reg($s0) rdram: u32 = undefined;
+    reg($s4) dmem: u32 = undefined;
+
+    // Match libdragon's SpStatusWait: do not schedule another full sync while
+    // its CPU callback or a queue syncpoint is still pending.
+    reg($t2) wait_mask: u32 = 0x00000300;
+    dma.resident_dma_wait_status(wait_mask);
+
+    rdram = load(u32, rdram_syncpoint_address);
+    dmem = syncpoint_id;
+    reg($t0) dma_size: u32 = 7;
+    reg($t1) dma_pitch: u32 = undefined;
+    dma.resident_dma_in(dma_size, dma_pitch, rdram, dmem);
+
+    dma_size = 0x00001000;
+    cp0.setSpStatusT0(dma_size);
+    store(u32, syncfull_command, word0);
+    store(u32, syncfull_command, word1, 4);
+
+    dmem = syncfull_command;
+    rdram = load(u32, rdram_state_address);
+    dma_size = 15;
+    dma.resident_dma_out(dma_size, dma_pitch, rdram, dmem);
+
+}
+
+command(41) fn syncFull(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) {
+    prepareSyncFull(word0, word1);
+    rdp.write8(word0, word1);
+    reg($s4) staging: u32 = undefined;
+    reg($s3) staging_end: u32 = undefined;
+    rdp.prepareStagedSend(staging, staging_end);
+    rdp.sendStaged(staging, staging_end) delay {
+        store(u8, rdp_syncfull_ongoing, 0);
+    }
+    reg($t0) busy: u32 = 0x40;
+    store(u8, rdp_syncfull_ongoing, busy);
+sync_hold_set:
+    @goto(queue.resident_command_loop);
+}
+
+command(26) fn rdpWaitIdle(reg($a0) _: u32) {
+    reg($t2) status: u32 = undefined;
+    reg($t1) busy: u32 = undefined;
+    reg($t3) busy_mask: u32 = 0x40;
+rdp_wait:
+    cp0.getDpStatusT2(status);
+rdp_wait_mask:
+    busy = status & busy_mask;
+    if(busy != 0) goto rdp_wait_mask delay {
+        cp0.getDpStatusT2(status);
+    }
+}
+
+command(58) fn setPrimitiveColor(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) noreturn {
+    store(u32, primitive_color_ex, word0);
+    store(u32, primitive_color_rgba, word1);
+    @goto(_start);
+}
+
+command(19) fn setPrimitiveColorComponent(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) noreturn {
+    reg($t0) opcode: u32 = 0x29000000;
+    word0 ^= opcode;
+    reg($t3) selection: u32 = undefined;
+    selection = word0 >> 16;
+    selection &= 3;
+    reg($t1) saved_ex: u32 = undefined;
+    if(selection == 0) goto primitive_set_rgba delay {
+        selection -= 1;
+    }
+    if(selection == 0) goto primitive_set_lod delay {
+        saved_ex = load(u32, primitive_color_ex);
+    }
+primitive_set_min_lod:
+    saved_ex &= 0x000000ff;
+    word0 |= saved_ex;
+    goto primitive_component_send delay {
+    primitive_set_lod:
+        saved_ex = load(u32, primitive_color_ex);
+    }
+    saved_ex &= 0x0000ff00;
+    word0 |= saved_ex;
+    goto primitive_component_send delay {
+    primitive_set_rgba:
+        saved_ex = load(u32, primitive_color_ex);
+    }
+primitive_rgba_loaded:
+    saved_ex &= 0x0000ffff;
+    word0 |= saved_ex;
+    store(u32, primitive_color_rgba, word1);
+primitive_component_send:
+    store(u32, primitive_color_ex, word0);
+    reg($s4) staging: u32 = primitive_color_ex;
+    reg($s3) staging_end: u32 = undefined;
+    @goto(rdp.sendStaged) delay {
+        @setDataAddress(staging_end, primitive_color_ex, 8);
+    }
+}
+
+fn writeSetScissor(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) noreturn {
+    store(u32, rdp_scissor_rect, word0);
+    reg($t6) modes_byte: i32 = load(i8, rdp_mode, 25);
+    modes_byte &= 0x20;
+    if(modes_byte == 0) goto scissor_fixed delay {
+        store(u32, rdp_scissor_rect, word1, 4);
+    }
+    word1 -%= 0x1000;
+scissor_fixed:
+    @goto(rdp.write8);
+}
+
+command(18) fn setScissorEx(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) {
+    reg($t1) scissor_mask: u32 = undefined;
+    ordered {
+        scissor_mask = 0x3f000000;
+        word0 ^= scissor_mask;
+    }
+    @callAndGoto(writeSetScissor, rdp.finalize);
+}
+
+fn sendOtherModes(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) {
+    reg($t1) opcode: u32 = undefined;
+    rdp.write8(word0, word1) delay {
+        opcode = 0xef;
+    }
+    reg($s0) staging: u32 = undefined;
+    store(u8, staging, opcode, -8);
+    @fallthrough(finalizeOtherModes);
+}
+
+fn finalizeOtherModes(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) noreturn {
+    word0 = load(u32, rdp_scissor_rect);
+    word1 = load(u32, rdp_scissor_rect, 4);
+    @callAndGoto(writeSetScissor, rdp.finalize);
+}
+
+command(47) fn setOtherModes(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) noreturn {
+    store(u32, rdp_mode, word0, 24);
+    store(u8, rdp_mode, 0, 24);
+    store(u32, rdp_mode, word1, 28);
+    @goto(sendOtherModes);
+}
+
+command(20) fn modifyOtherModes(
+    reg($a0) command: i32,
+    reg($a1) inverse_mask: u32,
+    reg($a2) value: u32,
+) {
+    reg($t1) updated: u32 = undefined;
+    updated = load(u32, rdp_mode + command, 24);
+    updated &= inverse_mask;
+    updated |= value;
+    store(u32, rdp_mode + command, updated, 24);
+    command <<= 16;
+    if(command < 0) @goto(updateRenderMode) delay {
+        command = load(i32, rdp_mode, 24);
+    }
+    inverse_mask = load(u32, rdp_mode, 28);
+    @fallthrough(sendOtherModes);
+}
+
+fn updateRenderMode() {
+    reg($a0) comb_hi: u32 = undefined;
+    reg($a1) comb_lo: u32 = undefined;
+    reg($a2) som_hi: u32 = load(u32, rdp_mode, 24);
+    reg($a3) som_lo: u32 = undefined;
+    reg($t0) scratch0: u32 = undefined;
+    reg($s0) selected_combiner: u32 = undefined;
+    reg($at) assembly_temporary: u32 = undefined;
+    scratch0 = som_hi & 8;
+    if(scratch0 != 0) @goto(rdp.finalize) delay {
+        som_lo = load(u32, rdp_mode, 28);
+    }
+    scratch0 = som_hi << 10;
+    if(scratch0 >= 0x80000000) goto update_fillcopy delay {
+        comb_hi = load(u32, rdp_mode);
+    }
+    comb_lo = load(u32, rdp_mode, 4);
+    if(comb_hi < 0x80000000) goto update_combiner_1cycle;
+    scratch0 = som_hi & 1;
+    if(scratch0 != 0) @goto(queue.resident_assertion_failed) delay {
+        assembly_temporary = 0xc0040000;
+    }
+    ordered {}
+    reg($t1) scratch1: u32 = undefined;
+    goto update_store_combiner_2cycle delay {
+update_combiner_1cycle:
+        scratch1 = 0x04000000;
+    }
+    scratch0 = som_hi & scratch1;
+    reg($t5) comb_hi_no_id: u32 = undefined;
+    if(scratch0 == 0) goto update_check_mipmap delay {
+        comb_hi_no_id = comb_hi << 8;
+    }
+    comb_hi_no_id >>= 8;
+    scratch0 = load(u32, combiner_tex_shade);
+    if(scratch0 != comb_hi_no_id) goto update_check_fog_shade delay {
+        scratch0 = load(u32, combiner_tex_shade, 4);
+    }
+    if(scratch0 == comb_lo) goto update_fog_change delay {
+        selected_combiner = combiner_tex_shade_fog;
+    }
+update_check_fog_shade:
+    scratch0 = load(u32, combiner_shade);
+    if(scratch0 != comb_hi_no_id) goto update_check_mipmap delay {
+        scratch0 = load(u32, combiner_shade, 4);
+    }
+    if(scratch0 != comb_lo) goto update_check_mipmap delay {
+        selected_combiner = combiner_shade_fog;
+    }
+update_fog_change:
+    comb_hi = load(u32, selected_combiner);
+    comb_lo = load(u32, selected_combiner, 4);
+
+update_check_mipmap:
+    reg($t2) scratch2: u32 = undefined;
+    scratch2 = som_hi & 3;
+    if(scratch2 == 0) goto update_store_combiner_1cycle delay {
+        scratch2 <<= 3;
+    }
+    scratch0 = load(u32, rdp_mode, 8);
+    scratch1 = load(u32, rdp_mode, 12);
+    comb_hi &= scratch0;
+    comb_lo &= scratch1;
+    ordered {}
+    scratch0 = load(u32, scratch2, combiner_mipmaps, -8);
+    scratch1 = load(u32, scratch2, combiner_mipmaps, -4);
+    comb_hi |= scratch0;
+    comb_lo |= scratch1;
+    goto update_store_combiner_2cycle;
+
+update_store_combiner_1cycle:
+    store(u32, mode_combiner_1cycle, comb_hi);
+    store(u32, mode_combiner_1cycle, comb_lo, 4);
+    scratch0 = load(u32, comb0_mask);
+    scratch1 = load(u32, comb0_mask, 4);
+    comb_hi &= scratch0;
+    comb_lo &= scratch1;
+    ordered {}
+    scratch0 = som_hi >> 16;
+    scratch0 <<= 31;
+    comb_hi |= scratch0;
+update_store_combiner_2cycle:
+    store(u32, mode_combiner_2cycle, comb_hi);
+    store(u32, mode_combiner_2cycle, comb_lo, 4);
+
+    scratch0 = load(u32, rdp_mode, 16);
+    scratch1 = load(u32, rdp_mode, 20);
+    reg($t8) background_blending: u32 = undefined;
+    background_blending = scratch1 != 0;
+    if(scratch1 != 0) goto update_blender_defaults_done delay {
+        scratch2 = som_lo & 8;
+    }
+update_no_background_blending:
+    if(scratch2 == 0) goto update_blender_defaults_done;
+    scratch1 = som_hi & 4;
+    scratch1 = load(u32, scratch1, aa_blend_default);
+    assembly_temporary = -16385;
+    scratch0 &= assembly_temporary;
+update_blender_defaults_done:
+    scratch2 = 0xccccc040;
+    reg($t3) scratch3: u32 = 0x3333c040;
+    reg($v0) blend_1cycle: u32 = scratch1;
+    reserved reg($v1) merged_blend: u32 = undefined;
+    if(scratch0 == 0) goto update_blender_1pass;
+    blend_1cycle = scratch0;
+    if(scratch1 == 0) goto update_blender_1pass;
+    scratch0 &= scratch2;
+    scratch1 &= scratch3;
+    merged_blend = scratch0 | scratch1;
+    merged_blend |= 0x8000;
+    goto update_blender_merged;
+update_blender_1pass:
+    merged_blend = blend_1cycle & scratch3;
+    blend_1cycle &= scratch2;
+update_blender_merged:
+
+    scratch0 = som_hi & 0x3e00;
+    scratch1 = 0x2000;
+    if(scratch0 != scratch1) goto update_yuv_done delay {
+        scratch0 = 0x0a00;
+    }
+    som_hi |= scratch0;
+update_yuv_done:
+    scratch2 = merged_blend << 16;
+    scratch1 = load(u32, mode_combiner_2cycle);
+    scratch1 |= scratch2;
+    ordered {}
+    selected_combiner = mode_combiner_2cycle;
+    reg($t6) cycle_type: u32 = 0x10200000;
+    if(scratch1 >= 0x80000000) goto update_cycle_selected;
+    selected_combiner = mode_combiner_1cycle;
+    merged_blend = blend_1cycle;
+    cycle_type = 0x10300000;
+update_cycle_selected:
+    assembly_temporary = 0xff300000;
+    som_hi |= assembly_temporary;
+    som_hi ^= cycle_type;
+    ordered {}
+
+    scratch0 = som_lo & 8;
+    scratch1 = background_blending << 2;
+    scratch0 |= scratch1;
+    scratch0 = load(u32, scratch0, aa_blend_table);
+    scratch1 = load(u32, aa_blend_mask);
+    scratch0 |= merged_blend;
+    scratch0 &= scratch1;
+    ordered {
+        scratch1 = ~scratch1;
+    }
+    som_lo &= scratch1;
+    som_lo |= scratch0;
+    scratch0 = 0x2001;
+    scratch1 = som_lo & scratch0;
+    if(scratch0 != scratch1) goto update_alpha_compare_done;
+    som_lo |= 0x3000;
+    ordered {
+        assembly_temporary = -4;
+        som_lo &= assembly_temporary;
+    }
+update_alpha_compare_done:
+    scratch0 = som_lo & 0x400;
+    scratch1 = som_lo & 0x4000;
+    if(scratch0 != 0) goto update_finish;
+    som_lo |= 0x800;
+    if(scratch1 != 0) goto update_finish;
+    som_lo ^= 0x800;
+
+update_finish:
+    comb_hi = load(u32, selected_combiner);
+    comb_lo = load(u32, selected_combiner, 4);
+    assembly_temporary = 0xff000000;
+    comb_hi |= assembly_temporary;
+    assembly_temporary = 0x03000000;
+    comb_hi ^= assembly_temporary;
+    scratch0 = load(u8, rdp_mode, 24);
+    store(u32, rdp_mode, som_hi, 24);
+    store(u32, rdp_mode, som_lo, 28);
+    store(u8, rdp_mode, scratch0, 24);
+    @callAndGoto(rdp.write16, rdp.finalize);
+
+update_fillcopy:
+    assembly_temporary = 0xff000000;
+    comb_hi = som_hi | assembly_temporary;
+    assembly_temporary = 0x10000000;
+    comb_hi ^= assembly_temporary;
+    comb_lo = som_lo;
+    @callAndGoto(rdp.write8, rdp.finalize);
+}
+
+command(24) fn setBlendingMode(reg($a0) _: u32, reg($a1) _: u32) noreturn {
+    @goto(rdpSetBlendingMode);
+}
+
+command(25) fn setFogMode(reg($a0) _: u32, reg($a1) _: u32) noreturn {
+    @goto(rdpSetFogMode);
+}
+
+command(27) fn setCombineMode1Pass(reg($a0) _: u32, reg($a1) _: u32, reg($a2) _: u32, reg($a3) _: u32) noreturn {
+    @goto(rdpSetCombineMode1Pass);
+}
+
+command(5) fn setCombineMode2Pass(reg($a0) _: u32, reg($a1) _: u32) noreturn {
+    @goto(rdpSetCombineMode2Pass);
+}
+
+command(4) fn resetMode(
+    reg($a0) comb_hi: u32,
+    reg($a1) comb_lo: u32,
+    reg($a2) som_hi: u32,
+    reg($a3) som_lo: u32,
+) {
+    reg($t3) previous_som_hi: u32 = load(u32, rdp_mode, 24);
+    reg($t2) freeze: u32 = undefined;
+    freeze = previous_som_hi & 8;
+    som_hi |= freeze;
+
+    ordered {}
+    reg($s0) mode: u32 = rdp_mode;
+    ordered {}
+    reg($v00) zero_mode: vec16 = 0;
+    store(vec16, mode, zero_mode);
+    store(vec16, mode, zero_mode, 16);
+    ordered {}
+    store(u32, rdp_mode, som_hi, 24);
+    store(u32, rdp_mode, som_lo, 28);
+
+    previous_som_hi ^= som_hi;
+    previous_som_hi <<= 10;
+    reg($t0) saved_comb_hi: u32 = undefined;
+    reg($t1) saved_comb_lo: u32 = undefined;
+    if(previous_som_hi < 0x80000000) goto reset_mode_combine delay {
+        saved_comb_hi = comb_hi;
+    }
+    saved_comb_lo = comb_lo;
+    comb_hi = load(u32, rdp_scissor_rect);
+    comb_lo = load(u32, rdp_scissor_rect, 4);
+    writeSetScissor(comb_hi, comb_lo);
+    comb_hi = saved_comb_hi;
+    comb_lo = saved_comb_lo;
+
+reset_mode_combine:
+    @goto(setCombineMode1Pass);
+}
+
+command(6) fn pushMode(reg($a0) _: u32) {
+    reg($s0) mode: u32 = rdp_mode;
+    reg($s1) stack: u32 = mode_stack;
+    ordered {}
+    reg($v00) mode0: vec16 = load(vec16, mode);
+    reg($v01) mode1: vec16 = load(vec16, mode, 16);
+    reg($v02) stack0: vec16 = load(vec16, stack);
+    reg($v03) stack1: vec16 = load(vec16, stack, 16);
+    reg($v04) stack2: vec16 = load(vec16, stack, 32);
+    reg($v05) stack3: vec16 = load(vec16, stack, 48);
+    store(vec16, stack, mode0);
+    store(vec16, stack, mode1, 16);
+    store(vec16, stack, stack0, 32);
+    store(vec16, stack, stack1, 48);
+    store(vec16, stack, stack2, 64);
+    store(vec16, stack, stack3, 80);
+}
+
+command(7) fn popMode(reg($a0) scissor0: u32) {
+    reg($s0) stack: u32 = mode_stack;
+    reg($s1) mode: u32 = rdp_mode;
+    ordered {}
+    reg($v00) stack0: vec16 = load(vec16, stack);
+    reg($v01) stack1: vec16 = load(vec16, stack, 16);
+    reg($v02) stack2: vec16 = load(vec16, stack, 32);
+    reg($v03) stack3: vec16 = load(vec16, stack, 48);
+    reg($v04) stack4: vec16 = load(vec16, stack, 64);
+    reg($v05) stack5: vec16 = load(vec16, stack, 80);
+    store(vec16, mode, stack0);
+    store(vec16, mode, stack1, 16);
+    store(vec16, stack, stack2);
+    store(vec16, stack, stack3, 16);
+    store(vec16, stack, stack4, 32);
+    store(vec16, stack, stack5, 48);
+    scissor0 = load(u32, rdp_scissor_rect);
+    reg($a1) scissor1: u32 = load(u32, rdp_scissor_rect, 4);
+    @callAndGoto(writeSetScissor, updateRenderMode);
+}
+
+fn rdpSetBlendingMode(
+    reg($a0) _: u32,
+    reg($a1) formula: u32,
+) {
+    reg($t0) first_step: u32 = load(u32, rdp_mode, 16);
+    store(u32, rdp_mode, formula, 20);
+    if(formula == 0) goto blending_check_two_pass;
+    first_step = formula;
+blending_check_two_pass:
+    first_step &= 0x8000;
+    if(first_step == 0) @goto(updateRenderMode);
+    @fallthrough(rdpSetFogMode);
+}
+
+fn rdpSetFogMode(
+    reg($a0) _: u32,
+    reg($a1) formula: u32,
+) {
+    store(u32, rdp_mode, formula, 16);
+    @goto(updateRenderMode);
+}
+
+fn rdpSetCombineMode1Pass(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+    reg($a2) mask0: u32,
+    reg($a3) mask1: u32,
+) {
+    reg($at) high_bit: u32 = 0x80000000;
+    word0 ^= high_bit;
+    store(u32, rdp_mode, mask0, 8);
+    store(u32, rdp_mode, mask1, 12);
+    @fallthrough(rdpSetCombineMode2Pass);
+}
+
+fn rdpSetCombineMode2Pass(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) {
+    reg($at) command_mask: u32 = 0x7f000000;
+    word0 |= command_mask;
+    command_mask = 0x03000000;
+    word0 ^= command_mask;
+    store(u32, rdp_mode, word0);
+    store(u32, rdp_mode, word1, 4);
+    @fallthrough(updateRenderMode);
+}
+
+command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
+    reg($a0) _: u32,
+) commandSize(32, 48, 96, 112, 96, 112, 160, 176) noreturn {
+    reg($gp) relative_command_end: i32 = undefined;
+    reg($t7) command_size: i32 = undefined;
+    reg($s1) command_end: i32 = undefined;
+    ordered {
+        command_end = relative_command_end + 0xe0;
+    }
+    reg($s0) command_start: i32 = undefined;
+    command_start = command_end - command_size;
+    reg($s4) staging: u32 = undefined;
+    staging = command_staging;
+    reg($t1) mipmap_bits: u32 = load(u8, rdp_mode, 24);
+    reg($t0) triangle_byte: u32 = load(u8, command_start, 1);
+    mipmap_bits &= 0x38;
+    triangle_byte |= mipmap_bits;
+    store(u8, command_start, triangle_byte, 1);
+passthrough_triangle_copy:
+    reg($v00) chunk: vec16 = load_unaligned(vec16, command_start);
+    store(vec16, staging, chunk);
+    command_start += 16;
+    staging += 16;
+    if(command_start < command_end) goto passthrough_triangle_copy;
+    rdp.setStagingEnd(staging);
+    @goto(rdp.finalize);
+}
+
+command(30) fn triangle(
+    reg($a0) triangle_command: i32,
+) noreturn {
+    reg($s4) staging_start: i32 = command_staging;
+    reg($s3) output: i32 = staging_start;
+    reg($v0) cull_mode: i32 = 2;
+    reg($a1) vertex1: i32 = triangle_data0;
+    reg($a2) vertex2: i32 = triangle_data1;
+    reg($a3) vertex3: i32 = undefined;
+    triangleAsync(triangle_command, vertex1, vertex2, vertex3, output, cull_mode) delay {
+        vertex3 = triangle_data2;
+    }
+    @fallthrough(triangleCull);
+}
+
+fn triangleCull() noreturn {
+    @callAndGoto(triangleSendEnd, queue.resident_command_loop);
+}
+
+fn triangleAsync(
+    reg($a0) triangle_command: i32,
+    reg($a1) vertex1: i32,
+    reg($a2) vertex2: i32,
+    reg($a3) vertex3: i32,
+    reg($s3) output: i32,
+    reg($v0) cull_mode: i32,
+) {
+
+    store(u16, output, vertex1);
+    store(u16, output, vertex2, 2);
+    store(u16, output, vertex3, 4);
+
+    reg($v01) all1: vec16 = load_vec_u32(vertex1, 0);
+    reg($v02) all2: vec16 = load_vec_u32(vertex2, 0);
+    reg($v03) all3: vec16 = load_vec_u32(vertex3, 0);
+    reg($t3) clip1: i32 = load(u16, vertex1, 6);
+    reg($v00) vector_zero: vec16 = undefined;
+    reg($v30) shift_constants: vec16 = undefined;
+    reg($v27) negative_powers: vec16 = undefined;
+    negative_powers = vector_zero - shift_constants;
+    reg($v06) y1: vec16 = all1.yyyyyyyy;
+    all1[3] = load(vec16, output, 0);
+    reg($v07) y2: vec16 = all2.yyyyyyyy;
+    all2[3] = load(vec16, output, 2);
+    reg($v08) y3: vec16 = all3.yyyyyyyy;
+    all3[3] = load(vec16, output, 4);
+    reg($v12) vector_one: vec16 = undefined;
+    ordered {}
+    vector_one = vector_zero + shift_constants.WWWWWWWW;
+    ordered {}
+    reg($t5) clip3: i32 = load(u16, vertex3, 6);
+    reg($t4) clip2: i32 = load(u16, vertex2, 6);
+
+    reg($v04) all_tmp1: vec16 = undefined;
+    reg($v05) all_tmp2: vec16 = undefined;
+    reg($v09) y_tmp1: vec16 = undefined;
+    reg($v10) y_tmp2: vec16 = undefined;
+    reg($t0) did_swap0: i32 = undefined;
+    reg($t1) did_swap1: i32 = undefined;
+    reg($t2) did_swap2: i32 = undefined;
+
+    // VGE/VLT consume VCO for equality tie-breaking. Match the reference's
+    // vaddc-with-K1 setup, which also guarantees VCO is clear before sorting.
+    ordered {}
+    reg($t6) command_bits: i32 = 0x3f;
+    y_tmp1 = vectorCompareGreaterOrEqual(y1, y2);
+    clip1 |= clip3;
+    all_tmp1 = vectorSelectByCompareCode(all1, all2);
+    clip1 |= clip2;
+    y1 = vectorCompareLessThan(y1, y2);
+    ordered {
+        did_swap0 = @readVectorCompareCode();
+    }
+    all1 = vectorSelectByCompareCode(all1, all2);
+
+    did_swap1 = clip1 & 0x3f;
+    reg($v28) hml_upper: vec16 = 0;
+    if(did_swap1 != command_bits) @goto(triangleCull) delay {
+        y_tmp2 = vectorCompareGreaterOrEqual(y1, y3);
+    }
+
+    clip1 &= 0x3f00;
+    all_tmp2 = vectorSelectByCompareCode(all1, all3);
+    command_bits = load(u8, rdp_mode, 24);
+    y1 = vectorCompareLessThan(y1, y3);
+    ordered {
+        did_swap1 = @readVectorCompareCode();
+    }
+    all1 = vectorSelectByCompareCode(all1, all3);
+
+    @nop();
+    y3 = vectorCompareGreaterOrEqual(y_tmp1, y_tmp2);
+    command_bits &= 0x38;
+    all3 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
+    store(vec16, output, y1[0], 6);
+    y2 = vectorCompareLessThan(y_tmp1, y_tmp2);
+    ordered {
+        did_swap2 = @readVectorCompareCode();
+    }
+    all2 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
+
+    if(clip1 != 0) @goto(triangleCull) delay {
+        did_swap0 ^= did_swap1;
+    }
+
+    reg($v24) hml: vec16 = undefined;
+    reg($v29) negative_my: vec16 = undefined;
+    reg($v18) normal: vec32 = undefined;
+    reg($v22) x12: vec32 = undefined;
+    reg($v25) fy: vec32 = undefined;
+    reg($v20) slope: vec32 = undefined;
+
+    // Preserve the reference's hand-scheduled scalar/vector pairing. The raw
+    // vector words are required because each element selector is significant.
+    ordered {
+        hml = vectorSubtractCarry(all3, all1);
+        did_swap0 ^= did_swap2;
+        all_tmp2 = vectorSubtractCarry(all2, all1);
+        vertex1 = all1[3];
+        all_tmp1 = vectorSubtractCarry(all3, all2);
+        vertex2 = all2[3];
+        x12.sfract[0] = vectorMove(all1[0]);
+        triangle_command |= command_bits;
+        x12.sfract[2] = vectorMove(all2[0]);
+        did_swap0 &= 1;
+        negative_my = vectorSubtractCarry(vector_zero, all_tmp2.yyyyyyyy);
+        vertex3 = all3[3];
+        fy.sfract = vectorShiftLeft8(y1, 14);
+        @storeVector16(y2, 0, output, 4);
+        fy.sint = vectorShiftRightArithmetic(y1, 2);
+        did_swap0 ^= cull_mode;
+        normal.sfract = vmudh(all_tmp2, hml.yyyyyyyy);
+        @storeVector16(y3, 0, output, 2);
+        normal.sfract = vmadh(hml, negative_my);
+        @storeVector32(all_tmp2, 0, output, 8);
+        normal.sint = readVectorAccumulatorHigh();
+        @storeVector32(all_tmp1, 0, output, 12);
+        normal.sfract = readVectorAccumulatorMiddle();
+        @loadVector64(hml, 2, output, 8);
+        fy.sfract = vectorSubtractCarry(vector_zero, fy.sfract);
+        clip2 = output +% 0x20;
+        fy.sint = vectorSubtract(fy.sint, fy.sint);
+        @loadVector16(y3, 0, vertex1, 18);
+        slope.sint[7] = vectorReciprocalHigh(normal.sint[0]);
+        did_swap1 = normal.sint[0];
+        slope.sfract[7] = vectorReciprocalLow(normal.sfract[0]);
+        @loadVector16(y3, 2, vertex2, 18);
+        slope.sint[7] = vectorReciprocalHigh(vector_zero[0]);
+        @loadVector16(y3, 4, vertex3, 18);
+        slope.sfract[0] = vectorReciprocal(hml[1]);
+        did_swap1 = did_swap1 < 0;
+        slope.sint[0] = vectorReciprocalHigh(hml[1]);
+    }
+    if(did_swap1 == did_swap0) @goto(triangleCull) delay {
+        ordered {
+            slope.sfract[2] = vectorReciprocal(all_tmp2[1]);
+        }
+    }
+    reg($v11) attribute3: vec16 = undefined;
+    reg($v14) inverse_w: vec32 = undefined;
+    reg($v16) edges: vec32 = undefined;
+    reg($v13) attribute_delta_high: vec16 = undefined;
+    reg($v31) reciprocal_constants: vec16 = undefined;
+    reg($at) large_offset: i32 = undefined;
+
+    ordered {
+        slope.sint[2] = vectorReciprocalHigh(all_tmp2[1]);
+        @loadVector16(y2, 0, vertex1, 16);
+        slope.sfract[4] = vectorReciprocal(all_tmp1[1]);
+        @loadVector16(y2, 2, vertex2, 16);
+        slope.sint[4] = vectorReciprocalHigh(all_tmp1[1]);
+        @loadVector16(y2, 4, vertex3, 16);
+        hml[7] = vectorMove(normal.sfract[0]);
+        did_swap1 ^= 1;
+        hml_upper[7] = vectorMove(normal.sint[0]);
+        did_swap1 <<= 7;
+        all1 = vmudn(slope.sfract, negative_powers.YYYYYYYY);
+        @loadVectorPackedUnsigned(attribute3, vertex3, 8);
+        all2 = vmadh(slope.sint, negative_powers.YYYYYYYY);
+        @loadVectorPackedUnsigned(y_tmp1, vertex1, 8);
+        negative_my = vectorSubtractCarry(y3, y3.zzzzzzzz);
+        @loadVectorPackedUnsigned(y_tmp2, vertex2, 8);
+        y2 = vectorCompareLessThan(y2, y2.zzzzzzzz);
+        triangle_command |= did_swap1;
+        y3 = vectorSelectByCompareCode(y3, y3.zzzzzzzz);
+        @loadVector16(inverse_w.sfract, 6, vertex3, 22);
+        all3 = vmudl(slope.sfract, hml.yywwYYWW);
+        @loadVector16(inverse_w.sfract, 4, vertex1, 22);
+        all3 = vmadm(slope.sint, hml.yywwYYWW);
+        @loadVector16(inverse_w.sfract, 5, vertex2, 22);
+        all3 = vmadn(slope.sfract, hml_upper);
+        clip3 = triangle_command & 0x400;
+        all_tmp1 = vmadh(slope.sint, hml_upper);
+        clip3 >>>= 4;
+        all3 = vmadn(vector_one, negative_powers.WWWWWWWW);
+        did_swap0 = hml[3];
+        all_tmp1 = vmadh(vector_one, negative_powers.WWWWWWWW);
+        did_swap1 = hml[0];
+        negative_my = vectorSubtractCarry(y3, y3.XXXXXXXX);
+        @loadVector16(inverse_w.sint, 5, vertex2, 20);
+        y2 = vectorCompareLessThan(y2, y2.XXXXXXXX);
+        @loadVector16(inverse_w.sint, 6, vertex3, 20);
+        y3 = vectorSelectByCompareCode(y3, y3.XXXXXXXX);
+        @loadVector16(inverse_w.sint, 4, vertex1, 20);
+        negative_my = vmudl(all3, all1);
+        clip3 +%= clip2;
+        negative_my = vmadm(all_tmp1, all1);
+        command_bits = triangle_command & 0x200;
+        normal.sfract = vmadn(all3, all2);
+        command_bits >>>= 3;
+        normal.sint = vmadh(all_tmp1, all2);
+        store(i16, output, triangle_command);
+    }
+
+    reg($ra) return_address: i32 = undefined;
+
+    // Exact remainder of libdragon's hand-scheduled triangle fast path.
+    ordered {
+        negative_my = vmudl(inverse_w.sfract, y3.xxxxxxxx);
+        @loadVector32(all_tmp1, 4, vertex1, 12);
+        negative_my = vmadm(inverse_w.sint, y3.xxxxxxxx);
+        @loadVector32(all3, 4, vertex2, 12);
+        inverse_w.sfract = vmadn(inverse_w.sfract, y2.xxxxxxxx);
+        did_swap0 = -did_swap0;
+        negative_my = vmudn(normal.sfract, hml);
+        did_swap1 = -did_swap1;
+        negative_my = vmadh(normal.sint, hml);
+        hml[3] = did_swap0;
+        slope.sfract = readVectorAccumulatorMiddle();
+        hml[0] = did_swap1;
+        slope.sint = readVectorAccumulatorHigh();
+        did_swap0 = 0xcf;
+        inverse_w.sfract = vectorSubtractCarry(inverse_w.sfract, shift_constants.WWWWWWWW);
+        @loadVector32(y1, 4, vertex3, 12);
+        y_tmp1 = vectorShiftRightLogical(y_tmp1, 7);
+        @writeVectorCompareCode(did_swap0);
+        y_tmp2 = vectorShiftRightLogical(y_tmp2, 7);
+        @loadVector16(y_tmp1, 7, vertex1, 4);
+        attribute3 = vectorShiftRightLogical(attribute3, 7);
+        @loadVector16(y_tmp2, 7, vertex2, 4);
+        inverse_w.sfract = vectorShiftRightLogical(inverse_w.sfract, 1);
+        @loadVector16(attribute3, 7, vertex3, 4);
+        negative_my = vmudl(slope.sfract, fy.sfract.XXXXXXXX);
+        command_bits +%= clip3;
+        negative_my = vmadm(slope.sint, fy.sfract.XXXXXXXX);
+        clip1 = triangle_command & 0x100;
+        edges.sfract = vmadn(slope.sfract, fy.sint.XXXXXXXX);
+        did_swap1 = dma.busy();
+        edges.sint = vmadh(slope.sint, fy.sint.XXXXXXXX);
+        @storeVector64(inverse_w.sfract, 4, output, 16);
+        all_tmp1 = vmulf(all_tmp1, inverse_w.sfract.xxxxXXXX);
+        @loadVector16(y_tmp1, 6, output, 16);
+        all3 = vmulf(all3, inverse_w.sfract.yyyyYYYY);
+        @loadVector16(y_tmp2, 6, output, 18);
+        y1 = vmulf(y1, inverse_w.sfract.zzzzZZZZ);
+        @loadVector16(attribute3, 6, output, 20);
+        x12.sint = vectorShiftRightArithmetic(x12.sfract, 2);
+        if(did_swap1 != 0) goto triangle_dma_busy delay {
+            did_swap0 = load(u8, rdp_syncfull_ongoing);
+        }
+    }
+triangle_dma_idle:
+    ordered {
+        x12.sfract = vectorShiftLeft8(x12.sfract, 14);
+        clip1 >>>= 4;
+        y_tmp1 = vectorSelectByCompareCode(y_tmp1, all_tmp1);
+        clip1 +%= command_bits;
+        y_tmp2 = vectorSelectByCompareCode(y_tmp2, all3);
+        @storeVector16(slope.sint, 4, output, 12);
+        attribute3 = vectorSelectByCompareCode(attribute3, y1);
+        triangle_command = load(i32, rdp_current);
+        edges.sfract = vectorAddCarry(edges.sfract, x12.sfract.xxxxxxxx);
+        @storeVector16(x12.sint, 2, output, 8);
+        edges.sint = vectorAdd(edges.sint, x12.sint.xxxxxxxx);
+        if(did_swap0 != 0) goto triangle_skip_dp_end delay {
+            @storeVector16(slope.sfract, 4, output, 14);
+        }
+        rdp.writeCommandEnd(triangle_command);
+    }
+triangle_skip_dp_end:
+    ordered {
+        vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
+        vector_one = vectorSubtract(y_tmp2, y_tmp1);
+        @storeVector16(x12.sfract, 2, output, 10);
+        attribute_delta_high = vectorSubtract(attribute3, y_tmp1);
+        clip1 = clip1 - output;
+        normal.sfract = vmudn(normal.sfract, shift_constants.YYYYYYYY);
+        @storeVector16(slope.sint, 2, output, 28);
+        normal.sint = vmadh(normal.sint, shift_constants.YYYYYYYY);
+        @storeVector16(slope.sfract, 2, output, 30);
+        all_tmp1 = vmudh(vector_one, hml.yyyyyyyy);
+        @storeVector16(edges.sint, 2, output, 24);
+        all_tmp1 = vmadh(attribute_delta_high, hml.wwwwwwww);
+        @storeVector16(edges.sfract, 2, output, 26);
+        all_tmp1 = readVectorAccumulatorMiddle();
+        @storeVector16(edges.sint, 0, output, 16);
+        all3 = readVectorAccumulatorHigh();
+        @storeVector16(edges.sfract, 0, output, 18);
+        y3 = vmudh(attribute_delta_high, hml.zzzzzzzz);
+        @storeVector16(slope.sint, 0, output, 20);
+        y3 = vmadh(vector_one, hml.xxxxxxxx);
+        @storeVector16(slope.sfract, 0, output, 22);
+        y3 = readVectorAccumulatorMiddle();
+        vertex2 = load(i32, rdp_sentinel);
+        y2 = readVectorAccumulatorHigh();
+        triangle_command <<= 8;
+        negative_my = vmudl(all_tmp1, normal.sfract.WWWWWWWW);
+        triangle_command >>>= 8;
+        negative_my = vmadm(all3, normal.sfract.WWWWWWWW);
+        dma.writeMemoryAddress(output);
+        all_tmp1 = vmadn(all_tmp1, normal.sint.WWWWWWWW);
+        dma.writeRdramAddress(triangle_command);
+        all3 = vmadh(all3, normal.sint.WWWWWWWW);
+        output +%= clip1;
+        negative_my = vmudl(y3, normal.sfract.WWWWWWWW);
+        triangle_command += clip1;
+        negative_my = vmadm(y2, normal.sfract.WWWWWWWW);
+        did_swap0 = vertex2 < triangle_command;
+        y3 = vmadn(y3, normal.sint.WWWWWWWW);
+        @storeVector64(all_tmp1, 0, clip2, 24);
+        y2 = vmadh(y2, normal.sint.WWWWWWWW);
+        @storeVector64(all_tmp1, 4, clip3, 24);
+        negative_my = vmadl(all_tmp1, slope.sfract.xxxxxxxx);
+        @storeVector64(all3, 0, clip2, 8);
+        negative_my = vmadm(all3, slope.sfract.xxxxxxxx);
+        @storeVector64(all3, 4, clip3, 8);
+        y1 = vmadn(all_tmp1, slope.sint.xxxxxxxx);
+        @storeVector64(y3, 0, clip2, 56);
+        all_tmp2 = vmadh(all3, slope.sint.xxxxxxxx);
+        if(did_swap0 != 0) goto triangle_buffer_slow delay {
+            @storeVector64(y3, 4, clip3, 56);
+        }
+    }
+triangle_buffer_done:
+    ordered {
+        negative_my = vmudh(y_tmp1, shift_constants.WWWWWWWW);
+        @storeVector64(y2, 0, clip2, 40);
+        negative_my = vmadl(y1, fy.sfract.XXXXXXXX);
+        @storeVector64(y2, 4, clip3, 40);
+        negative_my = vmadm(all_tmp2, fy.sfract.XXXXXXXX);
+        @storeVector64(y1, 0, clip2, 48);
+        all2 = vmadn(y1, fy.sint.XXXXXXXX);
+        @storeVector64(y1, 4, clip3, 48);
+        all1 = vmadh(all_tmp2, fy.sint.XXXXXXXX);
+        @storeVector64(all_tmp2, 0, clip2, 32);
+        y3[6] = vectorMove(y2[7]);
+        @storeVector64(all_tmp2, 4, clip3, 32);
+        y1[6] = vectorMove(all_tmp2[7]);
+        store(u32, rdp_current, triangle_command);
+        y_tmp2[1] = vectorMove(all2[7]);
+        @storeVector64(all2, 0, clip2, 16);
+        y_tmp2[0] = vectorMove(all1[7]);
+        @storeVector64(all2, 4, clip3, 16);
+        y_tmp2[3] = vectorMove(all_tmp1[7]);
+        @storeVector64(all1, 0, clip2, 0);
+        y_tmp2[2] = vectorMove(all3[7]);
+        @storeVector64(all1, 4, clip3, 0);
+        @storeVector32(y1, 6, command_bits, 8);
+        @storeVector32(y3, 6, command_bits, 12);
+        clip1 -%= 1;
+        @storeVector64(y_tmp2, 0, command_bits, 0);
+        @return() delay {
+            dma.writeLengthAndStart(clip1);
+        }
+    }
+triangle_buffer_slow:
+    vertex3 = return_address;
+    triangle_command = load(i32, rdp_buffers, 4);
+    did_swap1 = load(i32, rdp_buffers);
+triangle_buffer_swap:
+    store(u32, rdp_buffers, triangle_command);
+    store(u32, rdp_buffers, did_swap1, 4);
+    store(u8, clip2, clip1);
+    ordered {
+        // Keep the reference's trapping add; generic large-immediate lowering
+        // materializes this expression with a different instruction sequence.
+        large_offset = 0x10000;
+        vertex2 = triangle_command + large_offset;
+    }
+    queue.resident_rdp_set_buffer(triangle_command, vertex1, vertex2) delay {
+        vertex1 = triangle_command;
+    }
+    cp0.setDmaAddrRdramA0(triangle_command);
+    clip1 = load(u8, clip2);
+    triangle_command +%= clip1;
+    goto triangle_buffer_done delay {
+        return_address = vertex3;
+    }
+triangle_dma_busy:
+    if(did_swap1 != 0) goto triangle_dma_busy delay {
+        cp0.getDmaBusyT1(did_swap1);
+    }
+    goto triangle_dma_idle;
+    @fallthrough(triangleSendEnd);
+}
+
+fn triangleSendEnd() noreturn {
+triangle_send_end:
+    reg($t0) dma_busy: u32 = undefined;
+    cp0.getDmaBusyT0(dma_busy);
+    if(dma_busy != 0) goto triangle_send_end;
+    reg($a0) staging_end: u32 = undefined;
+    @goto(queue.resident_rdp_append_buffer) delay {
+        rdp.loadCurrent(staging_end);
+    }
+}
+
+command(2, 16) fn rectangleExclusive(
+    reg($a0) word0: i32,
+    reg($a1) word1: u32,
+ ) commandSize(8, 16) noreturn {
+    reg($a2) word2: u32 = undefined;
+    reg($a3) word3: i32 = undefined;
+    reg($t0) modes_byte: i32 = load(i8, rdp_mode, 25);
+    modes_byte &= 0x20;
+    reg($t1) opcode: i32 = undefined;
+    if(modes_byte == 0) goto rect_substitute delay {
+        opcode = 0x34000000;
+    }
+    word0 -%= 0x4004;
+    modes_byte = -65536;
+    reg($t2) derivative: i32 = undefined;
+    derivative = word3 & modes_byte;
+    derivative <<= 2;
+    word3 &= 0x0000ffff;
+    word3 |= derivative;
+rect_substitute:
+    word0 ^= opcode;
+    modes_byte = word0 << 3;
+    reg($s0) writer: u32 = undefined;
+    if(modes_byte < 0) goto rect_end delay {
+        @setFunctionAddress(writer, rdp.write8);
+    }
+rect_write16:
+    @setFunctionAddress(writer, rdp.write16);
+rect_end:
+    reg($ra) return_address: u32 = undefined;
+    @jump(writer) delay {
+        @setFunctionAddress(return_address, rdp.finalize);
+    }
+}
+
+command(3) fn clearZBuffer(
+    reg($a0) target: i32,
+    reg($a1) target_dma_size: u32,
+    reg($a2) temporary: u32,
+    reg($a3) clear_value: u32,
+) noreturn {
+    reg($v01) fill: vec16 = undefined;
+    fill[0] = clear_value;
+    reg($v00) vector_zero: vec16 = undefined;
+    fill = vector_zero | fill.xxxxxxxx;
+    ordered {}
+
+    reg($s0) rdram: u32 = undefined;
+    reg($s4) dmem: u32 = undefined;
+
+    reg($t7) overlay_data_end: i32 = undefined;
+    @setDataAddress(overlay_data_end, triangle_padding2, 4);
+    // Libdragon compares its zero-based data end against 0x500. Libptero's
+    // corresponding overlay DMEM coordinate is shifted by 0x800.
+    if(overlay_data_end > 0x0d00) @goto(queue.resident_assertion_failed) delay {
+        reg($at) assertion_code: u32 = 0xc0090000;
+    }
+    reg($t2) flags: i32 = undefined;
+    clearZBackup(overlay_data_end, flags, temporary) delay {
+        flags = -32756;
+    }
+
+    dmem = 1280;
+    reg($s3) fill_end: u32 = undefined;
+    fill_end = dmem +% 4096;
+clear_z_fill:
+    store(vec16, dmem, fill);
+    store(vec16, dmem, fill, 16);
+    store(vec16, dmem, fill, 32);
+    dmem +%= 64;
+    if(dmem != fill_end) goto clear_z_fill delay {
+        store(vec16, dmem, fill, -16);
+    }
+
+    dma.resident_dma_wait_ready();
+    cp0.setDmaAddrRspZero();
+    cp0.setDmaAddrRdramA0(target);
+    cp0.setDmaWriteA1(target_dma_size);
+    flags = 12;
+    reg($ra) return_address: u32 = undefined;
+    @goto(clearZBackup) delay {
+        @setFunctionAddress(return_address, queue.resident_command_loop);
+    }
+}
+
+fn clearZBackup(
+    reg($t7) backup_size: i32,
+    reg($t2) flags: i32,
+    reg($a2) temporary: u32,
+) noreturn {
+    reg($s4) dmem: u32 = 0;
+    reg($s0) rdram: u32 = temporary;
+    reg($t0) dma_size: i32 = undefined;
+    @goto(dma.resident_dma_exec) delay {
+        dma_size = backup_size -% 1;
+    }
+    @nop();
+}
+
+command(17) fn setDebugMode(reg($a0) command: u32) {
+    reg($t0) bitdepth: u32 = load(u8, rdp_target_bitdepth);
+    bitdepth &= 0x7f;
+    if(command != 0) {
+        bitdepth |= 0x80;
+    }
+    store(u8, rdp_target_bitdepth, bitdepth);
+}
+
+command(28) fn autoTmemSetAddress(reg($a0) command: i32) noreturn {
+    command <<= 16;
+    command >>= 16;
+    reg($t0) address: i32 = undefined;
+    reg($t1) limit: i32 = undefined;
+    reg($at) invalid: u32 = undefined;
+    reg($ra) return_address: u32 = undefined;
+    if(command < 0) goto autotmem_end delay {
+        address = load(u16, autotmem_address);
+    }
+    if(command == 0) goto autotmem_begin delay {
+        limit = load(u16, autotmem_limit);
+    }
+
+    store(u16, autotmem_previous_address, address);
+    address += command;
+    invalid = signedLessThan(limit, address);
+    if(invalid != 0) @goto(queue.resident_assertion_failed) delay {
+        invalid = 0xc0070000;
+    }
+    @jump(return_address) delay {
+        store(u16, autotmem_address, address);
+    }
+
+autotmem_begin:
+    address = load(u8, autotmem_enabled);
+    limit = address +% 1;
+    if(address != 0) @goto(queue.resident_return_to_caller) delay {
+        store(u8, autotmem_enabled, limit);
+    }
+    address = 512;
+    store(u16, autotmem_limit, address);
+    store(u16, autotmem_previous_address, 0);
+    @jump(return_address) delay {
+        store(u16, autotmem_address, 0);
+    }
+
+autotmem_end:
+    address = load(u8, autotmem_enabled);
+    address -%= 1;
+    if(address < 0) @goto(queue.resident_assertion_failed) delay {
+        invalid = 0xc0080000;
+    }
+    @jump(return_address) delay {
+        store(u8, autotmem_enabled, address);
+    }
+}
+
+command(29) fn autoTmemSetTile(
+    reg($a0) word0: u32,
+    reg($a1) _: u32,
+) noreturn {
+    reg($t1) use_previous: u32 = undefined;
+    reg($at) mask: u32 = 0x00040000;
+    reg($t0) address: u32 = undefined;
+    use_previous = word0 & mask;
+    if(use_previous == 0) goto autotmem_tile_address_done delay {
+        address = load(i16, autotmem_address);
+    }
+autotmem_tile_previous:
+    address = load(i16, autotmem_previous_address);
+autotmem_tile_address_done:
+    use_previous = 0x28000000;
+    word0 ^= use_previous;
+    word0 += address;
+
+    use_previous = word0 >> 19;
+    use_previous &= 0x1f;
+    address = 3;
+    if(use_previous == address) goto autotmem_lower_limit delay {
+        address = 6;
+    }
+    if(use_previous == address) goto autotmem_lower_limit delay {
+        address = 8;
+    }
+    if(use_previous == address) goto autotmem_lower_limit delay {
+        address = 9;
+    }
+    if(use_previous != address) @goto(_start) delay {
+    autotmem_lower_limit:
+        address = 256;
+    }
+    @goto(_start) delay {
+        store(u16, autotmem_limit, address);
+    }
+}
+
+command(31) fn setTriangleData(
+    reg($a0) vertex_offset: u32,
+    reg($a1) xy: u32,
+    reg($a2) z: u32,
+    reg($a3) rgba: u32,
+    reg($t0) _: u32,
+    reg($t1) _: u32,
+    reg($t2) _: u32,
+) {
+    store(u32, vertex_offset, xy, triangle_data0);
+    store(u32, vertex_offset, z, triangle_data0, 4);
+    store(u32, vertex_offset, rgba, triangle_data0, 8);
+    reg($t0) st: u32 = 0xff;
+    store(u8, vertex_offset, st, triangle_data0, 7);
+
+    reg($gp) command_end: u32 = undefined;
+    st = load(u32, command_end, 0xd4);
+    reg($t1) w: u32 = load(u32, command_end, 0xd8);
+    reg($t2) inverse_w: u32 = load(u32, command_end, 0xdc);
+    store(u32, vertex_offset, st, triangle_data0, 12);
+    store(u32, vertex_offset, w, triangle_data0, 16);
+    store(u32, vertex_offset, inverse_w, triangle_data0, 20);
 }

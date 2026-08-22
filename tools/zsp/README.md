@@ -1,62 +1,528 @@
 # ZSP
 
-ZSP is the in-repository Zig implementation of the RSPL-inspired RSP
-transpiler. Source files are transpiled to MIPS/RSP assembly and then assembled
-as RSP microcode.
+ZSP is the in-repository RSP transpiler. It translates `.zsp` source files to
+GNU-style MIPS/RSP assembly, which can then be assembled into RSP microcode.
 
-## Vector support
+This document describes the language implemented in this repository.
 
-The initial vector subset provides `vec16` and `vec32` register values:
+## Building and running
+
+```sh
+zig build-exe tools/zsp/zsp.zig -femit-bin=/tmp/zsp
+/tmp/zsp input.zsp output.s
+zig cc -target mips-freestanding-none -c output.s -o output.o
+```
+
+The command-line syntax is:
+
+```text
+zsp <input.zsp> [--module-dir <dir>] [--depfile <file>] [--no-optimize] [output.s]
+```
+
+Assembly is written to standard output when `output.s` is omitted. Imports are
+resolved relative to the importing file, then relative to `--module-dir`.
+`--depfile` writes a Make-compatible dependency file containing every loaded
+module. Optimization is enabled by default; `--no-optimize` preserves the
+direct emitter output.
+
+## Types and literals
+
+The scalar types are `u8`, `u16`, `u32`, `i8`, `i16`, and `i32`. They describe
+the value's signedness and memory access width; scalar values live in 32-bit RSP
+general-purpose registers.
+
+The vector types are:
+
+- `vec16`: eight 16-bit lanes in one 128-bit vector register.
+- `vec32`: eight 16.16 fixed-point lanes in two adjacent vector registers. The
+  named register holds the integer halves and the following register holds the
+  fractional halves.
+
+Decimal and hexadecimal integer literals are supported. `_` and `'` may be
+used as digit separators, and a leading `-` is accepted.
+
+```zig
+const mask: u32 = 0xff00_ff00;
+reg signed_value: i32 = -32;
+```
+
+## Register variables and constants
+
+Register variables use `reg`, optionally pinned to a hardware register:
+
+```zig
+reg count: u32 = 0;
+reg($t0) status: u32 = undefined;
+reg inferred = load(u16, address);
+```
+
+`undefined` reserves a register without emitting initialization. A type may be
+inferred only from a `load`. Unpinned scalar registers are allocated
+automatically; `$zero`, `$at`, `$k0`, `$k1`, `$gp`, `$sp`, and `$ra` are not
+automatically allocated. `$gp` may still be explicitly pinned.
+
+`const` declares a compile-time scalar value. Constants are emitted as
+immediates where possible and do not consume registers:
+
+```zig
+const dmem_end: u16 = 0x1000;
+```
+
+Names may not be duplicated in a visible global or function scope. The old
+`var` spelling is not supported.
+
+## Scalar expressions
+
+All scalar types support assignment, arithmetic, shifts, bitwise operations,
+and comparisons. Binary expressions are intentionally simple: one operator is
+allowed per assignment, so longer expressions must use intermediate
+assignments.
+
+```zig
+value = left + right;
+value += 1;
+value +%= 1;       // wrapping addition
+value -= amount;
+value -%= amount;  // wrapping subtraction
+value *= 8;
+value /= 4;
+value <<= amount;
+value >>= amount;  // arithmetic for signed values, logical for unsigned
+value >>>= amount; // explicitly logical
+value &= mask;
+value |= bits;
+value ^= bits;
+value = left ~| right;
+value = ~value;
+value = -value;
+flag = left < right; // normalized to 0 or 1
+```
+
+The corresponding non-compound operators are `+`, `+%`, `-`, `-%`, `*`, `/`,
+`<<`, `>>`, `>>>`, `&`, `|`, `^`, and `~|`. Ordinary addition and subtraction
+emit trapping RSP instructions; the `%` forms emit wrapping instructions.
+Unary `-` likewise emits trapping `sub` for signed types and wrapping `subu`
+for unsigned types.
+
+The RSP has no general integer multiply or divide instructions. Scalar `*` and
+`/` therefore require a power-of-two constant and lower to shifts. Types must
+match when copying or combining register values. `signedLessThan(a, b)` exposes
+an explicitly signed scalar comparison as a value.
+
+`==`, `!=`, `<`, `<=`, `>`, and `>=` produce a normalized scalar `0` or `1`.
+Signedness for ordered comparisons comes from the operands' scalar type.
+
+## Memory and storage
+
+Scalar and full-vector memory operations use:
+
+```zig
+reg word = load(u32, address, 4);
+store(u16, address, value, 2);
+
+reg vector: vec16 = load(vec16, address, 16);
+store(vec16, address, vector, 32);
+```
+
+The offset is optional and must be a literal. A storage label can be combined
+with a runtime base register inside a scalar load or store:
+
+```zig
+reg value: u32 = load(u32, table + index);
+value = load(u32, table + index, 12);
+store(u32, table + index, value, 12);
+```
+
+These forms emit relocation-bearing MIPS memory operands such as
+`%lo(table + 12)($t0)`. A label without a runtime base uses `$zero`. The older
+`load(u32, index, table, 12)` and corresponding `store` spelling remains
+supported for compatibility.
+
+Scalar loads use signed or unsigned byte/halfword instructions according to
+the type; stores accept every scalar type. Signed narrow loads may widen into
+32-bit registers. Scalar offsets must fit the underlying 16-bit instruction
+immediate.
+
+Full-vector operations lower to `lqv` and `sqv`. Their byte offsets must be
+multiples of 16 in the signed seven-bit scaled range (-1024 through 1008). A
+`vec32` transfer emits two operations, with the fractional register at the next
+16-byte offset. A single `vec16` lane can be transferred with
+`lane = load(vec16, address, offset)` or `store(vec16, address, vector[lane],
+offset)`. `load_vec_u8(address, offset)` loads eight packed bytes and expands
+them as signed packed values into a `vec16`; `load_vec_u8_unsigned` performs
+the unsigned form. `load_vec_u32(address, offset, lane)` loads four bytes into
+the selected two-lane position without modifying the rest of the vector.
+
+ZSP supports initialized data, zero/uninitialized storage, and persistent
+overlay state:
+
+```zig
+packed struct Header {
+    opcode: u8;
+    size: u8;
+    address: u32;
+}
+
+data {
+    magic: u32 = 0x12345678;
+    bytes: [4]u8 = .{ 1, 2, 3, 4 };
+    header: Header = .{ 1, 6, 0x100 };
+}
+
+bss {
+    scratch: [16]u32;
+    pub shared_value: u32;
+    extern linked_value: u32;
+}
+
+state {
+    persistent_counter: u32;
+}
+```
+
+Packed structs contain scalar fields without padding. `data` requires literal
+initializers and arrays require exactly the declared number of elements. `bss`
+and `state` reserve addressable storage. The complete `state` section is padded
+to an eight-byte boundary and is intended to survive replacement of an
+overlay. Storage labels are compile-time DMEM addresses. `pub` exports a
+storage label and `extern` references storage
+provided by another linked unit; external declarations have no initializer.
+
+## Functions, calls, and modules
+
+Functions may be prefixed by `export`, `pub`, and/or `inline`, and may have the
+`noreturn` modifier:
+
+```zig
+inline pub fn add(
+    reg($a0) left: u32,
+    reg($a1) right: u32,
+) {
+    left += right;
+}
+
+export fn _start() noreturn {
+    add(1, 2);
+    @break();
+}
+```
+
+Every parameter must specify a fixed scalar or vector register. Calls do not
+implement a conventional stack ABI: arguments must match the parameter type
+and register binding. Constants and literals can be materialized in pinned
+scalar parameters. Vector arguments must already occupy the exact required
+register. `inline` functions are expanded at the call site; other functions
+use the repository's stackless fixed-register calling convention. `export`
+emits a global assembly symbol, while `pub` permits access from another ZSP
+module.
+
+Modules use relative imports and qualified calls:
+
+```zig
+const dma = @import("dma.zsp");
+
+export fn _start() noreturn {
+    dma.exec(15, 0, rdram, 0x20, 0x0c);
+}
+```
+
+Only `pub` functions may be referenced through an import. Import cycles,
+unknown modules/functions, and duplicate import aliases are rejected.
+
+## Control flow
+
+Structured conditions support `==`, `!=`, `<`, `<=`, `>`, and `>=`, with
+signedness taken from the left register:
+
+```zig
+if (count < limit) {
+    count += 1;
+} else {
+    count = 0;
+}
+
+while (count != 0) {
+    count -= 1;
+}
+```
+
+Local labels and explicit branches are also available. A `delay` block must
+contain exactly one source statement:
+
+```zig
+retry:
+if (status != 0) goto retry delay {
+    status = load(u32, address);
+}
+
+goto done, .branch delay {
+    result = 1;
+}
+done:
+```
+
+`goto label` targets a local label and accepts `.jump` (the default) or
+`.branch`. Function-level transfers use these builtins:
+
+```zig
+@goto(function);                 // direct jump
+@goto(module.function, .branch); // imported public function
+@jump(address);                  // indirect jump through a scalar value
+@fallthrough(function);          // place the target directly after this one
+@setReturn(label);               // materialize this function's return label
+@setFunctionAddress(value, fn);  // materialize a function address in value's register
+@setDataAddress(value, data, 8); // materialize a data address plus an optional offset
+```
+
+`@goto` and `@jump` also accept a one-statement `delay` block. Conditional
+forms such as `if (condition) @goto(function) delay { ... }` are supported.
+
+Functions are emitted in declaration order by default. `@fallthrough(target)`
+also makes the target physically follow the current function, so the compiler
+can omit the transfer instruction safely.
+
+Byte-constrained programs that must interleave functions from imported modules
+can centralize the exceptional order in one block:
+
+```zig
+layout {
+    first;
+    helpers.prepare;
+    second;
+}
+```
+
+Functions omitted from `layout` retain declaration order after its entries.
+Only one layout declaration is allowed in a linked program; entries must be
+unique and imported entries must name public functions.
+
+Other builtins are `@nop()` and `@break(code)`, where the optional break code
+is a 20-bit unsigned value. `asm("instruction")` emits a raw assembly line and
+acts as an optimization barrier when its effects are unknown.
+
+An `ordered` block preserves the emitted instruction order and forms an
+optimization barrier at both boundaries. Use it for hand-scheduled hardware
+sequences while retaining normal ZSP expressions and type checking:
+
+```zig
+ordered {
+    mask = 0x3f000000;
+    command ^= mask;
+}
+```
+
+No optimizer transformation moves, removes, or rewrites instructions within an
+ordered block, or moves instructions across either boundary.
+
+`@return()` emits `jr $ra`. It accepts the same optional one-statement delay
+block as other control transfers:
+
+```zig
+@return() delay {
+    dma.writeLengthAndStart(length);
+}
+```
+
+## Commands and command tables
+
+`command(index)` marks functions for the resident/overlay command ABI. Indices
+range from 0 through 239 and must be unique:
+
+```zig
+command(2) fn write(
+    reg($a0) header: u32,
+    reg($a1) value: u32,
+) noreturn {
+    store(u32, header, value);
+    @goto(commandLoop);
+}
+
+const commands = @commandTable();
+```
+
+Command parameters describe fixed ABI registers and command size. A parameter
+named `_` contributes to the size without defining a symbol. `@commandTable()`
+emits handler and size metadata, including empty slots and extended overlay
+indices.
+
+Handlers that consume a variable-length command directly from `$gp` can use
+`commandSize(bytes)` to override the inferred size. The override must be a
+nonzero multiple of four and cannot be smaller than the declared parameters.
+
+## Vector registers and basic operations
+
+Vector registers use two decimal digits (`$v00` through `$v31`) to distinguish
+them from scalar `$v0` and `$v1`:
 
 ```zig
 reg($v01) left: vec16 = load(vec16, address);
 reg($v02) right: vec16 = load(vec16, address, 16);
-reg result: vec16 = 0;
-
-result = left + right;
+reg result: vec16 = left + right;
 result ^= right;
-store(vec16, address, result, 32);
 ```
 
-`vec16` occupies one 128-bit vector register. `vec32` represents eight 16.16
-fixed-point lanes and occupies an adjacent pair: the named register contains
-the integer halves and the following register contains the fractional halves.
-For example, `reg($v08) value: vec32` reserves `$v08` and `$v09`.
+`$v00` and `$v29`-`$v31` are reserved by automatic allocation. Automatically
+allocated vectors use `$v01`-`$v28`; `vec32` allocation keeps its pair
+contiguous. An explicitly pinned `vec32` must also have a valid adjacent
+register.
 
-Vector registers use two decimal digits (`$v00` through `$v31`) so they remain
-distinct from the scalar MIPS registers `$v0` and `$v1`. `$v00` and
-`$v29`–`$v31` are reserved by the backend. Automatic allocation uses
-`$v01`–`$v28` and keeps `vec32` pairs contiguous.
-
-The supported vector operators are:
-
-- Assignment and zero initialization
-- Addition and subtraction: `+`, `-`, `+=`, `-=`
-- Logic: `&`, `|`, `^`, `~|`, `~`, including compound assignments
-
+Both vector types support copy, zero initialization, `+`, `-`, `+=`, `-=`,
+`&`, `|`, `^`, `~|`, `~`, and the corresponding compound bitwise operations.
 `vec32` addition and subtraction propagate carry or borrow from the fractional
-register to the integer register. Copies, inversion, and zero initialization do
-not assume that `$v00` already contains zero.
+register to the integer register. Copies, inversion, and zero initialization
+do not assume `$v00` contains zero.
 
-Functions may declare fixed vector-register parameters:
+One specialized packed-vector shift is available: `vec16 >>> 8` lowers to the
+RSP `vsrl` form used by the resident command dispatcher. Other vector shifts
+are rejected.
+
+## Vector lanes, swizzles, and views
+
+A lane may be read or written with an index from 0 through 7:
 
 ```zig
-inline fn accumulate(
-    reg($v01) value: vec16,
-    reg($v02) addend: vec16,
-) {
-    value += addend;
-}
+scalar = vector[3];
+vector[5] = scalar;
 ```
 
-Call arguments must have the same vector type and exact fixed register as the
-corresponding parameter.
+Lane transfers use the RSP COP2 halfword instructions. The single-lane aliases
+`.x`, `.y`, `.z`, `.w`, `.X`, `.Y`, `.Z`, and `.W` are also supported.
 
-Full-vector memory operations currently lower to `lqv` and `sqv`. Their
-immediate offsets must be multiples of 16 in the signed seven-bit scaled range
-(-1024 through 1008 bytes). A `vec32` transfer performs two operations, with
-the fractional register at an additional 16-byte offset.
+Vector instruction operands accept the native RSP element-selection patterns:
 
-Swizzles, lane transfers, packed or partial vector memory operations, vector
-casts, multiplication, accumulator operations, comparisons, and shifts are
-not part of this initial subset.
+```text
+.xyzwXYZW  .xxzzXXZZ  .yywwYYWW  .xxxxXXXX
+.yyyyYYYY  .zzzzZZZZ  .wwwwWWWW
+.xxxxxxxx  .yyyyyyyy  .zzzzzzzz  .wwwwwwww
+.XXXXXXXX  .YYYYYYYY  .ZZZZZZZZ  .WWWWWWWW
+```
+
+Typed views select how multiplication operands and results are interpreted:
+`.sint`, `.uint`, `.sfract`, and `.ufract`.
+
+## Vector multiply, accumulator, and comparison
+
+ZSP exposes the RSP vector unit operations as expression functions:
+
+```zig
+result.sfract = vmulf(source.sfract, factor.x);
+result.sfract = vmacf(addend.sfract, factor.yyyyyyyy);
+result = vmudh(left, right);
+result = vmadh(left, right);
+result = accumulator(.middle);
+```
+
+The supported multiply families are:
+
+- Fractional: `vmulf`, `vmulu`, `vmacf`, `vmacu`.
+- Partial product: `vmudl`, `vmudm`, `vmudn`, `vmudh`, `vmadl`, `vmadm`,
+  `vmadn`, `vmadh`.
+- Accumulator reads: `accumulator(.high)`, `accumulator(.middle)`, and
+  `accumulator(.low)`.
+
+Operand widths, typed views, destination views, and swizzle placement are
+validated according to the selected instruction.
+
+The VCC-backed vector operations are `vlt`, `veq`, `vne`, `vge`, and `vmrg`:
+
+```zig
+mask_result = vlt(left, right);
+merged = vmrg(if_true, if_false);
+```
+
+These map directly to RSP vector instructions; they are not scalar booleans or
+general structured conditions.
+
+More explicit aliases are available for code that should describe the vector
+unit state it manipulates:
+
+```zig
+sum = vectorAdd(left, right);
+difference = vectorSubtract(left, right);
+sum = vectorAddCarry(left, right);
+difference = vectorSubtractCarry(left, right);
+mask = vectorCompareLessThan(left, right);
+mask = vectorCompareEqual(left, right);
+mask = vectorCompareNotEqual(left, right);
+mask = vectorCompareGreaterOrEqual(left, right);
+merged = vectorSelectByCompareCode(if_true, if_false);
+
+high = readVectorAccumulatorHigh();
+middle = readVectorAccumulatorMiddle();
+low = readVectorAccumulatorLow();
+result[0] = vectorReciprocal(source[0]);
+result[0] = vectorReciprocalLow(source[0]);
+result[0] = vectorReciprocalHigh(source[0]);
+destination[3] = vectorMove(source[6]);
+```
+
+`vectorMove` emits the RSP's native `VMOV` destination-element encoding. A
+plain lane-to-lane assignment retains the legacy encoding; assigning a scalar
+register to a vector lane emits `MTC2`.
+
+The vector control registers use their full hardware names. Reads return a
+scalar value and writes consume one:
+
+```zig
+carry = @readVectorCarryOut();
+compare = @readVectorCompareCode();
+extension = @readVectorCompareExtension();
+@writeVectorCarryOut(carry);
+@writeVectorCompareCode(compare);
+@writeVectorCompareExtension(extension);
+```
+
+`vectorShiftLeft8(source, amount)` accepts amounts 8 through 15, and
+`vectorShiftRightArithmetic(source, amount)` accepts amounts 1 through 8.
+`vectorShiftRightLogical(source, amount)` accepts amounts 1 through 8. They
+describe the RSP multiply-based vector shift forms explicitly.
+
+Partial and packed vector transfers are statement builtins. Their lane and
+offset arguments are compile-time integers:
+
+```zig
+@loadVector16(vector, lane, address, offset);
+@loadVector32(vector, lane, address, offset);
+@loadVector64(vector, lane, address, offset);
+@loadVector128(vector, address, offset);
+@storeVector16(vector, lane, address, offset);
+@storeVector32(vector, lane, address, offset);
+@storeVector64(vector, lane, address, offset);
+@storeVector128(vector, address, offset);
+@loadVectorPackedSigned(vector, address, offset);
+@loadVectorPackedUnsigned(vector, address, offset);
+```
+
+Use `reserved reg($v1) name: u32 = undefined;` to give an ABI-reserved scalar
+register a name while preventing the backend from silently using `$v1` as its
+temporary register.
+
+The RSP hardware namespaces expose the CP0 operations needed by DMA and RDP
+command submission:
+
+```zig
+busy = dma.busy();
+dma.writeMemoryAddress(dmem_address);
+dma.writeRdramAddress(rdram_address);
+dma.writeLengthAndStart(length);
+rdp.writeCommandEnd(command_end);
+```
+
+## Optimizer
+
+The assembly optimizer performs conservative RSP scheduling. It can fill
+branch delay slots, hide scalar load latency, pair independent scalar and
+vector pipeline instructions, and tighten common CP0 polling loops. It tracks
+register and memory dependencies, preserves memory order, leaves already-filled
+delay slots intact, and treats unknown raw assembly as a barrier. Use
+`--no-optimize` when inspecting direct code generation.
+
+## Current limitations
+
+Notable omissions include general scalar multiplication/division, arbitrary
+expression trees, casts, ternary expressions, general vector shifts, packed
+vector stores, unaligned vector operations, transposed vector operations,
+annotations, and macros.
+
+See `tools/zsp/tests.zig` and the `.zsp` files under `src/n64/rsp/ucode/` and
+`src/tests/ucode/` for executable examples of the supported subset.

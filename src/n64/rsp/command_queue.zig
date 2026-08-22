@@ -68,8 +68,8 @@ pub const CommandQueue = struct {
         if (inline_argument > 0x00ffffff) {
             @panic("RSP command queue inline argument is too large");
         }
-        if (arguments.len > 3) {
-            @panic("RSP command queue supports at most three argument words");
+        if (arguments.len > 62) {
+            @panic("RSP command queue command exceeds the 252-byte descriptor limit");
         }
         const command_words = 1 + arguments.len;
         if (self.index + command_words >= self.buffer.len) {

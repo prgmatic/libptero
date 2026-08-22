@@ -28,9 +28,25 @@ pub fn writeOptimized(allocator: std.mem.Allocator, writer: *std.Io.Writer, asse
         lines.deinit(allocator);
     }
 
+    var ordered_depth: usize = 0;
     var it = std.mem.splitScalar(u8, assembly, '\n');
-    while (it.next()) |text| try lines.append(allocator, parseLine(text));
+    while (it.next()) |line_text| {
+        if (std.mem.eql(u8, std.mem.trim(u8, line_text, " \t\r"), "# zsp ordered block begin")) {
+            ordered_depth += 1;
+            try lines.append(allocator, .{ .text = line_text });
+            continue;
+        }
+        if (std.mem.eql(u8, std.mem.trim(u8, line_text, " \t\r"), "# zsp ordered block end")) {
+            ordered_depth -= 1;
+            try lines.append(allocator, .{ .text = line_text });
+            continue;
+        }
+        var line = parseLine(line_text);
+        if (ordered_depth != 0) line.kind = .other;
+        try lines.append(allocator, line);
+    }
 
+    try foldSymbolOffsets(allocator, &lines);
     removeDeadWrites(&lines);
     try foldPollingLoops(allocator, &lines);
     fillDelaySlots(&lines);
@@ -40,6 +56,54 @@ pub fn writeOptimized(allocator: std.mem.Allocator, writer: *std.Io.Writer, asse
     for (lines.items, 0..) |line, index| {
         try writer.writeAll(line.text);
         if (index + 1 < lines.items.len) try writer.writeByte('\n');
+    }
+}
+
+fn foldSymbolOffsets(allocator: std.mem.Allocator, lines: *std.ArrayList(Line)) !void {
+    var index: usize = 0;
+    while (index + 1 < lines.items.len) {
+        const address = lines.items[index];
+        const memory = lines.items[index + 1];
+        if (address.kind != .instruction or memory.kind != .instruction or
+            address.instruction.branch or memory.instruction.branch or
+            (index > 0 and lines.items[index - 1].instruction.branch) or
+            !std.mem.startsWith(u8, std.mem.trim(u8, address.text, " \t"), "addiu $at, $zero, %lo("))
+        {
+            index += 1;
+            continue;
+        }
+        const label_start = std.mem.indexOf(u8, address.text, "%lo(") orelse {
+            index += 1;
+            continue;
+        };
+        const label_end = std.mem.indexOfScalarPos(u8, address.text, label_start + 4, ')') orelse {
+            index += 1;
+            continue;
+        };
+        const operand_end = std.mem.indexOf(u8, memory.text, "($at)") orelse {
+            index += 1;
+            continue;
+        };
+        var operand_start = operand_end;
+        while (operand_start > 0 and memory.text[operand_start - 1] != ' ' and memory.text[operand_start - 1] != ',') {
+            operand_start -= 1;
+        }
+        if (operand_start == operand_end) {
+            index += 1;
+            continue;
+        }
+        const replacement = try std.fmt.allocPrint(allocator, "{s}%lo({s} + {s})($zero){s}", .{
+            memory.text[0..operand_start],
+            address.text[label_start + 4 .. label_end],
+            memory.text[operand_start..operand_end],
+            memory.text[operand_end + "($at)".len ..],
+        });
+        if (lines.items[index + 1].owned) allocator.free(lines.items[index + 1].text);
+        var replacement_line = parseLine(replacement);
+        replacement_line.owned = true;
+        lines.items[index + 1] = replacement_line;
+        if (lines.items[index].owned) allocator.free(lines.items[index].text);
+        _ = lines.orderedRemove(index);
     }
 }
 
@@ -292,6 +356,7 @@ fn parseLine(text: []const u8) Line {
         info.writes |= registerMask(regs[0]);
         for (regs[1..reg_count]) |reg| info.reads |= registerMask(reg);
     }
+    if (std.mem.eql(u8, op, "jal")) info.writes |= registerMask(31);
     // Vector arithmetic shares the accumulator/flag datapath. Treat it as a
     // dependency to prevent unsafe reordering of currently supported VU ops.
     if (vector and !load and !store) {

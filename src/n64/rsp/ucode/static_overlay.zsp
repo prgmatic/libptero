@@ -14,7 +14,7 @@ command(0) fn _start(
     reg dmem_address: u32 = 0;
     dmem_address = command & 0x00ffffff;
     reg value: u32 = load(u32, persistent_counter);
-    value += 1;
+    value +%= 1;
     store(u32, persistent_counter, value);
     store(u32, dmem_address, value);
 }

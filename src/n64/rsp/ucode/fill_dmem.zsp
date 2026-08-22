@@ -4,7 +4,7 @@ export fn _start() noreturn {
 
     while(ptr < dmem_end) {
 	store(u16, ptr, ptr);
-	ptr += 2;
+	ptr +%= 2;
     }
-    asm("break");
+    @break();
 }

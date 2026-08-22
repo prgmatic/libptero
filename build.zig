@@ -88,6 +88,15 @@ fn addToolTests(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(rsp_overlay_link_tests).step);
 
+    const rsp_pack_tests = b.addTest(.{
+        .name = "rsp-pack-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/build/rsp_pack.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(rsp_pack_tests).step);
+
     const test_protocol_tests = b.addTest(.{
         .name = "test-protocol-tests",
         .root_module = b.createModule(.{
@@ -140,6 +149,15 @@ fn addGeneratedN64Assets(
             tools,
             "static_overlay_2",
             b.path("src/n64/rsp/ucode/static_overlay_2.zsp"),
+            overlay_linker_script,
+        ),
+    });
+    n64_module.addAnonymousImport("multi_slot_overlay_rsp", .{
+        .root_source_file = buildRspUcodeFromPath(
+            b,
+            tools,
+            "multi_slot_overlay",
+            b.path("src/n64/rsp/ucode/multi_slot_overlay.zsp"),
             overlay_linker_script,
         ),
     });

@@ -75,7 +75,7 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const command_count: usize = if (commands) |section| blk: {
         if (section.sh_size % command_source_size != 0) return error.InvalidCommandSection;
         const count: usize = @intCast(section.sh_size / command_source_size);
-        if (count > 16) return error.TooManyCommands;
+        if (count > 240) return error.TooManyCommands;
         break :blk count;
     } else 0;
     const commands_offset = data_offset + padded_data_size;
@@ -191,18 +191,34 @@ fn packCommands(
     const size: usize = @intCast(section.sh_size);
     if (offset + size > elf_bytes.len) return error.BadElf;
     const source = elf_bytes[offset..][0..size];
-    var seen: u16 = 0;
-    for (0..size / command_source_size) |record_index| {
+    try packCommandRecords(destination, source, text.sh_addr, text.sh_size);
+}
+
+fn packCommandRecords(
+    destination: []u8,
+    source: []const u8,
+    text_address: u64,
+    text_size: u64,
+) !void {
+    if (source.len % command_source_size != 0 or
+        destination.len < source.len / command_source_size * command_packed_size)
+    {
+        return error.InvalidCommandSection;
+    }
+    var seen = std.StaticBitSet(240).initEmpty();
+    for (0..source.len / command_source_size) |record_index| {
         const record = source[record_index * command_source_size ..][0..command_source_size];
         const handler = std.mem.readInt(u32, record[0..4], .big);
         const index = record[4];
         const command_size = record[5];
-        if (index >= 16 or seen & (@as(u16, 1) << @intCast(index)) != 0) {
+        if (index >= 240 or seen.isSet(index)) {
             return error.InvalidCommandIndex;
         }
-        seen |= @as(u16, 1) << @intCast(index);
+        seen.set(index);
         if (command_size & 3 != 0) return error.InvalidCommandSize;
-        if (handler < text.sh_addr or handler >= text.sh_addr + text.sh_size or handler & 3 != 0) {
+        _ = text_address;
+        _ = text_size;
+        if (handler < imem_base or handler >= imem_base + 0x1000 or handler & 3 != 0) {
             return error.InvalidCommandHandler;
         }
         const handler_offset = handler - imem_base;
@@ -212,6 +228,66 @@ fn packCommands(
         output_record[1] = command_size;
         std.mem.writeInt(u16, output_record[2..4], @intCast(handler_offset), .big);
     }
+}
+
+test "packed commands retain indices across the full overlay range" {
+    const indices = [_]u8{ 0, 15, 16, 63, 239 };
+    var source: [indices.len * command_source_size]u8 = @splat(0);
+    var destination: [indices.len * command_packed_size]u8 = @splat(0);
+    for (indices, 0..) |index, record_index| {
+        const record = source[record_index * command_source_size ..][0..command_source_size];
+        std.mem.writeInt(u32, record[0..4], imem_base + @as(u32, @intCast(record_index * 4)), .big);
+        record[4] = index;
+        record[5] = 4;
+    }
+
+    try packCommandRecords(&destination, &source, imem_base, 0x1000);
+    for (indices, 0..) |index, record_index| {
+        const record = destination[record_index * command_packed_size ..][0..command_packed_size];
+        try std.testing.expectEqual(index, record[0]);
+        try std.testing.expectEqual(@as(u8, 4), record[1]);
+        try std.testing.expectEqual(@as(u16, @intCast(record_index * 4)), std.mem.readInt(u16, record[2..4], .big));
+    }
+}
+
+test "packed commands reject duplicates across overlay slots" {
+    var source: [2 * command_source_size]u8 = @splat(0);
+    var destination: [2 * command_packed_size]u8 = @splat(0);
+    for (0..2) |record_index| {
+        const record = source[record_index * command_source_size ..][0..command_source_size];
+        std.mem.writeInt(u32, record[0..4], imem_base + @as(u32, @intCast(record_index * 4)), .big);
+        record[4] = 63;
+        record[5] = 4;
+    }
+    try std.testing.expectError(
+        error.InvalidCommandIndex,
+        packCommandRecords(&destination, &source, imem_base, 0x1000),
+    );
+}
+
+test "packed overlay commands may target resident IMEM" {
+    var source: [command_source_size]u8 = @splat(0);
+    var destination: [command_packed_size]u8 = @splat(0);
+    std.mem.writeInt(u32, source[0..4], imem_base + 0x3c, .big);
+    source[4] = 21;
+    source[5] = 8;
+
+    try packCommandRecords(&destination, &source, imem_base + 0x280, 0xd18);
+    try std.testing.expectEqual(@as(u8, 21), destination[0]);
+    try std.testing.expectEqual(@as(u8, 8), destination[1]);
+    try std.testing.expectEqual(@as(u16, 0x3c), std.mem.readInt(u16, destination[2..4], .big));
+}
+
+test "packed commands reject index 240" {
+    var source: [command_source_size]u8 = @splat(0);
+    var destination: [command_packed_size]u8 = @splat(0);
+    std.mem.writeInt(u32, source[0..4], imem_base, .big);
+    source[4] = 240;
+    source[5] = 4;
+    try std.testing.expectError(
+        error.InvalidCommandIndex,
+        packCommandRecords(&destination, &source, imem_base, 0x1000),
+    );
 }
 
 fn copySection(dest: []u8, bytes: []const u8, section: elf.Elf64_Shdr) !void {

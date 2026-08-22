@@ -94,6 +94,222 @@ test "optimizer preserves memory order and treats unknown asm as a barrier" {
     try expectOptimizedAsm(assembly, assembly);
 }
 
+test "exact assembly lines emit optimizer barriers" {
+    try expectAsm(
+        \\fn test() {
+        \\  asmExact("addiu $t0, $zero, 1");
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\# zsp exact assembly barrier
+        \\  addiu $t0, $zero, 1
+        \\# zsp exact assembly barrier
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "ordered blocks preserve emitted instruction order" {
+    try expectAsm(
+        \\fn test() {
+        \\  ordered {
+        \\    asm("addiu $t0, $zero, 1");
+        \\    asm("addiu $t1, $zero, 2");
+        \\    asm("bne $t0, $zero, done");
+        \\    asm("nop");
+        \\  }
+        \\  done:
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\# zsp ordered block begin
+        \\  addiu $t0, $zero, 1
+        \\  addiu $t1, $zero, 2
+        \\  bne $t0, $zero, done
+        \\  nop
+        \\# zsp ordered block end
+        \\LABEL_test_done_0:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "vector control registers use explicit read and write builtins" {
+    try expectAsm(
+        \\fn test() {
+        \\  reg($t0) carry: u32 = @readVectorCarryOut();
+        \\  reg($t1) compare: u32 = @readVectorCompareCode();
+        \\  reg($t2) extension: u32 = @readVectorCompareExtension();
+        \\  @writeVectorCarryOut(carry);
+        \\  @writeVectorCompareCode(compare);
+        \\  @writeVectorCompareExtension(extension);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x48480000 # cfc2 $t0, $0
+        \\  .word 0x48490800 # cfc2 $t1, $1
+        \\  .word 0x484a1000 # cfc2 $t2, $2
+        \\  .word 0x48c80000 # ctc2 $t0, $0
+        \\  .word 0x48c90800 # ctc2 $t1, $1
+        \\  .word 0x48ca1000 # ctc2 $t2, $2
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "reserved scalar declarations claim the backend scratch register" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) left: u32 = undefined;
+        \\  reg($t1) right: u32 = undefined;
+        \\  reserved reg($v1) temporary: u32 = undefined;
+        \\  temporary = left | right;
+        \\  left |= temporary;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  or $v1, $t0, $t1
+        \\  or $t0, $t0, $v1
+        \\  break
+        \\
+        \\
+    );
+
+    try expectAsmError(
+        \\fn test() noreturn {
+        \\  reg($t0) value: u32 = undefined;
+        \\  reserved reg($v1) temporary: u32 = undefined;
+        \\  value +%= 0x12345678;
+        \\  @break();
+        \\}
+    , error.BackendScratchRegisterUnavailable);
+}
+
+test "DMA and RDP operations compose with an explicit return delay slot" {
+    try expectAsm(
+        \\fn test() {
+        \\  reg($t1) busy: u32 = dma.busy();
+        \\  reg($s3) memory: u32 = undefined;
+        \\  reg($a0) rdram: u32 = undefined;
+        \\  reg($t3) length: u32 = undefined;
+        \\  dma.writeMemoryAddress(memory);
+        \\  dma.writeRdramAddress(rdram);
+        \\  rdp.writeCommandEnd(rdram);
+        \\  @return() delay {
+        \\    dma.writeLengthAndStart(length);
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  mfc0 $t1, $6
+        \\  mtc0 $s3, $0
+        \\  mtc0 $a0, $1
+        \\  mtc0 $a0, $9
+        \\  jr $ra
+        \\  mtc0 $t3, $3
+        \\
+        \\
+    );
+}
+
+test "scalar comparison expressions produce normalized register results" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) left: i32 = undefined;
+        \\  reg($t1) right: i32 = undefined;
+        \\  reg($t2) result: u32 = undefined;
+        \\  result = left < right;
+        \\  result = left <= right;
+        \\  result = left > right;
+        \\  result = left >= right;
+        \\  result = left == right;
+        \\  result = left != right;
+        \\  result = right != 0;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  slt $t2, $t0, $t1
+        \\  slt $t2, $t1, $t0
+        \\  xori $t2, $t2, 1
+        \\  slt $t2, $t1, $t0
+        \\  slt $t2, $t0, $t1
+        \\  xori $t2, $t2, 1
+        \\  xor $t2, $t0, $t1
+        \\  sltiu $t2, $t2, 1
+        \\  xor $t2, $t0, $t1
+        \\  sltu $t2, $zero, $t2
+        \\  sltu $t2, $zero, $t1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "functions emit in source order" {
+    try expectAsm(
+        \\fn second() {}
+        \\fn first() {}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\second:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\first:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "optimizer folds a literal data-label address into a memory relocation" {
+    try expectOptimizedAsm(
+        \\  addiu $at, $zero, %lo(mode)
+        \\  lw $a0, 24($at)
+        \\  addiu $at, $zero, %lo(mode)
+        \\  sw $a1, -4($at)
+    ,
+        \\  lw $a0, %lo(mode + 24)($zero)
+        \\  sw $a1, %lo(mode + -4)($zero)
+    );
+}
+
 test "optimizer folds a CP0 polling while loop into a conditional back edge" {
     try expectOptimizedAsm(
         "  addiu $t3, $zero, 0\n  mfc0 $t3, $5\nloop:\n  beq $t3, $zero, end\n  nop\n  mfc0 $t3, $5\n  j loop\n  nop\nend:\n  andi $t3, $t0, 4095\n",
@@ -130,7 +346,7 @@ test "unsigned high-bit comparison emits a signed zero branch" {
     );
 }
 
-test "syntax numbers and scalar variables emit addiu" {
+test "ordinary scalar arithmetic emits trapping instructions" {
     try expectAsm(
         \\fn test() {
         \\  const initial: u32 = 0x1234;
@@ -146,7 +362,7 @@ test "syntax numbers and scalar variables emit addiu" {
         \\test:
         \\  addiu $t0, $zero, 1234
         \\  addiu $t1, $zero, 4660
-        \\  addiu $t0, $t0, 10
+        \\  addi $t0, $t0, 10
         \\  jr $ra
         \\  nop
         \\
@@ -207,6 +423,32 @@ test "data blocks emit scalar arrays and expose DMEM addresses" {
         \\  addiu $t1, $zero, %lo(overlay_idmap)
         \\  lw $t2, %lo(overlay_data_rdram)($zero)
         \\  break
+        \\
+        \\
+    );
+}
+
+test "scalar label loads and stores fold literal offsets into the instruction" {
+    try expectAsm(
+        \\bss { words: [2]u32; }
+        \\fn test() noreturn {
+        \\  reg($t0) value: u32 = load(u32, words, 4);
+        \\  store(u32, words, value, 4);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.bss
+        \\.balign 4
+        \\words:
+        \\  .space 8
+        \\
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  lw $t0, %lo(words + 4)($zero)
+        \\  sw $t0, %lo(words + 4)($zero)
         \\
         \\
     );
@@ -351,10 +593,10 @@ test "scalar assignment operators support every data type" {
         \\  addiu $t1, $zero, 18
         \\  addiu $t2, $zero, 0
         \\  or $t2, $t0, $zero
-        \\  addu $t2, $t2, $t0
-        \\  addu $t2, $t0, $t1
-        \\  subu $t2, $t2, $t0
-        \\  subu $t2, $t0, $t1
+        \\  add $t2, $t2, $t0
+        \\  add $t2, $t0, $t1
+        \\  sub $t2, $t2, $t0
+        \\  sub $t2, $t0, $t1
         \\  addiu $t2, $zero, 10
         \\  jr $ra
         \\  nop
@@ -489,7 +731,7 @@ test "scalar bitwise operators support every data type" {
         \\  ori $t2, $t2, 16
         \\  xor $t2, $t0, $t1
         \\  xori $t2, $t2, 3
-        \\  nor $t2, $zero, $t0
+        \\  nor $t2, $t0, $zero
         \\  nor $t2, $t0, $t1
         \\  nor $t2, $t2, $t0
         \\  jr $ra
@@ -552,31 +794,31 @@ test "comparisons support every operator and scalar data type" {
             \\  addiu $t2, $zero, 0
             \\  bne $t0, $t1, LABEL_test_ifend_0
             \\  nop
-            \\  addiu $t2, $t2, 1
+            \\  addi $t2, $t2, 1
             \\LABEL_test_ifend_0:
             \\  beq $t0, $t1, LABEL_test_ifend_1
             \\  nop
-            \\  addiu $t2, $t2, 2
+            \\  addi $t2, $t2, 2
             \\LABEL_test_ifend_1:
             \\  {s} $at, $t0, $t1
             \\  beq $at, $zero, LABEL_test_ifend_2
             \\  nop
-            \\  addiu $t2, $t2, 3
+            \\  addi $t2, $t2, 3
             \\LABEL_test_ifend_2:
             \\  {s} $at, $t1, $t0
             \\  bne $at, $zero, LABEL_test_ifend_3
             \\  nop
-            \\  addiu $t2, $t2, 4
+            \\  addi $t2, $t2, 4
             \\LABEL_test_ifend_3:
             \\  {s} $at, $t1, $t0
             \\  beq $at, $zero, LABEL_test_ifend_4
             \\  nop
-            \\  addiu $t2, $t2, 5
+            \\  addi $t2, $t2, 5
             \\LABEL_test_ifend_4:
             \\  {s} $at, $t0, $t1
             \\  bne $at, $zero, LABEL_test_ifend_5
             \\  nop
-            \\  addiu $t2, $t2, 6
+            \\  addi $t2, $t2, 6
             \\LABEL_test_ifend_5:
             \\  jr $ra
             \\  nop
@@ -605,14 +847,13 @@ test "comparison immediates and else blocks emit direct branches" {
         \\
         \\test:
         \\  addiu $t0, $zero, -1
-        \\  slti $at, $t0, 0
-        \\  bne $at, $zero, LABEL_test_ifelse_0
+        \\  bltz $t0, LABEL_test_ifelse_0
         \\  nop
-        \\  addiu $t0, $t0, 1
+        \\  addi $t0, $t0, 1
         \\  j LABEL_test_ifend_0
         \\  nop
         \\LABEL_test_ifelse_0:
-        \\  addiu $t0, $t0, -1
+        \\  addi $t0, $t0, -1
         \\LABEL_test_ifend_0:
         \\  jr $ra
         \\  nop
@@ -677,6 +918,392 @@ test "vec16 and vec32 operations emit encoded RSP vector instructions" {
         \\  .word 0x4a072a6c # vxor $v09, $v05, $v07
         \\  .word 0xe9082006 # sqv $v08, 96($t0)
         \\  .word 0xe9092007 # sqv $v09, 112($t0)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "unaligned vector loads emit paired lqv and lrv instructions" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) ptr: u32 = 8;
+        \\  reg($v01) narrow: vec16 = load_unaligned(vec16, ptr);
+        \\  reg($v02) wide: vec32 = load_unaligned(vec32, ptr, 16);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 8
+        \\  .word 0xc9012000 # lqv $v01, 0($t0)
+        \\  .word 0xc9012801 # lrv $v01, 16($t0)
+        \\  .word 0xc9022001 # lqv $v02, 16($t0)
+        \\  .word 0xc9022802 # lrv $v02, 32($t0)
+        \\  .word 0xc9032002 # lqv $v03, 32($t0)
+        \\  .word 0xc9032803 # lrv $v03, 48($t0)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "triangle packed and partial vector loads emit exact RSP encodings" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) ptr: u32 = 8;
+        \\  reg($v01) unsigned_bytes: vec16 = load_vec_u8_unsigned(ptr, 8);
+        \\  reg($v02) signed_bytes: vec16 = load_vec_u8(ptr, 8);
+        \\  reg($v03) words: vec16 = load_vec_u32(ptr, 4);
+        \\  words = load_vec_u32(ptr, 8, 4);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 8
+        \\  .word 0xc9013801 # luv $v01, 8($t0)
+        \\  .word 0xc9023001 # lpv $v02, 8($t0)
+        \\  .word 0xc9031001 # llv $v03[0], 4($t0)
+        \\  .word 0xc9031402 # llv $v03[4], 8($t0)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "explicit vector memory builtins emit each transfer width" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) ptr: u32 = 8;
+        \\  reg($v01) value: vec16 = undefined;
+        \\  @loadVector16(value, 2, ptr, 4);
+        \\  @storeVector16(value, 2, ptr, 4);
+        \\  @loadVector32(value, 2, ptr, 4);
+        \\  @storeVector32(value, 2, ptr, 4);
+        \\  @loadVector64(value, 2, ptr, 8);
+        \\  @storeVector64(value, 2, ptr, 8);
+        \\  @loadVector128(value, ptr, 16);
+        \\  @storeVector128(value, ptr, 16);
+        \\  @loadVectorPackedSigned(value, ptr, 8);
+        \\  @loadVectorPackedUnsigned(value, ptr, 8);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 8
+        \\  .word 0xc9010a02 # lsv $v01[2], 4($t0)
+        \\  .word 0xe9010a02 # ssv $v01[2], 4($t0)
+        \\  .word 0xc9011201 # llv $v01[2], 4($t0)
+        \\  .word 0xe9011201 # slv $v01[2], 4($t0)
+        \\  .word 0xc9011a01 # ldv $v01[2], 8($t0)
+        \\  .word 0xe9011a01 # sdv $v01[2], 8($t0)
+        \\  .word 0xc9012001 # lqv $v01, 16($t0)
+        \\  .word 0xe9012001 # sqv $v01, 16($t0)
+        \\  .word 0xc9013001 # lpv $v01, 8($t0)
+        \\  .word 0xc9013801 # luv $v01, 8($t0)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "triangle vector shifts use the resident shift constant vector" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) source: vec16 = undefined;
+        \\  reg($v02) left: vec16 = undefined;
+        \\  reg($v03) arithmetic: vec16 = undefined;
+        \\  reg($v04) logical: vec16 = undefined;
+        \\  left = source << 14;
+        \\  arithmetic = source >> 2;
+        \\  logical = source >>> 7;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4b3f0886 # vsll8 $v02, $v01, $v31
+        \\  .word 0x4b3f08c5 # vsra $v03, $v01, $v31
+        \\  .word 0x4bdf0904 # vsrl $v04, $v01, $v31
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "explicit vector shift names preserve vec32 views" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v06) source: vec16 = undefined;
+        \\  reg($v25) shifted: vec32 = undefined;
+        \\  shifted.sfract = vectorShiftLeft8(source, 14);
+        \\  shifted.sint = vectorShiftRightArithmetic(source, 2);
+        \\  source = vectorShiftRightLogical(source, 7);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4b3f3686 # vsll8 $v26, $v06, $v31
+        \\  .word 0x4b3f3645 # vsra $v25, $v06, $v31
+        \\  .word 0x4bdf3184 # vsrl $v06, $v06, $v31
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "scalar unary negation preserves signed instruction selection" {
+    try expectAsm(
+        \\fn test(reg($t0) signed: i32, reg($t1) unsigned: u32) noreturn {
+        \\  signed = -signed;
+        \\  unsigned = -unsigned;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  sub $t0, $zero, $t0
+        \\  subu $t1, $zero, $t1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "layout declarations centralize exceptional function order" {
+    var parser = try parser_mod.Parser.init(testing.allocator,
+        \\layout {
+        \\  second;
+        \\  first;
+        \\}
+        \\fn first() noreturn { @break(1); }
+        \\fn second() noreturn { @break(2); }
+    );
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    try testing.expectEqual(@as(usize, 3), functions.len);
+    try testing.expectEqual(@as(usize, 2), functions[0].layout_entries.len);
+    try testing.expectEqualStrings("second", functions[0].layout_entries[0].name);
+    try testing.expectEqualStrings("first", functions[0].layout_entries[1].name);
+}
+
+test "explicit vector operation names preserve RSP encodings" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) left: vec16 = undefined;
+        \\  reg($v02) right: vec16 = undefined;
+        \\  reg($v03) result: vec16 = undefined;
+        \\  result = vectorAdd(left, right);
+        \\  result = vectorSubtract(left, right);
+        \\  result = vectorAddCarry(left, right);
+        \\  result = vectorSubtractCarry(left, right);
+        \\  result = vectorCompareLessThan(left, right);
+        \\  result = vectorCompareEqual(left, right);
+        \\  result = vectorCompareNotEqual(left, right);
+        \\  result = vectorCompareGreaterOrEqual(left, right);
+        \\  result = vectorSelectByCompareCode(left, right);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a0208d0 # vadd $v03, $v01, $v02
+        \\  .word 0x4a0208d1 # vsub $v03, $v01, $v02
+        \\  .word 0x4a0208d4 # vaddc $v03, $v01, $v02
+        \\  .word 0x4a0208d5 # vsubc $v03, $v01, $v02
+        \\  .word 0x4a0208e0 # vlt $v03, $v01, $v02
+        \\  .word 0x4a0208e1 # veq $v03, $v01, $v02
+        \\  .word 0x4a0208e2 # vne $v03, $v01, $v02
+        \\  .word 0x4a0208e3 # vge $v03, $v01, $v02
+        \\  .word 0x4a0208e7 # vmrg $v03, $v01, $v02
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "explicit accumulator and reciprocal names preserve RSP encodings" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v18) high: vec16 = readVectorAccumulatorHigh();
+        \\  reg($v19) middle: vec16 = readVectorAccumulatorMiddle();
+        \\  reg($v20) reciprocal_high: vec16 = undefined;
+        \\  reg($v21) reciprocal_low: vec16 = undefined;
+        \\  reg($v24) source: vec16 = undefined;
+        \\  reciprocal_high[7] = vectorReciprocalHigh(high[0]);
+        \\  reciprocal_low[7] = vectorReciprocalLow(middle[0]);
+        \\  reciprocal_low[0] = vectorReciprocal(source[1]);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4b00049d # vsar $v18, $v00, $v00
+        \\  .word 0x4b2004dd # vsar $v19, $v00, $v00
+        \\  .word 0x4b127d32 # vrcph $v20[7], $v18[0]
+        \\  .word 0x4b137d71 # vrcpl $v21[7], $v19[0]
+        \\  .word 0x4b384570 # vrcp $v21[0], $v24[1]
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "command tail jumps omit unreachable command return scaffolding" {
+    try expectAsm(
+        \\command(1) fn commandTail(reg($a0) value: u32) {
+        \\  @goto(target);
+        \\}
+        \\fn target(reg($a0) value: u32) noreturn {
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.globl commandTail
+        \\commandTail:
+        \\  j target
+        \\  nop
+        \\
+        \\target:
+        \\  break
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word commandTail
+        \\  .byte 1
+        \\  .byte 4
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "callAndGoto emits the libdragon jump-and-continuation idiom" {
+    try expectAsm(
+        \\fn append() {}
+        \\fn finish() noreturn { @break(); }
+        \\command(1) fn test() {
+        \\  @callAndGoto(append, finish);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\append:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\finish:
+        \\  break
+        \\
+        \\.globl test
+        \\test:
+        \\  j append
+        \\  addiu $ra, $zero, %lo(finish)
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word test
+        \\  .byte 1
+        \\  .byte 0
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "function call accepts one explicit delay-slot statement" {
+    try expectAsm(
+        \\fn helper(reg($a0) value: u32) {}
+        \\command(1) fn test(reg($a0) value: u32) {
+        \\  reg($t3) opcode: u32 = undefined;
+        \\  helper(value) delay { opcode = 0xf0000000; }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\helper:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\.globl test
+        \\test:
+        \\  or $k1, $ra, $zero
+        \\  jal helper
+        \\  lui $t3, 61440
+        \\  jr $k1
+        \\  nop
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word test
+        \\  .byte 1
+        \\  .byte 4
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "vector lane moves and reciprocal operations emit exact RSP encodings" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) destination: vec16 = 0;
+        \\  reg($v02) source: vec16 = 0;
+        \\  reg($v03) reciprocal: vec16 = 0;
+        \\  reg($v04) input: vec16 = 0;
+        \\  destination[3] = source[6];
+        \\  destination[0] = vectorMove(source[0]);
+        \\  reciprocal[0] = vrcph(input[5]);
+        \\  reciprocal[1] = vrcpl(input[4]);
+        \\  reciprocal[2] = vrcp(input[3]);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
+        \\  .word 0x4a04212c # vxor $v04, $v04, $v04
+        \\  .word 0x4bc21873 # vmov $v01[3], $v02[6]
+        \\  .word 0x4b024073 # vmov $v01[0], $v02[0]
+        \\  .word 0x4ba400f2 # vrcph $v03[0], $v04[5]
+        \\  .word 0x4b8408f1 # vrcpl $v03[1], $v04[4]
+        \\  .word 0x4b6410f0 # vrcp $v03[2], $v04[3]
         \\  break
         \\
         \\
@@ -780,11 +1407,23 @@ test "vector declarations validate fixed registers and register pairs" {
         \\  reg($v1) value: vec16 = 0;
         \\}
     , .expected_vector_register, 2, 7);
-    try expectAsmError(
+    try expectAsm(
         \\fn test() {
         \\  reg($v28) value: vec32 = 0;
         \\}
-    , error.VectorRegisterReservedForBackend);
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a1ce72c # vxor $v28, $v28, $v28
+        \\  .word 0x4a1def6c # vxor $v29, $v29, $v29
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
     try expectAsmError(
         \\fn test() {
         \\  reg($v01) a: vec32 = 0;
@@ -894,6 +1533,55 @@ test "vector swizzles views and indexed lane transfers lower to COP2 encodings" 
     );
 }
 
+test "signed vector lane extraction preserves MFC2 sign extension" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) source: vec16 = 0;
+        \\  reg($t0) signed: i32 = undefined;
+        \\  signed = source[0];
+        \\  signed = signedLessThan(signed, 0);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x48080800 # mfc2 $t0, $v01[0]
+        \\  slt $t0, $t0, $zero
+        \\
+        \\
+    );
+}
+
+test "vec32 views compose with lane and swizzle selection" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) wide: vec32 = 0;
+        \\  reg($t0) scalar: i32 = undefined;
+        \\  scalar = wide.sint[2];
+        \\  wide.sfract[3] = vrcp(wide.sint[2]);
+        \\  wide.sfract = wide.sfract.XXXXXXXX;
+        \\  store(vec16, scalar, wide.sfract[3]);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  .word 0x48080a00 # mfc2 $t0, $v01[2]
+        \\  .word 0x4b4118b0 # vrcp $v02[3], $v01[2]
+        \\  .word 0x4b8200aa # vor $v02, $v00, $v02
+        \\  .word 0xe9020b00 # ssv $v02[3], 0($t0)
+        \\
+        \\
+    );
+}
+
 test "fractional multiply and accumulate expressions emit VU instructions" {
     try expectAsm(
         \\fn test() noreturn {
@@ -918,6 +1606,52 @@ test "fractional multiply and accumulate expressions emit VU instructions" {
         \\  .word 0x4a0208c1 # vmulu $v03, $v01, $v02
         \\  .word 0x4b2208c8 # vmacf $v03, $v01, $v02
         \\  .word 0x4a0208c9 # vmacu $v03, $v01, $v02
+        \\
+        \\
+    );
+}
+
+test "explicit saturated vector add and subtract emit VADD and VSUB" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) lhs: vec16 = 0;
+        \\  reg($v02) rhs: vec16 = 0;
+        \\  reg($v03) result: vec16 = vadd(lhs, rhs.xxxxxxxx);
+        \\  result = vsub(lhs, rhs);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  .word 0x4b0208d0 # vadd $v03, $v01, $v02
+        \\  .word 0x4a0208d1 # vsub $v03, $v01, $v02
+        \\
+        \\
+    );
+}
+
+test "half-vector stores emit SDV with exact lane and offset fields" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t4) ptr: u32 = undefined;
+        \\  reg($v04) values: vec16 = undefined;
+        \\  store(vec64, ptr, values, 24);
+        \\  store(vec64, ptr, values[4], 56);
+        \\  store(vec32lane, ptr, values[6], 12);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0xe9841803 # sdv $v04[0], 24($t4)
+        \\  .word 0xe9841c07 # sdv $v04[4], 56($t4)
+        \\  .word 0xe9841603 # slv $v04[6], 12($t4)
         \\
         \\
     );
@@ -1164,14 +1898,27 @@ test "load can assign an already defined register" {
     );
 }
 
-test "load destination rejects incompatible widening" {
-    try expectAsmError(
+test "signed narrow loads can widen into u32 registers" {
+    try expectAsm(
         \\fn test() {
         \\  reg ptr: u32 = 0;
         \\  reg value: u32 = 0;
         \\  value = load(i16, ptr);
         \\}
-    , error.RegisterTypeMismatch);
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 0
+        \\  addiu $t1, $zero, 0
+        \\  lh $t1, 0($t0)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
 }
 
 test "inline calls bind parameters and expand inside caller scope" {
@@ -1239,9 +1986,19 @@ test "fixed-register parameters reject conflicting bindings" {
         \\  reg($t0) second: u32,
         \\) {}
     , error.RegisterAlreadyInUse);
-    try expectAsmError(
-        \\fn reserved_register(reg($at) value: u32) {}
-    , error.RegisterReservedForBackend);
+    try expectAsm(
+        \\fn scratch(reg($at) value: u32) {}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\scratch:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
 }
 
 test "function parameters require explicit register bindings" {
@@ -1266,7 +2023,7 @@ test "gp can be explicitly pinned but is not automatically allocated" {
         \\test:
         \\  addiu $gp, $zero, 32
         \\  addiu $t0, $zero, 1
-        \\  addu $gp, $gp, $t0
+        \\  add $gp, $gp, $t0
         \\  break
         \\
         \\
@@ -1341,6 +2098,33 @@ test "goto selects branch encoding and accepts a typed delay slot" {
     );
 }
 
+test "conditional function goto supports nonzero equality immediates" {
+    try expectAsm(
+        \\fn target() noreturn { @break(); }
+        \\fn dispatch(reg($t0) value: u32) noreturn {
+        \\  if(value == 3) @goto(target) delay {
+        \\    value = 7;
+        \\  }
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\  break
+        \\
+        \\dispatch:
+        \\  addiu $at, $zero, 3
+        \\  beq $t0, $at, target
+        \\  addiu $t0, $zero, 7
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "setReturn materializes a function return label" {
     try expectAsm(
         \\fn loop() noreturn {
@@ -1362,6 +2146,141 @@ test "setReturn materializes a function return label" {
         \\  jr $t0
         \\  nop
         \\  addiu $ra, $zero, %lo(loop)
+        \\
+        \\
+    );
+}
+
+test "setFunctionAddress materializes a function label in a typed register" {
+    try expectAsm(
+        \\fn append(reg($a0) value: u32) noreturn {
+        \\  @break();
+        \\}
+        \\fn dispatch() noreturn {
+        \\  reg($t5) next: u32 = undefined;
+        \\  @setFunctionAddress(next, append);
+        \\  @jump(next);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\append:
+        \\  break
+        \\
+        \\dispatch:
+        \\  addiu $t5, $zero, %lo(append)
+        \\  jr $t5
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "setDataAddress materializes a data label with an offset" {
+    try expectAsm(
+        \\bss { cached: [2]u32; }
+        \\fn send() noreturn {
+        \\  reg($s3) end: u32 = undefined;
+        \\  @setDataAddress(end, cached, 8);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.bss
+        \\.balign 4
+        \\cached:
+        \\  .space 8
+        \\
+        \\.text
+        \\
+        \\
+        \\send:
+        \\  addiu $s3, $zero, %lo(cached + 8)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "conditional direct goto supports signed register comparisons" {
+    try expectAsm(
+        \\fn failed() noreturn {
+        \\  @break();
+        \\}
+        \\fn check(reg($s3) end: i32, reg($s4) start: i32) noreturn {
+        \\  if(end < start) @goto(failed) delay {
+        \\    reg($at) code: u32 = 0xc0060000;
+        \\  }
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\failed:
+        \\  break
+        \\
+        \\check:
+        \\  slt $at, $s3, $s4
+        \\  bnez $at, failed
+        \\  lui $at, 49158
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "conditional direct goto lowers signed zero tests directly" {
+    try expectAsm(
+        \\fn failed() noreturn { @break(); }
+        \\fn check(reg($t0) value: i32) noreturn {
+        \\  if(value < 0) @goto(failed) delay {
+        \\    reg($at) code: u32 = 0xc0080000;
+        \\  }
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\failed:
+        \\  break
+        \\
+        \\check:
+        \\  bltz $t0, failed
+        \\  lui $at, 49160
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "conditional direct goto accepts a register rhs" {
+    try expectAsm(
+        \\fn target() noreturn { @break(); }
+        \\fn check(reg($t1) value: u32, reg($t0) expected: u32) noreturn {
+        \\  if(value == expected) @goto(target) delay {
+        \\    expected = 6;
+        \\  }
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\  break
+        \\
+        \\check:
+        \\  beq $t1, $t0, target
+        \\  addiu $t0, $zero, 6
+        \\  break
         \\
         \\
     );
@@ -1423,6 +2342,32 @@ test "fallthrough places the target function immediately afterward" {
     );
 }
 
+test "fallthrough suppresses an implicit function return" {
+    try expectAsm(
+        \\fn first() {
+        \\  @nop();
+        \\  @fallthrough(last);
+        \\}
+        \\fn last() {
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\first:
+        \\  nop
+        \\
+        \\last:
+        \\  break
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
 test "local labels support direct and conditional goto" {
     try expectAsm(
         \\fn dispatch(reg($t0) value: u32) noreturn {
@@ -1457,7 +2402,7 @@ test "local goto delay blocks emit typed delay-slot statements" {
         \\    next += 1;
         \\  }
         \\  goto done delay {
-        \\    @move($t0, $t1);
+        \\    value = next;
         \\  }
         \\done:
         \\  @break();
@@ -1469,7 +2414,7 @@ test "local goto delay blocks emit typed delay-slot statements" {
         \\
         \\dispatch:
         \\  beq $t0, $zero, LABEL_dispatch_done_0
-        \\  addiu $t1, $t1, 1
+        \\  addi $t1, $t1, 1
         \\  j LABEL_dispatch_done_0
         \\  or $t0, $t1, $zero
         \\LABEL_dispatch_done_0:
@@ -1520,11 +2465,13 @@ test "delay blocks reject multiple source statements" {
     , error.InvalidDelaySlot);
 }
 
-test "move copies between explicit scalar registers" {
+test "assignment copies between explicit scalar registers" {
     try expectAsm(
         \\fn test() noreturn {
-        \\  @move($sp, $ra);
-        \\  @move($ra, $sp);
+        \\  reg($sp) saved_return: u32 = undefined;
+        \\  reg($ra) return_address: u32 = undefined;
+        \\  saved_return = return_address;
+        \\  return_address = saved_return;
         \\  @break();
         \\}
     ,
@@ -1571,6 +2518,7 @@ test "scalar loads support symbolic offsets from an index register" {
         \\}
         \\fn test(reg($t0) index: u32) {
         \\  reg($t1) value: u32 = load(u16, index, table);
+        \\  value = load(u16, table + index, 6);
         \\}
     ,
         \\.set noreorder
@@ -1585,6 +2533,7 @@ test "scalar loads support symbolic offsets from an index register" {
         \\
         \\test:
         \\  lhu $t1, %lo(table)($t0)
+        \\  lhu $t1, %lo(table + 6)($t0)
         \\  jr $ra
         \\  nop
         \\
@@ -1599,6 +2548,7 @@ test "scalar stores support symbolic offsets from an index register" {
         \\}
         \\fn test(reg($t0) index: u32, reg($t1) value: u32) {
         \\  store(u32, index, value, table);
+        \\  store(u32, table + index, value, 12);
         \\}
     ,
         \\.set noreorder
@@ -1613,6 +2563,7 @@ test "scalar stores support symbolic offsets from an index register" {
         \\
         \\test:
         \\  sw $t1, %lo(table)($t0)
+        \\  sw $t1, %lo(table + 12)($t0)
         \\  jr $ra
         \\  nop
         \\
@@ -1668,6 +2619,61 @@ test "function calls verify fixed-register arguments without moves" {
         \\  jal callee
         \\  nop
         \\  break
+        \\
+        \\
+    );
+}
+
+test "inline calls do not force command return-address preservation" {
+    try expectAsm(
+        \\inline fn primitive(reg($a0) value: u32) {
+        \\  asm("mtc0 $a0, $9");
+        \\}
+        \\command(1) fn commandHandler(reg($a0) value: u32) {
+        \\  primitive(value);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.globl commandHandler
+        \\commandHandler:
+        \\  mtc0 $a0, $9
+        \\  jr $ra
+        \\  nop
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word commandHandler
+        \\  .byte 1
+        \\  .byte 4
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "data addresses can initialize signed pointer registers" {
+    try expectAsm(
+        \\bss { storage: u32; }
+        \\fn test() {
+        \\  reg($t0) pointer: i32 = storage;
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.bss
+        \\.balign 4
+        \\storage:
+        \\  .space 4
+        \\
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  addiu $t0, $zero, %lo(storage)
+        \\  jr $ra
+        \\  nop
         \\
         \\
     );
@@ -1780,7 +2786,7 @@ test "while loop emits labels branch and back edge" {
         \\  beq $at, $zero, LABEL__start_whileend_0
         \\  nop
         \\  sh $t0, 0($t0)
-        \\  addiu $t0, $t0, 2
+        \\  addi $t0, $t0, 2
         \\  j LABEL__start_while_0
         \\  nop
         \\LABEL__start_whileend_0:
@@ -1810,14 +2816,12 @@ test "command functions emit indexed handler metadata" {
         \\
         \\.globl first
         \\first:
-        \\  or $k1, $ra, $zero
-        \\  jr $k1
+        \\  jr $ra
         \\  nop
         \\
         \\.globl second
         \\second:
-        \\  or $k1, $ra, $zero
-        \\  jr $k1
+        \\  jr $ra
         \\  nop
         \\
         \\.section .zsp_commands,"",@progbits
@@ -1832,6 +2836,123 @@ test "command functions emit indexed handler metadata" {
         \\
         \\
     );
+}
+
+test "commandSize overrides inferred command metadata size" {
+    try expectAsm(
+        \\command(8) fn triangle(reg($a0) header: u32) commandSize(176) noreturn {
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.globl triangle
+        \\triangle:
+        \\  break
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word triangle
+        \\  .byte 8
+        \\  .byte 176
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "commandSize maps individual sizes onto shared command slots" {
+    try expectAsm(
+        \\command(8, 9) fn triangles(reg($a0) header: u32) commandSize(32, 48) noreturn {
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.globl triangles
+        \\triangles:
+        \\  break
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word triangles
+        \\  .byte 8
+        \\  .byte 32
+        \\  .short 0
+        \\  .word triangles
+        \\  .byte 9
+        \\  .byte 48
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "command discard parameters describe trailing command words" {
+    try expectAsm(
+        \\command(31) fn triangleData(
+        \\  reg($a0) offset: u32,
+        \\  reg($a1) xy: u32,
+        \\  reg($a2) z: u32,
+        \\  reg($a3) rgba: u32,
+        \\  reg($t0) _: u32,
+        \\  reg($t1) _: u32,
+        \\  reg($t2) _: u32,
+        \\) {}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.globl triangleData
+        \\triangleData:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word triangleData
+        \\  .byte 31
+        \\  .byte 28
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "external resident functions can provide command table aliases" {
+    try expectAsm(
+        \\command(21, 23) extern fn resident_command_loop() commandSize(8) noreturn;
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word resident_command_loop
+        \\  .byte 21
+        \\  .byte 8
+        \\  .short 0
+        \\  .word resident_command_loop
+        \\  .byte 23
+        \\  .byte 8
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "command trailing parameters must be discarded" {
+    try expectAsmError(
+        \\command(0) fn bad(
+        \\  reg($a0) a: u32,
+        \\  reg($a1) b: u32,
+        \\  reg($a2) c: u32,
+        \\  reg($a3) d: u32,
+        \\  reg($t0) trailing: u32,
+        \\) {}
+    , error.InvalidCommandParameters);
 }
 
 test "command table materializes handlers, sizes, and empty slots" {
@@ -1864,14 +2985,12 @@ test "command table materializes handlers, sizes, and empty slots" {
         \\
         \\.globl wait
         \\wait:
-        \\  or $k1, $ra, $zero
-        \\  jr $k1
+        \\  jr $ra
         \\  nop
         \\
         \\.globl jump
         \\jump:
-        \\  or $k1, $ra, $zero
-        \\  jr $k1
+        \\  jr $ra
         \\  nop
         \\
         \\.globl _start
@@ -1914,8 +3033,7 @@ test "command functions support indices spanning overlay IDs" {
         \\
         \\.globl extended
         \\extended:
-        \\  or $k1, $ra, $zero
-        \\  jr $k1
+        \\  jr $ra
         \\  nop
         \\
         \\.section .zsp_commands,"",@progbits
@@ -1925,6 +3043,49 @@ test "command functions support indices spanning overlay IDs" {
         \\  .short 0
         \\
         \\
+    );
+}
+
+test "one command handler can occupy multiple command slots" {
+    try expectAsm(
+        \\command(0, 15, 63) fn shared(reg($a0) header: u32) {}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.globl shared
+        \\shared:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\.section .zsp_commands,"",@progbits
+        \\  .word shared
+        \\  .byte 0
+        \\  .byte 4
+        \\  .short 0
+        \\  .word shared
+        \\  .byte 15
+        \\  .byte 4
+        \\  .short 0
+        \\  .word shared
+        \\  .byte 63
+        \\  .byte 4
+        \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "optimizer does not move an ra read into a jal delay slot" {
+    try expectOptimizedAsm(
+        \\  or $k1, $ra, $zero
+        \\  jal helper
+        \\  nop
+    ,
+        \\  or $k1, $ra, $zero
+        \\  jal helper
+        \\  nop
     );
 }
 
@@ -1960,4 +3121,41 @@ test "syntax rejects removed var keyword" {
         \\  var a: u16 = 0;
         \\}
     , .var_keyword_removed, 2, 3);
+}
+
+test "resident instruction forms are expressible without inline assembly" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($gp) address: u32 = undefined;
+        \\  reg($t7) size: u32 = undefined;
+        \\  reg($t0) next: u32 = undefined;
+        \\  reg($t1) limit: u32 = undefined;
+        \\  reg($at) comparison: u32 = undefined;
+        \\  reg($v31) packed_vector: vec16 = undefined;
+        \\  reg($v30) shifted: vec16 = undefined;
+        \\  next = address +% size;
+        \\  comparison = signedLessThan(next, limit);
+        \\  packed_vector = load_vec_u8(0);
+        \\  shifted = packed_vector >>> 8;
+        \\  goto done, .branch delay {
+        \\done:
+        \\    @break(0xba);
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addu $t0, $gp, $t7
+        \\  slt $at, $t0, $t1
+        \\  .word 0xc81f3000 # lpv $v31, 0($zero)
+        \\  .word 0x4bffff84 # vsrl $v30, $v31, $v31
+        \\  b LABEL_test_done_0
+        \\LABEL_test_done_0:
+        \\  break 0xba
+        \\
+        \\
+    );
 }
