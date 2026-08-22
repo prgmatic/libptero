@@ -16,8 +16,9 @@ pub const Summary = struct {
 pub fn run(tests: []const Test) Summary {
     var summary: Summary = .{ .passed = 0, .failed = 0 };
 
-    for (tests) |test_case| {
-        n64.debug.print("[Run] {s}", .{test_case.name});
+    if (tests.len > 0) n64.debug.print("[Run] {s}", .{tests[0].name});
+
+    for (tests, 0..) |test_case, test_index| {
         testing.reset();
 
         test_case.run() catch |err| {
@@ -35,20 +36,24 @@ pub fn run(tests: []const Test) Summary {
                     n64.debug.print("      at 0x{x:0>8}\n", .{details.address});
                 }
             }
+            if (test_index + 1 < tests.len) {
+                n64.debug.print("[Run] {s}", .{tests[test_index + 1].name});
+            }
             continue;
         };
 
         summary.passed += 1;
-        n64.debug.print(" [Pass ✅]\n", .{});
+        if (test_index + 1 < tests.len) {
+            n64.debug.print(" [Pass ✅]\n[Run] {s}", .{tests[test_index + 1].name});
+        } else {
+            n64.debug.print(" [Pass ✅]\n", .{});
+        }
     }
 
-    n64.debug.print("\n{d} passed, {d} failed\n", .{
-        summary.passed,
-        summary.failed,
-    });
     n64.debug.print(
-        "@@LIBPTERO_TEST_END@@ {{\"passed\":{d},\"failed\":{d}}}\n",
-        .{ summary.passed, summary.failed },
+        "\n{d} passed, {d} failed\n" ++
+            "@@LIBPTERO_TEST_END@@ {{\"passed\":{d},\"failed\":{d}}}\n",
+        .{ summary.passed, summary.failed, summary.passed, summary.failed },
     );
     return summary;
 }
