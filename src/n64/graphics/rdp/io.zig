@@ -1,10 +1,14 @@
 pub const dma_start_addr: *volatile u32 = @ptrFromInt(0xA4100000);
 pub const dma_end_addr: *volatile u32 = @ptrFromInt(0xA4100004);
 pub const dma_current_addr: *volatile u32 = @ptrFromInt(0xA4100008);
-pub const status: *volatile Status = @ptrFromInt(0xA410000C);
+pub const status: *const volatile Status = @ptrFromInt(0xA410000C);
+pub const status_write: *volatile u32 = @ptrFromInt(0xA410000C);
 
 pub fn setDmaSource(source: RdpDmaSource) void {
-    status.*.dma_source = source;
+    status_write.* = switch (source) {
+        .rdram => 1 << 0,
+        .dmem => 1 << 1,
+    };
 }
 
 const Status = packed struct(u32) {
@@ -24,5 +28,5 @@ const Status = packed struct(u32) {
 
 const RdpDmaSource = enum(u1) {
     rdram = 0,
-    dmem  = 1,
+    dmem = 1,
 };

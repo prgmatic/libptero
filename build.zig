@@ -29,6 +29,19 @@ pub fn build(b: *std.Build) void {
     const game_step = game.addInstallStep(b, "game", "Build the game ROM");
     b.getInstallStep().dependOn(game_step);
 
+    const rdp_benchmark = @import("build/rom.zig").build(b, .{
+        .name = "rdp-stars-benchmark",
+        .title = "RDP Stars Benchmark",
+        .root_source_file = "src/benchmarks/rdp_stars_entry.zig",
+        .linker_script = "src/game/link.ld",
+        .assembly_files = &.{"src/game/interrupt.S"},
+        .target = target,
+        .n64_module = n64_module,
+        .tools = tools,
+        .ipl3_debug = enable_ipl3_debug,
+    });
+    _ = rdp_benchmark.addInstallStep(b, "rdp-benchmark", "Build the RDP star benchmark ROM");
+
     const test_rom = @import("build/rom.zig").build(b, .{
         .name = "tests",
         .title = "Libptero Tests",

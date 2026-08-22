@@ -7,17 +7,29 @@ const interrupt = @import("../interrupt.zig");
 
 pub const FixedQueue = queue.FixedQueue;
 pub const RspQueue = queue.RspQueue;
+pub const DirectQueue = queue.DirectQueue;
+pub const RspSubmittedQueue = queue.RspSubmittedQueue;
+pub const OverlayQueue = queue.OverlayQueue;
 pub const CommandQueue = queue.CommandQueue;
 pub const FixedCommandQueue = queue.FixedCommandQueue;
 pub const RspCommandQueue = queue.RspCommandQueue;
+pub const DirectCommandQueue = queue.DirectCommandQueue;
+pub const RspSubmittedCommandQueue = queue.RspSubmittedCommandQueue;
+pub const OverlayCommandQueue = queue.OverlayCommandQueue;
 pub const LoadTextureOptions = queue.LoadTextureOptions;
 
 pub const RenderQueue = rq.RenderQueue;
 pub const FixedRenderQueue = rq.FixedRenderQueue;
 pub const RspRenderQueue = rq.RspRenderQueue;
+pub const DirectRenderQueue = rq.DirectRenderQueue;
+pub const RspSubmittedRenderQueue = rq.RspSubmittedRenderQueue;
+pub const OverlayRenderQueue = rq.OverlayRenderQueue;
+// Canonical high-level renderer. Use DirectRenderQueue or
+// RspSubmittedRenderQueue when raw CPU command construction is intentional.
+pub const DefaultRenderQueue = OverlayRenderQueue;
 pub const Fence = interrupt.RdpFence;
 
-pub fn syncFull(render_queue: *RspRenderQueue) Fence {
+pub fn syncFull(render_queue: anytype) Fence {
     render_queue.fullSync();
     const fence = interrupt.armRdpFence();
     render_queue.execute();
@@ -25,7 +37,7 @@ pub fn syncFull(render_queue: *RspRenderQueue) Fence {
 }
 pub const SpriteDrawOptions = rq.SpriteDrawOptions;
 pub const Pivot = rq.Pivot;
-pub const TexVertex = queue.TexVertex;
+pub const TexVertex = rq.TexVertex;
 
 pub const OtherModes = modes.OtherModes;
 pub const CycleType = modes.CycleType;

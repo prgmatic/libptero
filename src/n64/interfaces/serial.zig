@@ -1,7 +1,7 @@
 const dramAddress: *volatile u32 = @ptrFromInt(0xA4800000);
 const pifReadAddress: *volatile u32 = @ptrFromInt(0xA4800004);
 const pifWriteAddress: *volatile u32 = @ptrFromInt(0xA4800010);
-const status: *volatile Status = @ptrFromInt(0xA4800018);
+const status: *const volatile Status = @ptrFromInt(0xA4800018);
 
 const pif_ram_addr = 0x1FC007C0;
 

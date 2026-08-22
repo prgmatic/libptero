@@ -48,6 +48,12 @@ var rdp_syncpoint_source: [2]u32 align(8) = .{ 0, 0 };
 var rdp_sync_state_output: [4]u32 align(8) = .{ 0, 0, 0, 0 };
 var rsp_rdp_command_buffer: [4]u64 align(8) = undefined;
 var rsp_rdp_dynamic_buffers: [2][rsp.rdp_dynamic_buffer_len]u8 align(16) = undefined;
+var direct_rdp_command_buffer: [16]u64 align(8) = undefined;
+var direct_rdp_render_target: [4 * 4]n64.graphics.color.Rgba32 align(64) = undefined;
+var overlay_rdp_render_target: [4 * 4]n64.graphics.color.Rgba32 align(64) = undefined;
+var overlay_rdp_render_target_16: [4 * 4]n64.graphics.color.Rgba16 align(64) = undefined;
+var native_triangle_overlay_target: [16 * 16]n64.graphics.color.Rgba16 align(64) = undefined;
+var native_triangle_texture: [4 * 4]n64.graphics.color.Rgba32 align(16) = undefined;
 var queue_dma_source: [4]u32 align(8) = .{ 0x12345678, 0x89abcdef, 0x0badcafe, 0xfeedface };
 var queue_dma_destination: [4]u32 align(8) = undefined;
 var overlay_1: rsp.Overlay = undefined;
@@ -90,6 +96,11 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: command fetch boundary", .run = commandFetchBoundary },
     .{ .name = "ZSP: polling syncpoint", .run = pollingSyncpoint },
     .{ .name = "ZSP: high-priority queue", .run = highPriorityQueue },
+    .{ .name = "RDP: direct CPU renderer", .run = directRdpRenderer },
+    .{ .name = "RDP: RSP-submitted raw queue", .run = rspBackedRdpQueue },
+    .{ .name = "RDP: completion fence", .run = rdpCompletionFence },
+    .{ .name = "RDP: native overlay textured triangle", .run = nativeOverlayTexturedTriangle },
+    .{ .name = "RDP: overlay-backed renderer", .run = overlayBackedRdpRenderer },
     .{ .name = "ZSP: RDP buffer commands", .run = rdpBufferCommands },
     .{ .name = "ZSP: RDP triangle sort and normal", .run = rdpTriangleSortAndNormal },
     .{ .name = "ZSP: RDP triangle render", .run = rdpTriangleRender },
@@ -1401,6 +1412,26 @@ fn rspBackedRdpQueue() !void {
     rsp.unregisterOverlay(&rdp_overlay);
 }
 
+fn directRdpRenderer() !void {
+    @memset(&direct_rdp_render_target, n64.graphics.color.Rgba32.black);
+    n64.cache.writebackData(&direct_rdp_render_target);
+    const image = n64.graphics.image.ImgRgba32{
+        .width = 4,
+        .height = 4,
+        .texel_data = direct_rdp_render_target[0..],
+    };
+    var render_queue = rdp.DirectRenderQueue.init(.{ .buffer = direct_rdp_command_buffer[0..] });
+    render_queue.setFrameBuffer(image);
+    render_queue.clearScreen(n64.graphics.color.Rgba32.green);
+    const fence = rdp.syncFull(&render_queue);
+    if (!fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
+
+    n64.cache.invalidateData(&direct_rdp_render_target);
+    for (direct_rdp_render_target) |pixel| {
+        try testing.expectEqual(n64.graphics.color.Rgba32.green, pixel);
+    }
+}
+
 fn rdpCompletionFence() !void {
     loadCommandDispatcher();
     rdp_queue.init(.low);
@@ -1417,6 +1448,135 @@ fn rdpCompletionFence() !void {
     try testing.expectEqual(start, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
     try testing.expectEqual(start + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
     try testing.expect(fence.isComplete());
+}
+
+fn overlayBackedRdpRenderer() !void {
+    loadCommandDispatcher();
+    rdp_overlay.init(rsp.programs.rdp_overlay);
+    rsp.registerOverlayStatic(&rdp_overlay, 12);
+    @memset(&overlay_rdp_render_target, n64.graphics.color.Rgba32.black);
+    n64.cache.writebackData(&overlay_rdp_render_target);
+
+    rdp_queue.init(.low);
+    const image = n64.graphics.image.ImgRgba32{
+        .width = 4,
+        .height = 4,
+        .texel_data = overlay_rdp_render_target[0..],
+    };
+    var render_queue = rdp.OverlayRenderQueue.init(rdp.OverlayQueue.init(
+        &rdp_queue,
+        &rdp_overlay,
+        .{ rsp_rdp_dynamic_buffers[0][0..], rsp_rdp_dynamic_buffers[1][0..] },
+    ));
+    render_queue.setFrameBuffer(image);
+    render_queue.clearScreen(n64.graphics.color.Rgba32.red);
+    const fence = rdp.syncFull(&render_queue);
+    try waitQueueTimeout(&rdp_queue);
+    if (!fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
+    n64.cache.invalidateData(&overlay_rdp_render_target);
+    for (overlay_rdp_render_target) |pixel| {
+        try testing.expectEqual(n64.graphics.color.Rgba32.red, pixel);
+    }
+
+    rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
+    @memset(&overlay_rdp_render_target, n64.graphics.color.Rgba32.black);
+    n64.cache.writebackData(&overlay_rdp_render_target);
+    render_queue.clear();
+    render_queue.setFrameBuffer(image);
+    render_queue.clearScreen(n64.graphics.color.Rgba32.blue);
+    const second_fence = rdp.syncFull(&render_queue);
+    try waitQueueTimeout(&rdp_queue);
+    if (!second_fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
+    n64.cache.invalidateData(&overlay_rdp_render_target);
+    for (overlay_rdp_render_target) |pixel| {
+        try testing.expectEqual(n64.graphics.color.Rgba32.blue, pixel);
+    }
+
+    rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
+    @memset(&overlay_rdp_render_target_16, n64.graphics.color.Rgba16.black);
+    n64.cache.writebackData(&overlay_rdp_render_target_16);
+    const image_16 = n64.graphics.image.ImgRgba16{
+        .width = 4,
+        .height = 4,
+        .texel_data = overlay_rdp_render_target_16[0..],
+    };
+    const gray = n64.graphics.color.Rgba16.fromInt(0x404040ff);
+    render_queue.clear();
+    render_queue.setFrameBuffer(image_16);
+    render_queue.clearScreen(gray);
+    const third_fence = rdp.syncFull(&render_queue);
+    try waitQueueTimeout(&rdp_queue);
+    if (!third_fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
+    n64.cache.invalidateData(&overlay_rdp_render_target_16);
+    for (overlay_rdp_render_target_16) |pixel| {
+        try testing.expectEqual(gray, pixel);
+    }
+
+    rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
+    rsp.releaseRdpToDirect();
+    rsp.unregisterOverlay(&rdp_overlay);
+}
+
+fn nativeOverlayTexturedTriangle() !void {
+    const black = n64.graphics.color.Rgba16.black;
+    const green = n64.graphics.color.Rgba32.green;
+    @memset(&native_triangle_overlay_target, black);
+    @memset(&native_triangle_texture, n64.graphics.color.Rgba32.white);
+    n64.cache.writebackData(&native_triangle_overlay_target);
+    n64.cache.writebackData(&native_triangle_texture);
+
+    const texture_image = n64.graphics.image.ImgRgba32{
+        .width = 4,
+        .height = 4,
+        .texel_data = native_triangle_texture[0..],
+    };
+    loadCommandDispatcher();
+    rdp_overlay.init(rsp.programs.rdp_overlay);
+    rsp.registerOverlayStatic(&rdp_overlay, 12);
+    rdp_queue.init(.low);
+    const overlay_image = n64.graphics.image.ImgRgba16{
+        .width = 16,
+        .height = 16,
+        .texel_data = native_triangle_overlay_target[0..],
+    };
+    var overlay_render = rdp.OverlayRenderQueue.init(rdp.OverlayQueue.init(
+        &rdp_queue,
+        &rdp_overlay,
+        .{ rsp_rdp_dynamic_buffers[0][0..], rsp_rdp_dynamic_buffers[1][0..] },
+    ));
+    renderNativeTriangleScene(&overlay_render, overlay_image, texture_image, green);
+    const overlay_fence = rdp.syncFull(&overlay_render);
+    if (!rsp.waitTimeout(&rdp_queue, 100_000_000)) return error.RspSignalTimeout;
+    if (!overlay_fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
+
+    n64.cache.invalidateData(&native_triangle_overlay_target);
+    var overlay_changed: usize = 0;
+    var overlay_checksum: u32 = 0;
+    for (native_triangle_overlay_target) |overlay_pixel| {
+        if (!std.meta.eql(overlay_pixel, black)) overlay_changed += 1;
+        overlay_checksum = overlay_checksum *% 16777619 ^ @as(u16, @bitCast(overlay_pixel));
+    }
+    try testing.expectEqual(@as(usize, 63), overlay_changed);
+    try testing.expectEqual(@as(u32, 0xee5baec0), overlay_checksum);
+    try testing.expectEqual(n64.graphics.color.Rgba16.green, native_triangle_overlay_target[8 * 16 + 8]);
+
+    rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
+    rsp.releaseRdpToDirect();
+    rsp.unregisterOverlay(&rdp_overlay);
+}
+
+fn renderNativeTriangleScene(render_queue: anytype, target: anytype, texture_image: anytype, color: n64.graphics.color.Rgba32) void {
+    render_queue.setFrameBuffer(target);
+    render_queue.clearScreen(n64.graphics.color.Rgba16.black);
+    render_queue.setCombineMode(.single(.{ .rgb_a = .tex0, .rgb_c = .primitive, .alpha_d = .tex0 }));
+    render_queue.setBlendMode(.alpha);
+    render_queue.setPrimColor(color);
+    render_queue.drawSprite(texture_image, 8, 8, .{
+        .rotation = 0.35,
+        .pivot = .center,
+        .scale_x = 2,
+        .scale_y = 2,
+    });
 }
 
 fn queuedDmaCommand() !void {
@@ -1436,6 +1596,20 @@ fn queuedDmaCommand() !void {
 
 fn waitQueueTimeout(queue: *const rsp.Queue) !void {
     if (rsp.waitTimeout(queue, rsp_timeout_attempts)) return;
+    n64.debug.print(
+        "\n      RSP pc={x:0>3} sp={x:0>8} dp={x:0>8} current={x:0>8} sentinel={x:0>8}\n      buffers={x:0>8},{x:0>8} dp_start={x:0>8} dp_end={x:0>8}\n",
+        .{
+            rsp.io.program_counter.*,
+            @as(u32, @bitCast(rsp.io.status_register_read.*)),
+            @as(u32, @bitCast(n64.interfaces.rdp.status.*)),
+            readDmemInt(u32, 0xc0),
+            readDmemInt(u32, 0xc4),
+            readDmemInt(u32, 0xc8),
+            readDmemInt(u32, 0xcc),
+            n64.interfaces.rdp.dma_start_addr.*,
+            n64.interfaces.rdp.dma_end_addr.*,
+        },
+    );
     rsp.halt();
     rsp.waitHalted();
     return error.RspSignalTimeout;

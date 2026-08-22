@@ -1,5 +1,6 @@
 const std = @import("std");
 const cache = @import("../cpu/cache.zig");
+const rdp_io = @import("../graphics/rdp/io.zig");
 
 pub const io = @import("io.zig");
 pub const programs = @import("programs.zig");
@@ -38,6 +39,19 @@ pub const Queue = struct {
     ) void {
         self.ensureCapacity(1 + arguments.len);
         self.current().writeOverlayCommand(registered, command_index, inline_argument, arguments);
+    }
+
+    // Fast path for typed wrappers whose command ABI is fixed in code. Generic
+    // callers should use writeOverlayCommand so metadata still validates them.
+    pub fn writeOverlayCommandKnown(
+        self: *Queue,
+        registered: *const Overlay,
+        command_index: u8,
+        inline_argument: u32,
+        arguments: []const u32,
+    ) void {
+        self.ensureCapacity(1 + arguments.len);
+        self.current().writeRawCommand(registered.commandId(command_index), inline_argument, arguments);
     }
 
     pub fn dmaToDmem(
@@ -99,8 +113,32 @@ pub const Queue = struct {
         }
         cache.invalidateData(first);
         cache.invalidateData(second);
-        self.writeDmem(rdp_buffers_dmem, physicalAddress(@intFromPtr(first.ptr)));
-        self.writeDmem(rdp_buffers_dmem + @sizeOf(u32), physicalAddress(@intFromPtr(second.ptr)));
+        const first_address = physicalAddress(@intFromPtr(first.ptr));
+        const second_address = physicalAddress(@intFromPtr(second.ptr));
+        self.writeDmem(rdp_current_dmem, first_address);
+        self.writeDmem(rdp_sentinel_dmem, first_address + rdp_dynamic_buffer_len);
+        self.writeDmem(rdp_buffers_dmem, first_address);
+        self.writeDmem(rdp_buffers_dmem + @sizeOf(u32), second_address);
+        // Match the resident state above before the queued SET_BUFFER command
+        // attempts to terminate this initial empty dynamic buffer.
+        // Abort any prior direct-DP stream, then select RDRAM DMA and release
+        // freeze/flush before seeding the resident queue's empty buffer.
+        rdp_io.status_write.* = (1 << 5) | (1 << 3);
+        rdp_io.status_write.* = 0x15;
+        var reset_wait: u16 = 500;
+        while (reset_wait != 0 and
+            (rdp_io.status.end_register_write_pending or
+                rdp_io.status.is_start_register_write_pending))
+        {
+            reset_wait -= 1;
+        }
+        rdp_io.dma_start_addr.* = first_address;
+        rdp_io.dma_end_addr.* = first_address;
+        var accept_wait: u32 = 1_000_000;
+        while (accept_wait != 0 and (@as(u32, @bitCast(rdp_io.status.*)) & 0x600) != 0) {
+            accept_wait -= 1;
+        }
+        if (accept_wait == 0) @panic("timed out initializing RSP-owned RDP buffers");
     }
 
     pub fn syncpoint(self: *Queue) void {
@@ -156,6 +194,8 @@ const overlay_idmap_dmem = 0x78;
 const pointer_stack_dmem = 0x88;
 const queue_address_dmem = 0xb0;
 const current_overlay_id_dmem = overlay_dmem_offset + 10;
+const rdp_current_dmem = 0xc0;
+const rdp_sentinel_dmem = 0xc4;
 const rdp_buffers_dmem = 0xc8;
 const overlay_dmem_offset = overlay.dmem_offset;
 
@@ -216,6 +256,24 @@ pub fn submitCommands(queue: *const CommandQueue) void {
     io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(queue.buffer.ptr));
     io.readDmem(i8, rdp_target_bitdepth_dmem).* = 0;
     io.status_register_write.* = io.status_set_signal7;
+}
+
+// Transfer DP ownership away from the resident RSP queue after the caller has
+// completed a full-sync fence and waited for its RSP Queue. Restore the empty
+// boot-state range expected by direct submitters and low-level test programs.
+pub fn releaseRdpToDirect() void {
+    rdp_io.status_write.* = (1 << 5) | (1 << 3);
+    rdp_io.status_write.* = 0x15;
+    rdp_io.dma_start_addr.* = 0;
+    rdp_io.dma_end_addr.* = 0;
+    var accept_wait: u32 = 1_000_000;
+    while (accept_wait != 0 and (@as(u32, @bitCast(rdp_io.status.*)) & 0x600) != 0) {
+        accept_wait -= 1;
+    }
+    if (accept_wait == 0) @panic("timed out releasing RDP to direct submission");
+    io.readDmem(u32, rdp_current_dmem).* = 0;
+    io.readDmem(u32, rdp_sentinel_dmem).* = 0;
+    io.readDmem(u8, rdp_syncfull_ongoing_dmem).* = 0;
 }
 
 fn writebackCommandGraph(queue: *const CommandQueue, depth: usize) void {

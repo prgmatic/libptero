@@ -17,18 +17,17 @@ const allocator = fixed_buffer_allocator.allocator();
 
 const width: u16 = 320;
 const height: u16 = 240;
-const queue_command_capacity = 2048;
-
 var frame_buffer0: Img16 = undefined;
 var frame_buffer1: Img16 = undefined;
 var current_frame_buffer: *Img16 = undefined;
 
-var queue_buffer: []u64 = undefined;
-var rq: rdp.FixedRenderQueue = undefined;
+var rdp_queue: rsp.Queue = undefined;
+var rdp_overlay: rsp.Overlay = undefined;
+var rdp_dynamic_buffers: [2][rsp.rdp_dynamic_buffer_len]u8 align(16) = undefined;
+var rq: rdp.DefaultRenderQueue = undefined;
 var frame_count: u32 = 0;
 
 var star_texture: Img32 = undefined;
-
 
 var stars: [128]Star = undefined;
 const colors = [_]Rgba32{
@@ -50,6 +49,7 @@ pub fn main() !void {
 
     while (true) {
         n64.interrupt.waitForInterrupt(.{ .rdp = true, .video = true });
+        rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
         swapBuffer();
         update();
     }
@@ -72,10 +72,9 @@ fn runRspFillDmem() void {
         }
     }
 
-    if(mismatch_count == 0) {
+    if (mismatch_count == 0) {
         print("Success\n", .{});
-    }
-    else {
+    } else {
         print("Mismatches {d}\n", .{mismatch_count});
     }
 }
@@ -92,15 +91,23 @@ fn init() !void {
 
     try initStarTexture();
 
-    queue_buffer = try allocator.alignedAlloc(u64, std.mem.Alignment.@"8", queue_command_capacity);
-    rq = rdp.FixedRenderQueue.init(.{ .buffer = queue_buffer });
+    rsp.halt();
+    rsp.waitHalted();
+    rsp.loadResident(rsp.programs.command_dispatcher);
+    rdp_overlay.init(rsp.programs.rdp_overlay);
+    rsp.registerOverlayStatic(&rdp_overlay, 12);
+    rdp_queue.init(.low);
+    rq = rdp.DefaultRenderQueue.init(rdp.OverlayQueue.init(
+        &rdp_queue,
+        &rdp_overlay,
+        .{ rdp_dynamic_buffers[0][0..], rdp_dynamic_buffers[1][0..] },
+    ));
 
     initStars();
     update();
     vi.setFrameBuffer(@intFromPtr(current_frame_buffer.texel_data.ptr));
     enableInterrupts();
 }
-
 
 fn update() void {
     const elapsed = elapsedSeconds();
@@ -110,11 +117,7 @@ fn update() void {
     rq.clearScreen(Rgba16.fromInt(0x404040FF));
 
     // Mul texture color and prim
-    rq.setCombineMode(.single(.{ 
-        .rgb_a = .tex0, 
-        .rgb_c = .primitive, 
-        .alpha_d = .tex0 
-    }));
+    rq.setCombineMode(.single(.{ .rgb_a = .tex0, .rgb_c = .primitive, .alpha_d = .tex0 }));
     rq.setBlendMode(.alpha);
 
     var star_count: usize = @intFromFloat(elapsed * 10 + 1);
@@ -124,9 +127,7 @@ fn update() void {
         stars[i].draw(&rq, star_texture, elapsed);
     }
 
-    rq.fullSync();
-    n64.cache.writebackData(queue_buffer);
-    rq.execute();
+    _ = rdp.syncFull(&rq);
     frame_count += 1;
 }
 
@@ -224,7 +225,7 @@ const Star = struct {
         };
     }
 
-    pub fn draw(self: Star, render_queue: *rdp.FixedRenderQueue, image: Img32, elapsed: f32) void {
+    pub fn draw(self: Star, render_queue: *rdp.DefaultRenderQueue, image: Img32, elapsed: f32) void {
         var scale_x: f32 = 1;
         var scale_y: f32 = 1;
 

@@ -2,3 +2,6 @@
 zig-out/
 .zig-cache/
 
+# Libdragon benchmark build output
+benchmarks/libdragon-rdp-stars/build/
+benchmarks/libdragon-rdp-stars/*.z64

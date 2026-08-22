@@ -1,4 +1,5 @@
 const io = @import("io.zig");
+const std = @import("std");
 const cache = @import("../../cpu/cache.zig");
 const rsp = @import("../../rsp/rsp.zig");
 const ColorFormat = @import("../color.zig").Format;
@@ -22,11 +23,13 @@ pub const FixedQueue = struct {
     }
 
     pub fn execute(self: *FixedQueue) void {
+        if (self.index == 0) return;
+        const commands = self.buffer[0..self.index];
+        cache.writebackData(commands);
         const addr: u32 = @intFromPtr(self.buffer.ptr) & 0xFFFFFF;
-        const s: *volatile u32 = @ptrCast(io.status);
-        s.* = 1;
+        io.status_write.* = 1;
         io.dma_start_addr.* = addr;
-        io.dma_end_addr.* = addr + @sizeOf(u64) * self.index;
+        io.dma_end_addr.* = addr + @sizeOf(u64) * commands.len;
     }
 
     pub fn clear(self: *FixedQueue) void {
@@ -86,6 +89,155 @@ pub const RspQueue = struct {
         self.index = 0;
     }
 };
+
+// Prefer these names in new code. The older names remain aliases so existing
+// applications do not need to migrate all at once.
+pub const DirectQueue = FixedQueue;
+pub const RspSubmittedQueue = RspQueue;
+
+// Raw RDP command sink which preserves ordering through the resident RSP queue
+// and lets the RDP overlay perform its state/address fixups. Use a dedicated
+// rsp.Queue so unrelated RSP work cannot be discarded at render boundaries.
+pub const OverlayQueue = struct {
+    rsp_queue: *rsp.Queue,
+    overlay: *rsp.Overlay,
+    dynamic_buffers: [2][]align(16) u8,
+    syncpoint_source: [2]u32 align(8) = .{ 0, 0 },
+    sync_state_output: [4]u32 align(8) = .{ 0, 0, 0, 0 },
+    packet: [22]u64 = undefined,
+    packet_len: usize = 0,
+    packet_expected: usize = 0,
+    configured: bool = false,
+
+    pub fn init(
+        rsp_queue: *rsp.Queue,
+        overlay: *rsp.Overlay,
+        dynamic_buffers: [2][]align(16) u8,
+    ) OverlayQueue {
+        if (dynamic_buffers[0].len != rsp.rdp_dynamic_buffer_len or
+            dynamic_buffers[1].len != rsp.rdp_dynamic_buffer_len)
+        {
+            @panic("overlay-backed RDP dynamic buffers must each be 64 KiB");
+        }
+        return .{
+            .rsp_queue = rsp_queue,
+            .overlay = overlay,
+            .dynamic_buffers = dynamic_buffers,
+        };
+    }
+
+    pub fn push(self: *OverlayQueue, value: u64) void {
+        self.ensureConfigured();
+        if (self.packet_len == 0) {
+            const opcode: u8 = @truncate(value >> 56);
+            self.packet_expected = packetWordCount(opcode);
+        }
+        self.packet[self.packet_len] = value;
+        self.packet_len += 1;
+        if (self.packet_len == self.packet_expected) self.emitPacket();
+    }
+
+    pub fn execute(self: *OverlayQueue) void {
+        if (self.packet_len != 0) @panic("incomplete RDP command packet");
+        rsp.flush(self.rsp_queue);
+    }
+
+    pub fn clear(self: *OverlayQueue) void {
+        // Overlay commands are written directly into the resident queue, so
+        // they cannot be discarded like a CPU-side command buffer. At a frame
+        // boundary there must only be complete packets; rsp.flush handles the
+        // resident queue's double-buffered reuse on the next execute().
+        if (self.packet_len != 0) @panic("cannot clear an incomplete RDP command packet");
+    }
+
+    // Submit compact vertices to the overlay's native triangle generator.
+    // This follows libdragon's RDPQ_CMD_TRIANGLE_DATA / RDPQ_CMD_TRIANGLE ABI
+    // instead of asking the CPU to construct and then repack a 96-byte TRI_TEX
+    // RDP packet.
+    pub fn nativeTexturedTriangle(self: *OverlayQueue, tile: u3, vertices: anytype) void {
+        if (self.packet_len != 0) @panic("native triangle cannot split a raw RDP packet");
+        self.ensureConfigured();
+        inline for (0..3) |index| {
+            const vertex = vertices[index];
+            const xy = packI16Pair(toS13_2(vertex.x), toS13_2(vertex.y));
+            const st = packI16Pair(toTexel5(vertex.s), toTexel5(vertex.t));
+            self.rsp_queue.writeOverlayCommandKnown(
+                self.overlay,
+                31,
+                index * 32,
+                &.{ xy, 0, 0, st, toS16_16(1.0 / vertex.inv_w), toS16_16(vertex.inv_w) },
+            );
+        }
+        self.rsp_queue.writeOverlayCommandKnown(self.overlay, 30, 0xca00 | @as(u32, tile), &.{});
+    }
+
+    fn emitPacket(self: *OverlayQueue) void {
+        var arguments: [43]u32 = undefined;
+        const first = self.packet[0];
+        arguments[0] = @truncate(first);
+        var argument_len: usize = 1;
+        for (self.packet[1..self.packet_len]) |word| {
+            arguments[argument_len] = @truncate(word >> 32);
+            arguments[argument_len + 1] = @truncate(word);
+            argument_len += 2;
+        }
+        const opcode: u8 = @truncate(first >> 56);
+        self.rsp_queue.writeOverlayCommand(
+            self.overlay,
+            overlayCommandIndex(opcode),
+            @as(u32, @truncate(first >> 32)) & 0x00ffffff,
+            arguments[0..argument_len],
+        );
+        self.packet_len = 0;
+        self.packet_expected = 0;
+    }
+
+    fn configureOverlayState(self: *OverlayQueue) void {
+        cache.writebackData(&self.syncpoint_source);
+        cache.writebackData(&self.sync_state_output);
+        var state = rsp.overlayState(self.overlay);
+        if (state.len < 24) @panic("RDP overlay state is missing full-sync fields");
+        std.mem.writeInt(
+            u32,
+            state[16..20],
+            @truncate(@intFromPtr(&self.sync_state_output) & 0x00ffffff),
+            .big,
+        );
+        std.mem.writeInt(
+            u32,
+            state[20..24],
+            @truncate(@intFromPtr(&self.syncpoint_source) & 0x00ffffff),
+            .big,
+        );
+        rsp.writebackOverlayState(self.overlay);
+    }
+
+    fn ensureConfigured(self: *OverlayQueue) void {
+        if (self.configured) return;
+        self.configureOverlayState();
+        self.rsp_queue.configureRdpBuffers(self.dynamic_buffers[0], self.dynamic_buffers[1]);
+        self.configured = true;
+    }
+};
+
+fn packI16Pair(high: i16, low: i16) u32 {
+    return @as(u32, @as(u16, @bitCast(high))) << 16 | @as(u16, @bitCast(low));
+}
+
+fn toS13_2(value: f32) i16 {
+    return @intFromFloat(@max(-8192.0, @min(8191.75, @floor(value * 4.0))));
+}
+
+fn toTexel5(value: f32) i16 {
+    return @intFromFloat(@max(-1024.0, @min(1023.96875, value)) * 32.0);
+}
+
+fn toS16_16(value: f32) u32 {
+    if (value >= 32768.0) return 0x7fffffff;
+    if (value < -32768.0) return 0x80000000;
+    const fixed: i32 = @intFromFloat(value * 65536.0);
+    return @bitCast(fixed);
+}
 
 pub const TextureRectangleOptions = struct {
     lrx: u12,
@@ -332,6 +484,9 @@ pub fn CommandQueue(comptime QueueType: type) type {
 
         // 0xFF
         pub fn setColorFrame(cq: *Self, image: anytype) void {
+            if (@intFromPtr(image.texel_data.ptr) & 63 != 0) {
+                @panic("RDP color image must be 64-byte aligned");
+            }
             cq.queue.push(buildImageCmd(0xFF, image));
         }
     };
@@ -339,6 +494,49 @@ pub fn CommandQueue(comptime QueueType: type) type {
 
 pub const FixedCommandQueue = CommandQueue(FixedQueue);
 pub const RspCommandQueue = CommandQueue(RspQueue);
+pub const DirectCommandQueue = CommandQueue(DirectQueue);
+pub const RspSubmittedCommandQueue = CommandQueue(RspSubmittedQueue);
+pub const OverlayCommandQueue = CommandQueue(OverlayQueue);
+
+fn packetWordCount(opcode: u8) usize {
+    return switch (opcode & 0x3f) {
+        0x24, 0x25 => 2,
+        0x08 => 4,
+        0x09 => 6,
+        0x0a => 12,
+        0x0b => 14,
+        0x0c => 12,
+        0x0d => 14,
+        0x0e => 20,
+        0x0f => 22,
+        else => 1,
+    };
+}
+
+fn overlayCommandIndex(opcode: u8) u8 {
+    // Raw RDP packets use the direct command slots. The overlay's lower-numbered
+    // stateful helpers have different argument ABIs and are only for callers
+    // that deliberately construct those higher-level commands.
+    return opcode & 0x3f;
+}
+
+test "overlay routes raw opcodes to direct command slots" {
+    try std.testing.expectEqual(@as(u8, 45), overlayCommandIndex(0xed));
+    try std.testing.expectEqual(@as(u8, 55), overlayCommandIndex(0xf7));
+    try std.testing.expectEqual(@as(u8, 63), overlayCommandIndex(0xff));
+    try std.testing.expectEqual(@as(u8, 39), overlayCommandIndex(0xe7));
+}
+
+test "overlay packet sizing covers rectangles and every triangle variant" {
+    try std.testing.expectEqual(@as(usize, 2), packetWordCount(0xe4));
+    try std.testing.expectEqual(@as(usize, 2), packetWordCount(0xe5));
+    const triangle_words = [_]usize{ 4, 6, 12, 14, 12, 14, 20, 22 };
+    for (triangle_words, 0..) |expected, index| {
+        try std.testing.expectEqual(expected, packetWordCount(@intCast(0xc8 + index)));
+        try std.testing.expectEqual(expected, packetWordCount(@intCast(0x08 + index)));
+    }
+    try std.testing.expectEqual(@as(usize, 1), packetWordCount(0xe7));
+}
 
 fn buildTextureRectangleWords(opcode: u8, options: TextureRectangleOptions) [2]u64 {
     return .{

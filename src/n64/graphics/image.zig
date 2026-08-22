@@ -23,7 +23,7 @@ pub const ImgCi8 = Image(colors.Ci8);
 pub const ImgCi4 = Image(colors.Ci4Pair);
 
 pub fn Image(comptime PixelFormat: type) type {
-    return struct{
+    return struct {
         const Self = @This();
 
         width: u16,
@@ -40,8 +40,9 @@ pub fn Image(comptime PixelFormat: type) type {
             return .{
                 .width = width,
                 .height = height,
-                // TODO: Configurable alignment
-                .texel_data = try allocator.alignedAlloc(PixelFormat, std.mem.Alignment.@"8", buffer_len)
+                // RDP color-image buffers require 64-byte alignment. Texture
+                // images are valid with this stronger alignment as well.
+                .texel_data = try allocator.alignedAlloc(PixelFormat, std.mem.Alignment.@"64", buffer_len),
             };
         }
 
@@ -54,8 +55,8 @@ pub fn Image(comptime PixelFormat: type) type {
         }
 
         pub fn fillRegion(self: *Self, color: PixelFormat, x: u32, y: u32, width: u32, height: u32) void {
-            for(y..y+height) |yi| {
-                for(x..x+width) |xi| {
+            for (y..y + height) |yi| {
+                for (x..x + width) |xi| {
                     const idx = yi * self.width + xi;
                     self.texel_data[idx] = color;
                 }

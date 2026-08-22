@@ -12,7 +12,7 @@ const CommandQueue = q.CommandQueue;
 const FixedQueue = q.FixedQueue;
 const TextureRectangleOptions = q.TextureRectangleOptions;
 const LoadTextureOptions = q.LoadTextureOptions;
-const TexVertex = q.TexVertex;
+pub const TexVertex = tri.TexVertex;
 
 const CombineMode = cc.CombineMode;
 const BlendMode = blender.BlendMode;
@@ -22,6 +22,9 @@ const Rgba32 = @import("../color.zig").Rgba32;
 
 pub const FixedRenderQueue = RenderQueue(FixedQueue);
 pub const RspRenderQueue = RenderQueue(q.RspQueue);
+pub const DirectRenderQueue = RenderQueue(q.DirectQueue);
+pub const RspSubmittedRenderQueue = RenderQueue(q.RspSubmittedQueue);
+pub const OverlayRenderQueue = RenderQueue(q.OverlayQueue);
 
 // State-tracking layer over CommandQueue. Manages OtherModes/combiner dirty state,
 // texture caching in TMEM, and provides high-level draw calls.
@@ -105,6 +108,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.fb_width = @intCast(image.width);
             rq.fb_height = @intCast(image.height);
             rq.cmd_queue.setColorFrame(image);
+            rq.cmd_queue.setScissor(0, 0, rq.fb_width * 4, rq.fb_height * 4);
         }
 
         pub fn setPrimColor(rq: *Self, color: Rgba32) void {
@@ -115,7 +119,6 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.cmd_queue.pipeSync();
             rq.cmd_queue.setOtherModes(.{ .cycle_type = .fill });
             rq.cmd_queue.setFillColor(color);
-            rq.cmd_queue.setScissor(0, 0, (rq.fb_width - 1) * 4, (rq.fb_height - 1) * 4);
             rq.cmd_queue.fillRect(0, 0, (rq.fb_width - 1) * 4, (rq.fb_height - 1) * 4);
             rq.mode_dirty = true;
         }
@@ -212,6 +215,12 @@ pub fn RenderQueue(comptime QueueType: type) type {
                 rq.flushModes();
                 tri.drawRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, src_width, src_height, flip_x, flip_y, opts.rotation, scale_x, scale_y, cx, cy);
             }
+        }
+
+        pub fn drawTexturedTriangle(rq: *Self, image: anytype, v1: TexVertex, v2: TexVertex, v3: TexVertex) void {
+            const tile = rq.ensureTexture(image);
+            rq.flushModes();
+            tri.emitTexturedTriangle(&rq.cmd_queue, tile, v1, v2, v3);
         }
     };
 }
