@@ -2974,6 +2974,87 @@ test "conditional direct goto emits a tail branch and delay slot" {
     );
 }
 
+test "conditional tail validates arguments and preserves direct branch lowering" {
+    try expectAsm(
+        \\fn target(reg($a0) value: u32) noreturn {
+        \\  @break();
+        \\}
+        \\fn dispatch(reg($t0) condition: u32) noreturn {
+        \\  reg value: u32 = 7;
+        \\  if(condition == 0) tail target(value) delay {
+        \\    @nop();
+        \\  }
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\  break
+        \\
+        \\dispatch:
+        \\  addiu $a0, $zero, 7
+        \\  beqz $t0, target
+        \\  nop
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "tail delay slot becomes the final instruction before zero-byte fallthrough" {
+    try expectAsm(
+        \\fn target(reg($a0) value: u32) noreturn {
+        \\  @break();
+        \\}
+        \\fn dispatch(reg($a0) value: u32) noreturn {
+        \\  tail target(value) delay {
+        \\    value += 1;
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\dispatch:
+        \\  addi $a0, $a0, 1
+        \\
+        \\target:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "typed direct jump validates arguments without changing function layout" {
+    try expectAsm(
+        \\fn target(reg($a0) value: u32) noreturn {
+        \\  @break();
+        \\}
+        \\fn dispatch() noreturn {
+        \\  reg value: u32 = 7;
+        \\  jump target(value);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\  break
+        \\
+        \\dispatch:
+        \\  addiu $a0, $zero, 7
+        \\  j target
+        \\  nop
+        \\
+        \\
+    );
+}
+
 test "delay blocks reject multiple source statements" {
     try expectAsmError(
         \\fn dispatch(reg($t0) value: u32) noreturn {

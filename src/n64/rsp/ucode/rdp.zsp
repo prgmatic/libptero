@@ -29,7 +29,7 @@ bss {
 // Canonical libdragon append/finalize interface. Complex handlers can append
 // multiple RDP commands before a single DMA submission.
 pub fn write8(word0: u32, word1: u32) using(rspq_command) {
-    reg staging_end: u32 = load(u32, command_staging_ptr);
+    reg($s0) staging_end: u32 = load(u32, command_staging_ptr);
     store(u32, staging_end, word0);
     store(u32, staging_end, word1, 4);
     staging_end += 8;
@@ -42,7 +42,7 @@ pub fn write16(
     word2: u32,
     word3: u32,
 ) using(rspq_command) {
-    reg staging_end: u32 = load(u32, command_staging_ptr);
+    reg($s0) staging_end: u32 = load(u32, command_staging_ptr);
     store(u32, staging_end, word0);
     store(u32, staging_end, word1, 4);
     store(u32, staging_end, word2, 8);
@@ -69,8 +69,8 @@ pub inline fn prepareStagedSend(
 }
 
 pub fn finalize() using(continuation) noreturn {
-    reg staging: u32 = command_staging;
-    reg staging_end: u32 = load(u32, command_staging_ptr);
+    reg($s4) staging: u32 = command_staging;
+    reg($s3) staging_end: u32 = load(u32, command_staging_ptr);
     store(u32, command_staging_ptr, staging);
     call sendStaged() then queue.resident_command_loop;
 }
@@ -85,7 +85,7 @@ pub fn sendStaged(
     dmem &= 0x0fff;
     reg($at) invalid_size: u32 = undefined;
     invalid_size = signedLessThan(staging_end, dmem);
-    if(invalid_size != 0) @goto(queue.resident_assertion_failed) delay {
+    if(invalid_size != 0) tail queue.resident_assertion_failed() delay {
         invalid_size = 0xc0060000;
     }
 
@@ -94,7 +94,7 @@ pub fn sendStaged(
     size = staging_end - dmem;
     reg($sp) saved_return: u32 = undefined;
     reg($ra) return_address: u32 = undefined;
-    if(size == 0) @goto(queue.resident_return_to_caller) delay {
+    if(size == 0) tail queue.resident_return_to_caller() delay {
         saved_return = return_address;
     }
 
@@ -110,7 +110,7 @@ pub fn sendStaged(
     if(invalid_size != 0) delay {
         next_function = &queue.resident_rdp_append_buffer;
     } {
-        reg wait_mask: u32 = load(u8, rdp_syncfull_ongoing);
+        reg($t3) wait_mask: u32 = load(u8, rdp_syncfull_ongoing);
         wait_mask |= 0x00000200;
         reg($t0) dp_status: u32 = undefined;
         do {
@@ -122,8 +122,10 @@ pub fn sendStaged(
 
         previous_start = load(StagedRdpBufferState.current, rdp_buffers);
         store(StagedRdpBufferState.current, rdp_buffers, rdram);
-        store(StagedRdpBufferState.previous, rdp_buffers, previous_start);
-        invalid_size = 0x00010000;
+        ordered {
+            store(StagedRdpBufferState.previous, rdp_buffers, previous_start);
+            invalid_size = 0x00010000;
+        }
         sentinel = rdram + invalid_size;
         start = rdram;
         next_function = &queue.resident_rdp_set_buffer;

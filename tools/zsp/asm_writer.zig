@@ -670,7 +670,10 @@ fn collectCalledFunctionClobbers(
                 addNamedClobber(registry, item.callee.module, item.callee.name, scalar, vector);
                 addNamedClobber(registry, item.continuation.module, item.continuation.name, scalar, vector);
             },
-            .tail => |tail| addNamedClobber(registry, tail.target.module, tail.target.name, scalar, vector),
+            .tail => |tail| {
+                addNamedClobber(registry, tail.target.module, tail.target.name, scalar, vector);
+                if (tail.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector);
+            },
             .jump => |jump| if (jump.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector),
             .return_from_function => |delay| if (delay) |items| collectCalledFunctionClobbers(registry, items, scalar, vector),
             else => {},
@@ -1496,6 +1499,7 @@ fn scanStatementLifetimes(context: *FunctionContext, statements: []const ast.Sta
             },
             .conditional_direct_goto => |branch| {
                 scanConditionLifetime(context, branch.condition, current);
+                for (branch.arguments) |argument| scanValueRefLifetime(context, argument, current);
                 if (branch.delay_slot) |delay| scanStatementLifetimes(context, delay, position);
             },
             .goto => |branch| {
@@ -1808,10 +1812,17 @@ fn scanValueLifetime(context: *FunctionContext, value: ast.Value, position: usiz
 
 fn scanBuiltinLifetime(context: *FunctionContext, builtin: ast.Builtin, position: usize, next: *usize) void {
     switch (builtin) {
-        .tail => |tail| for (tail.arguments) |argument| scanValueRefLifetime(context, argument, position),
+        .tail => |tail| {
+            for (tail.arguments) |argument| scanValueRefLifetime(context, argument, position);
+            if (tail.delay_slot) |delay| scanStatementLifetimes(context, delay, next);
+        },
         .jump => |jump| {
             scanValueRefLifetime(context, jump.address, position);
             if (jump.delay_slot) |delay| scanStatementLifetimes(context, delay, next);
+        },
+        .direct_goto => |branch| {
+            for (branch.arguments) |argument| scanValueRefLifetime(context, argument, position);
+            if (branch.delay_slot) |delay| scanStatementLifetimes(context, delay, next);
         },
         .return_from_function => |delay| if (delay) |items| scanStatementLifetimes(context, items, next),
         .set_return => |name| context.touchLifetime(name, position),
@@ -1876,7 +1887,28 @@ fn applyCallRequirements(
             },
             .goto => |branch| if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
             .conditional_goto => |branch| if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
-            .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
+            .conditional_direct_goto => |branch| {
+                if (branch.typed and branch.target.module == null) {
+                    if (findFunction(functions, branch.target.name)) |function| {
+                        if (branch.arguments.len == function.parameters.len) {
+                            for (branch.arguments, function.parameters) |argument, parameter| {
+                                switch (argument) {
+                                    .ident => |name| {
+                                        if (context.hasLifetime(name)) {
+                                            try context.requireRegister(name, parameter.reg, parameter.vector_reg);
+                                        } else {
+                                            addParameterSetupClobber(context, current, parameter);
+                                        }
+                                    },
+                                    .number => addParameterSetupClobber(context, current, parameter),
+                                    else => {},
+                                }
+                            }
+                        }
+                    }
+                }
+                if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position);
+            },
             .break_loop => |transfer| if (transfer.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
             .while_loop => |loop| try applyCallRequirements(context, functions, loop.statements, position),
             .do_while_loop => |loop| {
@@ -1895,6 +1927,21 @@ fn applyCallRequirements(
             },
             .ordered_block => |items| try applyCallRequirements(context, functions, items, position),
             .builtin => |builtin| switch (builtin) {
+                .direct_goto => |branch| {
+                    if (branch.typed and branch.target.module == null) {
+                        if (findFunction(functions, branch.target.name)) |function| {
+                            if (branch.arguments.len == function.parameters.len) {
+                                for (branch.arguments, function.parameters) |argument, parameter| switch (argument) {
+                                    .ident => |name| if (context.hasLifetime(name)) {
+                                        try context.requireRegister(name, parameter.reg, parameter.vector_reg);
+                                    },
+                                    else => {},
+                                };
+                            }
+                        }
+                    }
+                    if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position);
+                },
                 .tail => |tail| {
                     if (tail.target.module == null) {
                         if (findFunction(functions, tail.target.name)) |function| {
@@ -1908,6 +1955,7 @@ fn applyCallRequirements(
                             }
                         }
                     }
+                    if (tail.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position);
                 },
                 .jump => |jump| if (jump.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
                 .return_from_function => |delay| if (delay) |items| try applyCallRequirements(context, functions, items, position),
@@ -2054,6 +2102,10 @@ fn writeStatements(
             },
             .conditional_direct_goto => |branch| {
                 if (branch.target.module != null) return error.UnresolvedModuleCall;
+                if (branch.typed) {
+                    const target = findFunction(functions, branch.target.name) orelse return error.UnknownFunction;
+                    try writeFunctionArguments(writer, context, target, branch.arguments, true);
+                }
                 const lhs = try context.lookup(branch.condition.lhs);
                 const lhs_reg = lhs.reg orelse return error.ConditionLhsMustBeRegister;
                 if (branch.condition.op != .eq and branch.condition.op != .ne) {
@@ -4136,6 +4188,10 @@ fn writeBuiltin(
         },
         .direct_goto => |branch| {
             if (branch.target.module != null) return error.UnresolvedModuleCall;
+            if (branch.typed) {
+                const function = findFunction(functions, branch.target.name) orelse return error.UnknownFunction;
+                try writeFunctionArguments(writer, context, function, branch.arguments, true);
+            }
             try writer.print("  {s} {s}\n", .{
                 if (branch.encoding == .jump) "j" else "b",
                 branch.target.name,
@@ -4160,7 +4216,11 @@ fn writeBuiltin(
                 context.omitted_tail_target == null or
                 !std.mem.eql(u8, context.omitted_tail_target.?, tail.target.name))
             {
-                try writer.print("  j {s}\n  nop\n", .{tail.target.name});
+                try writer.print("  j {s}\n", .{tail.target.name});
+                try writeDelaySlot(writer, functions, context, tail.delay_slot);
+            } else if (tail.delay_slot) |delay_slot| {
+                if (delay_slot.len != 1) return error.InvalidDelaySlot;
+                try writeStatements(writer, functions, context, delay_slot);
             }
         },
         .set_return => |target| try writer.print("  addiu $ra, $zero, %lo({s})\n", .{target}),

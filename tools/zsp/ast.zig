@@ -309,6 +309,8 @@ pub const Builtin = union(enum) {
     return_from_function: ?[]Statement,
     direct_goto: struct {
         target: FunctionRef,
+        arguments: []const ValueRef = &.{},
+        typed: bool = false,
         encoding: DirectGotoEncoding = .jump,
         delay_slot: ?[]Statement,
     },
@@ -319,6 +321,7 @@ pub const Builtin = union(enum) {
     tail: struct {
         target: FunctionRef,
         arguments: []const ValueRef,
+        delay_slot: ?[]Statement = null,
     },
     set_return: []const u8,
     set_function_address: struct {
@@ -444,6 +447,8 @@ pub const Statement = union(enum) {
     conditional_direct_goto: struct {
         condition: Condition,
         target: FunctionRef,
+        arguments: []const ValueRef = &.{},
+        typed: bool = false,
         delay_slot: ?[]Statement,
     },
     while_loop: struct {
@@ -514,15 +519,24 @@ fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
             },
             .ordered_block => |ordered| freeStatements(allocator, ordered),
             .builtin => |builtin| switch (builtin) {
-                .tail => |tail| allocator.free(tail.arguments),
+                .tail => |tail| {
+                    allocator.free(tail.arguments);
+                    if (tail.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
+                },
                 .jump => |jump| if (jump.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
-                .direct_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
+                .direct_goto => |branch| {
+                    if (branch.arguments.len != 0) allocator.free(branch.arguments);
+                    if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
+                },
                 .return_from_function => |delay_slot| if (delay_slot) |return_statements| freeStatements(allocator, return_statements),
                 else => {},
             },
             .goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
             .conditional_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
-            .conditional_direct_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
+            .conditional_direct_goto => |branch| {
+                if (branch.arguments.len != 0) allocator.free(branch.arguments);
+                if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
+            },
             .if_statement => |if_statement| {
                 if (if_statement.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
                 freeStatements(allocator, if_statement.then_statements);

@@ -165,6 +165,7 @@ const Loader = struct {
                     },
                     .tail => |*tail| {
                         try self.resolveFunctionRef(module_index, &tail.target);
+                        if (tail.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
                     },
                     .set_function_address => |*set_address| {
                         try self.resolveFunctionRef(module_index, &set_address.target);

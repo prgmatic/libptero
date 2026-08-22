@@ -16,7 +16,7 @@ pub fn out(
     reg($s4) dmem: u32,
 ) noreturn {
     reg($t2) flags: u32 = -32756;
-    tail exec(size, pitch, rdram, dmem, flags);
+    jump exec(size, pitch, rdram, dmem, flags);
 }
 
 pub fn outAsync(
@@ -26,7 +26,7 @@ pub fn outAsync(
     reg($s4) dmem: u32,
 ) noreturn {
     reg($t2) flags: u32 = -32768;
-    tail exec(size, pitch, rdram, dmem, flags);
+    jump exec(size, pitch, rdram, dmem, flags);
 }
 
 pub fn inAsync(
@@ -36,7 +36,7 @@ pub fn inAsync(
     reg($s4) dmem: u32,
 ) noreturn {
     reg($t2) flags: u32 = 0;
-    tail exec(size, pitch, rdram, dmem, flags);
+    jump exec(size, pitch, rdram, dmem, flags);
 }
 
 pub fn in(
@@ -99,10 +99,10 @@ pub fn returnToCaller() noreturn {
 
 pub fn waitIdle() noreturn {
     reg($t2) flags: u32 = 0x0c;
-    tail waitStatus(flags);
+    jump waitStatus(flags);
 }
 
 pub fn waitOut() noreturn {
     reg($t2) flags: u32 = 0x08;
-    tail waitStatus(flags);
+    jump waitStatus(flags);
 }

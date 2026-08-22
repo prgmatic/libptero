@@ -136,7 +136,7 @@ command(61, 62) fn setFixupImage(
     reg($a0) word0: u32,
     reg($a1) address: u32,
 ) {
-    reg opcode: u32;
+    reg opcode: u32 = undefined;
     fixupAddress(address) delay {
         opcode = 0xf0000000;
     }
@@ -149,7 +149,7 @@ fn writeSetFillColor(reg($a1) color: u32) noreturn {
     reg bitdepth: u32 = load(u8, rdp_target_bitdepth);
     bitdepth &= 3;
     reg($a0) word0: u32 = undefined;
-    if(bitdepth == 3) @goto(rdp.write8) delay {
+    if(bitdepth == 3) tail rdp.write8(word0, color) delay {
         word0 = 0xf7000000;
     }
 
@@ -171,7 +171,7 @@ fn writeSetFillColor(reg($a1) color: u32) noreturn {
     color = upper | lower;
     bitdepth = color << 16;
     color |= bitdepth;
-    tail rdp.write8(word0, color);
+    jump rdp.write8(word0, color);
 }
 
 command(63) fn setColorImage(
@@ -249,7 +249,7 @@ command(41) fn syncFull(
     }
     reg busy: u32 = 0x40;
     store(u8, rdp_syncfull_ongoing, busy);
-    tail queue.resident_command_loop();
+    jump queue.resident_command_loop();
 }
 
 command(26) fn rdpWaitIdle(reg($a0) _: u32) {
@@ -270,7 +270,7 @@ command(58) fn setPrimitiveColor(
 ) noreturn {
     store(u32, primitive_color_ex, word0);
     store(u32, primitive_color_rgba, word1);
-    tail _start(word0, word1);
+    jump _start(word0, word1);
 }
 
 command(19) fn setPrimitiveColorComponent(
@@ -297,7 +297,7 @@ command(19) fn setPrimitiveColorComponent(
     store(u32, primitive_color_ex, word0);
     reg staging: u32 = primitive_color_ex;
     reg($s3) staging_end: u32 = undefined;
-    @goto(rdp.sendStaged) delay {
+    jump rdp.sendStaged(staging, staging_end) delay {
         @setDataAddress(staging_end, primitive_color_ex, 8);
     }
 }
@@ -313,7 +313,7 @@ fn writeSetScissor(
     if(modes_byte != 0) {
         word1 -%= 0x1000;
     }
-    tail rdp.write8(word0, word1);
+    jump rdp.write8(word0, word1);
 }
 
 command(18) fn setScissorEx(
@@ -332,7 +332,7 @@ fn sendOtherModes(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) {
-    reg opcode: u32;
+    reg opcode: u32 = undefined;
     rdp.write8(word0, word1) delay {
         opcode = 0xef;
     }
@@ -357,7 +357,7 @@ command(47) fn setOtherModes(
     store(RdpModeState.other_modes_high, rdp_mode, word0);
     store(u8, rdp_mode, 0, 24);
     store(RdpModeState.other_modes_low, rdp_mode, word1);
-    tail sendOtherModes(word0, word1);
+    jump sendOtherModes(word0, word1);
 }
 
 command(20) fn modifyOtherModes(
@@ -371,7 +371,7 @@ command(20) fn modifyOtherModes(
     updated |= value;
     store(u32, rdp_mode + command, updated, 24);
     command <<= 16;
-    if(command < 0) @goto(updateRenderMode) delay {
+    if(command < 0) tail updateRenderMode() delay {
         command = load(i32, rdp_mode, 24);
     }
     inverse_mask = load(RdpModeState.other_modes_low, rdp_mode);
@@ -386,7 +386,7 @@ fn updateRenderMode() {
     reg selected_combiner: u32 = undefined;
     reg mode_frozen: u32;
     mode_frozen = som_hi & OtherModeHigh.pipeline_frozen;
-    if(mode_frozen != 0) @goto(rdp.finalize) delay {
+    if(mode_frozen != 0) tail rdp.finalize() delay {
         som_lo = load(RdpModeState.other_modes_low, rdp_mode);
     }
     reg fill_or_copy_cycle: u32;
@@ -408,9 +408,9 @@ fn updateRenderMode() {
         if(comb_hi < 0x80000000) {
             break combiner_1cycle;
         }
-        reg invalid_cycle_flags: u32;
+        reg($t2) invalid_cycle_flags: u32 = undefined;
         invalid_cycle_flags = som_hi & 1;
-        if(invalid_cycle_flags != 0) @goto(queue.resident_assertion_failed) delay {
+        if(invalid_cycle_flags != 0) tail queue.resident_assertion_failed() delay {
             reg($at) assertion_code: u32 = 0xc0040000;
         }
         break store_combiner_2cycle;
@@ -582,19 +582,19 @@ fn updateRenderMode() {
 }
 
 command(24) fn setBlendingMode(reg($a0) command: u32, reg($a1) formula: u32) noreturn {
-    tail rdpSetBlendingMode(command, formula);
+    jump rdpSetBlendingMode(command, formula);
 }
 
 command(25) fn setFogMode(reg($a0) command: u32, reg($a1) formula: u32) noreturn {
-    tail rdpSetFogMode(command, formula);
+    jump rdpSetFogMode(command, formula);
 }
 
 command(27) fn setCombineMode1Pass(reg($a0) word0: u32, reg($a1) word1: u32, reg($a2) mask0: u32, reg($a3) mask1: u32) noreturn {
-    tail rdpSetCombineMode1Pass(word0, word1, mask0, mask1);
+    jump rdpSetCombineMode1Pass(word0, word1, mask0, mask1);
 }
 
 command(5) fn setCombineMode2Pass(reg($a0) word0: u32, reg($a1) word1: u32) noreturn {
-    tail rdpSetCombineMode2Pass(word0, word1);
+    jump rdpSetCombineMode2Pass(word0, word1);
 }
 
 command(4) fn resetMode(
@@ -628,7 +628,7 @@ command(4) fn resetMode(
         comb_hi = saved_comb_hi;
         comb_lo = saved_comb_lo;
     }
-    tail setCombineMode1Pass(comb_hi, comb_lo, som_hi, som_lo);
+    jump setCombineMode1Pass(comb_hi, comb_lo, som_hi, som_lo);
 }
 
 command(6) fn pushMode(reg($a0) _: u32) {
@@ -664,7 +664,7 @@ command(7) fn popMode(reg($a0) scissor0: u32) {
     store(vec16, stack, stack4, 32);
     store(vec16, stack, stack5, 48);
     scissor0 = load(ScissorState.first_word, rdp_scissor_rect);
-    reg scissor1: u32 = load(ScissorState.second_word, rdp_scissor_rect);
+    reg($a1) scissor1: u32 = load(ScissorState.second_word, rdp_scissor_rect);
     call writeSetScissor() then updateRenderMode;
 }
 
@@ -678,7 +678,7 @@ fn rdpSetBlendingMode(
         first_step = formula;
     }
     first_step &= 0x8000;
-    if(first_step == 0) @goto(updateRenderMode);
+    if(first_step == 0) tail updateRenderMode();
     tail rdpSetFogMode(command, formula);
 }
 
@@ -687,7 +687,7 @@ fn rdpSetFogMode(
     reg($a1) formula: u32,
 ) {
     store(RdpModeState.foreground_blend, rdp_mode, formula);
-    tail updateRenderMode();
+    jump updateRenderMode();
 }
 
 fn rdpSetCombineMode1Pass(
@@ -741,7 +741,7 @@ command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
         staging += 16;
     } while(command_start < command_end);
     rdp.setStagingEnd(staging);
-    tail rdp.finalize();
+    jump rdp.finalize();
 }
 
 command(30) fn triangle(
@@ -818,7 +818,7 @@ fn triangleAsync(
 
     did_swap1 = clip1 & 0x3f;
     reg hml_upper: vec16 = 0;
-    if(did_swap1 != command_bits) @goto(triangleCull) delay {
+    if(did_swap1 != command_bits) tail triangleCull() delay {
         y_tmp2 = vectorCompareGreaterOrEqual(y1, y3);
     }
 
@@ -842,16 +842,16 @@ fn triangleAsync(
     }
     all2 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
 
-    if(clip1 != 0) @goto(triangleCull) delay {
+    if(clip1 != 0) tail triangleCull() delay {
         did_swap0 ^= did_swap1;
     }
 
-    reg hml: vec16;
+    reg hml: vec16 = undefined;
     reg($v29) negative_my: vec16 = undefined;
-    reg normal: vec32;
-    reg x12: vec32;
-    reg fy: vec32;
-    reg slope: vec32;
+    reg normal: vec32 = undefined;
+    reg x12: vec32 = undefined;
+    reg fy: vec32 = undefined;
+    reg slope: vec32 = undefined;
 
     // Preserve the reference's hand-scheduled scalar/vector pairing. The raw
     // vector words are required because each element selector is significant.
@@ -894,17 +894,17 @@ fn triangleAsync(
         did_swap1 = did_swap1 < 0;
         slope.sint[0] = vectorReciprocalHigh(hml[1]);
     }
-    if(did_swap1 == did_swap0) @goto(triangleCull) delay {
+    if(did_swap1 == did_swap0) tail triangleCull() delay {
         ordered {
             slope.sfract[2] = vectorReciprocal(all_tmp2[1]);
         }
     }
-    reg attribute3: vec16;
-    reg inverse_w: vec32;
-    reg edges: vec32;
-    reg attribute_delta_high: vec16;
+    reg attribute3: vec16 = undefined;
+    reg inverse_w: vec32 = undefined;
+    reg edges: vec32 = undefined;
+    reg attribute_delta_high: vec16 = undefined;
     reg($v31) reciprocal_constants: vec16 = undefined;
-    reg large_offset: i32;
+    reg large_offset: i32 = undefined;
 
     ordered {
         slope.sint[2] = vectorReciprocalHigh(all_tmp2[1]);
@@ -1138,7 +1138,7 @@ fn triangleSendEnd() noreturn {
         cp0.getDmaBusyT0(dma_busy);
     } while(dma_busy != 0);
     reg($a0) staging_end: u32 = undefined;
-    @goto(queue.resident_rdp_append_buffer) delay {
+    jump queue.resident_rdp_append_buffer(staging_end) delay {
         rdp.loadCurrent(staging_end);
     }
 }
@@ -1151,7 +1151,7 @@ command(2, 16) fn rectangleExclusive(
     reg($a3) word3: i32 = undefined;
     reg modes_byte: i32 = load(i8, rdp_mode, 25);
     modes_byte &= 0x20;
-    reg opcode: i32;
+    reg opcode: i32 = undefined;
     opcode = 0x34000000;
     if(modes_byte != 0) {
         word0 -%= 0x4004;
@@ -1164,7 +1164,7 @@ command(2, 16) fn rectangleExclusive(
     }
     word0 ^= opcode;
     modes_byte = word0 << 3;
-    reg writer: fn(rspq_command) = &rdp.write8;
+    reg($s0) writer: fn(rspq_command) = &rdp.write8;
     if(modes_byte >= 0) {
         writer = &rdp.write16;
     }
@@ -1191,7 +1191,7 @@ command(3) fn clearZBuffer(
     @setDataAddress(overlay_data_end, triangle_padding2, 4);
     // Libdragon compares its zero-based data end against 0x500. Libptero's
     // corresponding overlay DMEM coordinate is shifted by 0x800.
-    if(overlay_data_end > 0x0d00) @goto(queue.resident_assertion_failed) delay {
+    if(overlay_data_end > 0x0d00) tail queue.resident_assertion_failed() delay {
         reg($at) assertion_code: u32 = 0xc0090000;
     }
     reg flags: i32 = undefined;
@@ -1216,7 +1216,7 @@ command(3) fn clearZBuffer(
     cp0.setDmaWriteA1(target_dma_size);
     flags = 12;
     reg($ra) return_address: u32 = undefined;
-    @goto(clearZBackup) delay {
+    jump clearZBackup(overlay_data_end, flags, temporary) delay {
         @setFunctionAddress(return_address, queue.resident_command_loop);
     }
 }
@@ -1229,7 +1229,8 @@ fn clearZBackup(
     reg dmem: u32 = 0;
     reg rdram: u32 = temporary;
     reg($t0) dma_size: i32 = undefined;
-    @goto(dma.resident_dma_exec) delay {
+    reg($t1) dma_pitch: u32 = undefined;
+    jump dma.resident_dma_exec(dma_size, dma_pitch, rdram, dmem, flags) delay {
         dma_size = backup_size -% 1;
     }
     @nop();
@@ -1247,21 +1248,21 @@ command(17) fn setDebugMode(reg($a0) command: u32) {
 command(28) fn autoTmemSetAddress(reg($a0) command: i32) noreturn {
     command <<= 16;
     command >>= 16;
-    reg address: i32;
+    reg address: i32 = undefined;
     reg limit: i32;
     reg($at) invalid: u32 = undefined;
     reg($ra) return_address: u32 = undefined;
-    if(command < 0) @goto(autoTmemEnd) delay {
+    if(command < 0) tail autoTmemEnd() delay {
         address = load(u16, autotmem_address);
     }
-    if(command == 0) @goto(autoTmemBegin) delay {
+    if(command == 0) tail autoTmemBegin() delay {
         limit = load(u16, autotmem_limit);
     }
 
     store(u16, autotmem_previous_address, address);
     address += command;
     invalid = signedLessThan(limit, address);
-    if(invalid != 0) @goto(queue.resident_assertion_failed) delay {
+    if(invalid != 0) tail queue.resident_assertion_failed() delay {
         invalid = 0xc0070000;
     }
     @jump(return_address) delay {
@@ -1275,7 +1276,7 @@ fn autoTmemBegin() noreturn {
     reg($ra) return_address: u32 = undefined;
     address = load(u8, autotmem_enabled);
     limit = address +% 1;
-    if(address != 0) @goto(queue.resident_return_to_caller) delay {
+    if(address != 0) tail queue.resident_return_to_caller() delay {
         store(u8, autotmem_enabled, limit);
     }
     address = 512;
@@ -1292,7 +1293,7 @@ fn autoTmemEnd() noreturn {
     reg($ra) return_address: u32 = undefined;
     address = load(u8, autotmem_enabled);
     address -%= 1;
-    if(address < 0) @goto(queue.resident_assertion_failed) delay {
+    if(address < 0) tail queue.resident_assertion_failed() delay {
         invalid = 0xc0080000;
     }
     @jump(return_address) delay {
@@ -1302,11 +1303,11 @@ fn autoTmemEnd() noreturn {
 
 command(29) fn autoTmemSetTile(
     reg($a0) word0: u32,
-    reg($a1) _: u32,
+    reg($a1) word1: u32,
 ) noreturn {
     reg use_previous: u32;
     reg mask: u32 = 0x00040000;
-    reg address: u32;
+    reg address: u32 = undefined;
     use_previous = word0 & mask;
     address = load(i16, autotmem_address);
     if(use_previous != 0) {
@@ -1335,11 +1336,11 @@ command(29) fn autoTmemSetTile(
                 address = 9;
             }
         }
-        if(use_previous != address) @goto(_start);
+        if(use_previous != address) tail _start(word0, word1);
     } exit delay {
         address = 256;
     }
-    @goto(_start) delay {
+    jump _start(word0, word1) delay {
         store(u16, autotmem_limit, address);
     }
 }

@@ -402,7 +402,8 @@ pub const Parser = struct {
         while (true) {
             var register_token: ?token.Token = null;
             const name = if (self.current.tag == .ident and
-                std.mem.eql(u8, self.current.text, "reg")) blk: {
+                std.mem.eql(u8, self.current.text, "reg"))
+            blk: {
                 _ = try self.expect(.ident);
                 _ = try self.expect(.l_paren);
                 register_token = try self.expect(.register);
@@ -564,11 +565,25 @@ pub const Parser = struct {
             }
             _ = try self.expect(.l_paren);
             const arguments = try self.parseCallArguments();
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .tail = .{ .target = target, .arguments = arguments } } };
+            return .{ .builtin = .{ .tail = .{
+                .target = target,
+                .arguments = arguments,
+                .delay_slot = try self.parseOptionalDelaySlot(),
+            } } };
         }
 
         if (std.mem.eql(u8, first.text, "jump")) {
+            if (self.current.tag == .ident) {
+                const target = try self.parseFunctionReference();
+                _ = try self.expect(.l_paren);
+                const arguments = try self.parseCallArguments();
+                return .{ .builtin = .{ .direct_goto = .{
+                    .target = target,
+                    .arguments = arguments,
+                    .typed = true,
+                    .delay_slot = try self.parseOptionalDelaySlot(),
+                } } };
+            }
             _ = try self.expect(.l_paren);
             const address = try self.parseValueRef();
             _ = try self.expect(.r_paren);
@@ -673,6 +688,19 @@ pub const Parser = struct {
             _ = try self.expect(.l_paren);
             const condition = try self.parseCondition();
             _ = try self.expect(.r_paren);
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "tail")) {
+                _ = try self.expect(.ident);
+                const target = try self.parseFunctionReference();
+                _ = try self.expect(.l_paren);
+                const arguments = try self.parseCallArguments();
+                return .{ .conditional_direct_goto = .{
+                    .condition = condition,
+                    .target = target,
+                    .arguments = arguments,
+                    .typed = true,
+                    .delay_slot = try self.parseOptionalDelaySlot(),
+                } };
+            }
             if (try self.eat(.at)) {
                 const builtin = try self.expect(.ident);
                 if (!std.mem.eql(u8, builtin.text, "goto")) return self.fail(builtin, .unsupported_builtin);
