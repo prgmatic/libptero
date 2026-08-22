@@ -28,8 +28,6 @@ pub const Parser = struct {
         while (self.current.tag != .eof) {
             if (self.isImportStart()) {
                 try self.parseImport();
-            } else if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "layout")) {
-                try functions.append(self.allocator, try self.parseLayoutDeclaration());
             } else if (self.isFunctionDeclarationStart()) {
                 try functions.append(self.allocator, try self.parseFunctionDeclaration());
             } else {
@@ -38,34 +36,6 @@ pub const Parser = struct {
         }
 
         return functions.toOwnedSlice(self.allocator);
-    }
-
-    fn parseLayoutDeclaration(self: *Parser) !ast.Function {
-        _ = try self.expect(.ident);
-        _ = try self.expect(.l_brace);
-        var entries: std.ArrayList(ast.FunctionRef) = .empty;
-        errdefer entries.deinit(self.allocator);
-        while (!try self.eat(.r_brace)) {
-            const first = try self.expect(.ident);
-            var entry = ast.FunctionRef{ .name = first.text };
-            if (try self.eat(.dot)) {
-                entry = .{ .module = first.text, .name = (try self.expect(.ident)).text };
-            }
-            _ = try self.expect(.semicolon);
-            try entries.append(self.allocator, entry);
-        }
-        return .{
-            .name = "layout",
-            .source_name = "layout",
-            .emit_label = false,
-            .export_symbol = false,
-            .public = false,
-            .inline_call = false,
-            .no_return = true,
-            .parameters = &.{},
-            .statements = &.{},
-            .layout_entries = try entries.toOwnedSlice(self.allocator),
-        };
     }
 
     pub fn takeImports(self: *Parser) ![]ast.Import {
@@ -392,6 +362,18 @@ pub const Parser = struct {
             return .{ .ordered_block = try self.parseBlockStatements() };
         }
 
+        if (std.mem.eql(u8, first.text, "tail")) {
+            const target_first = try self.expect(.ident);
+            var target = ast.FunctionRef{ .name = target_first.text };
+            if (try self.eat(.dot)) {
+                target = .{ .module = target_first.text, .name = (try self.expect(.ident)).text };
+            }
+            _ = try self.expect(.l_paren);
+            const arguments = try self.parseCallArguments();
+            _ = try self.expect(.semicolon);
+            return .{ .builtin = .{ .tail = .{ .target = target, .arguments = arguments } } };
+        }
+
         if (std.mem.eql(u8, first.text, "asm") or std.mem.eql(u8, first.text, "asmExact")) {
             _ = try self.expect(.l_paren);
             const asm_text = try self.expect(.string);
@@ -412,6 +394,58 @@ pub const Parser = struct {
                 .condition = condition,
                 .statements = try self.parseBlockStatements(),
             } };
+        }
+
+        if (std.mem.eql(u8, first.text, "do")) return self.parseDoWhileStatement(null);
+
+        if (std.mem.eql(u8, first.text, "break") or std.mem.eql(u8, first.text, "continue")) {
+            const label: ?[]const u8 = if (self.current.tag == .ident) (try self.expect(.ident)).text else null;
+            if (std.mem.eql(u8, first.text, "break")) {
+                return .{ .break_loop = .{
+                    .label = label,
+                    .delay_slot = try self.parseOptionalDelaySlot(),
+                } };
+            }
+            _ = try self.expect(.semicolon);
+            return .{ .continue_loop = label };
+        }
+
+        if (try self.eat(.colon)) {
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "block")) {
+                _ = try self.expect(.ident);
+                _ = try self.expect(.l_brace);
+                const statements = try self.parseBlockStatements();
+                var exit_delay: ?[]ast.Statement = null;
+                if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "exit")) {
+                    _ = try self.expect(.ident);
+                    const delay = try self.expect(.ident);
+                    if (!std.mem.eql(u8, delay.text, "delay")) return self.fail(delay, .unexpected_token);
+                    _ = try self.expect(.l_brace);
+                    exit_delay = try self.parseBlockStatements();
+                }
+                return .{ .labeled_block = .{
+                    .label = first.text,
+                    .statements = statements,
+                    .exit_delay = exit_delay,
+                } };
+            }
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "while")) {
+                _ = try self.expect(.ident);
+                _ = try self.expect(.l_paren);
+                const condition = try self.parseCondition();
+                _ = try self.expect(.r_paren);
+                _ = try self.expect(.l_brace);
+                return .{ .while_loop = .{
+                    .label = first.text,
+                    .condition = condition,
+                    .statements = try self.parseBlockStatements(),
+                } };
+            }
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "do")) {
+                _ = try self.expect(.ident);
+                return self.parseDoWhileStatement(first.text);
+            }
+            return .{ .label = first.text };
         }
 
         if (std.mem.eql(u8, first.text, "if")) {
@@ -444,6 +478,12 @@ pub const Parser = struct {
                     .delay_slot = try self.parseOptionalDelaySlot(),
                 } };
             }
+            var delay_slot: ?[]ast.Statement = null;
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "delay")) {
+                _ = try self.expect(.ident);
+                _ = try self.expect(.l_brace);
+                delay_slot = try self.parseBlockStatements();
+            }
             _ = try self.expect(.l_brace);
             const then_statements = try self.parseBlockStatements();
 
@@ -456,6 +496,7 @@ pub const Parser = struct {
 
             return .{ .if_statement = .{
                 .condition = condition,
+                .delay_slot = delay_slot,
                 .then_statements = then_statements,
                 .else_statements = else_statements,
             } };
@@ -479,8 +520,6 @@ pub const Parser = struct {
                 .delay_slot = try self.parseOptionalDelaySlot(),
             } };
         }
-
-        if (try self.eat(.colon)) return .{ .label = first.text };
 
         if (std.mem.eql(u8, first.text, "store")) {
             _ = try self.expect(.l_paren);
@@ -670,6 +709,23 @@ pub const Parser = struct {
         }
 
         return self.fail(first, .unsupported_statement);
+    }
+
+    fn parseDoWhileStatement(self: *Parser, label: ?[]const u8) !ast.Statement {
+        _ = try self.expect(.l_brace);
+        const statements = try self.parseBlockStatements();
+        const while_token = try self.expect(.ident);
+        if (!std.mem.eql(u8, while_token.text, "while")) return self.fail(while_token, .unexpected_token);
+        _ = try self.expect(.l_paren);
+        const condition = try self.parseCondition();
+        _ = try self.expect(.r_paren);
+        const delay_slot = try self.parseOptionalDelaySlot();
+        return .{ .do_while_loop = .{
+            .label = label,
+            .condition = condition,
+            .statements = statements,
+            .delay_slot = delay_slot,
+        } };
     }
 
     fn parseOptionalDelaySlot(self: *Parser) !?[]ast.Statement {
@@ -912,13 +968,6 @@ pub const Parser = struct {
                 .callee = callee,
                 .continuation = continuation,
             } } };
-        }
-
-        if (std.mem.eql(u8, name.text, "fallthrough")) {
-            const target = try self.expect(.ident);
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .fallthrough = .{ .name = target.text } } };
         }
 
         if (std.mem.eql(u8, name.text, "setReturn")) {

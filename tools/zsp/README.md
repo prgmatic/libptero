@@ -279,6 +279,69 @@ if (count < limit) {
 while (count != 0) {
     count -= 1;
 }
+
+copy: do {
+    count -= 1;
+} while (count != 0);
+
+outer: while (active != 0) {
+    if (finished != 0) {
+        break outer;
+    }
+    continue outer;
+}
+```
+
+Structured conditionals may carry an explicit delay block when the delay-slot
+instruction is part of the algorithm rather than merely scheduling:
+
+```zig
+if (ready != 0) delay {
+    status = next_status;
+} {
+    consume();
+}
+```
+
+The delay block executes whether the branch is taken or not. The emitter may
+invert a condition and place a terminating arm first when that removes an
+otherwise necessary jump.
+
+Labeled blocks provide structured forward exits. Conditional exits lower to a
+direct branch to the block end, without an intermediate jump:
+
+```zig
+done: block {
+    if (value == 0) {
+        break done delay {
+            status = next_status;
+        }
+    }
+    value += 1;
+}
+```
+
+When the exit instruction must also fill the delay slot of a terminal
+conditional transfer, attach an explicit shared exit delay:
+
+```zig
+done: block {
+    if (invalid != 0) @goto(failed);
+} exit delay {
+    status = next_status;
+}
+```
+
+`break` and `continue` target the innermost loop unless followed by a loop
+label. A `do`/`while` loop can explicitly fill its backward branch delay slot
+without reverting to labels and gotos:
+
+```zig
+do {
+    status &= mask;
+} while (status != 0) delay {
+    status = cp0.read(4);
+}
 ```
 
 Local labels and explicit branches are also available. A `delay` block must
@@ -303,7 +366,6 @@ done:
 @goto(function);                 // direct jump
 @goto(module.function, .branch); // imported public function
 @jump(address);                  // indirect jump through a scalar value
-@fallthrough(function);          // place the target directly after this one
 @setReturn(label);               // materialize this function's return label
 @setFunctionAddress(value, fn);  // materialize a function address in value's register
 @setDataAddress(value, data, 8); // materialize a data address plus an optional offset
@@ -312,24 +374,19 @@ done:
 `@goto` and `@jump` also accept a one-statement `delay` block. Conditional
 forms such as `if (condition) @goto(function) delay { ... }` are supported.
 
-Functions are emitted in declaration order by default. `@fallthrough(target)`
-also makes the target physically follow the current function, so the compiler
-can omit the transfer instruction safely.
-
-Byte-constrained programs that must interleave functions from imported modules
-can centralize the exceptional order in one block:
+Use `tail` for a non-returning transfer with normal function argument checking:
 
 ```zig
-layout {
-    first;
-    helpers.prepare;
-    second;
+fn first(reg($a0) value: u32) noreturn {
+    tail helpers.prepare(value);
 }
 ```
 
-Functions omitted from `layout` retain declaration order after its entries.
-Only one layout declaration is allowed in a linked program; entries must be
-unique and imported entries must name public functions.
+The emitter places a tail target immediately after its caller when possible,
+including targets imported from another module, so the transfer costs zero
+bytes. If another placement edge has already claimed the target, `tail` emits
+`j target` and a `nop` delay slot. Function order is selected deterministically;
+source code does not specify physical layout.
 
 Other builtins are `@nop()` and `@break(code)`, where the optional break code
 is a 20-bit unsigned value. `asm("instruction")` emits a raw assembly line and

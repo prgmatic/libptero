@@ -16,7 +16,6 @@ pub const Function = struct {
     clobber_vector_regs: []const VectorRegister = &.{},
     parameters: []const Parameter,
     statements: []Statement,
-    layout_entries: []FunctionRef = &.{},
 };
 
 pub const Import = struct {
@@ -305,7 +304,10 @@ pub const Builtin = union(enum) {
         callee: FunctionRef,
         continuation: FunctionRef,
     },
-    fallthrough: FunctionRef,
+    tail: struct {
+        target: FunctionRef,
+        arguments: []const ValueRef,
+    },
     set_return: []const u8,
     set_function_address: struct {
         destination: []const u8,
@@ -392,6 +394,11 @@ pub const Call = struct {
     delay_slot: ?[]Statement = null,
 };
 
+pub const BreakTransfer = struct {
+    label: ?[]const u8,
+    delay_slot: ?[]Statement,
+};
+
 pub const Statement = union(enum) {
     packed_struct_decl: PackedStructDecl,
     command_table_decl: []const u8,
@@ -428,11 +435,26 @@ pub const Statement = union(enum) {
         delay_slot: ?[]Statement,
     },
     while_loop: struct {
+        label: ?[]const u8 = null,
         condition: Condition,
         statements: []Statement,
     },
+    do_while_loop: struct {
+        label: ?[]const u8 = null,
+        condition: Condition,
+        statements: []Statement,
+        delay_slot: ?[]Statement,
+    },
+    labeled_block: struct {
+        label: []const u8,
+        statements: []Statement,
+        exit_delay: ?[]Statement,
+    },
+    break_loop: BreakTransfer,
+    continue_loop: ?[]const u8,
     if_statement: struct {
         condition: Condition,
+        delay_slot: ?[]Statement,
         then_statements: []Statement,
         else_statements: ?[]Statement,
     },
@@ -447,7 +469,6 @@ pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) 
         if (function.command_sizes.len != 0) allocator.free(function.command_sizes);
         if (function.clobber_regs.len != 0) allocator.free(function.clobber_regs);
         if (function.clobber_vector_regs.len != 0) allocator.free(function.clobber_vector_regs);
-        if (function.layout_entries.len != 0) allocator.free(function.layout_entries);
         allocator.free(function.parameters);
         freeStatements(allocator, function.statements);
     }
@@ -464,8 +485,18 @@ fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
                 allocator.free(declarations);
             },
             .while_loop => |loop| freeStatements(allocator, loop.statements),
+            .do_while_loop => |loop| {
+                freeStatements(allocator, loop.statements);
+                if (loop.delay_slot) |delay| freeStatements(allocator, delay);
+            },
+            .break_loop => |transfer| if (transfer.delay_slot) |delay| freeStatements(allocator, delay),
+            .labeled_block => |block| {
+                freeStatements(allocator, block.statements);
+                if (block.exit_delay) |delay| freeStatements(allocator, delay);
+            },
             .ordered_block => |ordered| freeStatements(allocator, ordered),
             .builtin => |builtin| switch (builtin) {
+                .tail => |tail| allocator.free(tail.arguments),
                 .jump => |jump| if (jump.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
                 .direct_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
                 .return_from_function => |delay_slot| if (delay_slot) |return_statements| freeStatements(allocator, return_statements),
@@ -475,6 +506,7 @@ fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
             .conditional_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
             .conditional_direct_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
             .if_statement => |if_statement| {
+                if (if_statement.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
                 freeStatements(allocator, if_statement.then_statements);
                 if (if_statement.else_statements) |else_statements| freeStatements(allocator, else_statements);
             },

@@ -35,7 +35,7 @@ fn fetchCommandBuffer() noreturn {
     reg($s0) rdram: u32 = load(u32, queue_rdram_address);
     reg($gp) command_address: u32 = undefined;
     rdram = rdram + command_address;
-    @fallthrough(fetchCommandBufferWithPointer);
+    tail fetchCommandBufferWithPointer(rdram);
 }
 
 fn fetchCommandBufferWithPointer(
@@ -50,7 +50,7 @@ fn fetchCommandBufferWithPointer(
     reg($t0) dma_size: u32 = 255;
     reg($t1) dma_pitch: u32 = undefined;
     dma.in(dma_size, dma_pitch, rdram, dma_destination);
-    @fallthrough(commandLoop);
+    tail commandLoop();
 }
 
 // Dispatcher/handler ABI, matching libdragon's RSPQ convention:
@@ -67,14 +67,14 @@ command(0) fn waitForInput() noreturn {
     reg status_value: u32 = undefined;
     cp0.getSpStatusT0(status_value);
     status_value &= status_signal_more;
-    if(status_value != 0) goto wakeup delay {
+    if(status_value == 0) delay {
         status_value = status_clear_signal_more;
+    } {
+        @break();
     }
-    @break();
-wakeup:
     cp0.setSpStatusT0(status_value);
 
-    @fallthrough(fetchCommandBuffer);
+    tail fetchCommandBuffer();
 }
 
 command(1) fn writeDmem(
@@ -102,7 +102,7 @@ command(3) fn call(
     }
     return_address = return_address + command_address;
     store(u32, stack_offset, return_address, pointer_stack);
-    @fallthrough(jump);
+    tail jump(command);
 }
 
 command(4) fn returnFromCall(reg($a0) command: u32) noreturn {
@@ -135,7 +135,7 @@ command(7) fn swapBuffers(
 ) noreturn {
     cp0.setSpStatusA2(status);
     command = load(u32, command, pointer_stack);
-    @fallthrough(call);
+    tail call(command, save_slot);
 }
 
 command(8) fn waitThenWriteStatus(
@@ -170,33 +170,31 @@ command(9) export fn rdpSetBuffer(
     const dp_status_end_valid: u32 = 0x00000200;
     const dp_status_dma_busy: u32 = 0x00000100;
 
-    if(dp_value != start) goto rdp_wait delay {
-        wait_mask = load(u8, rdp_syncfull_ongoing);
+    wait_mask = load(u8, rdp_syncfull_ongoing);
+    if(dp_value == start) {
+        wait_mask |= dp_status_dma_busy;
     }
-    wait_mask |= dp_status_dma_busy;
-rdp_wait:
     wait_mask |= dp_status_end_valid;
-rdp_wait_status:
-    cp0.getDpStatusT2(dp_status);
-    masked_status = dp_status & wait_mask;
-    if(masked_status != 0) goto rdp_wait_status delay {
+    do {
+        cp0.getDpStatusT2(dp_status);
+        masked_status = dp_status & wait_mask;
+    } while(masked_status != 0) delay {
         store(u8, rdp_syncfull_ongoing, 0);
     }
     dp_value = load(u32, rdp_current);
     dp_status = load(i8, rdp_target_bitdepth);
-    if(dp_status < 0x80000000) goto rdp_debug_done delay {
-        cp0.setDpEndT0(dp_value);
+    cp0.setDpEndT0(dp_value);
+    if(dp_status >= 0x80000000) {
+        dp_status = 0x80;
+        dma.waitStatus(dp_status);
+        dp_value = 0x410;
+        cp0.setSpStatusT0(dp_value);
+        dp_status = 0x80;
+        dma.waitStatus(dp_status);
     }
-    dp_status = 0x80;
-    dma.waitStatus(dp_status);
-    dp_value = 0x410;
-    cp0.setSpStatusT0(dp_value);
-    dp_status = 0x80;
-    dma.waitStatus(dp_status);
-rdp_debug_done:
     return_address = saved_return;
     cp0.setDpStart(start);
-    @fallthrough(rdpAppendBuffer);
+    tail rdpAppendBuffer(current);
 }
 
 command(10) export fn rdpAppendBuffer(reg($a0) current: u32) noreturn {
@@ -212,7 +210,7 @@ command(10) export fn rdpAppendBuffer(reg($a0) current: u32) noreturn {
 // Resident command queue dispatcher.
 export fn _start() noreturn {
     reg($gp) command_address: u32 = 0;
-    @fallthrough(waitForInput);
+    tail waitForInput();
 }
 
 export fn commandLoop() noreturn {
@@ -291,7 +289,9 @@ descriptor_valid:
     }
 
 invalid_command:
-    goto invalid_command, .branch delay {
+    ordered {}
+invalid_loop: do {
+    } while(scratch != 0) delay {
         @break(0xba);
     }
 
@@ -314,12 +314,12 @@ load_overlay_data:
     dma_size |= 0x0f;
     dma.in(dma_size, dma_pitch, rdram, dma_destination);
 
-load_segment:
-    rdram = load(u32, dma_pitch);
-    dma_size = load(u16, dma_pitch, 4);
-    dma_destination = load(u16, dma_pitch, 6);
-    dma.in(dma_size, dma_pitch, rdram, dma_destination);
-    if(rdram >= 0x80000000) goto load_segment delay {
+    do {
+        rdram = load(u32, dma_pitch);
+        dma_size = load(u16, dma_pitch, 4);
+        dma_destination = load(u16, dma_pitch, 6);
+        dma.in(dma_size, dma_pitch, rdram, dma_destination);
+    } while(rdram >= 0x80000000) delay {
         dma_pitch +%= 8;
     }
 
@@ -329,5 +329,5 @@ switch_high_priority:
     }
     command_header = 36;
     argument_1 = 32;
-    @fallthrough(swapBuffers);
+    tail swapBuffers(command_header, argument_1, argument_2);
 }

@@ -121,23 +121,6 @@ const Loader = struct {
             }
         }
 
-        var layout_seen = false;
-        for (self.modules.items, 0..) |*module, module_index| {
-            for (module.functions) |*declaration| {
-                if (declaration.layout_entries.len == 0) continue;
-                if (layout_seen) return error.DuplicateLayoutDeclaration;
-                layout_seen = true;
-                for (declaration.layout_entries, 0..) |*entry, entry_index| {
-                    try self.resolveFunctionRef(module_index, entry);
-                    for (declaration.layout_entries[0..entry_index]) |previous| {
-                        if (std.mem.eql(u8, previous.name, entry.name)) {
-                            return error.DuplicateLayoutEntry;
-                        }
-                    }
-                }
-            }
-        }
-
         var flattened: std.ArrayList(ast.Function) = .empty;
         errdefer flattened.deinit(self.allocator);
         for (self.modules.items) |module| {
@@ -172,8 +155,8 @@ const Loader = struct {
                         try self.resolveFunctionRef(module_index, &call.callee);
                         try self.resolveFunctionRef(module_index, &call.continuation);
                     },
-                    .fallthrough => |*target| {
-                        try self.resolveFunctionRef(module_index, target);
+                    .tail => |*tail| {
+                        try self.resolveFunctionRef(module_index, &tail.target);
                     },
                     .set_function_address => |*set_address| {
                         try self.resolveFunctionRef(module_index, &set_address.target);
@@ -187,6 +170,15 @@ const Loader = struct {
                     else => {},
                 },
                 .while_loop => |*loop| try self.resolveCalls(module_index, loop.statements),
+                .do_while_loop => |*loop| {
+                    try self.resolveCalls(module_index, loop.statements);
+                    if (loop.delay_slot) |delay| try self.resolveCalls(module_index, delay);
+                },
+                .labeled_block => |*block| {
+                    try self.resolveCalls(module_index, block.statements);
+                    if (block.exit_delay) |delay| try self.resolveCalls(module_index, delay);
+                },
+                .break_loop => |*transfer| if (transfer.delay_slot) |delay| try self.resolveCalls(module_index, delay),
                 .ordered_block => |ordered| try self.resolveCalls(module_index, ordered),
                 .goto => |*branch| if (branch.delay_slot) |delay_slot| {
                     try self.resolveCalls(module_index, delay_slot);
@@ -199,6 +191,7 @@ const Loader = struct {
                     if (branch.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
                 },
                 .if_statement => |*if_statement| {
+                    if (if_statement.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
                     try self.resolveCalls(module_index, if_statement.then_statements);
                     if (if_statement.else_statements) |else_statements| {
                         try self.resolveCalls(module_index, else_statements);

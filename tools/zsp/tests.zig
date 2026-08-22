@@ -20,6 +20,24 @@ fn expectAsm(source: []const u8, expected: []const u8) !void {
     try testing.expectEqualStrings(expected, actual);
 }
 
+test "assembly emission is deterministic" {
+    const source =
+        \\fn second() noreturn { @break(2); }
+        \\fn first() noreturn { tail second(); }
+    ;
+    var parser = try parser_mod.Parser.init(testing.allocator, source);
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+
+    var first = std.Io.Writer.Allocating.init(testing.allocator);
+    defer first.deinit();
+    var second = std.Io.Writer.Allocating.init(testing.allocator);
+    defer second.deinit();
+    try asm_writer.write(&first.writer, functions);
+    try asm_writer.write(&second.writer, functions);
+    try testing.expectEqualStrings(first.written(), second.written());
+}
+
 fn expectParseError(source: []const u8, err: parser_mod.ErrorType, line: usize, column: usize) !void {
     var parser = try parser_mod.Parser.init(testing.allocator, source);
     const result = parser.parse();
@@ -1161,23 +1179,6 @@ test "scalar unary negation preserves signed instruction selection" {
         \\
         \\
     );
-}
-
-test "layout declarations centralize exceptional function order" {
-    var parser = try parser_mod.Parser.init(testing.allocator,
-        \\layout {
-        \\  second;
-        \\  first;
-        \\}
-        \\fn first() noreturn { @break(1); }
-        \\fn second() noreturn { @break(2); }
-    );
-    const functions = try parser.parse();
-    defer ast.freeFunctions(testing.allocator, functions);
-    try testing.expectEqual(@as(usize, 3), functions.len);
-    try testing.expectEqual(@as(usize, 2), functions[0].layout_entries.len);
-    try testing.expectEqualStrings("second", functions[0].layout_entries[0].name);
-    try testing.expectEqualStrings("first", functions[0].layout_entries[1].name);
 }
 
 test "explicit vector operation names preserve RSP encodings" {
@@ -2446,17 +2447,18 @@ test "jump accepts a typed delay slot" {
     );
 }
 
-test "fallthrough places the target function immediately afterward" {
+test "tail transfers place their target adjacent and emit no transfer instruction" {
     try expectAsm(
         \\fn first() noreturn {
-        \\  @nop();
-        \\  @fallthrough(last);
+        \\  reg value: u32 = 7;
+        \\  tail last(value);
         \\}
         \\fn middle() noreturn {
-        \\  @break();
+        \\  @break(2);
         \\}
-        \\fn last() noreturn {
-        \\  @nop();
+        \\fn last(reg($t3) value: u32) noreturn {
+        \\  value += 1;
+        \\  @break(1);
         \\}
     ,
         \\.set noreorder
@@ -2464,39 +2466,83 @@ test "fallthrough places the target function immediately afterward" {
         \\.text
         \\
         \\first:
-        \\  nop
+        \\  addiu $t3, $zero, 7
         \\
         \\last:
-        \\  nop
+        \\  addi $t3, $t3, 1
+        \\  break 0x1
         \\
         \\middle:
-        \\  break
+        \\  break 0x2
         \\
         \\
     );
 }
 
-test "fallthrough suppresses an implicit function return" {
+test "conflicting tail placement emits a jump for the non-adjacent edge" {
     try expectAsm(
-        \\fn first() {
-        \\  @nop();
-        \\  @fallthrough(last);
-        \\}
-        \\fn last() {
-        \\  @break();
-        \\}
+        \\fn first() noreturn { tail target(); }
+        \\fn second() noreturn { tail target(); }
+        \\fn target() noreturn { @break(); }
     ,
         \\.set noreorder
         \\.set noat
         \\.text
         \\
         \\first:
+        \\
+        \\target:
+        \\  break
+        \\
+        \\second:
+        \\  j target
         \\  nop
         \\
-        \\last:
-        \\  break
-        \\  jr $ra
+        \\
+    );
+}
+
+test "tail transfers to external functions emit a jump" {
+    try expectAsm(
+        \\extern fn target() clobbers() noreturn;
+        \\fn first() noreturn { tail target(); }
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\first:
+        \\  j target
         \\  nop
+        \\
+        \\
+    );
+}
+
+test "non-terminal tail transfers emit an explicit jump" {
+    try expectAsm(
+        \\fn first(reg($a0) flag: u32) noreturn {
+        \\  if(flag != 0) {
+        \\    tail target();
+        \\  }
+        \\  @break();
+        \\}
+        \\fn target() noreturn { @break(1); }
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\first:
+        \\  beq $a0, $zero, LABEL_first_ifend_0
+        \\  nop
+        \\  j target
+        \\  nop
+        \\LABEL_first_ifend_0:
+        \\  break
+        \\
+        \\target:
+        \\  break 0x1
         \\
         \\
     );
@@ -3473,6 +3519,7 @@ test "module imports public functions and qualified calls parse" {
         \\export fn _start() noreturn {
         \\  dma.exec();
         \\  @goto(dma.exec);
+        \\  tail dma.exec();
         \\}
     );
     const functions = try parser.parse();
@@ -3491,6 +3538,9 @@ test "module imports public functions and qualified calls parse" {
     const direct_goto = functions[1].statements[1].builtin.direct_goto;
     try testing.expectEqualStrings("dma", direct_goto.target.module.?);
     try testing.expectEqualStrings("exec", direct_goto.target.name);
+    const tail = functions[1].statements[2].builtin.tail;
+    try testing.expectEqualStrings("dma", tail.target.module.?);
+    try testing.expectEqualStrings("exec", tail.target.name);
 }
 
 test "while loop emits labels branch and back edge" {
@@ -3525,6 +3575,243 @@ test "while loop emits labels branch and back edge" {
         \\
         \\
     );
+}
+
+test "labeled break and continue target the requested loop" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) outer_value: u32 = 0;
+        \\  reg($t1) inner_value: u32 = 0;
+        \\outer: while(outer_value < 2) {
+        \\  inner: while(inner_value < 2) {
+        \\    break outer;
+        \\  }
+        \\  continue outer;
+        \\}
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 0
+        \\  addiu $t1, $zero, 0
+        \\LABEL_test_while_0:
+        \\  sltiu $at, $t0, 2
+        \\  beq $at, $zero, LABEL_test_whileend_0
+        \\  nop
+        \\LABEL_test_while_1:
+        \\  sltiu $at, $t1, 2
+        \\  beq $at, $zero, LABEL_test_whileend_1
+        \\  nop
+        \\  j LABEL_test_whileend_0
+        \\  nop
+        \\LABEL_test_whileend_1:
+        \\  j LABEL_test_while_0
+        \\  nop
+        \\LABEL_test_whileend_0:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "do while loops branch after executing their body" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) value: u32 = 0;
+        \\again: do {
+        \\  value += 1;
+        \\} while(value < 3);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 0
+        \\LABEL_test_dowhile_0:
+        \\  addi $t0, $t0, 1
+        \\  sltiu $at, $t0, 3
+        \\  bne $at, $zero, LABEL_test_dowhile_0
+        \\  nop
+        \\LABEL_test_dowhileend_0:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "structured if supports an explicit branch delay slot" {
+    try expectAsm(
+        \\fn test(reg($t0) value: u32) noreturn {
+        \\  if(value != 0) delay {
+        \\    value = 7;
+        \\  } {
+        \\    @break(1);
+        \\  }
+        \\  @break(2);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  beq $t0, $zero, LABEL_test_ifend_0
+        \\  addiu $t0, $zero, 7
+        \\  break 0x1
+        \\LABEL_test_ifend_0:
+        \\  break 0x2
+        \\
+        \\
+    );
+}
+
+test "structured if preserves a load in an explicit branch delay slot" {
+    try expectAsm(
+        \\bss {
+        \\  delay_value: u16;
+        \\  arm_value: u8;
+        \\}
+        \\fn test(reg($a0) flag: i32) noreturn {
+        \\  reg($t0) value: u32 = undefined;
+        \\  if(flag < 0) delay {
+        \\    value = load(u16, delay_value);
+        \\  } {
+        \\    value = load(u8, arm_value);
+        \\    @break(1);
+        \\  }
+        \\  @break(2);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.bss
+        \\.balign 2
+        \\delay_value:
+        \\  .space 2
+        \\arm_value:
+        \\  .space 1
+        \\
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  bgez $a0, LABEL_test_ifend_0
+        \\  lhu $t0, %lo(delay_value)($zero)
+        \\  lbu $t0, %lo(arm_value)($zero)
+        \\  break 0x1
+        \\LABEL_test_ifend_0:
+        \\  break 0x2
+        \\
+        \\
+    );
+}
+
+test "if block placement avoids a jump when the else arm terminates" {
+    try expectAsm(
+        \\fn test(reg($a0) flag: u32, reg($t0) value: u32) noreturn {
+        \\  if(flag != 0) {
+        \\    value += 1;
+        \\  } else {
+        \\    @return();
+        \\  }
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  bne $a0, $zero, LABEL_test_ifthen_0
+        \\  nop
+        \\  jr $ra
+        \\  nop
+        \\LABEL_test_ifthen_0:
+        \\  addi $t0, $t0, 1
+        \\LABEL_test_ifend_0:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "conditional labeled block breaks branch directly to the block exit" {
+    try expectAsm(
+        \\fn test(reg($t0) value: u32) noreturn {
+        \\  done: block {
+        \\    if(value == 0) {
+        \\      break done delay {
+        \\        value = 1;
+        \\      }
+        \\    }
+        \\    value = 2;
+        \\  }
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  beq $t0, $zero, LABEL_test_blockend_0
+        \\  addiu $t0, $zero, 1
+        \\  addiu $t0, $zero, 2
+        \\LABEL_test_blockend_0:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "labeled block exit delay is shared with a terminal conditional transfer" {
+    try expectAsm(
+        \\fn target() noreturn { @break(1); }
+        \\fn test(reg($t0) value: u32) noreturn {
+        \\  done: block {
+        \\    if(value == 0) {
+        \\      break done;
+        \\    }
+        \\    if(value != 1) @goto(target);
+        \\  } exit delay {
+        \\    value = 7;
+        \\  }
+        \\  @break(2);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\  break 0x1
+        \\
+        \\test:
+        \\  beq $t0, $zero, LABEL_test_blockend_0
+        \\  nop
+        \\  addiu $at, $zero, 1
+        \\  bne $t0, $at, target
+        \\LABEL_test_blockend_0:
+        \\  addiu $t0, $zero, 7
+        \\  break 0x2
+        \\
+        \\
+    );
+}
+
+test "loop control outside a matching loop is rejected" {
+    try expectAsmError(
+        \\fn test() noreturn {
+        \\  continue missing;
+        \\}
+    , error.UnknownLoopLabel);
 }
 
 test "syntax rejects unsupported function modifier" {

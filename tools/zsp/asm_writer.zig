@@ -30,30 +30,7 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     try writer.writeAll(".text\n\n");
     var emitted = [_]bool{false} ** 1024;
     if (functions.len > emitted.len) return error.TooManyFunctions;
-    var fallthrough_target = [_]bool{false} ** 1024;
-    var emission_order: [1024]usize = undefined;
-    var emission_count: usize = 0;
-    for (functions) |declaration| {
-        for (declaration.layout_entries) |entry| {
-            for (functions, 0..) |candidate, index| {
-                if (!std.mem.eql(u8, candidate.name, entry.name)) continue;
-                emission_order[emission_count] = index;
-                emission_count += 1;
-                break;
-            } else return error.UnknownFunction;
-        }
-    }
-    for (functions, 0..) |_, index| {
-        var listed = false;
-        for (emission_order[0..emission_count]) |listed_index| {
-            if (listed_index != index) continue;
-            listed = true;
-            break;
-        }
-        if (listed) continue;
-        emission_order[emission_count] = index;
-        emission_count += 1;
-    }
+    var tail_target = [_]bool{false} ** 1024;
     for (functions) |function| {
         if (function.statements.len == 0) continue;
         const builtin = switch (function.statements[function.statements.len - 1]) {
@@ -61,21 +38,21 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
             else => continue,
         };
         const target = switch (builtin) {
-            .fallthrough => |target| target,
+            .tail => |tail| tail.target,
             else => continue,
         };
         if (target.module != null) return error.UnresolvedModuleCall;
         for (functions, 0..) |candidate, target_index| {
             if (!std.mem.eql(u8, candidate.name, target.name)) continue;
-            fallthrough_target[target_index] = true;
+            tail_target[target_index] = true;
             break;
         } else return error.UnknownFunction;
     }
-    for (emission_order[0..functions.len]) |function_index| {
-        if (fallthrough_target[function_index]) continue;
+    for (functions, 0..) |_, function_index| {
+        if (tail_target[function_index]) continue;
         try writeFunction(writer, functions, &top_level_context, &emitted, function_index);
     }
-    for (emission_order[0..functions.len]) |function_index| {
+    for (functions, 0..) |_, function_index| {
         try writeFunction(writer, functions, &top_level_context, &emitted, function_index);
     }
     try writeCommandManifest(writer, functions);
@@ -95,7 +72,7 @@ fn writeFunction(
     if (!function.inline_call) {
         const terminal_jump = function.statements.len != 0 and switch (function.statements[function.statements.len - 1]) {
             .builtin => |builtin| switch (builtin) {
-                .direct_goto, .call_and_goto, .fallthrough, .jump, .return_from_function => true,
+                .direct_goto, .call_and_goto, .tail, .jump, .return_from_function => true,
                 else => false,
             },
             else => false,
@@ -122,6 +99,20 @@ fn writeFunction(
             }
             try context.prepareLifetimes(functions, function.parameters, function.statements);
         }
+        if (function.statements.len != 0) switch (function.statements[function.statements.len - 1]) {
+            .builtin => |terminal| switch (terminal) {
+                .tail => |tail| {
+                    if (tail.target.module != null) return error.UnresolvedModuleCall;
+                    const target_index = findFunctionIndex(functions, tail.target.name) orelse return error.UnknownFunction;
+                    if (!functions[target_index].external and !functions[target_index].inline_call and !emitted[target_index]) {
+                        context.omitted_tail_target = tail.target.name;
+                        context.omitted_tail_position = countFlowStatements(function.statements);
+                    }
+                },
+                else => {},
+            },
+            else => {},
+        };
         try bindParameters(context, function.parameters);
         try writeStatements(writer, functions, context, function.statements);
         if (!function.no_return and !terminal_jump) {
@@ -140,15 +131,20 @@ fn writeFunction(
         else => return,
     };
     const target = switch (builtin) {
-        .fallthrough => |target| target,
+        .tail => |tail| tail.target,
         else => return,
     };
     if (target.module != null) return error.UnresolvedModuleCall;
-    for (functions, 0..) |candidate, target_index| {
-        if (!std.mem.eql(u8, candidate.name, target.name)) continue;
-        return writeFunction(writer, functions, top_level_context, emitted, target_index);
+    const target_index = findFunctionIndex(functions, target.name) orelse return error.UnknownFunction;
+    if (functions[target_index].external or functions[target_index].inline_call) return;
+    return writeFunction(writer, functions, top_level_context, emitted, target_index);
+}
+
+fn findFunctionIndex(functions: []const ast.Function, name: []const u8) ?usize {
+    for (functions, 0..) |function, index| {
+        if (std.mem.eql(u8, function.name, name)) return index;
     }
-    return error.UnknownFunction;
+    return null;
 }
 
 fn statementsContainEmittedCall(functions: []const ast.Function, statements: []const ast.Statement) bool {
@@ -163,12 +159,21 @@ fn statementsContainEmittedCall(functions: []const ast.Function, statements: []c
             }
         },
         .if_statement => |branch| {
+            if (branch.delay_slot) |delay_slot| if (statementsContainEmittedCall(functions, delay_slot)) return true;
             if (statementsContainEmittedCall(functions, branch.then_statements)) return true;
             if (branch.else_statements) |else_statements| {
                 if (statementsContainEmittedCall(functions, else_statements)) return true;
             }
         },
         .while_loop => |loop| if (statementsContainEmittedCall(functions, loop.statements)) return true,
+        .do_while_loop => |loop| {
+            if (statementsContainEmittedCall(functions, loop.statements)) return true;
+            if (loop.delay_slot) |delay| if (statementsContainEmittedCall(functions, delay)) return true;
+        },
+        .labeled_block => |block| {
+            if (statementsContainEmittedCall(functions, block.statements)) return true;
+            if (block.exit_delay) |delay| if (statementsContainEmittedCall(functions, delay)) return true;
+        },
         .ordered_block => |ordered| if (statementsContainEmittedCall(functions, ordered)) return true,
         .goto => |branch| if (branch.delay_slot) |delay_slot| {
             if (statementsContainEmittedCall(functions, delay_slot)) return true;
@@ -178,6 +183,9 @@ fn statementsContainEmittedCall(functions: []const ast.Function, statements: []c
         },
         .conditional_direct_goto => |branch| if (branch.delay_slot) |delay_slot| {
             if (statementsContainEmittedCall(functions, delay_slot)) return true;
+        },
+        .break_loop => |transfer| if (transfer.delay_slot) |delay| {
+            if (statementsContainEmittedCall(functions, delay)) return true;
         },
         .builtin => |builtin| switch (builtin) {
             .jump => |jump| if (jump.delay_slot) |delay_slot| {
@@ -537,9 +545,19 @@ fn scanDirectStatementClobbers(statements: []const ast.Statement, result: *Funct
         .conditional_goto => |branch| if (branch.delay_slot) |delay| scanDirectStatementClobbers(delay, result),
         .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| scanDirectStatementClobbers(delay, result),
         .while_loop => |loop| scanDirectStatementClobbers(loop.statements, result),
+        .do_while_loop => |loop| {
+            scanDirectStatementClobbers(loop.statements, result);
+            if (loop.delay_slot) |delay| scanDirectStatementClobbers(delay, result);
+        },
+        .break_loop => |transfer| if (transfer.delay_slot) |delay| scanDirectStatementClobbers(delay, result),
         .if_statement => |branch| {
+            if (branch.delay_slot) |items| scanDirectStatementClobbers(items, result);
             scanDirectStatementClobbers(branch.then_statements, result);
             if (branch.else_statements) |items| scanDirectStatementClobbers(items, result);
+        },
+        .labeled_block => |block| {
+            scanDirectStatementClobbers(block.statements, result);
+            if (block.exit_delay) |delay| scanDirectStatementClobbers(delay, result);
         },
         .ordered_block => |items| scanDirectStatementClobbers(items, result),
         .builtin => |builtin| switch (builtin) {
@@ -574,9 +592,19 @@ fn collectCalledFunctionClobbers(
             if (branch.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector);
         },
         .while_loop => |loop| collectCalledFunctionClobbers(registry, loop.statements, scalar, vector),
+        .do_while_loop => |loop| {
+            collectCalledFunctionClobbers(registry, loop.statements, scalar, vector);
+            if (loop.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector);
+        },
+        .break_loop => |transfer| if (transfer.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector),
         .if_statement => |branch| {
+            if (branch.delay_slot) |items| collectCalledFunctionClobbers(registry, items, scalar, vector);
             collectCalledFunctionClobbers(registry, branch.then_statements, scalar, vector);
             if (branch.else_statements) |items| collectCalledFunctionClobbers(registry, items, scalar, vector);
+        },
+        .labeled_block => |block| {
+            collectCalledFunctionClobbers(registry, block.statements, scalar, vector);
+            if (block.exit_delay) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector);
         },
         .ordered_block => |items| collectCalledFunctionClobbers(registry, items, scalar, vector),
         .builtin => |builtin| switch (builtin) {
@@ -585,7 +613,7 @@ fn collectCalledFunctionClobbers(
                 addNamedClobber(registry, item.callee.module, item.callee.name, scalar, vector);
                 addNamedClobber(registry, item.continuation.module, item.continuation.name, scalar, vector);
             },
-            .fallthrough => |target| addNamedClobber(registry, target.module, target.name, scalar, vector),
+            .tail => |tail| addNamedClobber(registry, tail.target.module, tail.target.name, scalar, vector),
             .jump => |jump| if (jump.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector),
             .return_from_function => |delay| if (delay) |items| collectCalledFunctionClobbers(registry, items, scalar, vector),
             else => {},
@@ -663,7 +691,15 @@ fn simulateAutomaticRegisters(
                 try simulateAutomaticRegisters(context, loop.statements, clobber);
                 context.popScope(scope);
             },
+            .do_while_loop => |loop| {
+                const scope = context.pushScope();
+                try simulateAutomaticRegisters(context, loop.statements, clobber);
+                if (loop.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber);
+                context.popScope(scope);
+            },
+            .break_loop => |transfer| if (transfer.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
             .if_statement => |branch| {
+                if (branch.delay_slot) |items| try simulateAutomaticRegisters(context, items, clobber);
                 const then_scope = context.pushScope();
                 try simulateAutomaticRegisters(context, branch.then_statements, clobber);
                 context.popScope(then_scope);
@@ -672,6 +708,12 @@ fn simulateAutomaticRegisters(
                     try simulateAutomaticRegisters(context, items, clobber);
                     context.popScope(else_scope);
                 }
+            },
+            .labeled_block => |block| {
+                const block_scope = context.pushScope();
+                try simulateAutomaticRegisters(context, block.statements, clobber);
+                if (block.exit_delay) |delay| try simulateAutomaticRegisters(context, delay, clobber);
+                context.popScope(block_scope);
             },
             .ordered_block => |items| try simulateAutomaticRegisters(context, items, clobber),
             .call => |call| if (call.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
@@ -710,12 +752,23 @@ const LifetimeCall = struct {
 };
 const LifetimeEventKind = enum { read, write };
 const LifetimeEvent = struct { name: []const u8, position: usize, kind: LifetimeEventKind };
+const EmissionLoop = struct {
+    name: ?[]const u8,
+    label: usize,
+    continue_suffix: []const u8,
+    break_suffix: []const u8,
+};
+const FlowLoop = struct { name: ?[]const u8, continue_position: usize, break_position: usize };
 
 const FunctionContext = struct {
     label_prefix: []const u8,
     symbols: [128]Symbol = undefined,
     symbol_count: usize = 0,
     next_label: usize = 0,
+    emission_loops: [32]EmissionLoop = undefined,
+    emission_loop_count: usize = 0,
+    flow_loops: [32]FlowLoop = undefined,
+    flow_loop_count: usize = 0,
     lifetimes: [128]Lifetime = undefined,
     lifetime_count: usize = 0,
     lifetime_labels: [128]LifetimeLabel = undefined,
@@ -735,6 +788,11 @@ const FunctionContext = struct {
     clobbers: ?*const FunctionClobberRegistry = null,
     function_forbidden_scalar: u32 = 0,
     function_forbidden_vector: u32 = 0,
+    omitted_tail_target: ?[]const u8 = null,
+    omitted_tail_position: usize = 0,
+    shared_exit_label: ?usize = null,
+    shared_exit_delay: ?[]const ast.Statement = null,
+    shared_exit_consumed: bool = false,
 
     fn add(self: *FunctionContext, symbol: Symbol) !void {
         if (self.symbol_count >= self.symbols.len) return error.TooManySymbols;
@@ -766,6 +824,7 @@ const FunctionContext = struct {
         self.lifetime_edge_count = 0;
         self.lifetime_call_count = 0;
         self.lifetime_event_count = 0;
+        self.flow_loop_count = 0;
         self.statement_position = 0;
         self.lifetime_reuse = !statementsContainUnstructuredControlFlow(statements);
         if (!self.lifetime_reuse) return;
@@ -1135,14 +1194,24 @@ fn statementsContainUnstructuredControlFlow(statements: []const ast.Statement) b
         .conditional_direct_goto => |branch| {
             if (branch.delay_slot) |delay| if (statementsContainUnstructuredControlFlow(delay)) return true;
         },
+        .break_loop => |transfer| if (transfer.delay_slot) |delay| if (statementsContainUnstructuredControlFlow(delay)) return true,
         .while_loop => |loop| if (statementsContainUnstructuredControlFlow(loop.statements)) return true,
+        .do_while_loop => |loop| {
+            if (statementsContainUnstructuredControlFlow(loop.statements)) return true;
+            if (loop.delay_slot) |delay| if (statementsContainUnstructuredControlFlow(delay)) return true;
+        },
         .if_statement => |branch| {
+            if (branch.delay_slot) |items| if (statementsContainUnstructuredControlFlow(items)) return true;
             if (statementsContainUnstructuredControlFlow(branch.then_statements)) return true;
             if (branch.else_statements) |items| if (statementsContainUnstructuredControlFlow(items)) return true;
         },
+        .labeled_block => |block| {
+            if (statementsContainUnstructuredControlFlow(block.statements)) return true;
+            if (block.exit_delay) |delay| if (statementsContainUnstructuredControlFlow(delay)) return true;
+        },
         .ordered_block => |items| if (statementsContainUnstructuredControlFlow(items)) return true,
         .builtin => |builtin| switch (builtin) {
-            .call_and_goto, .fallthrough => {},
+            .call_and_goto, .tail => {},
             .return_from_function => |delay| if (delay) |items| {
                 if (statementsContainUnstructuredControlFlow(items)) return true;
             },
@@ -1205,14 +1274,26 @@ fn scanStatementLifetimes(context: *FunctionContext, statements: []const ast.Sta
                 context.addLifetimeEdge(branch.target, current);
                 if (branch.delay_slot) |delay| scanStatementLifetimes(context, delay, position);
             },
+            .break_loop => |transfer| if (transfer.delay_slot) |delay| scanStatementLifetimes(context, delay, position),
             .while_loop => |loop| {
                 scanConditionLifetime(context, loop.condition, current);
                 scanStatementLifetimes(context, loop.statements, position);
             },
+            .do_while_loop => |loop| {
+                scanStatementLifetimes(context, loop.statements, position);
+                position.* += 1;
+                scanConditionLifetime(context, loop.condition, position.*);
+                if (loop.delay_slot) |delay| scanStatementLifetimes(context, delay, position);
+            },
             .if_statement => |branch| {
                 scanConditionLifetime(context, branch.condition, current);
+                if (branch.delay_slot) |items| scanStatementLifetimes(context, items, position);
                 scanStatementLifetimes(context, branch.then_statements, position);
                 if (branch.else_statements) |items| scanStatementLifetimes(context, items, position);
+            },
+            .labeled_block => |block| {
+                scanStatementLifetimes(context, block.statements, position);
+                if (block.exit_delay) |delay| scanStatementLifetimes(context, delay, position);
             },
             .ordered_block => |items| scanStatementLifetimes(context, items, position),
             else => {},
@@ -1227,9 +1308,15 @@ fn countFlowStatements(statements: []const ast.Statement) usize {
         .goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
         .conditional_goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
         .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
+        .break_loop => |transfer| if (transfer.delay_slot) |delay| countFlowStatements(delay) else 0,
         .while_loop => |loop| countFlowStatements(loop.statements),
-        .if_statement => |branch| countFlowStatements(branch.then_statements) +
+        .do_while_loop => |loop| countFlowStatements(loop.statements) + 1 +
+            (if (loop.delay_slot) |delay| countFlowStatements(delay) else 0),
+        .if_statement => |branch| (if (branch.delay_slot) |items| countFlowStatements(items) else 0) +
+            countFlowStatements(branch.then_statements) +
             (if (branch.else_statements) |items| countFlowStatements(items) else 0),
+        .labeled_block => |block| countFlowStatements(block.statements) +
+            (if (block.exit_delay) |delay| countFlowStatements(delay) else 0),
         .ordered_block => |items| countFlowStatements(items),
         .builtin => |builtin| switch (builtin) {
             .jump => |jump| if (jump.delay_slot) |delay| countFlowStatements(delay) else 0,
@@ -1274,9 +1361,15 @@ fn buildStatementFlow(
             .goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
             .conditional_goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
             .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
+            .break_loop => |transfer| if (transfer.delay_slot) |delay| countFlowStatements(delay) else 0,
             .while_loop => |loop| countFlowStatements(loop.statements),
-            .if_statement => |branch| countFlowStatements(branch.then_statements) +
+            .do_while_loop => |loop| countFlowStatements(loop.statements) + 1 +
+                (if (loop.delay_slot) |delay| countFlowStatements(delay) else 0),
+            .if_statement => |branch| (if (branch.delay_slot) |items| countFlowStatements(items) else 0) +
+                countFlowStatements(branch.then_statements) +
                 (if (branch.else_statements) |items| countFlowStatements(items) else 0),
+            .labeled_block => |block| countFlowStatements(block.statements) +
+                (if (block.exit_delay) |delay| countFlowStatements(delay) else 0),
             .ordered_block => |items| countFlowStatements(items),
             .builtin => |builtin| switch (builtin) {
                 .jump => |jump| if (jump.delay_slot) |delay| countFlowStatements(delay) else 0,
@@ -1322,16 +1415,90 @@ fn buildStatementFlow(
             .while_loop => |loop| {
                 if (nested_count != 0) addFlowSuccessor(context, current, current + 1);
                 addFlowSuccessor(context, current, next);
+                if (context.flow_loop_count >= context.flow_loops.len) {
+                    context.lifetime_reuse = false;
+                    return;
+                }
+                context.flow_loops[context.flow_loop_count] = .{
+                    .name = loop.label,
+                    .continue_position = current,
+                    .break_position = next,
+                };
+                context.flow_loop_count += 1;
                 buildStatementFlow(context, loop.statements, position, current);
+                context.flow_loop_count -= 1;
             },
+            .do_while_loop => |loop| {
+                const body_start = current + 1;
+                const body_count = countFlowStatements(loop.statements);
+                const condition_position = current + body_count + 1;
+                addFlowSuccessor(context, current, if (loop.statements.len == 0) condition_position else body_start);
+                if (context.flow_loop_count >= context.flow_loops.len) {
+                    context.lifetime_reuse = false;
+                    return;
+                }
+                context.flow_loops[context.flow_loop_count] = .{
+                    .name = loop.label,
+                    .continue_position = condition_position,
+                    .break_position = next,
+                };
+                context.flow_loop_count += 1;
+                buildStatementFlow(context, loop.statements, position, condition_position);
+                context.flow_loop_count -= 1;
+                position.* += 1;
+                if (loop.delay_slot) |delay| {
+                    const delay_start = condition_position + 1;
+                    addFlowSuccessor(context, condition_position, delay_start);
+                    buildStatementFlow(context, delay, position, next);
+                    const delay_end = current + nested_count;
+                    addFlowSuccessor(context, delay_end, body_start);
+                } else {
+                    addFlowSuccessor(context, condition_position, body_start);
+                    addFlowSuccessor(context, condition_position, next);
+                }
+            },
+            .break_loop => |transfer| {
+                const target = findFlowLoopTarget(context, transfer.label, false);
+                if (transfer.delay_slot) |delay| {
+                    addFlowSuccessor(context, current, current + 1);
+                    buildStatementFlow(context, delay, position, target);
+                } else addFlowSuccessor(context, current, target);
+            },
+            .continue_loop => |name| addFlowSuccessor(context, current, findFlowLoopTarget(context, name, true)),
             .if_statement => |branch| {
+                const delay_count = if (branch.delay_slot) |items| countFlowStatements(items) else 0;
                 const then_count = countFlowStatements(branch.then_statements);
-                if (then_count != 0) addFlowSuccessor(context, current, current + 1) else addFlowSuccessor(context, current, next);
+                const then_start = current + delay_count + 1;
+                const then_target = if (then_count != 0) then_start else next;
+                const branch_position = if (delay_count != 0) current + delay_count else current;
+                if (branch.delay_slot) |delay| {
+                    addFlowSuccessor(context, current, current + 1);
+                    buildStatementFlow(context, delay, position, then_target);
+                } else addFlowSuccessor(context, current, then_target);
                 buildStatementFlow(context, branch.then_statements, position, next);
                 if (branch.else_statements) |items| {
-                    if (items.len != 0) addFlowSuccessor(context, current, current + then_count + 1) else addFlowSuccessor(context, current, next);
+                    if (items.len != 0) addFlowSuccessor(context, branch_position, then_start + then_count) else addFlowSuccessor(context, branch_position, next);
                     buildStatementFlow(context, items, position, next);
-                } else addFlowSuccessor(context, current, next);
+                } else addFlowSuccessor(context, branch_position, next);
+            },
+            .labeled_block => |block| {
+                const body_count = countFlowStatements(block.statements);
+                const exit_count = if (block.exit_delay) |delay| countFlowStatements(delay) else 0;
+                const exit_start = if (exit_count != 0) current + body_count + 1 else next;
+                if (nested_count != 0) addFlowSuccessor(context, current, current + 1) else addFlowSuccessor(context, current, next);
+                if (context.flow_loop_count >= context.flow_loops.len) {
+                    context.lifetime_reuse = false;
+                    return;
+                }
+                context.flow_loops[context.flow_loop_count] = .{
+                    .name = block.label,
+                    .continue_position = 0,
+                    .break_position = exit_start,
+                };
+                context.flow_loop_count += 1;
+                buildStatementFlow(context, block.statements, position, exit_start);
+                context.flow_loop_count -= 1;
+                if (block.exit_delay) |delay| buildStatementFlow(context, delay, position, next);
             },
             .ordered_block => |items| {
                 if (nested_count != 0) addFlowSuccessor(context, current, current + 1) else addFlowSuccessor(context, current, next);
@@ -1346,12 +1513,27 @@ fn buildStatementFlow(
                     addFlowSuccessor(context, current, current + 1);
                     buildStatementFlow(context, items, position, 0);
                 },
-                .direct_goto, .call_and_goto, .fallthrough => {},
+                .direct_goto, .call_and_goto, .tail => {},
                 else => addFlowSuccessor(context, current, next),
             },
             else => addFlowSuccessor(context, current, next),
         }
     }
+}
+
+fn findFlowLoopTarget(context: *FunctionContext, name: ?[]const u8, want_continue: bool) usize {
+    var index = context.flow_loop_count;
+    while (index > 0) {
+        index -= 1;
+        const loop = context.flow_loops[index];
+        if (name) |requested| {
+            const actual = loop.name orelse continue;
+            if (!std.mem.eql(u8, requested, actual)) continue;
+        }
+        return if (want_continue) loop.continue_position else loop.break_position;
+    }
+    context.lifetime_reuse = false;
+    return 0;
 }
 
 fn scanConditionLifetime(context: *FunctionContext, condition: ast.Condition, position: usize) void {
@@ -1394,6 +1576,7 @@ fn scanValueLifetime(context: *FunctionContext, value: ast.Value, position: usiz
 
 fn scanBuiltinLifetime(context: *FunctionContext, builtin: ast.Builtin, position: usize, next: *usize) void {
     switch (builtin) {
+        .tail => |tail| for (tail.arguments) |argument| scanValueRefLifetime(context, argument, position),
         .jump => |jump| {
             scanValueRefLifetime(context, jump.address, position);
             if (jump.delay_slot) |delay| scanStatementLifetimes(context, delay, next);
@@ -1462,13 +1645,38 @@ fn applyCallRequirements(
             .goto => |branch| if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
             .conditional_goto => |branch| if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
             .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
+            .break_loop => |transfer| if (transfer.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
             .while_loop => |loop| try applyCallRequirements(context, functions, loop.statements, position),
+            .do_while_loop => |loop| {
+                try applyCallRequirements(context, functions, loop.statements, position);
+                position.* += 1;
+                if (loop.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position);
+            },
             .if_statement => |branch| {
+                if (branch.delay_slot) |items| try applyCallRequirements(context, functions, items, position);
                 try applyCallRequirements(context, functions, branch.then_statements, position);
                 if (branch.else_statements) |items| try applyCallRequirements(context, functions, items, position);
             },
+            .labeled_block => |block| {
+                try applyCallRequirements(context, functions, block.statements, position);
+                if (block.exit_delay) |delay| try applyCallRequirements(context, functions, delay, position);
+            },
             .ordered_block => |items| try applyCallRequirements(context, functions, items, position),
             .builtin => |builtin| switch (builtin) {
+                .tail => |tail| {
+                    if (tail.target.module == null) {
+                        if (findFunction(functions, tail.target.name)) |function| {
+                            if (tail.arguments.len == function.parameters.len) {
+                                for (tail.arguments, function.parameters) |argument, parameter| switch (argument) {
+                                    .ident => |name| if (context.hasLifetime(name)) {
+                                        try context.requireRegister(name, parameter.reg, parameter.vector_reg);
+                                    },
+                                    else => {},
+                                };
+                            }
+                        }
+                    }
+                },
                 .jump => |jump| if (jump.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
                 .return_from_function => |delay| if (delay) |items| try applyCallRequirements(context, functions, items, position),
                 else => {},
@@ -1536,10 +1744,20 @@ fn statementsWriteParameter(
         .goto => |branch| if (branch.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true,
         .conditional_goto => |branch| if (branch.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true,
         .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true,
+        .break_loop => |transfer| if (transfer.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true,
         .while_loop => |loop| if (statementsWriteParameter(functions, loop.statements, name, visited, visited_count)) return true,
+        .do_while_loop => |loop| {
+            if (statementsWriteParameter(functions, loop.statements, name, visited, visited_count)) return true;
+            if (loop.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true;
+        },
         .if_statement => |branch| {
+            if (branch.delay_slot) |items| if (statementsWriteParameter(functions, items, name, visited, visited_count)) return true;
             if (statementsWriteParameter(functions, branch.then_statements, name, visited, visited_count)) return true;
             if (branch.else_statements) |items| if (statementsWriteParameter(functions, items, name, visited, visited_count)) return true;
+        },
+        .labeled_block => |block| {
+            if (statementsWriteParameter(functions, block.statements, name, visited, visited_count)) return true;
+            if (block.exit_delay) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true;
         },
         .ordered_block => |items| if (statementsWriteParameter(functions, items, name, visited, visited_count)) return true,
         .builtin => |builtin| switch (builtin) {
@@ -1584,13 +1802,7 @@ fn writeStatements(
                     context.label_prefix,
                     branch.target,
                 });
-                if (branch.delay_slot) |delay_slot| {
-                    if (delay_slot.len != 1 and
-                        !(delay_slot.len == 2 and delay_slot[0] == .label)) return error.InvalidDelaySlot;
-                    try writeStatements(writer, functions, context, delay_slot);
-                } else {
-                    try writer.writeAll("  nop\n");
-                }
+                try writeConditionalDirectDelaySlot(writer, functions, context, branch.delay_slot);
             },
             .conditional_goto => |branch| {
                 var inverse = branch.condition;
@@ -1627,7 +1839,7 @@ fn writeStatements(
                             regName(lhs_reg),
                             branch.target.name,
                         });
-                        try writeDelaySlot(writer, functions, context, branch.delay_slot);
+                        try writeConditionalDirectDelaySlot(writer, functions, context, branch.delay_slot);
                         continue;
                     }
                     if (branch.condition.rhs == .number) {
@@ -1653,7 +1865,7 @@ fn writeStatements(
                                     regName(compiler_scratch),
                                     branch.target.name,
                                 });
-                                try writeDelaySlot(writer, functions, context, branch.delay_slot);
+                                try writeConditionalDirectDelaySlot(writer, functions, context, branch.delay_slot);
                                 continue;
                             }
                         }
@@ -1681,7 +1893,7 @@ fn writeStatements(
                         regName(compiler_scratch),
                         branch.target.name,
                     });
-                    try writeDelaySlot(writer, functions, context, branch.delay_slot);
+                    try writeConditionalDirectDelaySlot(writer, functions, context, branch.delay_slot);
                     continue;
                 }
                 var rhs_reg: ?Register = null;
@@ -1713,15 +1925,13 @@ fn writeStatements(
                         branch.target.name,
                     });
                 }
-                if (branch.delay_slot) |delay_slot| {
-                    if (delay_slot.len != 1 and
-                        !(delay_slot.len == 2 and delay_slot[0] == .label)) return error.InvalidDelaySlot;
-                    try writeStatements(writer, functions, context, delay_slot);
-                } else {
-                    try writer.writeAll("  nop\n");
-                }
+                try writeConditionalDirectDelaySlot(writer, functions, context, branch.delay_slot);
             },
+            .break_loop => |transfer| try writeBreakTransfer(writer, functions, context, transfer),
+            .continue_loop => |name| try writeLoopTransfer(writer, context, name, true),
             .while_loop => |loop| try writeWhile(writer, functions, context, loop),
+            .do_while_loop => |loop| try writeDoWhile(writer, functions, context, loop),
+            .labeled_block => |block| try writeLabeledBlock(writer, functions, context, block),
             .if_statement => |if_statement| try writeIf(writer, functions, context, if_statement),
             .ordered_block => |ordered| {
                 try writer.writeAll("# zsp ordered block begin\n");
@@ -3398,33 +3608,7 @@ fn writeCall(
 ) anyerror!void {
     if (call.module != null) return error.UnresolvedModuleCall;
     const function = findFunction(functions, call.name) orelse return error.UnknownFunction;
-    if (call.arguments.len != function.parameters.len) return error.FunctionArgumentCountMismatch;
-    for (call.arguments, function.parameters) |argument, parameter| {
-        switch (argument) {
-            .vector_access => return error.FunctionArgumentTypeMismatch,
-            .number => |number| {
-                if (isVectorType(parameter.data_type)) return error.VectorArgumentMustBeRegister;
-                try loadImmediateInto(writer, parameter.reg orelse return error.InvalidScalarRegister, number);
-            },
-            .ident => |name| {
-                const symbol = try context.lookup(name);
-                if (symbol.data_type != parameter.data_type) return error.FunctionArgumentTypeMismatch;
-                if (isVectorType(parameter.data_type)) {
-                    if (symbol.vector_reg != parameter.vector_reg) {
-                        return error.FunctionArgumentRegisterMismatch;
-                    }
-                } else if (symbol.reg) |argument_reg| {
-                    if (argument_reg != parameter.reg.?) return error.FunctionArgumentRegisterMismatch;
-                } else {
-                    try loadImmediateInto(
-                        writer,
-                        parameter.reg orelse return error.InvalidScalarRegister,
-                        symbol.constant orelse return error.ExpectedConstant,
-                    );
-                }
-            },
-        }
-    }
+    try writeFunctionArguments(writer, context, function, call.arguments, false);
 
     if (function.inline_call) {
         var inline_context = FunctionContext{
@@ -3467,6 +3651,46 @@ fn writeCall(
     try writeDelaySlot(writer, functions, context, call.delay_slot);
 }
 
+fn writeFunctionArguments(
+    writer: *std.Io.Writer,
+    context: *FunctionContext,
+    function: ast.Function,
+    arguments: []const ast.ValueRef,
+    allow_signedness_change: bool,
+) !void {
+    if (arguments.len != function.parameters.len) return error.FunctionArgumentCountMismatch;
+    for (arguments, function.parameters) |argument, parameter| {
+        switch (argument) {
+            .vector_access => return error.FunctionArgumentTypeMismatch,
+            .number => |number| {
+                if (isVectorType(parameter.data_type)) return error.VectorArgumentMustBeRegister;
+                try loadImmediateInto(writer, parameter.reg orelse return error.InvalidScalarRegister, number);
+            },
+            .ident => |name| {
+                const symbol = try context.lookup(name);
+                if (symbol.data_type != parameter.data_type and
+                    !(allow_signedness_change and scalarAbiTypesCompatible(symbol.data_type, parameter.data_type)))
+                {
+                    return error.FunctionArgumentTypeMismatch;
+                }
+                if (isVectorType(parameter.data_type)) {
+                    if (symbol.vector_reg != parameter.vector_reg) {
+                        return error.FunctionArgumentRegisterMismatch;
+                    }
+                } else if (symbol.reg) |argument_reg| {
+                    if (argument_reg != parameter.reg.?) return error.FunctionArgumentRegisterMismatch;
+                } else {
+                    try loadImmediateInto(
+                        writer,
+                        parameter.reg orelse return error.InvalidScalarRegister,
+                        symbol.constant orelse return error.ExpectedConstant,
+                    );
+                }
+            },
+        }
+    }
+}
+
 fn writeBuiltin(
     writer: *std.Io.Writer,
     functions: []const ast.Function,
@@ -3505,7 +3729,18 @@ fn writeBuiltin(
             try writer.print("  j {s}\n", .{call.callee.name});
             try writer.print("  addiu $ra, $zero, %lo({s})\n", .{call.continuation.name});
         },
-        .fallthrough => {},
+        .tail => |tail| {
+            if (tail.target.module != null) return error.UnresolvedModuleCall;
+            const function = findFunction(functions, tail.target.name) orelse return error.UnknownFunction;
+            if (function.inline_call) return error.CannotTailInlineFunction;
+            try writeFunctionArguments(writer, context, function, tail.arguments, true);
+            if (context.statement_position != context.omitted_tail_position or
+                context.omitted_tail_target == null or
+                !std.mem.eql(u8, context.omitted_tail_target.?, tail.target.name))
+            {
+                try writer.print("  j {s}\n  nop\n", .{tail.target.name});
+            }
+        },
         .set_return => |target| try writer.print("  addiu $ra, $zero, %lo({s})\n", .{target}),
         .set_function_address => |set_address| {
             if (set_address.target.module != null) return error.UnresolvedModuleCall;
@@ -3583,6 +3818,11 @@ fn writeBuiltin(
     }
 }
 
+fn scalarAbiTypesCompatible(lhs: DataType, rhs: DataType) bool {
+    if (isVectorType(lhs) or isVectorType(rhs)) return false;
+    return (scalarDataSize(lhs) catch return false) == (scalarDataSize(rhs) catch return false);
+}
+
 fn writeDelaySlot(
     writer: *std.Io.Writer,
     functions: []const ast.Function,
@@ -3598,6 +3838,22 @@ fn writeDelaySlot(
     }
 }
 
+fn writeConditionalDirectDelaySlot(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+    delay_slot: ?[]ast.Statement,
+) !void {
+    if (delay_slot != null or context.shared_exit_label == null) {
+        return writeDelaySlot(writer, functions, context, delay_slot);
+    }
+    const delay = context.shared_exit_delay orelse return error.MissingSharedExitDelay;
+    if (delay.len != 1) return error.InvalidDelaySlot;
+    try writer.print("LABEL_{s}_blockend_{d}:\n", .{ context.label_prefix, context.shared_exit_label.? });
+    try writeStatements(writer, functions, context, delay);
+    context.shared_exit_consumed = true;
+}
+
 fn writeWhile(
     writer: *std.Io.Writer,
     functions: []const ast.Function,
@@ -3605,15 +3861,203 @@ fn writeWhile(
     loop: anytype,
 ) anyerror!void {
     const label = context.allocLabel();
+    if (context.emission_loop_count >= context.emission_loops.len) return error.TooManyNestedLoops;
+    context.emission_loops[context.emission_loop_count] = .{
+        .name = loop.label,
+        .label = label,
+        .continue_suffix = "while",
+        .break_suffix = "whileend",
+    };
+    context.emission_loop_count += 1;
+    defer context.emission_loop_count -= 1;
 
     try writer.print("LABEL_{s}_while_{d}:\n", .{ context.label_prefix, label });
     try writeConditionBranchFalse(writer, context, loop.condition, "whileend", label, true);
     const scope = context.pushScope();
     defer context.popScope(scope);
     try writeStatements(writer, functions, context, loop.statements);
-    try writer.print("  j LABEL_{s}_while_{d}\n", .{ context.label_prefix, label });
-    try writer.writeAll("  nop\n");
+    if (!statementsTerminateControlFlow(loop.statements)) {
+        try writer.print("  j LABEL_{s}_while_{d}\n", .{ context.label_prefix, label });
+        try writer.writeAll("  nop\n");
+    }
     try writer.print("LABEL_{s}_whileend_{d}:\n", .{ context.label_prefix, label });
+}
+
+fn writeDoWhile(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+    loop: anytype,
+) anyerror!void {
+    const label = context.allocLabel();
+    if (context.emission_loop_count >= context.emission_loops.len) return error.TooManyNestedLoops;
+    context.emission_loops[context.emission_loop_count] = .{
+        .name = loop.label,
+        .label = label,
+        .continue_suffix = "dowhilecond",
+        .break_suffix = "dowhileend",
+    };
+    context.emission_loop_count += 1;
+    defer context.emission_loop_count -= 1;
+
+    const needs_continue_label = statementsContainLoopContinue(loop.statements);
+    try writer.print("LABEL_{s}_dowhile_{d}:\n", .{ context.label_prefix, label });
+    const scope = context.pushScope();
+    defer context.popScope(scope);
+    try writeStatements(writer, functions, context, loop.statements);
+    if (needs_continue_label) {
+        try writer.print("LABEL_{s}_dowhilecond_{d}:\n", .{ context.label_prefix, label });
+    }
+    if (context.track_statement_position) context.statement_position += 1;
+    var inverse = loop.condition;
+    inverse.op = invertComparison(inverse.op);
+    try writeConditionBranchFalse(writer, context, inverse, "dowhile", label, loop.delay_slot == null);
+    if (loop.delay_slot) |delay| {
+        if (delay.len != 1) return error.InvalidDelaySlot;
+        try writeStatements(writer, functions, context, delay);
+    }
+    try writer.print("LABEL_{s}_dowhileend_{d}:\n", .{ context.label_prefix, label });
+}
+
+fn writeLabeledBlock(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+    block: anytype,
+) anyerror!void {
+    const label = context.allocLabel();
+    if (context.emission_loop_count >= context.emission_loops.len) return error.TooManyNestedLoops;
+    context.emission_loops[context.emission_loop_count] = .{
+        .name = block.label,
+        .label = label,
+        .continue_suffix = "",
+        .break_suffix = "blockend",
+    };
+    context.emission_loop_count += 1;
+    defer context.emission_loop_count -= 1;
+
+    const scope = context.pushScope();
+    defer context.popScope(scope);
+    const terminal_can_share = if (block.statements.len == 0)
+        false
+    else switch (block.statements[block.statements.len - 1]) {
+        .conditional_direct_goto => |branch| branch.delay_slot == null,
+        .break_loop => |transfer| transfer.delay_slot == null,
+        else => false,
+    };
+    const can_share = block.exit_delay != null and terminal_can_share;
+    if (can_share) {
+        try writeStatements(writer, functions, context, block.statements[0 .. block.statements.len - 1]);
+        const saved_label = context.shared_exit_label;
+        const saved_delay = context.shared_exit_delay;
+        const saved_consumed = context.shared_exit_consumed;
+        context.shared_exit_label = label;
+        context.shared_exit_delay = block.exit_delay;
+        context.shared_exit_consumed = false;
+        defer {
+            context.shared_exit_label = saved_label;
+            context.shared_exit_delay = saved_delay;
+            context.shared_exit_consumed = saved_consumed;
+        }
+        try writeStatements(writer, functions, context, block.statements[block.statements.len - 1 ..]);
+        if (!context.shared_exit_consumed) {
+            try writer.print("LABEL_{s}_blockend_{d}:\n", .{ context.label_prefix, label });
+            try writeStatements(writer, functions, context, block.exit_delay.?);
+        }
+    } else {
+        try writeStatements(writer, functions, context, block.statements);
+        try writer.print("LABEL_{s}_blockend_{d}:\n", .{ context.label_prefix, label });
+        if (block.exit_delay) |delay| try writeStatements(writer, functions, context, delay);
+    }
+}
+
+fn statementsContainLoopContinue(statements: []const ast.Statement) bool {
+    for (statements) |statement| switch (statement) {
+        .continue_loop => return true,
+        .while_loop => |loop| if (statementsContainLoopContinue(loop.statements)) return true,
+        .do_while_loop => |loop| if (statementsContainLoopContinue(loop.statements)) return true,
+        .if_statement => |branch| {
+            if (branch.delay_slot) |items| if (statementsContainLoopContinue(items)) return true;
+            if (statementsContainLoopContinue(branch.then_statements)) return true;
+            if (branch.else_statements) |items| if (statementsContainLoopContinue(items)) return true;
+        },
+        .labeled_block => |block| {
+            if (statementsContainLoopContinue(block.statements)) return true;
+            if (block.exit_delay) |delay| if (statementsContainLoopContinue(delay)) return true;
+        },
+        .ordered_block => |items| if (statementsContainLoopContinue(items)) return true,
+        else => {},
+    };
+    return false;
+}
+
+fn invertComparison(op: ast.CompareOp) ast.CompareOp {
+    return switch (op) {
+        .eq => .ne,
+        .ne => .eq,
+        .lt => .ge,
+        .le => .gt,
+        .gt => .le,
+        .ge => .lt,
+    };
+}
+
+fn statementsTerminateControlFlow(statements: []const ast.Statement) bool {
+    if (statements.len == 0) return false;
+    return switch (statements[statements.len - 1]) {
+        .break_loop, .continue_loop, .goto => true,
+        .builtin => |builtin| switch (builtin) {
+            .jump, .return_from_function, .direct_goto, .call_and_goto, .tail => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn writeLoopTransfer(
+    writer: *std.Io.Writer,
+    context: *const FunctionContext,
+    name: ?[]const u8,
+    is_continue: bool,
+) !void {
+    var index = context.emission_loop_count;
+    while (index > 0) {
+        index -= 1;
+        const loop = context.emission_loops[index];
+        if (name) |requested| {
+            const actual = loop.name orelse continue;
+            if (!std.mem.eql(u8, requested, actual)) continue;
+        }
+        if (is_continue and loop.continue_suffix.len == 0) return error.CannotContinueBlock;
+        try writer.print("  j LABEL_{s}_{s}_{d}\n  nop\n", .{
+            context.label_prefix,
+            if (is_continue) loop.continue_suffix else loop.break_suffix,
+            loop.label,
+        });
+        return;
+    }
+    return error.UnknownLoopLabel;
+}
+
+fn writeBreakTransfer(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+    transfer: ast.BreakTransfer,
+) !void {
+    var index = context.emission_loop_count;
+    while (index > 0) {
+        index -= 1;
+        const target = context.emission_loops[index];
+        if (transfer.label) |requested| {
+            const actual = target.name orelse continue;
+            if (!std.mem.eql(u8, requested, actual)) continue;
+        }
+        try writer.print("  j LABEL_{s}_{s}_{d}\n", .{ context.label_prefix, target.break_suffix, target.label });
+        try writeConditionalDirectDelaySlot(writer, functions, context, transfer.delay_slot);
+        return;
+    }
+    return error.UnknownLoopLabel;
 }
 
 fn writeIf(
@@ -3623,22 +4067,85 @@ fn writeIf(
     if_statement: anytype,
 ) anyerror!void {
     const label = context.allocLabel();
+    if (if_statement.else_statements == null and if_statement.then_statements.len == 1 and
+        if_statement.then_statements[0] == .break_loop and if_statement.then_statements[0].break_loop.label != null)
+    {
+        const transfer = if_statement.then_statements[0].break_loop;
+        const target_name = transfer.label.?;
+        if (if_statement.delay_slot != null and transfer.delay_slot != null) return error.MultipleDelaySlots;
+        const delay_slot = if_statement.delay_slot orelse transfer.delay_slot;
+        var target_index = context.emission_loop_count;
+        while (target_index > 0) {
+            target_index -= 1;
+            const target = context.emission_loops[target_index];
+            if (target.name == null or !std.mem.eql(u8, target.name.?, target_name)) continue;
+            var inverse = if_statement.condition;
+            inverse.op = invertComparison(inverse.op);
+            try writeConditionBranchFalse(writer, context, inverse, target.break_suffix, target.label, delay_slot == null);
+            try writeStructuredDelaySlot(writer, functions, context, delay_slot);
+            if (context.track_statement_position) context.statement_position += 1 +
+                (if (transfer.delay_slot) |items| countFlowStatements(items) else 0);
+            return;
+        }
+        return error.UnknownLoopLabel;
+    }
+    const then_terminates = statementsTerminateControlFlow(if_statement.then_statements);
+    const else_terminates = if (if_statement.else_statements) |items| statementsTerminateControlFlow(items) else false;
+    const reorder = if_statement.else_statements != null and else_terminates and !then_terminates;
+
+    if (reorder) {
+        var inverse = if_statement.condition;
+        inverse.op = invertComparison(inverse.op);
+        try writeConditionBranchFalse(writer, context, inverse, "ifthen", label, if_statement.delay_slot == null);
+        try writeStructuredDelaySlot(writer, functions, context, if_statement.delay_slot);
+
+        const source_position = context.statement_position;
+        const then_count = countFlowStatements(if_statement.then_statements);
+        context.statement_position = source_position + then_count;
+        const else_scope = context.pushScope();
+        try writeStatements(writer, functions, context, if_statement.else_statements.?);
+        context.popScope(else_scope);
+
+        try writer.print("LABEL_{s}_ifthen_{d}:\n", .{ context.label_prefix, label });
+        context.statement_position = source_position;
+        const then_scope = context.pushScope();
+        try writeStatements(writer, functions, context, if_statement.then_statements);
+        context.popScope(then_scope);
+        context.statement_position = source_position + then_count + countFlowStatements(if_statement.else_statements.?);
+        try writer.print("LABEL_{s}_ifend_{d}:\n", .{ context.label_prefix, label });
+        return;
+    }
+
     const false_suffix: []const u8 = if (if_statement.else_statements != null) "ifelse" else "ifend";
-    try writeConditionBranchFalse(writer, context, if_statement.condition, false_suffix, label, true);
+    try writeConditionBranchFalse(writer, context, if_statement.condition, false_suffix, label, if_statement.delay_slot == null);
+    try writeStructuredDelaySlot(writer, functions, context, if_statement.delay_slot);
 
     const then_scope = context.pushScope();
     try writeStatements(writer, functions, context, if_statement.then_statements);
     context.popScope(then_scope);
 
     if (if_statement.else_statements) |else_statements| {
-        try writer.print("  j LABEL_{s}_ifend_{d}\n", .{ context.label_prefix, label });
-        try writer.writeAll("  nop\n");
+        if (!then_terminates) {
+            try writer.print("  j LABEL_{s}_ifend_{d}\n", .{ context.label_prefix, label });
+            try writer.writeAll("  nop\n");
+        }
         try writer.print("LABEL_{s}_ifelse_{d}:\n", .{ context.label_prefix, label });
         const else_scope = context.pushScope();
         try writeStatements(writer, functions, context, else_statements);
         context.popScope(else_scope);
     }
     try writer.print("LABEL_{s}_ifend_{d}:\n", .{ context.label_prefix, label });
+}
+
+fn writeStructuredDelaySlot(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+    delay_slot: ?[]ast.Statement,
+) !void {
+    const delay = delay_slot orelse return;
+    if (delay.len != 1) return error.InvalidDelaySlot;
+    try writeStatements(writer, functions, context, delay);
 }
 
 fn writeConditionBranchFalse(

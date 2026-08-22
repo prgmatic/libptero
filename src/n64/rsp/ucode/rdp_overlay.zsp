@@ -3,57 +3,6 @@ const dma = @import("resident_dma.zsp");
 const cp0 = @import("cp0.zsp");
 const queue = @import("resident_queue.zsp");
 
-// The reference overlay has a fixed IMEM ABI. Keep its exceptional layout in
-// one place; functions in ordinary ZSP modules otherwise follow source order.
-layout {
-    _start;
-    passthrough16;
-    setPrimitiveColor;
-    setPrimitiveColorComponent;
-    setOtherModes;
-    modifyOtherModes;
-    sendOtherModes;
-    finalizeOtherModes;
-    setFillColor32;
-    setScissorEx;
-    setFixupImage;
-    setColorImage;
-    rectangleExclusive;
-    passthroughTriangle;
-    setLookupAddress;
-    fixupAddress;
-    rdpWaitIdle;
-    syncFull;
-    pushMode;
-    popMode;
-    setBlendingMode;
-    setFogMode;
-    setCombineMode1Pass;
-    setCombineMode2Pass;
-    resetMode;
-    setTriangleData;
-    triangle;
-    triangleCull;
-    setDebugMode;
-    autoTmemSetAddress;
-    autoTmemSetTile;
-    clearZBuffer;
-    clearZBackup;
-    rdp.sendStaged;
-    rdp.finalize;
-    rdp.write8;
-    rdp.write16;
-    rdpSetBlendingMode;
-    rdpSetFogMode;
-    rdpSetCombineMode1Pass;
-    rdpSetCombineMode2Pass;
-    updateRenderMode;
-    writeSetScissor;
-    writeSetFillColor;
-    triangleAsync;
-    triangleSendEnd;
-}
-
 // Libdragon deliberately maps these reserved command slots straight back to
 // the resident queue loop. An external command target represents that table
 // alias without adding any overlay instructions.
@@ -255,7 +204,6 @@ command(41) fn syncFull(
     }
     reg busy: u32 = 0x40;
     store(u8, rdp_syncfull_ongoing, busy);
-sync_hold_set:
     @goto(queue.resident_command_loop);
 }
 
@@ -263,11 +211,10 @@ command(26) fn rdpWaitIdle(reg($a0) _: u32) {
     reg status: u32 = undefined;
     reg busy: u32 = undefined;
     reg busy_mask: u32 = 0x40;
-rdp_wait:
     cp0.getDpStatusT2(status);
-rdp_wait_mask:
-    busy = status & busy_mask;
-    if(busy != 0) goto rdp_wait_mask delay {
+    do {
+        busy = status & busy_mask;
+    } while(busy != 0) delay {
         cp0.getDpStatusT2(status);
     }
 }
@@ -290,31 +237,18 @@ command(19) fn setPrimitiveColorComponent(
     reg selection: u32 = undefined;
     selection = word0 >> 16;
     selection &= 3;
-    reg saved_ex: u32 = undefined;
-    if(selection == 0) goto primitive_set_rgba delay {
-        selection -= 1;
+    reg saved_ex: u32 = load(u32, primitive_color_ex);
+    if(selection == 0) {
+        saved_ex &= 0x0000ffff;
+        store(u32, primitive_color_rgba, word1);
+    } else {
+        if(selection == 1) {
+            saved_ex &= 0x0000ff00;
+        } else {
+            saved_ex &= 0x000000ff;
+        }
     }
-    if(selection == 0) goto primitive_set_lod delay {
-        saved_ex = load(u32, primitive_color_ex);
-    }
-primitive_set_min_lod:
-    saved_ex &= 0x000000ff;
     word0 |= saved_ex;
-    goto primitive_component_send delay {
-    primitive_set_lod:
-        saved_ex = load(u32, primitive_color_ex);
-    }
-    saved_ex &= 0x0000ff00;
-    word0 |= saved_ex;
-    goto primitive_component_send delay {
-    primitive_set_rgba:
-        saved_ex = load(u32, primitive_color_ex);
-    }
-primitive_rgba_loaded:
-    saved_ex &= 0x0000ffff;
-    word0 |= saved_ex;
-    store(u32, primitive_color_rgba, word1);
-primitive_component_send:
     store(u32, primitive_color_ex, word0);
     reg($s4) staging: u32 = primitive_color_ex;
     reg($s3) staging_end: u32 = undefined;
@@ -330,11 +264,10 @@ fn writeSetScissor(
     store(u32, rdp_scissor_rect, word0);
     reg modes_byte: i32 = load(i8, rdp_mode, 25);
     modes_byte &= 0x20;
-    if(modes_byte == 0) goto scissor_fixed delay {
-        store(u32, rdp_scissor_rect, word1, 4);
+    store(u32, rdp_scissor_rect, word1, 4);
+    if(modes_byte != 0) {
+        word1 -%= 0x1000;
     }
-    word1 -%= 0x1000;
-scissor_fixed:
     @goto(rdp.write8);
 }
 
@@ -360,7 +293,7 @@ fn sendOtherModes(
     }
     reg($s0) staging: u32 = undefined;
     store(u8, staging, opcode, -8);
-    @fallthrough(finalizeOtherModes);
+    tail finalizeOtherModes(word0, word1);
 }
 
 fn finalizeOtherModes(
@@ -397,7 +330,7 @@ command(20) fn modifyOtherModes(
         command = load(i32, rdp_mode, 24);
     }
     inverse_mask = load(u32, rdp_mode, 28);
-    @fallthrough(sendOtherModes);
+    tail sendOtherModes(command, inverse_mask);
 }
 
 fn updateRenderMode() {
@@ -413,123 +346,146 @@ fn updateRenderMode() {
         som_lo = load(u32, rdp_mode, 28);
     }
     scratch0 = som_hi << 10;
-    if(scratch0 >= 0x80000000) goto update_fillcopy delay {
+    if(scratch0 >= 0x80000000) delay {
         comb_hi = load(u32, rdp_mode);
+    } {
+        assembly_temporary = 0xff000000;
+        comb_hi = som_hi | assembly_temporary;
+        assembly_temporary = 0x10000000;
+        comb_hi ^= assembly_temporary;
+        comb_lo = som_lo;
+        @callAndGoto(rdp.write8, rdp.finalize);
     }
     comb_lo = load(u32, rdp_mode, 4);
-    if(comb_hi < 0x80000000) goto update_combiner_1cycle;
-    scratch0 = som_hi & 1;
-    if(scratch0 != 0) @goto(queue.resident_assertion_failed) delay {
-        reg($at) assertion_code: u32 = 0xc0040000;
-    }
     reg scratch1: u32 = undefined;
-    goto update_store_combiner_2cycle delay {
-update_combiner_1cycle:
+    store_combiner_2cycle: block {
+    combiner_1cycle: block {
+        if(comb_hi < 0x80000000) {
+            break combiner_1cycle;
+        }
+        scratch0 = som_hi & 1;
+        if(scratch0 != 0) @goto(queue.resident_assertion_failed) delay {
+            reg($at) assertion_code: u32 = 0xc0040000;
+        }
+        break store_combiner_2cycle;
+    } exit delay {
         scratch1 = 0x04000000;
     }
-    scratch0 = som_hi & scratch1;
-    reg comb_hi_no_id: u32 = undefined;
-    if(scratch0 == 0) goto update_check_mipmap delay {
-        comb_hi_no_id = comb_hi << 8;
+    check_mipmap: block {
+        scratch0 = som_hi & scratch1;
+        reg comb_hi_no_id: u32 = undefined;
+        if(scratch0 == 0) {
+            break check_mipmap delay {
+                comb_hi_no_id = comb_hi << 8;
+            }
+        }
+        comb_hi_no_id >>= 8;
+        scratch0 = load(u32, combiner_tex_shade);
+        fog_change: block {
+            check_fog_shade: block {
+                if(scratch0 != comb_hi_no_id) {
+                    break check_fog_shade delay {
+                        scratch0 = load(u32, combiner_tex_shade, 4);
+                    }
+                }
+                if(scratch0 == comb_lo) {
+                    break fog_change delay {
+                        selected_combiner = combiner_tex_shade_fog;
+                    }
+                }
+            }
+            scratch0 = load(u32, combiner_shade);
+            if(scratch0 != comb_hi_no_id) {
+                break check_mipmap delay {
+                    scratch0 = load(u32, combiner_shade, 4);
+                }
+            }
+            if(scratch0 != comb_lo) {
+                break check_mipmap delay {
+                    selected_combiner = combiner_shade_fog;
+                }
+            }
+        }
+        comb_hi = load(u32, selected_combiner);
+        comb_lo = load(u32, selected_combiner, 4);
     }
-    comb_hi_no_id >>= 8;
-    scratch0 = load(u32, combiner_tex_shade);
-    if(scratch0 != comb_hi_no_id) goto update_check_fog_shade delay {
-        scratch0 = load(u32, combiner_tex_shade, 4);
-    }
-    if(scratch0 == comb_lo) goto update_fog_change delay {
-        selected_combiner = combiner_tex_shade_fog;
-    }
-update_check_fog_shade:
-    scratch0 = load(u32, combiner_shade);
-    if(scratch0 != comb_hi_no_id) goto update_check_mipmap delay {
-        scratch0 = load(u32, combiner_shade, 4);
-    }
-    if(scratch0 != comb_lo) goto update_check_mipmap delay {
-        selected_combiner = combiner_shade_fog;
-    }
-update_fog_change:
-    comb_hi = load(u32, selected_combiner);
-    comb_lo = load(u32, selected_combiner, 4);
-
-update_check_mipmap:
     reg scratch2: u32 = undefined;
     scratch2 = som_hi & 3;
-    if(scratch2 == 0) goto update_store_combiner_1cycle delay {
+    if(scratch2 != 0) delay {
         scratch2 <<= 3;
+    } {
+        scratch0 = load(u32, rdp_mode, 8);
+        scratch1 = load(u32, rdp_mode, 12);
+        comb_hi &= scratch0;
+        comb_lo &= scratch1;
+        scratch0 = load(u32, scratch2, combiner_mipmaps, -8);
+        scratch1 = load(u32, scratch2, combiner_mipmaps, -4);
+        comb_hi |= scratch0;
+        comb_lo |= scratch1;
+    } else {
+        store(u32, mode_combiner_1cycle, comb_hi);
+        store(u32, mode_combiner_1cycle, comb_lo, 4);
+        scratch0 = load(u32, comb0_mask);
+        scratch1 = load(u32, comb0_mask, 4);
+        comb_hi &= scratch0;
+        comb_lo &= scratch1;
+        scratch0 = som_hi >> 16;
+        scratch0 <<= 31;
+        comb_hi |= scratch0;
     }
-    scratch0 = load(u32, rdp_mode, 8);
-    scratch1 = load(u32, rdp_mode, 12);
-    comb_hi &= scratch0;
-    comb_lo &= scratch1;
-    scratch0 = load(u32, scratch2, combiner_mipmaps, -8);
-    scratch1 = load(u32, scratch2, combiner_mipmaps, -4);
-    comb_hi |= scratch0;
-    comb_lo |= scratch1;
-    goto update_store_combiner_2cycle;
-
-update_store_combiner_1cycle:
-    store(u32, mode_combiner_1cycle, comb_hi);
-    store(u32, mode_combiner_1cycle, comb_lo, 4);
-    scratch0 = load(u32, comb0_mask);
-    scratch1 = load(u32, comb0_mask, 4);
-    comb_hi &= scratch0;
-    comb_lo &= scratch1;
-    scratch0 = som_hi >> 16;
-    scratch0 <<= 31;
-    comb_hi |= scratch0;
-update_store_combiner_2cycle:
+    }
     store(u32, mode_combiner_2cycle, comb_hi);
     store(u32, mode_combiner_2cycle, comb_lo, 4);
 
     scratch0 = load(u32, rdp_mode, 16);
     scratch1 = load(u32, rdp_mode, 20);
+    reg scratch2: u32 = undefined;
     reg background_blending: u32 = undefined;
     background_blending = scratch1 != 0;
-    if(scratch1 != 0) goto update_blender_defaults_done delay {
-        scratch2 = som_lo & 8;
+    scratch2 = som_lo & 8;
+    if(scratch1 == 0) {
+        if(scratch2 != 0) {
+            scratch1 = som_hi & 4;
+            scratch1 = load(u32, scratch1, aa_blend_default);
+            assembly_temporary = -16385;
+            scratch0 &= assembly_temporary;
+        }
     }
-update_no_background_blending:
-    if(scratch2 == 0) goto update_blender_defaults_done;
-    scratch1 = som_hi & 4;
-    scratch1 = load(u32, scratch1, aa_blend_default);
-    assembly_temporary = -16385;
-    scratch0 &= assembly_temporary;
-update_blender_defaults_done:
     scratch2 = 0xccccc040;
     reg scratch3: u32 = 0x3333c040;
     reg blend_1cycle: u32 = scratch1;
     reg merged_blend: u32 = undefined;
-    if(scratch0 == 0) goto update_blender_1pass;
-    blend_1cycle = scratch0;
-    if(scratch1 == 0) goto update_blender_1pass;
-    scratch0 &= scratch2;
-    scratch1 &= scratch3;
-    merged_blend = scratch0 | scratch1;
-    merged_blend |= 0x8000;
-    goto update_blender_merged;
-update_blender_1pass:
+    if(scratch0 != 0) {
+        blend_1cycle = scratch0;
+    }
     merged_blend = blend_1cycle & scratch3;
     blend_1cycle &= scratch2;
-update_blender_merged:
+    if(scratch0 != 0) {
+        if(scratch1 != 0) {
+            scratch0 &= scratch2;
+            scratch1 &= scratch3;
+            merged_blend = scratch0 | scratch1;
+            merged_blend |= 0x8000;
+        }
+    }
 
     scratch0 = som_hi & 0x3e00;
     scratch1 = 0x2000;
-    if(scratch0 != scratch1) goto update_yuv_done delay {
+    if(scratch0 == scratch1) delay {
         scratch0 = 0x0a00;
+    } {
+        som_hi |= scratch0;
     }
-    som_hi |= scratch0;
-update_yuv_done:
     scratch2 = merged_blend << 16;
     scratch1 = load(u32, mode_combiner_2cycle);
     scratch1 |= scratch2;
     selected_combiner = mode_combiner_2cycle;
     reg cycle_type: u32 = 0x10200000;
-    if(scratch1 >= 0x80000000) goto update_cycle_selected;
-    selected_combiner = mode_combiner_1cycle;
-    merged_blend = blend_1cycle;
-    cycle_type = 0x10300000;
-update_cycle_selected:
+    if(scratch1 < 0x80000000) {
+        selected_combiner = mode_combiner_1cycle;
+        merged_blend = blend_1cycle;
+        cycle_type = 0x10300000;
+    }
     assembly_temporary = 0xff300000;
     som_hi |= assembly_temporary;
     som_hi ^= cycle_type;
@@ -548,21 +504,21 @@ update_cycle_selected:
     som_lo |= scratch0;
     scratch0 = 0x2001;
     scratch1 = som_lo & scratch0;
-    if(scratch0 != scratch1) goto update_alpha_compare_done;
-    som_lo |= 0x3000;
-    ordered {
-        assembly_temporary = -4;
-        som_lo &= assembly_temporary;
+    if(scratch0 == scratch1) {
+        som_lo |= 0x3000;
+        ordered {
+            assembly_temporary = -4;
+            som_lo &= assembly_temporary;
+        }
     }
-update_alpha_compare_done:
     scratch0 = som_lo & 0x400;
     scratch1 = som_lo & 0x4000;
-    if(scratch0 != 0) goto update_finish;
-    som_lo |= 0x800;
-    if(scratch1 != 0) goto update_finish;
-    som_lo ^= 0x800;
-
-update_finish:
+    if(scratch0 == 0) {
+        som_lo |= 0x800;
+        if(scratch1 == 0) {
+            som_lo ^= 0x800;
+        }
+    }
     comb_hi = load(u32, selected_combiner);
     comb_lo = load(u32, selected_combiner, 4);
     assembly_temporary = 0xff000000;
@@ -574,14 +530,6 @@ update_finish:
     store(u32, rdp_mode, som_lo, 28);
     store(u8, rdp_mode, scratch0, 24);
     @callAndGoto(rdp.write16, rdp.finalize);
-
-update_fillcopy:
-    assembly_temporary = 0xff000000;
-    comb_hi = som_hi | assembly_temporary;
-    assembly_temporary = 0x10000000;
-    comb_hi ^= assembly_temporary;
-    comb_lo = som_lo;
-    @callAndGoto(rdp.write8, rdp.finalize);
 }
 
 command(24) fn setBlendingMode(reg($a0) _: u32, reg($a1) _: u32) noreturn {
@@ -622,17 +570,15 @@ command(4) fn resetMode(
     previous_som_hi <<= 10;
     reg saved_comb_hi: u32 = undefined;
     reg saved_comb_lo: u32 = undefined;
-    if(previous_som_hi < 0x80000000) goto reset_mode_combine delay {
-        saved_comb_hi = comb_hi;
+    saved_comb_hi = comb_hi;
+    if(previous_som_hi >= 0x80000000) {
+        saved_comb_lo = comb_lo;
+        comb_hi = load(u32, rdp_scissor_rect);
+        comb_lo = load(u32, rdp_scissor_rect, 4);
+        writeSetScissor(comb_hi, comb_lo);
+        comb_hi = saved_comb_hi;
+        comb_lo = saved_comb_lo;
     }
-    saved_comb_lo = comb_lo;
-    comb_hi = load(u32, rdp_scissor_rect);
-    comb_lo = load(u32, rdp_scissor_rect, 4);
-    writeSetScissor(comb_hi, comb_lo);
-    comb_hi = saved_comb_hi;
-    comb_lo = saved_comb_lo;
-
-reset_mode_combine:
     @goto(setCombineMode1Pass);
 }
 
@@ -674,17 +620,17 @@ command(7) fn popMode(reg($a0) scissor0: u32) {
 }
 
 fn rdpSetBlendingMode(
-    reg($a0) _: u32,
+    reg($a0) command: u32,
     reg($a1) formula: u32,
 ) {
     reg first_step: u32 = load(u32, rdp_mode, 16);
     store(u32, rdp_mode, formula, 20);
-    if(formula == 0) goto blending_check_two_pass;
-    first_step = formula;
-blending_check_two_pass:
+    if(formula != 0) {
+        first_step = formula;
+    }
     first_step &= 0x8000;
     if(first_step == 0) @goto(updateRenderMode);
-    @fallthrough(rdpSetFogMode);
+    tail rdpSetFogMode(command, formula);
 }
 
 fn rdpSetFogMode(
@@ -705,7 +651,7 @@ fn rdpSetCombineMode1Pass(
     word0 ^= high_bit;
     store(u32, rdp_mode, mask0, 8);
     store(u32, rdp_mode, mask1, 12);
-    @fallthrough(rdpSetCombineMode2Pass);
+    tail rdpSetCombineMode2Pass(word0, word1);
 }
 
 fn rdpSetCombineMode2Pass(
@@ -718,7 +664,7 @@ fn rdpSetCombineMode2Pass(
     word0 ^= command_mask;
     store(u32, rdp_mode, word0);
     store(u32, rdp_mode, word1, 4);
-    @fallthrough(updateRenderMode);
+    tail updateRenderMode();
 }
 
 command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
@@ -739,12 +685,12 @@ command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
     mipmap_bits &= 0x38;
     triangle_byte |= mipmap_bits;
     store(u8, command_start, triangle_byte, 1);
-passthrough_triangle_copy:
-    reg($v00) chunk: vec16 = load_unaligned(vec16, command_start);
-    store(vec16, staging, chunk);
-    command_start += 16;
-    staging += 16;
-    if(command_start < command_end) goto passthrough_triangle_copy;
+    do {
+        reg($v00) chunk: vec16 = load_unaligned(vec16, command_start);
+        store(vec16, staging, chunk);
+        command_start += 16;
+        staging += 16;
+    } while(command_start < command_end);
     rdp.setStagingEnd(staging);
     @goto(rdp.finalize);
 }
@@ -761,7 +707,7 @@ command(30) fn triangle(
     triangleAsync(triangle_command, vertex1, vertex2, vertex3, output, cull_mode) delay {
         vertex3 = triangle_data2;
     }
-    @fallthrough(triangleCull);
+    tail triangleCull();
 }
 
 fn triangleCull() noreturn {
@@ -1003,11 +949,15 @@ fn triangleAsync(
         y1 = vmulf(y1, inverse_w.sfract.zzzzZZZZ);
         @loadVector16(attribute3, 6, output, 20);
         x12.sint = vectorShiftRightArithmetic(x12.sfract, 2);
-        if(did_swap1 != 0) goto triangle_dma_busy delay {
+        if(did_swap1 != 0) delay {
             did_swap0 = load(u8, rdp_syncfull_ongoing);
+        } {
+        triangle_dma_wait: do {
+        } while(did_swap1 != 0) delay {
+            cp0.getDmaBusyT1(did_swap1);
+        }
         }
     }
-triangle_dma_idle:
     ordered {
         x12.sfract = vectorShiftLeft8(x12.sfract, 14);
         clip1 >>>= 4;
@@ -1020,12 +970,12 @@ triangle_dma_idle:
         edges.sfract = vectorAddCarry(edges.sfract, x12.sfract.xxxxxxxx);
         @storeVector16(x12.sint, 2, output, 8);
         edges.sint = vectorAdd(edges.sint, x12.sint.xxxxxxxx);
-        if(did_swap0 != 0) goto triangle_skip_dp_end delay {
+        if(did_swap0 == 0) delay {
             @storeVector16(slope.sfract, 4, output, 14);
+        } {
+            rdp.writeCommandEnd(triangle_command);
         }
-        rdp.writeCommandEnd(triangle_command);
     }
-triangle_skip_dp_end:
     ordered {
         vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
         vector_one = vectorSubtract(y_tmp2, y_tmp1);
@@ -1075,11 +1025,30 @@ triangle_skip_dp_end:
         y1 = vmadn(all_tmp1, slope.sint.xxxxxxxx);
         @storeVector64(y3, 0, clip2, 56);
         all_tmp2 = vmadh(all3, slope.sint.xxxxxxxx);
-        if(did_swap0 != 0) goto triangle_buffer_slow delay {
+        if(did_swap0 != 0) delay {
             @storeVector64(y3, 4, clip3, 56);
+        } {
+            vertex3 = return_address;
+            triangle_command = load(i32, rdp_buffers, 4);
+            did_swap1 = load(i32, rdp_buffers);
+            store(u32, rdp_buffers, triangle_command);
+            store(u32, rdp_buffers, did_swap1, 4);
+            store(u8, clip2, clip1);
+            ordered {
+                // Keep the reference's trapping add; generic large-immediate lowering
+                // materializes this expression with a different instruction sequence.
+                large_offset = 0x10000;
+                vertex2 = triangle_command + large_offset;
+            }
+            queue.resident_rdp_set_buffer(triangle_command, vertex1, vertex2) delay {
+                vertex1 = triangle_command;
+            }
+            cp0.setDmaAddrRdramA0(triangle_command);
+            clip1 = load(u8, clip2);
+            triangle_command +%= clip1;
+            return_address = vertex3;
         }
     }
-triangle_buffer_done:
     ordered {
         negative_my = vmudh(y_tmp1, shift_constants.WWWWWWWW);
         @storeVector64(y2, 0, clip2, 40);
@@ -1111,42 +1080,14 @@ triangle_buffer_done:
             dma.writeLengthAndStart(clip1);
         }
     }
-triangle_buffer_slow:
-    vertex3 = return_address;
-    triangle_command = load(i32, rdp_buffers, 4);
-    did_swap1 = load(i32, rdp_buffers);
-triangle_buffer_swap:
-    store(u32, rdp_buffers, triangle_command);
-    store(u32, rdp_buffers, did_swap1, 4);
-    store(u8, clip2, clip1);
-    ordered {
-        // Keep the reference's trapping add; generic large-immediate lowering
-        // materializes this expression with a different instruction sequence.
-        large_offset = 0x10000;
-        vertex2 = triangle_command + large_offset;
-    }
-    queue.resident_rdp_set_buffer(triangle_command, vertex1, vertex2) delay {
-        vertex1 = triangle_command;
-    }
-    cp0.setDmaAddrRdramA0(triangle_command);
-    clip1 = load(u8, clip2);
-    triangle_command +%= clip1;
-    goto triangle_buffer_done delay {
-        return_address = vertex3;
-    }
-triangle_dma_busy:
-    if(did_swap1 != 0) goto triangle_dma_busy delay {
-        cp0.getDmaBusyT1(did_swap1);
-    }
-    goto triangle_dma_idle;
-    @fallthrough(triangleSendEnd);
+    tail triangleSendEnd();
 }
 
 fn triangleSendEnd() noreturn {
-triangle_send_end:
     reg dma_busy: u32 = undefined;
-    cp0.getDmaBusyT0(dma_busy);
-    if(dma_busy != 0) goto triangle_send_end;
+    do {
+        cp0.getDmaBusyT0(dma_busy);
+    } while(dma_busy != 0);
     reg($a0) staging_end: u32 = undefined;
     @goto(queue.resident_rdp_append_buffer) delay {
         rdp.loadCurrent(staging_end);
@@ -1162,26 +1103,23 @@ command(2, 16) fn rectangleExclusive(
     reg modes_byte: i32 = load(i8, rdp_mode, 25);
     modes_byte &= 0x20;
     reg opcode: i32 = undefined;
-    if(modes_byte == 0) goto rect_substitute delay {
-        opcode = 0x34000000;
+    opcode = 0x34000000;
+    if(modes_byte != 0) {
+        word0 -%= 0x4004;
+        modes_byte = -65536;
+        reg derivative: i32 = undefined;
+        derivative = word3 & modes_byte;
+        derivative <<= 2;
+        word3 &= 0x0000ffff;
+        word3 |= derivative;
     }
-    word0 -%= 0x4004;
-    modes_byte = -65536;
-    reg derivative: i32 = undefined;
-    derivative = word3 & modes_byte;
-    derivative <<= 2;
-    word3 &= 0x0000ffff;
-    word3 |= derivative;
-rect_substitute:
     word0 ^= opcode;
     modes_byte = word0 << 3;
     reg($s0) writer: u32 = undefined;
-    if(modes_byte < 0) goto rect_end delay {
-        @setFunctionAddress(writer, rdp.write8);
+    @setFunctionAddress(writer, rdp.write8);
+    if(modes_byte >= 0) {
+        @setFunctionAddress(writer, rdp.write16);
     }
-rect_write16:
-    @setFunctionAddress(writer, rdp.write16);
-rect_end:
     reg($ra) return_address: u32 = undefined;
     @jump(writer) delay {
         @setFunctionAddress(return_address, rdp.finalize);
@@ -1216,14 +1154,13 @@ command(3) fn clearZBuffer(
     dmem = 1280;
     reg fill_end: u32 = undefined;
     fill_end = dmem +% 4096;
-clear_z_fill:
-    store(vec16, dmem, fill);
-    store(vec16, dmem, fill, 16);
-    store(vec16, dmem, fill, 32);
-    dmem +%= 64;
-    if(dmem != fill_end) goto clear_z_fill delay {
+    do {
+        store(vec16, dmem, fill);
+        store(vec16, dmem, fill, 16);
+        store(vec16, dmem, fill, 32);
+        dmem +%= 64;
         store(vec16, dmem, fill, -16);
-    }
+    } while(dmem != fill_end);
 
     dma.resident_dma_wait_ready();
     cp0.setDmaAddrRspZero();
@@ -1266,10 +1203,10 @@ command(28) fn autoTmemSetAddress(reg($a0) command: i32) noreturn {
     reg limit: i32 = undefined;
     reg($at) invalid: u32 = undefined;
     reg($ra) return_address: u32 = undefined;
-    if(command < 0) goto autotmem_end delay {
+    if(command < 0) @goto(autoTmemEnd) delay {
         address = load(u16, autotmem_address);
     }
-    if(command == 0) goto autotmem_begin delay {
+    if(command == 0) @goto(autoTmemBegin) delay {
         limit = load(u16, autotmem_limit);
     }
 
@@ -1282,8 +1219,12 @@ command(28) fn autoTmemSetAddress(reg($a0) command: i32) noreturn {
     @jump(return_address) delay {
         store(u16, autotmem_address, address);
     }
+}
 
-autotmem_begin:
+fn autoTmemBegin() noreturn {
+    reg($t0) address: i32 = undefined;
+    reg($t1) limit: i32 = undefined;
+    reg($ra) return_address: u32 = undefined;
     address = load(u8, autotmem_enabled);
     limit = address +% 1;
     if(address != 0) @goto(queue.resident_return_to_caller) delay {
@@ -1295,8 +1236,12 @@ autotmem_begin:
     @jump(return_address) delay {
         store(u16, autotmem_address, 0);
     }
+}
 
-autotmem_end:
+fn autoTmemEnd() noreturn {
+    reg($t0) address: i32 = undefined;
+    reg($at) invalid: u32 = undefined;
+    reg($ra) return_address: u32 = undefined;
     address = load(u8, autotmem_enabled);
     address -%= 1;
     if(address < 0) @goto(queue.resident_assertion_failed) delay {
@@ -1315,30 +1260,35 @@ command(29) fn autoTmemSetTile(
     reg mask: u32 = 0x00040000;
     reg address: u32 = undefined;
     use_previous = word0 & mask;
-    if(use_previous == 0) goto autotmem_tile_address_done delay {
-        address = load(i16, autotmem_address);
+    address = load(i16, autotmem_address);
+    if(use_previous != 0) {
+        address = load(i16, autotmem_previous_address);
     }
-autotmem_tile_previous:
-    address = load(i16, autotmem_previous_address);
-autotmem_tile_address_done:
     use_previous = 0x28000000;
     word0 ^= use_previous;
     word0 += address;
 
     use_previous = word0 >> 19;
     use_previous &= 0x1f;
-    address = 3;
-    if(use_previous == address) goto autotmem_lower_limit delay {
-        address = 6;
-    }
-    if(use_previous == address) goto autotmem_lower_limit delay {
-        address = 8;
-    }
-    if(use_previous == address) goto autotmem_lower_limit delay {
-        address = 9;
-    }
-    if(use_previous != address) @goto(_start) delay {
-    autotmem_lower_limit:
+    valid_format: block {
+        address = 3;
+        if(use_previous == address) {
+            break valid_format delay {
+                address = 6;
+            }
+        }
+        if(use_previous == address) {
+            break valid_format delay {
+                address = 8;
+            }
+        }
+        if(use_previous == address) {
+            break valid_format delay {
+                address = 9;
+            }
+        }
+        if(use_previous != address) @goto(_start);
+    } exit delay {
         address = 256;
     }
     @goto(_start) delay {
