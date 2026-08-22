@@ -11,6 +11,9 @@ pub const Function = struct {
     no_return: bool,
     command_indices: []const u8 = &.{},
     command_sizes: []const u8 = &.{},
+    has_clobber_contract: bool = false,
+    clobber_regs: []const Register = &.{},
+    clobber_vector_regs: []const VectorRegister = &.{},
     parameters: []const Parameter,
     statements: []Statement,
     layout_entries: []FunctionRef = &.{},
@@ -35,7 +38,7 @@ pub const Value = union(enum) {
     vector_shift: VectorShift,
     accumulator_read: AccumulatorPart,
     vector_control_read: VectorControlRegister,
-    hardware_read: enum { rsp_dma_busy },
+    hardware_read: u4,
     scalar_comparison: ScalarComparison,
     signed_less_than: struct { lhs: ValueRef, rhs: ValueRef },
     number: i64,
@@ -171,11 +174,12 @@ pub const VectorMemoryOperation = enum {
     load_packed_unsigned,
 };
 
-pub const HardwareWriteOperation = enum {
+pub const HardwareWriteOperation = union(enum) {
     rsp_dma_memory_address,
     rsp_dma_rdram_address,
     rsp_dma_write_length,
     rdp_command_end,
+    cp0: u4,
 };
 
 pub const Register = enum {
@@ -327,6 +331,14 @@ pub const Builtin = union(enum) {
         operation: HardwareWriteOperation,
         value: ValueRef,
     },
+    hardware_read_register: struct {
+        hardware_register: u4,
+        destination: Register,
+    },
+    hardware_write_register: struct {
+        hardware_register: u4,
+        source: Register,
+    },
 };
 
 pub const DirectGotoEncoding = enum {
@@ -365,6 +377,12 @@ pub const Assignment = struct {
     lhs: Value,
     op: AssignOp,
     rhs: ?Value,
+    continuation: []const BinaryStep = &.{},
+};
+
+pub const BinaryStep = struct {
+    op: AssignOp,
+    rhs: Value,
 };
 
 pub const Call = struct {
@@ -427,6 +445,8 @@ pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) 
     for (functions) |function| {
         if (function.command_indices.len != 0) allocator.free(function.command_indices);
         if (function.command_sizes.len != 0) allocator.free(function.command_sizes);
+        if (function.clobber_regs.len != 0) allocator.free(function.clobber_regs);
+        if (function.clobber_vector_regs.len != 0) allocator.free(function.clobber_vector_regs);
         if (function.layout_entries.len != 0) allocator.free(function.layout_entries);
         allocator.free(function.parameters);
         freeStatements(allocator, function.statements);
@@ -437,6 +457,7 @@ pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) 
 fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
     for (statements) |statement| {
         switch (statement) {
+            .assignment => |assignment| if (assignment.continuation.len != 0) allocator.free(assignment.continuation),
             .packed_struct_decl => |declaration| allocator.free(declaration.fields),
             .data_block, .bss_block, .state_block => |declarations| {
                 for (declarations) |declaration| allocator.free(declaration.values);

@@ -3,14 +3,14 @@ pub extern fn resident_dma_out(
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
     reg($s4) dmem: u32,
-) noreturn;
+) clobbers($at, $t2, $s4) noreturn;
 
 pub extern fn resident_dma_in(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
     reg($s4) dmem: u32,
-) noreturn;
+) clobbers($at, $t2, $s4) noreturn;
 
 pub extern fn resident_dma_exec(
     reg($t0) size: u32,
@@ -18,7 +18,7 @@ pub extern fn resident_dma_exec(
     reg($s0) rdram: u32,
     reg($s4) dmem: u32,
     reg($t2) flags: u32,
-) noreturn;
+) clobbers($at, $t2, $s4) noreturn;
 
-pub extern fn resident_dma_wait_status(reg($t2) flags: u32) noreturn;
-pub extern fn resident_dma_wait_ready() noreturn;
+pub extern fn resident_dma_wait_status(reg($t2) flags: u32) clobbers($at) noreturn;
+pub extern fn resident_dma_wait_ready() clobbers($at, $t2) noreturn;

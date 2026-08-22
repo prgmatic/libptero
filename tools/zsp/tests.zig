@@ -239,6 +239,31 @@ test "DMA and RDP operations compose with an explicit return delay slot" {
     );
 }
 
+test "CP0 intrinsics support values and explicit fixed registers" {
+    try expectAsm(
+        \\fn test(reg($t0) value: u32) noreturn {
+        \\  value = cp0.read(4);
+        \\  cp0.write(9, value);
+        \\  cp0.readRegister(5, $at);
+        \\  cp0.writeRegister(2, $at);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  mfc0 $t0, $4
+        \\  mtc0 $t0, $9
+        \\  mfc0 $at, $5
+        \\  mtc0 $at, $2
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "scalar comparison expressions produce normalized register results" {
     try expectAsm(
         \\fn test() noreturn {
@@ -293,6 +318,26 @@ test "functions emit in source order" {
         \\first:
         \\  jr $ra
         \\  nop
+        \\
+        \\
+    );
+}
+
+test "parenthesized scalar expression chains reuse the destination register" {
+    try expectAsm(
+        \\fn test(reg($t0) a: u32, reg($t1) b: u32, reg($t2) c: u32, reg($t3) result: u32) noreturn {
+        \\  result = (a & b | c);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  and $t3, $t0, $t1
+        \\  or $t3, $t3, $t2
+        \\  break
         \\
         \\
     );
@@ -534,6 +579,33 @@ test "packed structs emit fields without padding" {
         \\.globl _start
         \\_start:
         \\  addiu $t0, $zero, %lo(header)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "packed struct field offsets are compile-time memory offsets" {
+    try expectAsm(
+        \\packed struct Header {
+        \\  opcode: u8;
+        \\  flags: u16;
+        \\  address: u32;
+        \\}
+        \\fn test(reg($t0) ptr: u32, reg($t1) value: u32) noreturn {
+        \\  value = load(u32, ptr, @offsetOf(Header, address));
+        \\  store(u16, ptr, value, @offsetOf(Header, flags));
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  lw $t1, 3($t0)
+        \\  sh $t1, 1($t0)
         \\  break
         \\
         \\
@@ -1432,7 +1504,7 @@ test "vector declarations validate fixed registers and register pairs" {
     , error.RegisterAlreadyInUse);
 }
 
-test "automatic vector allocation keeps vec32 register pairs contiguous" {
+test "automatic vector allocation reuses dead registers and keeps vec32 pairs contiguous" {
     try expectAsm(
         \\fn test() noreturn {
         \\  reg a: vec16 = 0;
@@ -1446,9 +1518,9 @@ test "automatic vector allocation keeps vec32 register pairs contiguous" {
         \\
         \\test:
         \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
         \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
-        \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
-        \\  .word 0x4a04212c # vxor $v04, $v04, $v04
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
         \\
         \\
     );
@@ -1460,6 +1532,9 @@ test "automatic vector allocation reports exhaustion" {
     try source_writer.writer.writeAll("fn test() {\n");
     for (0..29) |index| {
         try source_writer.writer.print("  reg value_{d}: vec16 = 0;\n", .{index});
+    }
+    for (1..29) |index| {
+        try source_writer.writer.print("  value_0 += value_{d};\n", .{index});
     }
     try source_writer.writer.writeAll("}\n");
     const source = try source_writer.toOwnedSlice();
@@ -2030,6 +2105,65 @@ test "gp can be explicitly pinned but is not automatically allocated" {
     );
 }
 
+test "automatic scalar allocation reuses a register after its final use" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg first: u32 = 1;
+        \\  first += 1;
+        \\  reg second: u32 = 2;
+        \\  second += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 1
+        \\  addi $t0, $t0, 1
+        \\  addiu $t0, $zero, 2
+        \\  addi $t0, $t0, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "automatic allocation preserves values across backward label edges" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg sum: u32 = 0;
+        \\  reg count: u32 = 2;
+        \\loop:
+        \\  sum += count;
+        \\  reg scratch: u32 = 1;
+        \\  count -= scratch;
+        \\  if(count != 0) goto loop;
+        \\  reg result: u32 = 3;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 0
+        \\  addiu $t1, $zero, 2
+        \\LABEL_test_loop_0:
+        \\  add $t0, $t0, $t1
+        \\  addiu $t2, $zero, 1
+        \\  sub $t1, $t1, $t2
+        \\  bne $t1, $zero, LABEL_test_loop_0
+        \\  nop
+        \\  addiu $t0, $zero, 3
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "jump transfers control through a scalar register" {
     try expectAsm(
         \\fn dispatch(reg($t0) handler: u32) noreturn {
@@ -2591,6 +2725,570 @@ test "undefined register declarations emit no instruction" {
     );
 }
 
+test "automatic call arguments coalesce into fixed ABI registers" {
+    try expectAsm(
+        \\fn consume(reg($t3) value: u32) noreturn {
+        \\  @break();
+        \\}
+        \\fn test() noreturn {
+        \\  reg value: u32 = 7;
+        \\  consume(value);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  break
+        \\
+        \\test:
+        \\  addiu $t3, $zero, 7
+        \\  jal consume
+        \\  nop
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "automatic values live across calls avoid inferred clobbers" {
+    try expectAsm(
+        \\fn consume(reg($t0) input: u32) {
+        \\  input += 1;
+        \\}
+        \\fn test() noreturn {
+        \\  reg value: u32 = 7;
+        \\  consume(3);
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  addi $t0, $t0, 1
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  addiu $t1, $zero, 7
+        \\  addiu $t0, $zero, 3
+        \\  jal consume
+        \\  nop
+        \\  addi $t1, $t1, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "literal argument setup avoids unrelated automatic values live across calls" {
+    try expectAsm(
+        \\fn consume(reg($t0) input: u32) {
+        \\}
+        \\fn test() noreturn {
+        \\  reg value: u32 = 7;
+        \\  consume(3);
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  addiu $t1, $zero, 7
+        \\  addiu $t0, $zero, 3
+        \\  jal consume
+        \\  nop
+        \\  addi $t1, $t1, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "constant argument setup avoids unrelated automatic values live across calls" {
+    try expectAsm(
+        \\fn consume(reg($t0) input: u32) {
+        \\}
+        \\fn test() noreturn {
+        \\  const input: u32 = 3;
+        \\  reg value: u32 = 7;
+        \\  consume(input);
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  addiu $t1, $zero, 7
+        \\  addiu $t0, $zero, 3
+        \\  jal consume
+        \\  nop
+        \\  addi $t1, $t1, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "read-only automatic arguments remain live in their ABI registers" {
+    try expectAsm(
+        \\fn consume(reg($t0) input: u32) {
+        \\}
+        \\fn test() noreturn {
+        \\  reg value: u32 = 7;
+        \\  consume(value);
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 7
+        \\  jal consume
+        \\  nop
+        \\  addi $t0, $t0, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "literal argument setup rejects conflicting pinned live values" {
+    try expectAsmError(
+        \\fn consume(reg($t0) input: u32) {
+        \\}
+        \\fn test() noreturn {
+        \\  reg($t0) value: u32 = 7;
+        \\  consume(3);
+        \\  value += 1;
+        \\  @break();
+        \\}
+    , error.PinnedRegisterOverwrittenByCallArgument);
+}
+
+test "transitive literal argument setup rejects conflicting pinned live values" {
+    try expectAsmError(
+        \\fn consume(reg($t0) input: u32) {
+        \\}
+        \\fn middle() {
+        \\  consume(3);
+        \\}
+        \\fn test() noreturn {
+        \\  reg($t0) value: u32 = 7;
+        \\  middle();
+        \\  value += 1;
+        \\  @break();
+        \\}
+    , error.PinnedRegisterClobberedByCall);
+}
+
+test "call clobber inference includes callee automatic registers" {
+    try expectAsm(
+        \\fn consume() {
+        \\  reg scratch: u32 = 1;
+        \\  scratch += 1;
+        \\}
+        \\fn test() noreturn {
+        \\  reg value: u32 = 7;
+        \\  consume();
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  addiu $t0, $zero, 1
+        \\  addi $t0, $t0, 1
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  addiu $t1, $zero, 7
+        \\  jal consume
+        \\  nop
+        \\  addi $t1, $t1, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "automatic callees preserve pinned caller locals live across calls" {
+    try expectAsm(
+        \\fn consume() {
+        \\  reg scratch: u32 = 1;
+        \\  scratch += 1;
+        \\}
+        \\fn test() noreturn {
+        \\  reg($t0) preserved: u32 = 7;
+        \\  consume();
+        \\  preserved += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  addiu $t1, $zero, 1
+        \\  addi $t1, $t1, 1
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 7
+        \\  jal consume
+        \\  nop
+        \\  addi $t0, $t0, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "fixed callee clobbers reject conflicting pinned caller locals" {
+    try expectAsmError(
+        \\fn consume() {
+        \\  reg($t0) scratch: u32 = 1;
+        \\}
+        \\fn test() noreturn {
+        \\  reg($t0) preserved: u32 = 7;
+        \\  consume();
+        \\  preserved += 1;
+        \\  @break();
+        \\}
+    , error.PinnedRegisterClobberedByCall);
+}
+
+test "transitive fixed clobbers reject conflicting pinned caller locals" {
+    try expectAsmError(
+        \\fn inner() {
+        \\  reg($t0) scratch: u32 = 1;
+        \\}
+        \\fn middle() {
+        \\  inner();
+        \\}
+        \\fn test() noreturn {
+        \\  reg($t0) preserved: u32 = 7;
+        \\  middle();
+        \\  preserved += 1;
+        \\  @break();
+        \\}
+    , error.PinnedRegisterClobberedByCall);
+}
+
+test "automatic values overwritten after calls may use callee clobbers" {
+    try expectAsm(
+        \\fn consume(reg($t0) input: u32) {
+        \\  input += 1;
+        \\}
+        \\fn test() noreturn {
+        \\  reg value: u32 = 7;
+        \\  consume(3);
+        \\  value = 9;
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  addi $t0, $t0, 1
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 7
+        \\  addiu $t0, $zero, 3
+        \\  jal consume
+        \\  nop
+        \\  addiu $t0, $zero, 9
+        \\  addi $t0, $t0, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "calls may define automatic output arguments in fixed registers" {
+    try expectAsm(
+        \\inline fn readStatus(reg($t2) value: u32) {
+        \\  value = cp0.read(11);
+        \\}
+        \\fn test() noreturn {
+        \\  reg value: u32;
+        \\  readStatus(value);
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  mfc0 $t2, $11
+        \\  addi $t2, $t2, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "extern clobber contracts constrain automatic values live across calls" {
+    try expectAsm(
+        \\extern fn consume() clobbers($t0);
+        \\fn test() noreturn {
+        \\  reg value: u32 = 7;
+        \\  consume();
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t1, $zero, 7
+        \\  jal consume
+        \\  nop
+        \\  addi $t1, $t1, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "extern clobber contracts parse scalar and vector registers" {
+    var parser = try parser_mod.Parser.init(testing.allocator,
+        \\extern fn consume() clobbers($t0, $s4, $v03, $v20);
+    );
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    try testing.expectEqual(@as(usize, 1), functions.len);
+    try testing.expect(functions[0].has_clobber_contract);
+    try testing.expectEqualSlices(ast.Register, &.{ .t0, .s4 }, functions[0].clobber_regs);
+    try testing.expectEqualSlices(ast.VectorRegister, &.{ .v03, .v20 }, functions[0].clobber_vector_regs);
+}
+
+test "extern vector clobbers constrain automatic values live across calls" {
+    try expectAsm(
+        \\extern fn consume() clobbers($v01);
+        \\fn test() noreturn {
+        \\  reg value: vec16 = 0;
+        \\  consume();
+        \\  reg addend: vec16 = 0;
+        \\  value += addend;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  jal consume
+        \\  nop
+        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a011094 # vaddc $v02, $v02, $v01
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "extern calls without contracts conservatively clobber automatic registers" {
+    try expectAsmError(
+        \\extern fn consume();
+        \\fn test() noreturn {
+        \\  reg value: u32 = 7;
+        \\  consume();
+        \\  value += 1;
+        \\  @break();
+        \\}
+    , error.OutOfFreeRegisters);
+}
+
+test "extern clobber contracts reject live pinned register conflicts" {
+    try expectAsmError(
+        \\extern fn consume() clobbers($t0);
+        \\fn test() noreturn {
+        \\  reg($t0) value: u32 = 7;
+        \\  consume();
+        \\  value += 1;
+        \\  @break();
+        \\}
+    , error.PinnedRegisterClobberedByExternalCall);
+}
+
+test "call delay-slot definitions survive callee clobbers" {
+    try expectAsm(
+        \\fn consume() clobbers($t0) {
+        \\}
+        \\fn test() noreturn {
+        \\  reg value: u32 = undefined;
+        \\  consume() delay {
+        \\    value = 7;
+        \\  }
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  jal consume
+        \\  addiu $t1, $zero, 7
+        \\  addi $t1, $t1, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "automatic values declared in call delay slots survive callee clobbers" {
+    try expectAsm(
+        \\fn consume() clobbers($t0) {
+        \\}
+        \\fn test() noreturn {
+        \\  consume() delay {
+        \\    reg value: u32 = 7;
+        \\  }
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  jal consume
+        \\  addiu $t1, $zero, 7
+        \\  addi $t1, $t1, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "control-flow liveness preserves values when a branch bypasses a write" {
+    try expectAsm(
+        \\extern fn consume() clobbers($t0);
+        \\fn test(reg($a0) flag: u32) noreturn {
+        \\  reg value: u32 = 7;
+        \\  consume();
+        \\  if(flag == 0) goto use_value;
+        \\  value = 9;
+        \\use_value:
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t1, $zero, 7
+        \\  jal consume
+        \\  nop
+        \\  beq $a0, $zero, LABEL_test_use_value_0
+        \\  nop
+        \\  addiu $t1, $zero, 9
+        \\LABEL_test_use_value_0:
+        \\  addi $t1, $t1, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "control-flow liveness ignores clobbers on mutually exclusive paths" {
+    try expectAsm(
+        \\extern fn consume() clobbers($t0);
+        \\inline fn define(reg($t0) value: u32) {
+        \\  value = 5;
+        \\}
+        \\fn test(reg($a0) flag: u32) noreturn {
+        \\  reg value: u32 = undefined;
+        \\  if(flag == 0) goto other_path;
+        \\  consume();
+        \\  value = 9;
+        \\  goto done;
+        \\other_path:
+        \\  define(value);
+        \\done:
+        \\  value += 1;
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  beq $a0, $zero, LABEL_test_other_path_0
+        \\  nop
+        \\  jal consume
+        \\  nop
+        \\  addiu $t0, $zero, 9
+        \\  j LABEL_test_done_0
+        \\  nop
+        \\LABEL_test_other_path_0:
+        \\  addiu $t0, $zero, 5
+        \\LABEL_test_done_0:
+        \\  addi $t0, $t0, 1
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "function calls verify fixed-register arguments without moves" {
     try expectAsm(
         \\fn callee(
@@ -2648,6 +3346,39 @@ test "inline calls do not force command return-address preservation" {
         \\  .byte 1
         \\  .byte 4
         \\  .short 0
+        \\
+        \\
+    );
+}
+
+test "automatic locals in inline functions honor nested call registers" {
+    try expectAsm(
+        \\fn consume(reg($t2) value: u32) {
+        \\}
+        \\inline fn helper(reg($a0) value: u32) {
+        \\  reg scratch: u32 = 3;
+        \\  consume(scratch);
+        \\  value += 1;
+        \\}
+        \\fn test(reg($a0) value: u32) noreturn {
+        \\  helper(value);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\consume:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  addiu $t2, $zero, 3
+        \\  jal consume
+        \\  nop
+        \\  addi $a0, $a0, 1
+        \\  break
         \\
         \\
     );

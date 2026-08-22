@@ -57,9 +57,41 @@ reg inferred = load(u16, address);
 ```
 
 `undefined` reserves a register without emitting initialization. A type may be
-inferred only from a `load`. Unpinned scalar registers are allocated
-automatically; `$zero`, `$at`, `$k0`, `$k1`, `$gp`, `$sp`, and `$ra` are not
-automatically allocated. `$gp` may still be explicitly pinned.
+inferred only from a `load`. Unpinned scalar registers are allocated from
+`$t0` through `$t9`, `$k0`, `$sp`, `$fp`, and `$s0` through `$s7`. `$zero`,
+`$at`, `$v0`, `$v1`, `$gp`, `$k1`, and `$ra` retain explicit ABI or backend
+meaning and are not allocated automatically. `$gp` may still be explicitly
+pinned.
+
+Automatic allocation is definition- and control-flow-aware: scalar and vector
+registers are reused after their values die along every reachable path. The
+analysis follows branches, loops, labels, gotos, nested blocks, and branch delay
+slots. A value produced in a call's delay slot is live across the callee, while
+a value defined by the callee is not treated as a live input.
+
+Calls constrain automatic arguments directly to fixed ABI registers. Values
+live across a call avoid the transitive register clobbers inferred from the
+call graph, and automatic callee locals avoid pinned caller locals that must
+survive the call. Inline function bodies receive the same lifetime and call
+analysis while reserving the caller's live registers.
+
+ZSP never inserts spills, argument moves, or save/restore instructions for
+automatic allocation. If no safe assignment exists without extra code,
+compilation fails.
+
+External functions can declare their complete register-clobber contract after
+their parameter list:
+
+```zig
+extern fn dmaWait(reg($t2) flags: u32) clobbers($at);
+extern fn resumeQueue() clobbers() noreturn;
+```
+
+Both scalar and vector hardware registers are accepted by `clobbers(...)`.
+An external function without a contract is conservatively assumed to clobber
+every register. A live explicitly pinned value that conflicts with an external
+contract is a compile error because the allocator cannot move that value or
+make the external routine preserve it.
 
 `const` declares a compile-time scalar value. Constants are emitted as
 immediates where possible and do not consume registers:
@@ -74,12 +106,13 @@ Names may not be duplicated in a visible global or function scope. The old
 ## Scalar expressions
 
 All scalar types support assignment, arithmetic, shifts, bitwise operations,
-and comparisons. Binary expressions are intentionally simple: one operator is
-allowed per assignment, so longer expressions must use intermediate
-assignments.
+and comparisons. An unparenthesized assignment has one operator. An explicitly
+parenthesized chain is evaluated left-to-right in the destination register, so
+it adds no temporary registers or hidden instructions.
 
 ```zig
 value = left + right;
+value = (left & mask | bits); // `(left & mask) | bits`, reusing `value`
 value += 1;
 value +%= 1;       // wrapping addition
 value -= amount;
@@ -180,7 +213,9 @@ state {
 }
 ```
 
-Packed structs contain scalar fields without padding. `data` requires literal
+Packed structs contain scalar fields without padding. Use
+`@offsetOf(Header, address)` as a compile-time memory offset; it emits the same
+immediate as writing the numeric byte offset directly. `data` requires literal
 initializers and arrays require exactly the declared number of elements. `bss`
 and `state` reserve addressable storage. The complete `state` section is padded
 to an eight-byte boundary and is intended to survive replacement of an
@@ -508,6 +543,17 @@ dma.writeLengthAndStart(length);
 rdp.writeCommandEnd(command_end);
 ```
 
+Any CP0 register can be accessed without inline assembly. `cp0.read(index)` is
+a scalar expression and `cp0.write(index, value)` is a statement. The
+`readRegister` and `writeRegister` forms accept an explicit fixed register for
+ABI helpers that intentionally operate on a register not declared as a value:
+
+```zig
+status = cp0.read(4);
+cp0.write(9, command_end);
+cp0.readRegister(5, $at);
+```
+
 ## Optimizer
 
 The assembly optimizer performs conservative RSP scheduling. It can fill
@@ -519,8 +565,8 @@ delay slots intact, and treats unknown raw assembly as a barrier. Use
 
 ## Current limitations
 
-Notable omissions include general scalar multiplication/division, arbitrary
-expression trees, casts, ternary expressions, general vector shifts, packed
+Notable omissions include general scalar multiplication/division, precedence-
+based arbitrary expression trees, casts, ternary expressions, general vector shifts, packed
 vector stores, unaligned vector operations, transposed vector operations,
 annotations, and macros.
 

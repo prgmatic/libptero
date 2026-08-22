@@ -23,7 +23,8 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     try writer.writeAll(".set noreorder\n");
     try writer.writeAll(".set noat\n");
 
-    var top_level_context = FunctionContext{ .label_prefix = "top_level" };
+    var clobbers = try FunctionClobberRegistry.init(functions);
+    var top_level_context = FunctionContext{ .label_prefix = "top_level", .clobbers = &clobbers };
     try writeStorageBlocks(writer, functions, &top_level_context);
     try writeCommandTable(writer, functions, &top_level_context);
     try writer.writeAll(".text\n\n");
@@ -114,6 +115,13 @@ fn writeFunction(
         }
         var function_context = top_level_context.child(function.name);
         const context = if (function.emit_label) &function_context else top_level_context;
+        if (function.emit_label) {
+            if (top_level_context.clobbers.?.find(function.name)) |function_clobber| {
+                context.function_forbidden_scalar = function_clobber.forbidden_scalar;
+                context.function_forbidden_vector = function_clobber.forbidden_vector;
+            }
+            try context.prepareLifetimes(functions, function.parameters, function.statements);
+        }
         try bindParameters(context, function.parameters);
         try writeStatements(writer, functions, context, function.statements);
         if (!function.no_return and !terminal_jump) {
@@ -315,13 +323,418 @@ const Symbol = struct {
     vector_reg: ?ast.VectorRegister = null,
     constant: ?i64,
     data_label: ?[]const u8 = null,
+    automatic: bool = false,
+    last_use: usize = std.math.maxInt(usize),
 };
+
+const FunctionClobber = struct {
+    name: []const u8,
+    scalar: u32 = 0,
+    vector: u32 = 0,
+    forbidden_scalar: u32 = 0,
+    forbidden_vector: u32 = 0,
+};
+
+const FunctionClobberRegistry = struct {
+    entries: [1024]FunctionClobber = undefined,
+    len: usize = 0,
+
+    fn init(functions: []const ast.Function) !FunctionClobberRegistry {
+        if (functions.len > 1024) return error.TooManyFunctions;
+        var result = FunctionClobberRegistry{};
+        var direct: [1024]FunctionClobber = undefined;
+        for (functions) |function| {
+            var entry = FunctionClobber{ .name = function.name };
+            scanDirectFunctionClobbers(functions, function, function.statements, &entry);
+            result.entries[result.len] = entry;
+            direct[result.len] = entry;
+            result.len += 1;
+        }
+        for (functions) |function| {
+            var context = FunctionContext{ .label_prefix = function.name };
+            try context.prepareLifetimes(functions, function.parameters, function.statements);
+            for (context.lifetime_calls[0..context.lifetime_call_count]) |call| {
+                const target = result.findPtr(call.target) orelse continue;
+                const target_function = findFunction(functions, call.target) orelse continue;
+                for (context.lifetimes[0..context.lifetime_count]) |lifetime| {
+                    if (lifetime.automatic or lifetime.declaration >= call.resume_position or
+                        !context.valueLivesAcross(lifetime.name, call.resume_position) or
+                        context.valueDefinedAt(lifetime.name, call.position)) continue;
+                    if (lifetime.fixed_reg) |reg| {
+                        if ((call.setup_scalar & registerBit(reg)) != 0) {
+                            return error.PinnedRegisterOverwrittenByCallArgument;
+                        }
+                        if (target_function.external and (target.scalar & registerBit(reg)) != 0) {
+                            return error.PinnedRegisterClobberedByExternalCall;
+                        }
+                        target.forbidden_scalar |= registerBit(reg);
+                    }
+                    if (lifetime.fixed_vector_reg) |reg| {
+                        if ((call.setup_vector & vectorRegisterBit(reg)) != 0) {
+                            return error.PinnedRegisterOverwrittenByCallArgument;
+                        }
+                        if (target_function.external and (target.vector & vectorRegisterBit(reg)) != 0) {
+                            return error.PinnedRegisterClobberedByExternalCall;
+                        }
+                        target.forbidden_vector |= vectorRegisterBit(reg);
+                        if (lifetime.data_type == .vec32) {
+                            if (nextVectorRegister(reg)) |second| {
+                                if ((call.setup_vector & vectorRegisterBit(second)) != 0) {
+                                    return error.PinnedRegisterOverwrittenByCallArgument;
+                                }
+                                if (target_function.external and (target.vector & vectorRegisterBit(second)) != 0) {
+                                    return error.PinnedRegisterClobberedByExternalCall;
+                                }
+                                target.forbidden_vector |= vectorRegisterBit(second);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        @memcpy(direct[0..result.len], result.entries[0..result.len]);
+        for (0..32) |_| {
+            const previous = result;
+            @memcpy(result.entries[0..result.len], direct[0..result.len]);
+            for (functions, 0..) |function, index| {
+                var context = FunctionContext{
+                    .label_prefix = function.name,
+                    .clobbers = &previous,
+                    .function_forbidden_scalar = direct[index].forbidden_scalar,
+                    .function_forbidden_vector = direct[index].forbidden_vector,
+                };
+                try context.prepareLifetimes(functions, function.parameters, function.statements);
+                for (context.lifetime_calls[0..context.lifetime_call_count]) |call| {
+                    result.entries[index].scalar |= call.setup_scalar;
+                    result.entries[index].vector |= call.setup_vector;
+                }
+                try bindParameters(&context, function.parameters);
+                try simulateAutomaticRegisters(&context, function.statements, &result.entries[index]);
+            }
+            var changed = true;
+            while (changed) {
+                changed = false;
+                for (functions, 0..) |function, index| {
+                    var scalar = result.entries[index].scalar;
+                    var vector = result.entries[index].vector;
+                    collectCalledFunctionClobbers(&result, function.statements, &scalar, &vector);
+                    if (scalar != result.entries[index].scalar or vector != result.entries[index].vector) {
+                        result.entries[index].scalar = scalar;
+                        result.entries[index].vector = vector;
+                        changed = true;
+                    }
+                }
+            }
+            for (result.entries[0..result.len]) |entry| {
+                if ((entry.scalar & entry.forbidden_scalar) != 0 or
+                    (entry.vector & entry.forbidden_vector) != 0)
+                {
+                    return error.PinnedRegisterClobberedByCall;
+                }
+            }
+            var converged = true;
+            for (functions, 0..) |function, index| {
+                _ = function;
+                if (result.entries[index].scalar != previous.entries[index].scalar or
+                    result.entries[index].vector != previous.entries[index].vector)
+                {
+                    converged = false;
+                    break;
+                }
+            }
+            if (converged) return result;
+        }
+        return error.RegisterClobberAnalysisDidNotConverge;
+    }
+
+    fn find(self: *const FunctionClobberRegistry, name: []const u8) ?FunctionClobber {
+        for (self.entries[0..self.len]) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry;
+        }
+        return null;
+    }
+
+    fn findPtr(self: *FunctionClobberRegistry, name: []const u8) ?*FunctionClobber {
+        for (self.entries[0..self.len]) |*entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry;
+        }
+        return null;
+    }
+};
+
+fn registerBit(reg: Register) u32 {
+    return @as(u32, 1) << @intFromEnum(reg);
+}
+
+fn vectorRegisterBit(reg: ast.VectorRegister) u32 {
+    return @as(u32, 1) << @intFromEnum(reg);
+}
+
+fn allAutomaticScalarRegisters() u32 {
+    var result: u32 = 0;
+    for (alloc_scalar_registers) |reg| result |= registerBit(reg);
+    return result;
+}
+
+fn allAutomaticVectorRegisters() u32 {
+    var result: u32 = 0;
+    for (alloc_vector_registers) |reg| result |= vectorRegisterBit(reg);
+    return result;
+}
+
+fn scanDirectFunctionClobbers(
+    functions: []const ast.Function,
+    function: ast.Function,
+    statements: []const ast.Statement,
+    result: *FunctionClobber,
+) void {
+    if (function.external and !function.has_clobber_contract) {
+        result.scalar = std.math.maxInt(u32);
+        result.vector = std.math.maxInt(u32);
+        return;
+    }
+    for (function.clobber_regs) |reg| result.scalar |= registerBit(reg);
+    for (function.clobber_vector_regs) |reg| result.vector |= vectorRegisterBit(reg);
+    if (!function.has_clobber_contract) {
+        for (function.parameters, 0..) |parameter, parameter_index| {
+            var visited: [1024]ParameterWriteVisit = undefined;
+            var visited_count: usize = 0;
+            if (!function.external and !functionParameterIsWritten(
+                functions,
+                function,
+                parameter_index,
+                &visited,
+                &visited_count,
+            )) continue;
+            if (parameter.reg) |reg| result.scalar |= registerBit(reg);
+            if (parameter.vector_reg) |reg| {
+                result.vector |= vectorRegisterBit(reg);
+                if (parameter.data_type == .vec32) {
+                    if (nextVectorRegister(reg)) |second| result.vector |= vectorRegisterBit(second);
+                }
+            }
+        }
+    }
+    scanDirectStatementClobbers(statements, result);
+}
+
+fn scanDirectStatementClobbers(statements: []const ast.Statement, result: *FunctionClobber) void {
+    for (statements) |statement| switch (statement) {
+        .var_decl => |decl| {
+            if (decl.is_const) continue;
+            if (isVectorType(decl.data_type)) {
+                if (decl.vector_reg) |reg| {
+                    result.vector |= vectorRegisterBit(reg);
+                    if (decl.data_type == .vec32) {
+                        if (nextVectorRegister(reg)) |second| result.vector |= vectorRegisterBit(second);
+                    }
+                }
+            } else if (decl.reg) |reg| {
+                result.scalar |= registerBit(reg);
+            }
+        },
+        .goto => |branch| if (branch.delay_slot) |delay| scanDirectStatementClobbers(delay, result),
+        .conditional_goto => |branch| if (branch.delay_slot) |delay| scanDirectStatementClobbers(delay, result),
+        .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| scanDirectStatementClobbers(delay, result),
+        .while_loop => |loop| scanDirectStatementClobbers(loop.statements, result),
+        .if_statement => |branch| {
+            scanDirectStatementClobbers(branch.then_statements, result);
+            if (branch.else_statements) |items| scanDirectStatementClobbers(items, result);
+        },
+        .ordered_block => |items| scanDirectStatementClobbers(items, result),
+        .builtin => |builtin| switch (builtin) {
+            .hardware_read_register => |transfer| result.scalar |= registerBit(transfer.destination),
+            .jump => |jump| if (jump.delay_slot) |delay| scanDirectStatementClobbers(delay, result),
+            .return_from_function => |delay| if (delay) |items| scanDirectStatementClobbers(items, result),
+            else => {},
+        },
+        .asm_line, .exact_asm_line => {
+            result.scalar |= allAutomaticScalarRegisters();
+            result.vector |= allAutomaticVectorRegisters();
+        },
+        else => {},
+    };
+}
+
+fn collectCalledFunctionClobbers(
+    registry: *const FunctionClobberRegistry,
+    statements: []const ast.Statement,
+    scalar: *u32,
+    vector: *u32,
+) void {
+    for (statements) |statement| switch (statement) {
+        .call => |call| {
+            addNamedClobber(registry, call.module, call.name, scalar, vector);
+            if (call.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector);
+        },
+        .goto => |branch| if (branch.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector),
+        .conditional_goto => |branch| if (branch.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector),
+        .conditional_direct_goto => |branch| {
+            addNamedClobber(registry, branch.target.module, branch.target.name, scalar, vector);
+            if (branch.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector);
+        },
+        .while_loop => |loop| collectCalledFunctionClobbers(registry, loop.statements, scalar, vector),
+        .if_statement => |branch| {
+            collectCalledFunctionClobbers(registry, branch.then_statements, scalar, vector);
+            if (branch.else_statements) |items| collectCalledFunctionClobbers(registry, items, scalar, vector);
+        },
+        .ordered_block => |items| collectCalledFunctionClobbers(registry, items, scalar, vector),
+        .builtin => |builtin| switch (builtin) {
+            .direct_goto => |item| addNamedClobber(registry, item.target.module, item.target.name, scalar, vector),
+            .call_and_goto => |item| {
+                addNamedClobber(registry, item.callee.module, item.callee.name, scalar, vector);
+                addNamedClobber(registry, item.continuation.module, item.continuation.name, scalar, vector);
+            },
+            .fallthrough => |target| addNamedClobber(registry, target.module, target.name, scalar, vector),
+            .jump => |jump| if (jump.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector),
+            .return_from_function => |delay| if (delay) |items| collectCalledFunctionClobbers(registry, items, scalar, vector),
+            else => {},
+        },
+        else => {},
+    };
+}
+
+fn addNamedClobber(
+    registry: *const FunctionClobberRegistry,
+    module: ?[]const u8,
+    name: []const u8,
+    scalar: *u32,
+    vector: *u32,
+) void {
+    if (module != null) return;
+    if (registry.find(name)) |entry| {
+        scalar.* |= entry.scalar;
+        vector.* |= entry.vector;
+    }
+}
+
+fn simulateAutomaticRegisters(
+    context: *FunctionContext,
+    statements: []const ast.Statement,
+    clobber: *FunctionClobber,
+) !void {
+    for (statements) |statement| {
+        if (context.track_statement_position) context.statement_position += 1;
+        switch (statement) {
+            .var_decl => |decl| {
+                if (decl.is_const) {
+                    try context.add(.{
+                        .name = decl.name,
+                        .data_type = decl.data_type,
+                        .reg = null,
+                        .constant = 0,
+                    });
+                } else if (isVectorType(decl.data_type)) {
+                    const reg = decl.vector_reg orelse try context.allocVectorRegister(decl.data_type, decl.name);
+                    try validateVectorRegisterBinding(context, decl.data_type, reg);
+                    clobber.vector |= vectorRegisterBit(reg);
+                    if (decl.data_type == .vec32) {
+                        clobber.vector |= vectorRegisterBit(nextVectorRegister(reg) orelse
+                            return error.InvalidVectorRegisterPair);
+                    }
+                    try context.add(.{
+                        .name = decl.name,
+                        .data_type = decl.data_type,
+                        .reg = null,
+                        .vector_reg = reg,
+                        .constant = null,
+                        .automatic = decl.vector_reg == null,
+                        .last_use = context.lastUse(decl.name),
+                    });
+                } else {
+                    const reg = decl.reg orelse try context.allocRegister(decl.data_type, decl.name);
+                    if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
+                    clobber.scalar |= registerBit(reg);
+                    try context.add(.{
+                        .name = decl.name,
+                        .data_type = decl.data_type,
+                        .reg = reg,
+                        .constant = null,
+                        .automatic = decl.reg == null,
+                        .last_use = context.lastUse(decl.name),
+                    });
+                }
+            },
+            .goto => |branch| if (branch.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
+            .conditional_goto => |branch| if (branch.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
+            .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
+            .while_loop => |loop| {
+                const scope = context.pushScope();
+                try simulateAutomaticRegisters(context, loop.statements, clobber);
+                context.popScope(scope);
+            },
+            .if_statement => |branch| {
+                const then_scope = context.pushScope();
+                try simulateAutomaticRegisters(context, branch.then_statements, clobber);
+                context.popScope(then_scope);
+                if (branch.else_statements) |items| {
+                    const else_scope = context.pushScope();
+                    try simulateAutomaticRegisters(context, items, clobber);
+                    context.popScope(else_scope);
+                }
+            },
+            .ordered_block => |items| try simulateAutomaticRegisters(context, items, clobber),
+            .call => |call| if (call.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
+            .builtin => |builtin| switch (builtin) {
+                .jump => |jump| if (jump.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
+                .return_from_function => |delay| if (delay) |items| try simulateAutomaticRegisters(context, items, clobber),
+                else => {},
+            },
+            else => {},
+        }
+    }
+}
+
+const Lifetime = struct {
+    name: []const u8,
+    declaration: usize,
+    last_use: usize,
+    automatic: bool,
+    data_type: DataType,
+    fixed_reg: ?Register = null,
+    fixed_vector_reg: ?ast.VectorRegister = null,
+    required_reg: ?Register = null,
+    required_vector_reg: ?ast.VectorRegister = null,
+    forbidden_scalar: u32 = 0,
+    forbidden_vector: u32 = 0,
+};
+
+const LifetimeLabel = struct { name: []const u8, position: usize };
+const LifetimeEdge = struct { target: []const u8, position: usize };
+const LifetimeCall = struct {
+    target: []const u8,
+    position: usize,
+    resume_position: usize,
+    setup_scalar: u32 = 0,
+    setup_vector: u32 = 0,
+};
+const LifetimeEventKind = enum { read, write };
+const LifetimeEvent = struct { name: []const u8, position: usize, kind: LifetimeEventKind };
 
 const FunctionContext = struct {
     label_prefix: []const u8,
     symbols: [128]Symbol = undefined,
     symbol_count: usize = 0,
     next_label: usize = 0,
+    lifetimes: [128]Lifetime = undefined,
+    lifetime_count: usize = 0,
+    lifetime_labels: [128]LifetimeLabel = undefined,
+    lifetime_label_count: usize = 0,
+    lifetime_edges: [128]LifetimeEdge = undefined,
+    lifetime_edge_count: usize = 0,
+    lifetime_calls: [128]LifetimeCall = undefined,
+    lifetime_call_count: usize = 0,
+    lifetime_events: [2048]LifetimeEvent = undefined,
+    lifetime_event_count: usize = 0,
+    flow_successors: [2049][2]usize = @splat(.{ 0, 0 }),
+    flow_successor_counts: [2049]u2 = @splat(0),
+    flow_statement_count: usize = 0,
+    statement_position: usize = 0,
+    track_statement_position: bool = true,
+    lifetime_reuse: bool = false,
+    clobbers: ?*const FunctionClobberRegistry = null,
+    function_forbidden_scalar: u32 = 0,
+    function_forbidden_vector: u32 = 0,
 
     fn add(self: *FunctionContext, symbol: Symbol) !void {
         if (self.symbol_count >= self.symbols.len) return error.TooManySymbols;
@@ -331,10 +744,297 @@ const FunctionContext = struct {
     }
 
     fn child(self: *const FunctionContext, label_prefix: []const u8) FunctionContext {
-        var result = FunctionContext{ .label_prefix = label_prefix };
+        var result = FunctionContext{
+            .label_prefix = label_prefix,
+            .clobbers = self.clobbers,
+            .function_forbidden_scalar = self.function_forbidden_scalar,
+            .function_forbidden_vector = self.function_forbidden_vector,
+        };
         @memcpy(result.symbols[0..self.symbol_count], self.symbols[0..self.symbol_count]);
         result.symbol_count = self.symbol_count;
         return result;
+    }
+
+    fn prepareLifetimes(
+        self: *FunctionContext,
+        functions: []const ast.Function,
+        parameters: []const ast.Parameter,
+        statements: []const ast.Statement,
+    ) !void {
+        self.lifetime_count = 0;
+        self.lifetime_label_count = 0;
+        self.lifetime_edge_count = 0;
+        self.lifetime_call_count = 0;
+        self.lifetime_event_count = 0;
+        self.statement_position = 0;
+        self.lifetime_reuse = !statementsContainUnstructuredControlFlow(statements);
+        if (!self.lifetime_reuse) return;
+        for (parameters) |parameter| {
+            if (std.mem.eql(u8, parameter.name, "_")) continue;
+            self.declareLifetime(
+                parameter.name,
+                0,
+                false,
+                parameter.data_type,
+                parameter.reg,
+                parameter.vector_reg,
+            );
+        }
+        var position: usize = 0;
+        scanStatementLifetimes(self, statements, &position);
+        if (!self.lifetime_reuse or position >= self.flow_successors.len) {
+            self.lifetime_reuse = false;
+            return;
+        }
+        self.extendBackwardEdgeLifetimes();
+        self.flow_statement_count = position;
+        @memset(self.flow_successor_counts[0 .. position + 1], 0);
+        position = 0;
+        buildStatementFlow(self, statements, &position, 0);
+        position = 0;
+        try applyCallRequirements(self, functions, statements, &position);
+        self.applyCallClobbers();
+    }
+
+    fn declareLifetime(
+        self: *FunctionContext,
+        name: []const u8,
+        position: usize,
+        automatic: bool,
+        data_type: DataType,
+        fixed_reg: ?Register,
+        fixed_vector_reg: ?ast.VectorRegister,
+    ) void {
+        if (self.lifetime_count >= self.lifetimes.len) {
+            self.lifetime_reuse = false;
+            return;
+        }
+        self.lifetimes[self.lifetime_count] = .{
+            .name = name,
+            .declaration = position,
+            .last_use = position,
+            .automatic = automatic,
+            .data_type = data_type,
+            .fixed_reg = fixed_reg,
+            .fixed_vector_reg = fixed_vector_reg,
+        };
+        self.lifetime_count += 1;
+    }
+
+    fn addLifetimeLabel(self: *FunctionContext, name: []const u8, position: usize) void {
+        if (self.lifetime_label_count >= self.lifetime_labels.len) {
+            self.lifetime_reuse = false;
+            return;
+        }
+        self.lifetime_labels[self.lifetime_label_count] = .{ .name = name, .position = position };
+        self.lifetime_label_count += 1;
+    }
+
+    fn addLifetimeEdge(self: *FunctionContext, target: []const u8, position: usize) void {
+        if (self.lifetime_edge_count >= self.lifetime_edges.len) {
+            self.lifetime_reuse = false;
+            return;
+        }
+        self.lifetime_edges[self.lifetime_edge_count] = .{ .target = target, .position = position };
+        self.lifetime_edge_count += 1;
+    }
+
+    fn addLifetimeCall(
+        self: *FunctionContext,
+        target: []const u8,
+        position: usize,
+        resume_position: usize,
+    ) void {
+        if (self.lifetime_call_count >= self.lifetime_calls.len) {
+            self.lifetime_reuse = false;
+            return;
+        }
+        self.lifetime_calls[self.lifetime_call_count] = .{
+            .target = target,
+            .position = position,
+            .resume_position = resume_position,
+        };
+        self.lifetime_call_count += 1;
+    }
+
+    fn applyCallClobbers(self: *FunctionContext) void {
+        if (!self.lifetime_reuse) return;
+        const registry = self.clobbers orelse return;
+        for (self.lifetime_calls[0..self.lifetime_call_count]) |call| {
+            const clobber = registry.find(call.target) orelse continue;
+            for (self.lifetimes[0..self.lifetime_count]) |*lifetime| {
+                if (lifetime.automatic and lifetime.declaration < call.resume_position and
+                    self.valueLivesAcross(lifetime.name, call.resume_position) and
+                    !self.valueDefinedAt(lifetime.name, call.position))
+                {
+                    lifetime.forbidden_scalar |= clobber.scalar | call.setup_scalar;
+                    lifetime.forbidden_vector |= clobber.vector | call.setup_vector;
+                }
+            }
+        }
+    }
+
+    fn addCallSetupClobber(self: *FunctionContext, position: usize, scalar: u32, vector: u32) void {
+        for (self.lifetime_calls[0..self.lifetime_call_count]) |*call| {
+            if (call.position != position) continue;
+            call.setup_scalar |= scalar;
+            call.setup_vector |= vector;
+            return;
+        }
+    }
+
+    fn hasLifetime(self: *const FunctionContext, name: []const u8) bool {
+        for (self.lifetimes[0..self.lifetime_count]) |lifetime| {
+            if (std.mem.eql(u8, lifetime.name, name)) return true;
+        }
+        return false;
+    }
+
+    fn extendBackwardEdgeLifetimes(self: *FunctionContext) void {
+        if (!self.lifetime_reuse) return;
+        for (self.lifetime_edges[0..self.lifetime_edge_count]) |edge| {
+            var target_position: ?usize = null;
+            for (self.lifetime_labels[0..self.lifetime_label_count]) |label| {
+                if (std.mem.eql(u8, label.name, edge.target)) {
+                    target_position = label.position;
+                    break;
+                }
+            }
+            const target = target_position orelse continue;
+            if (target >= edge.position) continue;
+            for (self.lifetimes[0..self.lifetime_count]) |*lifetime| {
+                if (lifetime.declaration <= edge.position and lifetime.last_use >= target) {
+                    lifetime.last_use = @max(lifetime.last_use, edge.position);
+                }
+            }
+        }
+    }
+
+    fn touchLifetime(self: *FunctionContext, name: []const u8, position: usize) void {
+        self.addLifetimeEvent(name, position, .read);
+        self.extendLifetime(name, position);
+    }
+
+    fn writeLifetime(self: *FunctionContext, name: []const u8, position: usize) void {
+        self.addLifetimeEvent(name, position, .write);
+        self.extendLifetime(name, position);
+    }
+
+    fn extendLifetime(self: *FunctionContext, name: []const u8, position: usize) void {
+        var index = self.lifetime_count;
+        while (index > 0) {
+            index -= 1;
+            if (std.mem.eql(u8, self.lifetimes[index].name, name)) {
+                self.lifetimes[index].last_use = @max(self.lifetimes[index].last_use, position);
+                return;
+            }
+        }
+    }
+
+    fn addLifetimeEvent(self: *FunctionContext, name: []const u8, position: usize, kind: LifetimeEventKind) void {
+        if (self.lifetime_event_count >= self.lifetime_events.len) {
+            self.lifetime_reuse = false;
+            return;
+        }
+        self.lifetime_events[self.lifetime_event_count] = .{ .name = name, .position = position, .kind = kind };
+        self.lifetime_event_count += 1;
+    }
+
+    fn valueLivesAcross(self: *const FunctionContext, name: []const u8, position: usize) bool {
+        if (position == 0 or position > self.flow_statement_count) return false;
+        var visited: [2049]bool = @splat(false);
+        return self.valueReadBeforeWrite(name, position, &visited);
+    }
+
+    fn valueReadBeforeWrite(
+        self: *const FunctionContext,
+        name: []const u8,
+        position: usize,
+        visited: *[2049]bool,
+    ) bool {
+        if (position == 0 or position > self.flow_statement_count or visited[position]) return false;
+        visited[position] = true;
+        for (self.lifetime_events[0..self.lifetime_event_count]) |event| {
+            if (event.position != position or !std.mem.eql(u8, event.name, name)) continue;
+            if (event.kind == .read) return true;
+            if (event.kind == .write) return false;
+        }
+        for (self.flow_successors[position][0..self.flow_successor_counts[position]]) |successor| {
+            if (self.valueReadBeforeWrite(name, successor, visited)) return true;
+        }
+        return false;
+    }
+
+    fn valueDefinedAt(self: *const FunctionContext, name: []const u8, position: usize) bool {
+        for (self.lifetime_events[0..self.lifetime_event_count]) |event| {
+            if (event.position == position and event.kind == .write and
+                std.mem.eql(u8, event.name, name)) return true;
+        }
+        return false;
+    }
+
+    fn lastUse(self: *const FunctionContext, name: []const u8) usize {
+        if (!self.lifetime_reuse) return std.math.maxInt(usize);
+        var index = self.lifetime_count;
+        while (index > 0) {
+            index -= 1;
+            if (std.mem.eql(u8, self.lifetimes[index].name, name)) return self.lifetimes[index].last_use;
+        }
+        return std.math.maxInt(usize);
+    }
+
+    fn requireRegister(
+        self: *FunctionContext,
+        name: []const u8,
+        reg: ?Register,
+        vector_reg: ?ast.VectorRegister,
+    ) !void {
+        var index = self.lifetime_count;
+        while (index > 0) {
+            index -= 1;
+            const lifetime = &self.lifetimes[index];
+            if (!std.mem.eql(u8, lifetime.name, name) or !lifetime.automatic) continue;
+            if ((lifetime.required_reg != null and lifetime.required_reg != reg) or
+                (lifetime.required_vector_reg != null and lifetime.required_vector_reg != vector_reg))
+            {
+                return error.FunctionArgumentRegisterMismatch;
+            }
+            lifetime.required_reg = reg;
+            lifetime.required_vector_reg = vector_reg;
+            return;
+        }
+    }
+
+    fn requiredRegister(self: *const FunctionContext, name: []const u8) ?Register {
+        for (self.lifetimes[0..self.lifetime_count]) |lifetime| {
+            if (std.mem.eql(u8, lifetime.name, name)) return lifetime.required_reg;
+        }
+        return null;
+    }
+
+    fn requiredVectorRegister(self: *const FunctionContext, name: []const u8) ?ast.VectorRegister {
+        for (self.lifetimes[0..self.lifetime_count]) |lifetime| {
+            if (std.mem.eql(u8, lifetime.name, name)) return lifetime.required_vector_reg;
+        }
+        return null;
+    }
+
+    fn registerForbidden(self: *const FunctionContext, name: []const u8, reg: Register) bool {
+        for (self.lifetimes[0..self.lifetime_count]) |lifetime| {
+            if (std.mem.eql(u8, lifetime.name, name)) {
+                return (lifetime.forbidden_scalar & registerBit(reg)) != 0;
+            }
+        }
+        return false;
+    }
+
+    fn vectorRegisterForbidden(self: *const FunctionContext, name: []const u8, reg: ast.VectorRegister) bool {
+        for (self.lifetimes[0..self.lifetime_count]) |lifetime| {
+            if (std.mem.eql(u8, lifetime.name, name)) {
+                return (lifetime.forbidden_vector & vectorRegisterBit(reg)) != 0;
+            }
+        }
+        return false;
     }
 
     fn lookup(self: *const FunctionContext, name: []const u8) !Symbol {
@@ -365,21 +1065,42 @@ const FunctionContext = struct {
         self.symbol_count = scope;
     }
 
-    fn allocRegister(self: *const FunctionContext, data_type: DataType) !Register {
+    fn allocRegister(self: *const FunctionContext, data_type: DataType, name: []const u8) !Register {
         if (isVectorType(data_type)) return error.ExpectedScalarType;
+        if (self.requiredRegister(name)) |reg| {
+            if ((self.function_forbidden_scalar & registerBit(reg)) != 0) {
+                return error.AutomaticRegisterClobberedByCall;
+            }
+            if (self.registerForbidden(name, reg)) return error.AutomaticRegisterClobberedByCall;
+            if (self.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
+            return reg;
+        }
         for (alloc_scalar_registers) |reg| {
+            if ((self.function_forbidden_scalar & registerBit(reg)) != 0) continue;
+            if (self.registerForbidden(name, reg)) continue;
             if (!self.isRegisterInUse(reg)) return reg;
         }
         return error.OutOfFreeRegisters;
     }
 
-    fn allocVectorRegister(self: *const FunctionContext, data_type: DataType) !ast.VectorRegister {
+    fn allocVectorRegister(self: *const FunctionContext, data_type: DataType, name: []const u8) !ast.VectorRegister {
         if (!isVectorType(data_type)) return error.ExpectedVectorType;
+        if (self.requiredVectorRegister(name)) |reg| {
+            if ((self.function_forbidden_vector & vectorRegisterBit(reg)) != 0) {
+                return error.AutomaticRegisterClobberedByCall;
+            }
+            if (self.vectorRegisterForbidden(name, reg)) return error.AutomaticRegisterClobberedByCall;
+            try validateVectorRegisterBinding(self, data_type, reg);
+            return reg;
+        }
         for (alloc_vector_registers) |reg| {
+            if ((self.function_forbidden_vector & vectorRegisterBit(reg)) != 0) continue;
+            if (self.vectorRegisterForbidden(name, reg)) continue;
             if (self.isVectorRegisterInUse(reg)) continue;
             if (data_type == .vec32) {
                 const second = nextVectorRegister(reg) orelse continue;
                 if (@intFromEnum(second) >= 29) continue;
+                if (self.vectorRegisterForbidden(name, second)) continue;
                 if (self.isVectorRegisterInUse(second)) continue;
             }
             return reg;
@@ -389,6 +1110,7 @@ const FunctionContext = struct {
 
     fn isRegisterInUse(self: *const FunctionContext, reg: Register) bool {
         for (self.symbols[0..self.symbol_count]) |symbol| {
+            if (symbol.automatic and symbol.last_use < self.statement_position) continue;
             if (symbol.reg) |symbol_reg| {
                 if (symbol_reg == reg) return true;
             }
@@ -398,6 +1120,7 @@ const FunctionContext = struct {
 
     fn isVectorRegisterInUse(self: *const FunctionContext, reg: ast.VectorRegister) bool {
         for (self.symbols[0..self.symbol_count]) |symbol| {
+            if (symbol.automatic and symbol.last_use < self.statement_position) continue;
             const symbol_reg = symbol.vector_reg orelse continue;
             if (symbol_reg == reg) return true;
             if (symbol.data_type == .vec32 and nextVectorRegister(symbol_reg) == reg) return true;
@@ -406,6 +1129,435 @@ const FunctionContext = struct {
     }
 };
 
+fn statementsContainUnstructuredControlFlow(statements: []const ast.Statement) bool {
+    for (statements) |statement| switch (statement) {
+        .asm_line, .exact_asm_line => return true,
+        .conditional_direct_goto => |branch| {
+            if (branch.delay_slot) |delay| if (statementsContainUnstructuredControlFlow(delay)) return true;
+        },
+        .while_loop => |loop| if (statementsContainUnstructuredControlFlow(loop.statements)) return true,
+        .if_statement => |branch| {
+            if (statementsContainUnstructuredControlFlow(branch.then_statements)) return true;
+            if (branch.else_statements) |items| if (statementsContainUnstructuredControlFlow(items)) return true;
+        },
+        .ordered_block => |items| if (statementsContainUnstructuredControlFlow(items)) return true,
+        .builtin => |builtin| switch (builtin) {
+            .call_and_goto, .fallthrough => {},
+            .return_from_function => |delay| if (delay) |items| {
+                if (statementsContainUnstructuredControlFlow(items)) return true;
+            },
+            else => {},
+        },
+        else => {},
+    };
+    return false;
+}
+
+fn scanStatementLifetimes(context: *FunctionContext, statements: []const ast.Statement, position: *usize) void {
+    for (statements) |statement| {
+        position.* += 1;
+        const current = position.*;
+        switch (statement) {
+            .var_decl => |decl| {
+                if (decl.is_const) {
+                    if (decl.value) |value| scanValueLifetime(context, value, current);
+                    continue;
+                }
+                context.declareLifetime(
+                    decl.name,
+                    current,
+                    decl.reg == null and decl.vector_reg == null,
+                    decl.data_type,
+                    decl.reg,
+                    decl.vector_reg,
+                );
+                if (decl.value) |value| scanValueLifetime(context, value, current);
+                context.writeLifetime(decl.name, current);
+            },
+            .assignment => |assignment| {
+                scanValueLifetime(context, assignment.lhs, current);
+                if (assignment.rhs) |rhs| scanValueLifetime(context, rhs, current);
+                for (assignment.continuation) |step| scanValueLifetime(context, step.rhs, current);
+                context.writeLifetime(assignment.destination, current);
+            },
+            .store => |store| {
+                scanValueRefLifetime(context, store.address, current);
+                scanValueRefLifetime(context, store.value, current);
+                if (store.label_offset) |name| context.touchLifetime(name, current);
+            },
+            .call => |call| {
+                for (call.arguments) |argument| scanValueRefLifetime(context, argument, current);
+                if (call.delay_slot) |delay| scanStatementLifetimes(context, delay, position);
+                context.addLifetimeCall(call.name, current, position.* + 1);
+            },
+            .builtin => |builtin| scanBuiltinLifetime(context, builtin, current, position),
+            .label => |name| context.addLifetimeLabel(name, current),
+            .conditional_goto => |branch| {
+                scanConditionLifetime(context, branch.condition, current);
+                context.addLifetimeEdge(branch.target, current);
+                if (branch.delay_slot) |delay| scanStatementLifetimes(context, delay, position);
+            },
+            .conditional_direct_goto => |branch| {
+                scanConditionLifetime(context, branch.condition, current);
+                if (branch.delay_slot) |delay| scanStatementLifetimes(context, delay, position);
+            },
+            .goto => |branch| {
+                context.addLifetimeEdge(branch.target, current);
+                if (branch.delay_slot) |delay| scanStatementLifetimes(context, delay, position);
+            },
+            .while_loop => |loop| {
+                scanConditionLifetime(context, loop.condition, current);
+                scanStatementLifetimes(context, loop.statements, position);
+            },
+            .if_statement => |branch| {
+                scanConditionLifetime(context, branch.condition, current);
+                scanStatementLifetimes(context, branch.then_statements, position);
+                if (branch.else_statements) |items| scanStatementLifetimes(context, items, position);
+            },
+            .ordered_block => |items| scanStatementLifetimes(context, items, position),
+            else => {},
+        }
+    }
+}
+
+fn countFlowStatements(statements: []const ast.Statement) usize {
+    var count = statements.len;
+    for (statements) |statement| count += switch (statement) {
+        .call => |call| if (call.delay_slot) |delay| countFlowStatements(delay) else 0,
+        .goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
+        .conditional_goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
+        .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
+        .while_loop => |loop| countFlowStatements(loop.statements),
+        .if_statement => |branch| countFlowStatements(branch.then_statements) +
+            (if (branch.else_statements) |items| countFlowStatements(items) else 0),
+        .ordered_block => |items| countFlowStatements(items),
+        .builtin => |builtin| switch (builtin) {
+            .jump => |jump| if (jump.delay_slot) |delay| countFlowStatements(delay) else 0,
+            .return_from_function => |delay| if (delay) |items| countFlowStatements(items) else 0,
+            else => 0,
+        },
+        else => 0,
+    };
+    return count;
+}
+
+fn flowLabelPosition(context: *const FunctionContext, name: []const u8) usize {
+    for (context.lifetime_labels[0..context.lifetime_label_count]) |label| {
+        if (std.mem.eql(u8, label.name, name)) return label.position;
+    }
+    return 0;
+}
+
+fn addFlowSuccessor(context: *FunctionContext, position: usize, successor: usize) void {
+    if (position == 0 or successor == 0) return;
+    const count = context.flow_successor_counts[position];
+    for (context.flow_successors[position][0..count]) |existing| if (existing == successor) return;
+    if (count == 2) {
+        context.lifetime_reuse = false;
+        return;
+    }
+    context.flow_successors[position][count] = successor;
+    context.flow_successor_counts[position] += 1;
+}
+
+fn buildStatementFlow(
+    context: *FunctionContext,
+    statements: []const ast.Statement,
+    position: *usize,
+    continuation: usize,
+) void {
+    for (statements, 0..) |statement, statement_index| {
+        position.* += 1;
+        const current = position.*;
+        const nested_count: usize = switch (statement) {
+            .call => |call| if (call.delay_slot) |delay| countFlowStatements(delay) else 0,
+            .goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
+            .conditional_goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
+            .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| countFlowStatements(delay) else 0,
+            .while_loop => |loop| countFlowStatements(loop.statements),
+            .if_statement => |branch| countFlowStatements(branch.then_statements) +
+                (if (branch.else_statements) |items| countFlowStatements(items) else 0),
+            .ordered_block => |items| countFlowStatements(items),
+            .builtin => |builtin| switch (builtin) {
+                .jump => |jump| if (jump.delay_slot) |delay| countFlowStatements(delay) else 0,
+                .return_from_function => |delay| if (delay) |items| countFlowStatements(items) else 0,
+                else => 0,
+            },
+            else => 0,
+        };
+        const next = if (statement_index + 1 < statements.len) current + nested_count + 1 else continuation;
+        switch (statement) {
+            .call => |call| {
+                if (call.delay_slot) |delay| {
+                    addFlowSuccessor(context, current, current + 1);
+                    buildStatementFlow(context, delay, position, next);
+                } else addFlowSuccessor(context, current, next);
+            },
+            .goto => |branch| {
+                const target = flowLabelPosition(context, branch.target);
+                if (branch.delay_slot) |delay| {
+                    addFlowSuccessor(context, current, current + 1);
+                    buildStatementFlow(context, delay, position, target);
+                } else addFlowSuccessor(context, current, target);
+            },
+            .conditional_goto => |branch| {
+                const target = flowLabelPosition(context, branch.target);
+                if (branch.delay_slot) |delay| {
+                    const delay_start = current + 1;
+                    addFlowSuccessor(context, current, delay_start);
+                    buildStatementFlow(context, delay, position, next);
+                    const delay_end = current + nested_count;
+                    addFlowSuccessor(context, delay_end, target);
+                } else {
+                    addFlowSuccessor(context, current, next);
+                    addFlowSuccessor(context, current, target);
+                }
+            },
+            .conditional_direct_goto => |branch| {
+                if (branch.delay_slot) |delay| {
+                    addFlowSuccessor(context, current, current + 1);
+                    buildStatementFlow(context, delay, position, next);
+                } else addFlowSuccessor(context, current, next);
+            },
+            .while_loop => |loop| {
+                if (nested_count != 0) addFlowSuccessor(context, current, current + 1);
+                addFlowSuccessor(context, current, next);
+                buildStatementFlow(context, loop.statements, position, current);
+            },
+            .if_statement => |branch| {
+                const then_count = countFlowStatements(branch.then_statements);
+                if (then_count != 0) addFlowSuccessor(context, current, current + 1) else addFlowSuccessor(context, current, next);
+                buildStatementFlow(context, branch.then_statements, position, next);
+                if (branch.else_statements) |items| {
+                    if (items.len != 0) addFlowSuccessor(context, current, current + then_count + 1) else addFlowSuccessor(context, current, next);
+                    buildStatementFlow(context, items, position, next);
+                } else addFlowSuccessor(context, current, next);
+            },
+            .ordered_block => |items| {
+                if (nested_count != 0) addFlowSuccessor(context, current, current + 1) else addFlowSuccessor(context, current, next);
+                buildStatementFlow(context, items, position, next);
+            },
+            .builtin => |builtin| switch (builtin) {
+                .jump => |jump| if (jump.delay_slot) |delay| {
+                    addFlowSuccessor(context, current, current + 1);
+                    buildStatementFlow(context, delay, position, 0);
+                },
+                .return_from_function => |delay| if (delay) |items| {
+                    addFlowSuccessor(context, current, current + 1);
+                    buildStatementFlow(context, items, position, 0);
+                },
+                .direct_goto, .call_and_goto, .fallthrough => {},
+                else => addFlowSuccessor(context, current, next),
+            },
+            else => addFlowSuccessor(context, current, next),
+        }
+    }
+}
+
+fn scanConditionLifetime(context: *FunctionContext, condition: ast.Condition, position: usize) void {
+    context.touchLifetime(condition.lhs, position);
+    scanValueLifetime(context, condition.rhs, position);
+}
+
+fn scanValueRefLifetime(context: *FunctionContext, value: ast.ValueRef, position: usize) void {
+    switch (value) {
+        .ident => |name| context.touchLifetime(name, position),
+        .vector_access => |access| context.touchLifetime(access.name, position),
+        .number => {},
+    }
+}
+
+fn scanValueLifetime(context: *FunctionContext, value: ast.Value, position: usize) void {
+    switch (value) {
+        .ident => |name| context.touchLifetime(name, position),
+        .vector_access => |access| context.touchLifetime(access.name, position),
+        .vector_operation => |operation| {
+            context.touchLifetime(operation.lhs.name, position);
+            context.touchLifetime(operation.rhs.name, position);
+        },
+        .vector_shift => |shift| context.touchLifetime(shift.source.name, position),
+        .scalar_comparison => |comparison| {
+            scanValueRefLifetime(context, comparison.lhs, position);
+            scanValueRefLifetime(context, comparison.rhs, position);
+        },
+        .signed_less_than => |comparison| {
+            scanValueRefLifetime(context, comparison.lhs, position);
+            scanValueRefLifetime(context, comparison.rhs, position);
+        },
+        .load => |load| {
+            scanValueRefLifetime(context, load.address, position);
+            if (load.label_offset) |name| context.touchLifetime(name, position);
+        },
+        else => {},
+    }
+}
+
+fn scanBuiltinLifetime(context: *FunctionContext, builtin: ast.Builtin, position: usize, next: *usize) void {
+    switch (builtin) {
+        .jump => |jump| {
+            scanValueRefLifetime(context, jump.address, position);
+            if (jump.delay_slot) |delay| scanStatementLifetimes(context, delay, next);
+        },
+        .return_from_function => |delay| if (delay) |items| scanStatementLifetimes(context, items, next),
+        .set_return => |name| context.touchLifetime(name, position),
+        .set_function_address => |item| context.writeLifetime(item.destination, position),
+        .set_data_address => |item| {
+            context.writeLifetime(item.destination, position);
+            context.touchLifetime(item.label, position);
+        },
+        .write_vector_control => |item| scanValueRefLifetime(context, item.value, position),
+        .vector_memory => |item| {
+            switch (item.operation) {
+                .load16, .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned => context.writeLifetime(item.vector.name, position),
+                .store16, .store32, .store64, .store128 => context.touchLifetime(item.vector.name, position),
+            }
+            scanValueRefLifetime(context, item.address, position);
+        },
+        .hardware_write => |item| scanValueRefLifetime(context, item.value, position),
+        else => {},
+    }
+}
+
+fn applyCallRequirements(
+    context: *FunctionContext,
+    functions: []const ast.Function,
+    statements: []const ast.Statement,
+    position: *usize,
+) !void {
+    for (statements) |statement| {
+        position.* += 1;
+        const current = position.*;
+        switch (statement) {
+            .call => |call| {
+                if (call.module == null) {
+                    if (findFunction(functions, call.name)) |function| {
+                        if (call.arguments.len == function.parameters.len) {
+                            for (call.arguments, function.parameters, 0..) |argument, parameter, parameter_index| {
+                                switch (argument) {
+                                    .ident => |name| {
+                                        if (context.hasLifetime(name)) {
+                                            try context.requireRegister(name, parameter.reg, parameter.vector_reg);
+                                            var visited: [1024]ParameterWriteVisit = undefined;
+                                            var visited_count: usize = 0;
+                                            if (functionParameterIsWritten(
+                                                functions,
+                                                function,
+                                                parameter_index,
+                                                &visited,
+                                                &visited_count,
+                                            )) context.writeLifetime(name, current);
+                                        } else {
+                                            addParameterSetupClobber(context, current, parameter);
+                                        }
+                                    },
+                                    .number => addParameterSetupClobber(context, current, parameter),
+                                    else => {},
+                                }
+                            }
+                        }
+                    }
+                }
+                if (call.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position);
+            },
+            .goto => |branch| if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
+            .conditional_goto => |branch| if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
+            .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
+            .while_loop => |loop| try applyCallRequirements(context, functions, loop.statements, position),
+            .if_statement => |branch| {
+                try applyCallRequirements(context, functions, branch.then_statements, position);
+                if (branch.else_statements) |items| try applyCallRequirements(context, functions, items, position);
+            },
+            .ordered_block => |items| try applyCallRequirements(context, functions, items, position),
+            .builtin => |builtin| switch (builtin) {
+                .jump => |jump| if (jump.delay_slot) |delay| try applyCallRequirements(context, functions, delay, position),
+                .return_from_function => |delay| if (delay) |items| try applyCallRequirements(context, functions, items, position),
+                else => {},
+            },
+            else => {},
+        }
+    }
+}
+
+fn addParameterSetupClobber(
+    context: *FunctionContext,
+    position: usize,
+    parameter: ast.Parameter,
+) void {
+    var scalar: u32 = 0;
+    var vector: u32 = 0;
+    if (parameter.reg) |reg| scalar |= registerBit(reg);
+    if (parameter.vector_reg) |reg| {
+        vector |= vectorRegisterBit(reg);
+        if (parameter.data_type == .vec32) {
+            if (nextVectorRegister(reg)) |second| vector |= vectorRegisterBit(second);
+        }
+    }
+    context.addCallSetupClobber(position, scalar, vector);
+}
+
+const ParameterWriteVisit = struct { function: []const u8, parameter: usize };
+
+fn functionParameterIsWritten(
+    functions: []const ast.Function,
+    function: ast.Function,
+    parameter_index: usize,
+    visited: *[1024]ParameterWriteVisit,
+    visited_count: *usize,
+) bool {
+    if (parameter_index >= function.parameters.len or visited_count.* >= visited.len) return true;
+    for (visited[0..visited_count.*]) |item| {
+        if (item.parameter == parameter_index and std.mem.eql(u8, item.function, function.name)) return false;
+    }
+    visited[visited_count.*] = .{ .function = function.name, .parameter = parameter_index };
+    visited_count.* += 1;
+    const name = function.parameters[parameter_index].name;
+    return statementsWriteParameter(functions, function.statements, name, visited, visited_count);
+}
+
+fn statementsWriteParameter(
+    functions: []const ast.Function,
+    statements: []const ast.Statement,
+    name: []const u8,
+    visited: *[1024]ParameterWriteVisit,
+    visited_count: *usize,
+) bool {
+    for (statements) |statement| switch (statement) {
+        .assignment => |assignment| if (std.mem.eql(u8, assignment.destination, name)) return true,
+        .call => |call| {
+            if (call.module == null) if (findFunction(functions, call.name)) |callee| {
+                for (call.arguments, 0..) |argument, argument_index| switch (argument) {
+                    .ident => |argument_name| if (std.mem.eql(u8, argument_name, name) and
+                        functionParameterIsWritten(functions, callee, argument_index, visited, visited_count)) return true,
+                    else => {},
+                };
+            };
+            if (call.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true;
+        },
+        .goto => |branch| if (branch.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true,
+        .conditional_goto => |branch| if (branch.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true,
+        .conditional_direct_goto => |branch| if (branch.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true,
+        .while_loop => |loop| if (statementsWriteParameter(functions, loop.statements, name, visited, visited_count)) return true,
+        .if_statement => |branch| {
+            if (statementsWriteParameter(functions, branch.then_statements, name, visited, visited_count)) return true;
+            if (branch.else_statements) |items| if (statementsWriteParameter(functions, items, name, visited, visited_count)) return true;
+        },
+        .ordered_block => |items| if (statementsWriteParameter(functions, items, name, visited, visited_count)) return true,
+        .builtin => |builtin| switch (builtin) {
+            .set_function_address => |item| if (std.mem.eql(u8, item.destination, name)) return true,
+            .set_data_address => |item| if (std.mem.eql(u8, item.destination, name)) return true,
+            .vector_memory => |item| switch (item.operation) {
+                .load16, .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned => if (std.mem.eql(u8, item.vector.name, name)) return true,
+                else => {},
+            },
+            .jump => |jump| if (jump.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true,
+            .return_from_function => |delay| if (delay) |items| if (statementsWriteParameter(functions, items, name, visited, visited_count)) return true,
+            else => {},
+        },
+        else => {},
+    };
+    return false;
+}
+
 fn writeStatements(
     writer: *std.Io.Writer,
     functions: []const ast.Function,
@@ -413,6 +1565,7 @@ fn writeStatements(
     statements: []const ast.Statement,
 ) anyerror!void {
     for (statements) |statement| {
+        if (context.track_statement_position) context.statement_position += 1;
         switch (statement) {
             .packed_struct_decl => {},
             .command_table_decl => {},
@@ -758,7 +1911,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
 
     if (isVectorType(decl.data_type)) {
         if (decl.reg != null) return error.InvalidVectorRegister;
-        const vector_reg = decl.vector_reg orelse try context.allocVectorRegister(decl.data_type);
+        const vector_reg = decl.vector_reg orelse try context.allocVectorRegister(decl.data_type, decl.name);
         try validateVectorRegisterBinding(context, decl.data_type, vector_reg);
         if (decl.value) |value| {
             try writeVectorInitialValue(writer, context, vector_reg, decl.data_type, value);
@@ -769,12 +1922,14 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
             .reg = null,
             .vector_reg = vector_reg,
             .constant = null,
+            .automatic = decl.vector_reg == null,
+            .last_use = context.lastUse(decl.name),
         });
         return;
     }
 
     if (decl.vector_reg != null) return error.InvalidScalarRegister;
-    const reg = decl.reg orelse try context.allocRegister(decl.data_type);
+    const reg = decl.reg orelse try context.allocRegister(decl.data_type, decl.name);
     if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
     if (decl.is_reserved and reg != compiler_scratch_2) return error.InvalidReservedRegister;
     if ((!decl.is_reserved and reg == compiler_scratch_2) or reg == command_return) {
@@ -813,6 +1968,8 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         .data_type = decl.data_type,
         .reg = reg,
         .constant = null,
+        .automatic = decl.reg == null,
+        .last_use = context.lastUse(decl.name),
     });
 }
 
@@ -917,6 +2074,7 @@ fn writeVectorInitialValue(
 fn writeAssignment(writer: *std.Io.Writer, context: *FunctionContext, assignment: ast.Assignment) !void {
     const destination = try context.lookup(assignment.destination);
     if (isVectorType(destination.data_type)) {
+        if (assignment.continuation.len != 0) return error.UnsupportedVectorExpressionTree;
         return writeVectorAssignment(writer, context, destination, assignment);
     }
     const destination_reg = destination.reg orelse return error.CannotAssignConst;
@@ -938,6 +2096,17 @@ fn writeAssignment(writer: *std.Io.Writer, context: *FunctionContext, assignment
             const rhs = assignment.rhs orelse return error.InvalidAssignment;
             try writeBinary(writer, context, destination, destination_reg, assignment.lhs, assignment.op, rhs);
         },
+    }
+    for (assignment.continuation) |step| {
+        try writeBinary(
+            writer,
+            context,
+            destination,
+            destination_reg,
+            .{ .ident = assignment.destination },
+            step.op,
+            step.rhs,
+        );
     }
 }
 
@@ -1417,11 +2586,11 @@ fn writeSet(
                 word, regName(destination_reg), @intFromEnum(control_register),
             });
         },
-        .hardware_read => {
+        .hardware_read => |register| {
             if (destination.data_type != .u32 and destination.data_type != .i32) {
                 return error.RegisterTypeMismatch;
             }
-            try writer.print("  mfc0 {s}, $6\n", .{regName(destination_reg)});
+            try writer.print("  mfc0 {s}, ${d}\n", .{ regName(destination_reg), register });
         },
         .scalar_comparison => |comparison| try writeScalarComparison(
             writer,
@@ -2258,17 +3427,30 @@ fn writeCall(
     }
 
     if (function.inline_call) {
-        const scope = context.pushScope();
-        defer context.popScope(scope);
+        var inline_context = FunctionContext{
+            .label_prefix = context.label_prefix,
+            .next_label = context.next_label,
+            .clobbers = context.clobbers,
+            .function_forbidden_scalar = context.function_forbidden_scalar,
+            .function_forbidden_vector = context.function_forbidden_vector,
+        };
+        for (context.symbols[0..context.symbol_count]) |caller_symbol| {
+            if (caller_symbol.automatic and caller_symbol.last_use < context.statement_position) continue;
+            var reserved_symbol = caller_symbol;
+            reserved_symbol.automatic = false;
+            reserved_symbol.last_use = std.math.maxInt(usize);
+            try inline_context.add(reserved_symbol);
+        }
+        try inline_context.prepareLifetimes(functions, function.parameters, function.statements);
         for (function.parameters) |parameter| {
-            if (context.lookup(parameter.name) catch null) |existing| {
+            if (inline_context.lookup(parameter.name) catch null) |existing| {
                 if (existing.data_type != parameter.data_type) return error.FunctionArgumentTypeMismatch;
                 if (existing.reg != parameter.reg or existing.vector_reg != parameter.vector_reg) {
                     return error.FunctionArgumentRegisterMismatch;
                 }
                 continue;
             }
-            try context.add(.{
+            try inline_context.add(.{
                 .name = parameter.name,
                 .data_type = parameter.data_type,
                 .reg = parameter.reg,
@@ -2276,7 +3458,8 @@ fn writeCall(
                 .constant = null,
             });
         }
-        try writeStatements(writer, functions, context, function.statements);
+        try writeStatements(writer, functions, &inline_context, function.statements);
+        context.next_label = inline_context.next_label;
         return;
     }
 
@@ -2387,9 +3570,16 @@ fn writeBuiltin(
                 .rsp_dma_rdram_address => 1,
                 .rsp_dma_write_length => 3,
                 .rdp_command_end => 9,
+                .cp0 => |register| register,
             };
             try writer.print("  mtc0 {s}, ${d}\n", .{ regName(source_reg), register });
         },
+        .hardware_read_register => |transfer| try writer.print("  mfc0 {s}, ${d}\n", .{
+            regName(transfer.destination), transfer.hardware_register,
+        }),
+        .hardware_write_register => |transfer| try writer.print("  mtc0 {s}, ${d}\n", .{
+            regName(transfer.source), transfer.hardware_register,
+        }),
     }
 }
 

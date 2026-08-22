@@ -1,143 +1,143 @@
 inline pub fn getDmaFull(reg($t3) value: u32) {
-    asm("mfc0 $t3, $5");
+    value = cp0.read(5);
 }
 
-inline pub fn getDmaFullAt() {
-    asm("mfc0 $at, $5");
+inline pub fn getDmaFullAt(reg($at) value: u32) {
+    value = cp0.read(5);
 }
 
 inline pub fn getDmaBusyT1(reg($t1) value: i32) {
-    asm("mfc0 $t1, $6");
+    value = cp0.read(6);
 }
 
 inline pub fn getDmaBusyT0(reg($t0) value: u32) {
-    asm("mfc0 $t0, $6");
+    value = cp0.read(6);
 }
 
 inline pub fn getSpStatus(reg($t3) value: u32) {
-    asm("mfc0 $t3, $4");
+    value = cp0.read(4);
 }
 
 inline pub fn getSpStatusT0(reg($t0) value: u32) {
-    asm("mfc0 $t0, $4");
+    value = cp0.read(4);
 }
 
 inline pub fn getSpStatusT2(reg($t2) value: u32) {
-    asm("mfc0 $t2, $4");
+    value = cp0.read(4);
 }
 
-inline pub fn getSpStatusAt() {
-    asm("mfc0 $at, $4");
+inline pub fn getSpStatusAt(reg($at) value: u32) {
+    value = cp0.read(4);
 }
 
 inline pub fn setSpStatus(reg($t3) value: u32) {
-    asm("mtc0 $t3, $4");
+    cp0.write(4, value);
 }
 
 inline pub fn setSpStatusT0(reg($t0) value: u32) {
-    asm("mtc0 $t0, $4");
+    cp0.write(4, value);
 }
 
 inline pub fn setSpStatusA0(reg($a0) value: u32) {
-    asm("mtc0 $a0, $4");
+    cp0.write(4, value);
 }
 
 inline pub fn setSpStatusA2(reg($a2) value: u32) {
-    asm("mtc0 $a2, $4");
+    cp0.write(4, value);
 }
 
 inline pub fn setDmaAddrRsp(reg($s4) value: u32) {
-    asm("mtc0 $s4, $0");
+    cp0.write(0, value);
 }
 
 inline pub fn setDmaAddrRspZero() {
-    asm("mtc0 $zero, $0");
+    cp0.write(0, 0);
 }
 
 inline pub fn setDmaAddrRspS3(reg($s3) value: u32) {
-    asm("mtc0 $s3, $0");
+    cp0.write(0, value);
 }
 
 inline pub fn setDmaAddrRspS3Signed(reg($s3) value: i32) {
-    asm("mtc0 $s3, $0");
+    cp0.write(0, value);
 }
 
 inline pub fn setDmaAddrRdram(reg($s0) value: u32) {
-    asm("mtc0 $s0, $1");
+    cp0.write(1, value);
 }
 
 inline pub fn setDmaAddrRdramA1(reg($a1) value: u32) {
-    asm("mtc0 $a1, $1");
+    cp0.write(1, value);
 }
 
 inline pub fn setDmaAddrRdramA0(reg($a0) value: i32) {
-    asm("mtc0 $a0, $1");
+    cp0.write(1, value);
 }
 
 inline pub fn setDmaRead(reg($t3) value: u32) {
-    asm("mtc0 $t3, $2");
+    cp0.write(2, value);
 }
 
-inline pub fn setDmaReadAt() {
-    asm("mtc0 $at, $2");
+inline pub fn setDmaReadAt(reg($at) value: u32) {
+    cp0.write(2, value);
 }
 
 inline pub fn setDmaWrite(reg($t3) value: u32) {
-    asm("mtc0 $t3, $3");
+    cp0.write(3, value);
 }
 
 inline pub fn setDmaWriteA1(reg($a1) value: u32) {
-    asm("mtc0 $a1, $3");
+    cp0.write(3, value);
 }
 
-inline pub fn setDmaWriteAt() {
-    asm("mtc0 $at, $3");
+inline pub fn setDmaWriteAt(reg($at) value: u32) {
+    cp0.write(3, value);
 }
 
 inline pub fn setDmaWriteT7(reg($t7) value: u32) {
-    asm("mtc0 $t7, $3");
+    cp0.write(3, value);
 }
 
 inline pub fn setDmaWriteT3Signed(reg($t3) value: i32) {
-    asm("mtc0 $t3, $3");
+    cp0.write(3, value);
 }
 
 inline pub fn getDpStart(reg($t3) value: u32) {
-    asm("mfc0 $t3, $8");
+    value = cp0.read(8);
 }
 
 inline pub fn getDpStartT0(reg($t0) value: u32) {
-    asm("mfc0 $t0, $8");
+    value = cp0.read(8);
 }
 
 inline pub fn setDpStart(reg($a1) value: u32) {
-    asm("mtc0 $a1, $8");
+    cp0.write(8, value);
 }
 
 inline pub fn setDpEnd(reg($a0) value: u32) {
-    asm("mtc0 $a0, $9");
+    cp0.write(9, value);
 }
 
 inline pub fn setDpEndT0(reg($t0) value: u32) {
-    asm("mtc0 $t0, $9");
+    cp0.write(9, value);
 }
 
 inline pub fn setDpEndA1(reg($a1) value: u32) {
-    asm("mtc0 $a1, $9");
+    cp0.write(9, value);
 }
 
 inline pub fn setDpEndA0(reg($a0) value: i32) {
-    asm("mtc0 $a0, $9");
+    cp0.write(9, value);
 }
 
 inline pub fn getDpStatus(reg($t3) value: u32) {
-    asm("mfc0 $t3, $11");
+    value = cp0.read(11);
 }
 
 inline pub fn getDpStatusT0(reg($t0) value: u32) {
-    asm("mfc0 $t0, $11");
+    value = cp0.read(11);
 }
 
 inline pub fn getDpStatusT2(reg($t2) value: u32) {
-    asm("mfc0 $t2, $11");
+    value = cp0.read(11);
 }

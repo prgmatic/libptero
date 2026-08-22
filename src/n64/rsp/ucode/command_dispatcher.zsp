@@ -64,7 +64,7 @@ command(0) fn waitForInput() noreturn {
     const status_signal_more: u32 = 0x00004000;
     const status_clear_signal_more: u32 = 0x00800000;
 
-    reg($t0) status_value: u32 = undefined;
+    reg status_value: u32 = undefined;
     cp0.getSpStatusT0(status_value);
     status_value &= status_signal_more;
     if(status_value != 0) goto wakeup delay {
@@ -142,7 +142,7 @@ command(8) fn waitThenWriteStatus(
     reg($a0) status: u32,
     reg($a1) mask: u32,
 ) noreturn {
-    reg($t2) wait_mask: u32 = mask;
+    reg wait_mask: u32 = mask;
     dma.waitStatus(wait_mask);
 }
 
@@ -156,11 +156,11 @@ command(9) export fn rdpSetBuffer(
     reg($a1) start: u32,
     reg($a2) sentinel: u32,
 ) noreturn {
-    reg($t0) dp_value: u32 = undefined;
-    reg($t1) masked_status: u32 = undefined;
-    reg($t2) dp_status: u32 = undefined;
-    reg($t3) wait_mask: u32 = undefined;
-    reg($sp) saved_return: u32 = undefined;
+    reg dp_value: u32 = undefined;
+    reg masked_status: u32 = undefined;
+    reg dp_status: u32 = undefined;
+    reg wait_mask: u32 = undefined;
+    reg saved_return: u32 = undefined;
     reg($ra) return_address: u32 = undefined;
     store(u32, rdp_sentinel, sentinel);
     if(sentinel == 0) @goto(dma.returnToCaller) delay {
@@ -201,7 +201,7 @@ rdp_debug_done:
 
 command(10) export fn rdpAppendBuffer(reg($a0) current: u32) noreturn {
     reg($ra) return_address: u32 = undefined;
-    reg($t0) syncfull_ongoing: u32 = load(u8, rdp_syncfull_ongoing);
+    reg syncfull_ongoing: u32 = load(u8, rdp_syncfull_ongoing);
     if(syncfull_ongoing != 0) @goto(dma.returnToCaller) delay {
         store(u32, rdp_current, current);
     }

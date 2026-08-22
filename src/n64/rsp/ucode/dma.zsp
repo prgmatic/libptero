@@ -55,9 +55,9 @@ pub fn exec(
     reg($s4) dmem: u32,
     reg($t2) flags: u32,
 ) noreturn {
-    reg($at) scratch: u32 = undefined;
+    reg scratch: u32 = undefined;
 dma_exec_wait:
-    cp0.getDmaFullAt();
+    cp0.getDmaFullAt(scratch);
     if(scratch != 0) goto dma_exec_wait delay {
         scratch = size & 0x0fff;
     }
@@ -70,10 +70,10 @@ dma_exec_wait:
         cp0.setDmaAddrRsp(dmem);
     }
     goto dma_exec_done, .branch delay {
-        cp0.setDmaWriteAt();
+        cp0.setDmaWriteAt(scratch);
     }
 dma_exec_read:
-    cp0.setDmaReadAt();
+    cp0.setDmaReadAt(scratch);
 dma_exec_done:
     scratch = rdram & 7;
     dmem = dmem + scratch;
@@ -82,12 +82,12 @@ dma_exec_done:
 }
 
 pub fn waitStatus(reg($t2) flags: u32) noreturn {
-    reg($at) status: u32 = undefined;
-    cp0.getSpStatusAt();
+    reg status: u32 = undefined;
+    cp0.getSpStatusAt(status);
 dma_status_wait:
     status &= flags;
     if(status != 0) goto dma_status_wait delay {
-        cp0.getSpStatusAt();
+        cp0.getSpStatusAt(status);
     }
     @fallthrough(returnToCaller);
 }

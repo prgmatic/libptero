@@ -1,12 +1,12 @@
-pub extern fn resident_command_loop() noreturn;
+pub extern fn resident_command_loop() clobbers() noreturn;
 
 pub extern fn resident_rdp_set_buffer(
     reg($a0) current: i32,
     reg($a1) start: i32,
     reg($a2) sentinel: i32,
-) noreturn;
+) clobbers($at, $t0, $t1, $t2, $t3, $sp) noreturn;
 
-pub extern fn resident_rdp_append_buffer(reg($a0) current: u32) noreturn;
+pub extern fn resident_rdp_append_buffer(reg($a0) current: u32) clobbers($t0) noreturn;
 
-pub extern fn resident_return_to_caller() noreturn;
-pub extern fn resident_assertion_failed() noreturn;
+pub extern fn resident_return_to_caller() clobbers() noreturn;
+pub extern fn resident_assertion_failed() clobbers() noreturn;

@@ -9,6 +9,7 @@ pub const Parser = struct {
     current: token.Token,
     diagnostic: ?Diagnostic = null,
     imports: std.ArrayList(ast.Import) = .empty,
+    packed_structs: std.ArrayList(ast.PackedStructDecl) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
         var parser = Parser{
@@ -22,6 +23,7 @@ pub const Parser = struct {
     }
 
     pub fn parse(self: *Parser) ![]ast.Function {
+        defer self.packed_structs.deinit(self.allocator);
         var functions: std.ArrayList(ast.Function) = .empty;
         while (self.current.tag != .eof) {
             if (self.isImportStart()) {
@@ -147,6 +149,11 @@ pub const Parser = struct {
         var no_return = false;
         var command_sizes: std.ArrayList(u8) = .empty;
         errdefer command_sizes.deinit(self.allocator);
+        var clobber_regs: std.ArrayList(ast.Register) = .empty;
+        errdefer clobber_regs.deinit(self.allocator);
+        var clobber_vector_regs: std.ArrayList(ast.VectorRegister) = .empty;
+        errdefer clobber_vector_regs.deinit(self.allocator);
+        var has_clobber_contract = false;
         while (self.current.tag == .ident) {
             const modifier = try self.expect(.ident);
             if (std.mem.eql(u8, modifier.text, "noreturn")) {
@@ -160,6 +167,22 @@ pub const Parser = struct {
                     if (!try self.eat(.comma)) break;
                 }
                 _ = try self.expect(.r_paren);
+            } else if (std.mem.eql(u8, modifier.text, "clobbers")) {
+                if (has_clobber_contract) return self.fail(modifier, .duplicate_clobber_contract);
+                has_clobber_contract = true;
+                _ = try self.expect(.l_paren);
+                if (!try self.eat(.r_paren)) while (true) {
+                    const register_token = try self.expect(.register);
+                    if (parseRegister(register_token)) |reg| {
+                        try clobber_regs.append(self.allocator, reg);
+                    } else if (parseVectorRegister(register_token)) |reg| {
+                        try clobber_vector_regs.append(self.allocator, reg);
+                    } else {
+                        return self.fail(register_token, .expected_register);
+                    }
+                    if (try self.eat(.r_paren)) break;
+                    _ = try self.expect(.comma);
+                };
             } else {
                 return self.fail(modifier, .unsupported_function_modifier);
             }
@@ -177,6 +200,9 @@ pub const Parser = struct {
                 .no_return = no_return,
                 .command_indices = command_indices,
                 .command_sizes = try command_sizes.toOwnedSlice(self.allocator),
+                .has_clobber_contract = has_clobber_contract,
+                .clobber_regs = try clobber_regs.toOwnedSlice(self.allocator),
+                .clobber_vector_regs = try clobber_vector_regs.toOwnedSlice(self.allocator),
                 .parameters = parameters,
                 .statements = &.{},
             };
@@ -195,6 +221,9 @@ pub const Parser = struct {
             .no_return = no_return,
             .command_indices = command_indices,
             .command_sizes = try command_sizes.toOwnedSlice(self.allocator),
+            .has_clobber_contract = has_clobber_contract,
+            .clobber_regs = try clobber_regs.toOwnedSlice(self.allocator),
+            .clobber_vector_regs = try clobber_vector_regs.toOwnedSlice(self.allocator),
             .parameters = parameters,
             .statements = statements,
         };
@@ -282,12 +311,50 @@ pub const Parser = struct {
 
         const first = try self.expect(.ident);
 
-        if ((std.mem.eql(u8, first.text, "dma") or std.mem.eql(u8, first.text, "rdp")) and
+        if ((std.mem.eql(u8, first.text, "dma") or std.mem.eql(u8, first.text, "rdp") or
+            std.mem.eql(u8, first.text, "cp0")) and
             self.current.tag == .dot)
         {
             _ = try self.expect(.dot);
             const operation_name = try self.expect(.ident);
             _ = try self.expect(.l_paren);
+            if (std.mem.eql(u8, first.text, "cp0") and
+                (std.mem.eql(u8, operation_name.text, "readRegister") or
+                    std.mem.eql(u8, operation_name.text, "writeRegister")))
+            {
+                const register_token = try self.expect(.number);
+                const register = try self.parseNumberValue(register_token);
+                if (register < 0 or register > 15) return self.fail(register_token, .invalid_hardware_register);
+                _ = try self.expect(.comma);
+                const scalar_token = try self.expect(.register);
+                const scalar_register = parseRegister(scalar_token) orelse
+                    return self.fail(scalar_token, .expected_scalar_register);
+                _ = try self.expect(.r_paren);
+                _ = try self.expect(.semicolon);
+                if (std.mem.eql(u8, operation_name.text, "readRegister")) {
+                    return .{ .builtin = .{ .hardware_read_register = .{
+                        .hardware_register = @intCast(register),
+                        .destination = scalar_register,
+                    } } };
+                }
+                return .{ .builtin = .{ .hardware_write_register = .{
+                    .hardware_register = @intCast(register),
+                    .source = scalar_register,
+                } } };
+            }
+            if (std.mem.eql(u8, first.text, "cp0") and std.mem.eql(u8, operation_name.text, "write")) {
+                const register_token = try self.expect(.number);
+                const register = try self.parseNumberValue(register_token);
+                if (register < 0 or register > 15) return self.fail(register_token, .invalid_hardware_register);
+                _ = try self.expect(.comma);
+                const value = try self.parseValueRef();
+                _ = try self.expect(.r_paren);
+                _ = try self.expect(.semicolon);
+                return .{ .builtin = .{ .hardware_write = .{
+                    .operation = .{ .cp0 = @intCast(register) },
+                    .value = value,
+                } } };
+            }
             const operation = hardwareWriteOperation(first.text, operation_name.text) orelse {
                 const arguments = try self.parseCallArguments();
                 const delay_slot = try self.parseOptionalDelaySlot();
@@ -525,6 +592,33 @@ pub const Parser = struct {
                 } };
             }
 
+            if (try self.eat(.l_paren)) {
+                const lhs = try self.parseValue();
+                const first_op = (try self.parseBinaryAssignOp()) orelse
+                    return self.fail(self.current, .unexpected_token);
+                const first_rhs = valueFromRef(try self.parseValueRef());
+                var continuation: std.ArrayList(ast.BinaryStep) = .empty;
+                errdefer continuation.deinit(self.allocator);
+                while (!try self.eat(.r_paren)) {
+                    const op = (try self.parseBinaryAssignOp()) orelse
+                        return self.fail(self.current, .unexpected_token);
+                    try continuation.append(self.allocator, .{
+                        .op = op,
+                        .rhs = valueFromRef(try self.parseValueRef()),
+                    });
+                }
+                _ = try self.expect(.semicolon);
+                return .{ .assignment = .{
+                    .destination = first.text,
+                    .destination_lane = destination_lane,
+                    .destination_view = destination_view,
+                    .lhs = lhs,
+                    .op = first_op,
+                    .rhs = first_rhs,
+                    .continuation = try continuation.toOwnedSlice(self.allocator),
+                } };
+            }
+
             const lhs = try self.parseValue();
             const comparison = try self.parseComparisonOperator();
             const assignment_lhs: ast.Value = if (comparison) |comparison_op| .{ .scalar_comparison = .{
@@ -608,10 +702,13 @@ pub const Parser = struct {
                 .data_type = data_type,
             });
         }
-        return .{
+        const declaration: ast.PackedStructDecl = .{
             .name = name.text,
             .fields = try fields.toOwnedSlice(self.allocator),
         };
+        errdefer self.allocator.free(declaration.fields);
+        try self.packed_structs.append(self.allocator, declaration);
+        return declaration;
     }
 
     fn parseStorageBlock(self: *Parser, initialized: bool) ![]const ast.DataDecl {
@@ -973,7 +1070,20 @@ pub const Parser = struct {
             if (!std.mem.eql(u8, operation.text, "busy")) return self.fail(operation, .unsupported_builtin);
             _ = try self.expect(.l_paren);
             _ = try self.expect(.r_paren);
-            return .{ .hardware_read = .rsp_dma_busy };
+            return .{ .hardware_read = 6 };
+        }
+
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "cp0")) {
+            _ = try self.expect(.ident);
+            _ = try self.expect(.dot);
+            const operation = try self.expect(.ident);
+            if (!std.mem.eql(u8, operation.text, "read")) return self.fail(operation, .unsupported_builtin);
+            _ = try self.expect(.l_paren);
+            const register_token = try self.expect(.number);
+            const register = try self.parseNumberValue(register_token);
+            if (register < 0 or register > 15) return self.fail(register_token, .invalid_hardware_register);
+            _ = try self.expect(.r_paren);
+            return .{ .hardware_read = @intCast(register) };
         }
 
         if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "signedLessThan")) {
@@ -1195,11 +1305,41 @@ pub const Parser = struct {
     }
 
     fn parseLiteralOffset(self: *Parser) !i64 {
+        if (try self.eat(.at)) {
+            const builtin = try self.expect(.ident);
+            if (!std.mem.eql(u8, builtin.text, "offsetOf")) {
+                return self.fail(builtin, .expected_literal_offset);
+            }
+            _ = try self.expect(.l_paren);
+            const type_name = try self.expect(.ident);
+            _ = try self.expect(.comma);
+            const field_name = try self.expect(.ident);
+            _ = try self.expect(.r_paren);
+            return self.packedStructFieldOffset(type_name, field_name);
+        }
         const tok = self.current;
         return switch (try self.parseValueRef()) {
             .number => |number| number,
             .ident, .vector_access => self.fail(tok, .expected_literal_offset),
         };
+    }
+
+    fn packedStructFieldOffset(self: *Parser, type_name: token.Token, field_name: token.Token) !i64 {
+        for (self.packed_structs.items) |declaration| {
+            if (!std.mem.eql(u8, declaration.name, type_name.text)) continue;
+            var offset: i64 = 0;
+            for (declaration.fields) |field| {
+                if (std.mem.eql(u8, field.name, field_name.text)) return offset;
+                offset += switch (field.data_type) {
+                    .u8, .i8 => 1,
+                    .u16, .i16 => 2,
+                    .u32, .i32 => 4,
+                    .vec16, .vec32 => unreachable,
+                };
+            }
+            return self.fail(field_name, .expected_literal_offset);
+        }
+        return self.fail(type_name, .expected_literal_offset);
     }
 
     fn parseCondition(self: *Parser) !ast.Condition {
@@ -1285,7 +1425,6 @@ pub const Parser = struct {
             std.mem.eql(u8, self.current.text, "extern") or
             std.mem.eql(u8, self.current.text, "inline") or
             std.mem.eql(u8, self.current.text, "pub") or
-            std.mem.eql(u8, self.current.text, "order") or
             std.mem.eql(u8, self.current.text, "command") or
             std.mem.eql(u8, self.current.text, "fn");
     }
@@ -1359,6 +1498,7 @@ pub const ErrorType = enum {
     var_keyword_removed,
     expected_data_type,
     expected_scalar_register,
+    expected_register,
     expected_vector_register,
     invalid_vector_lane,
     invalid_vector_swizzle,
@@ -1378,6 +1518,8 @@ pub const ErrorType = enum {
     expected_struct_declaration,
     invalid_array_length,
     invalid_command_index,
+    invalid_hardware_register,
+    duplicate_clobber_contract,
     incorrect_array_initializer_count,
     unexpected_token,
     invalid_number,
@@ -1401,6 +1543,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .var_keyword_removed => "'var' has been replaced by 'reg' for register variables",
         .expected_data_type => "expected data type",
         .expected_scalar_register => "expected scalar register",
+        .expected_register => "expected scalar or vector register",
         .expected_vector_register => "expected vector register ($v00 through $v31)",
         .invalid_vector_lane => "vector lane must be between 0 and 7",
         .invalid_vector_swizzle => "unsupported vector swizzle",
@@ -1420,6 +1563,8 @@ pub fn errorString(code: ErrorType) []const u8 {
         .expected_struct_declaration => "expected packed struct declaration",
         .invalid_array_length => "invalid array length",
         .invalid_command_index => "command index must be between 0 and 239",
+        .invalid_hardware_register => "hardware register index must be between 0 and 15",
+        .duplicate_clobber_contract => "function has more than one clobber contract",
         .incorrect_array_initializer_count => "array initializer must contain exactly the declared element count",
         .unexpected_token => "unexpected token",
         .invalid_number => "invalid number",
