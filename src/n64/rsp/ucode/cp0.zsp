@@ -25,3 +25,19 @@ inline pub fn setDmaRead(reg($t3) value: u32) {
 inline pub fn setDmaWrite(reg($t3) value: u32) {
     asm("mtc0 $t3, $3");
 }
+
+inline pub fn getDpStart(reg($t3) value: u32) {
+    asm("mfc0 $t3, $8");
+}
+
+inline pub fn setDpStart(reg($a1) value: u32) {
+    asm("mtc0 $a1, $8");
+}
+
+inline pub fn setDpEnd(reg($a0) value: u32) {
+    asm("mtc0 $a0, $9");
+}
+
+inline pub fn getDpStatus(reg($t3) value: u32) {
+    asm("mfc0 $t3, $11");
+}

@@ -27,21 +27,60 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     try writeStorageBlocks(writer, functions, &top_level_context);
     try writeCommandTable(writer, functions, &top_level_context);
     try writer.writeAll(".text\n\n");
+    var emitted = [_]bool{false} ** 1024;
+    if (functions.len > emitted.len) return error.TooManyFunctions;
+    var fallthrough_target = [_]bool{false} ** 1024;
     for (functions) |function| {
-        if (function.inline_call) continue;
+        if (function.statements.len == 0) continue;
+        const builtin = switch (function.statements[function.statements.len - 1]) {
+            .builtin => |builtin| builtin,
+            else => continue,
+        };
+        const target = switch (builtin) {
+            .fallthrough => |target| target,
+            else => continue,
+        };
+        if (target.module != null) return error.UnresolvedModuleCall;
+        for (functions, 0..) |candidate, target_index| {
+            if (!std.mem.eql(u8, candidate.name, target.name)) continue;
+            fallthrough_target[target_index] = true;
+            break;
+        } else return error.UnknownFunction;
+    }
+    for (functions, 0..) |_, function_index| {
+        if (fallthrough_target[function_index]) continue;
+        try writeFunction(writer, functions, &top_level_context, &emitted, function_index);
+    }
+    for (functions, 0..) |_, function_index| {
+        try writeFunction(writer, functions, &top_level_context, &emitted, function_index);
+    }
+    try writeCommandManifest(writer, functions);
+}
+
+fn writeFunction(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    top_level_context: *FunctionContext,
+    emitted: []bool,
+    function_index: usize,
+) !void {
+    if (emitted[function_index]) return;
+    emitted[function_index] = true;
+    const function = functions[function_index];
+    if (!function.inline_call) {
         if ((function.export_symbol or function.command_index != null) and function.emit_label) {
             try writer.print(".globl {s}\n", .{function.name});
         }
         if (function.emit_label) {
             try writer.print("{s}:\n", .{function.name});
         }
-        if (function.command_index != null) {
+        if (function.command_index != null and !function.no_return) {
             try writer.print("  or {s}, {s}, {s}\n", .{
-                regName(command_return), regName(.zero), regName(.ra),
+                regName(command_return), regName(.ra), regName(.zero),
             });
         }
         var function_context = top_level_context.child(function.name);
-        const context = if (function.emit_label) &function_context else &top_level_context;
+        const context = if (function.emit_label) &function_context else top_level_context;
         try bindParameters(context, function.parameters);
         try writeStatements(writer, functions, context, function.statements);
         if (!function.no_return) {
@@ -54,7 +93,21 @@ pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
         }
         try writer.writeByte('\n');
     }
-    try writeCommandManifest(writer, functions);
+    if (function.statements.len == 0) return;
+    const builtin = switch (function.statements[function.statements.len - 1]) {
+        .builtin => |builtin| builtin,
+        else => return,
+    };
+    const target = switch (builtin) {
+        .fallthrough => |target| target,
+        else => return,
+    };
+    if (target.module != null) return error.UnresolvedModuleCall;
+    for (functions, 0..) |candidate, target_index| {
+        if (!std.mem.eql(u8, candidate.name, target.name)) continue;
+        return writeFunction(writer, functions, top_level_context, emitted, target_index);
+    }
+    return error.UnknownFunction;
 }
 
 fn writeCommandManifest(writer: *std.Io.Writer, functions: []const ast.Function) !void {
@@ -79,7 +132,7 @@ fn writeCommandManifest(writer: *std.Io.Writer, functions: []const ast.Function)
 }
 
 fn validateCommandFunction(function: ast.Function) !void {
-    if (function.inline_call or function.no_return) return error.InvalidCommandFunction;
+    if (function.inline_call) return error.InvalidCommandFunction;
     if (function.parameters.len > 4) return error.InvalidCommandParameters;
     for (function.parameters, 0..) |parameter, parameter_index| {
         if (isVectorType(parameter.data_type)) return error.InvalidCommandParameters;
@@ -114,18 +167,12 @@ fn writeCommandTable(
     }
     if (table_len == 0) return error.EmptyCommandTable;
 
-    try writer.writeAll(".data\n.balign 4\n");
+    try writer.writeAll(".data\n.balign 2\n");
     try writer.print("{s}:\n", .{name});
-    for (commands[0..table_len]) |command| {
-        if (command) |function| {
-            try writer.print("  .word {s} + 0x{x:0>8}\n", .{
-                function.name,
-                function.parameters.len * 4 << 24,
-            });
-        } else {
-            try writer.writeAll("  .word 0\n");
-        }
-    }
+    for (commands[0..table_len]) |_| try writer.writeAll("  .short 0\n");
+    try writer.writeAll(".section .zsp_command_table,\"\",@progbits\n");
+    try writer.print("  .word {s}\n  .word {d}\n", .{ name, table_len });
+    try writer.writeAll(".data\n");
     try writer.writeByte('\n');
     try context.add(.{
         .name = name,
@@ -275,7 +322,57 @@ fn writeStatements(
             .assignment => |assignment| try writeAssignment(writer, context, assignment),
             .store => |store| try writeStore(writer, context, store),
             .call => |call| try writeCall(writer, functions, context, call),
-            .builtin => |builtin| try writeBuiltin(writer, context, builtin),
+            .builtin => |builtin| try writeBuiltin(writer, functions, context, builtin),
+            .label => |name| try writer.print("LABEL_{s}_{s}_0:\n", .{ context.label_prefix, name }),
+            .goto => |branch| {
+                try writer.print("  j LABEL_{s}_{s}_0\n", .{ context.label_prefix, branch.target });
+                if (branch.delay_slot) |delay_slot| {
+                    if (delay_slot.len != 1) return error.InvalidDelaySlot;
+                    try writeStatements(writer, functions, context, delay_slot);
+                } else {
+                    try writer.writeAll("  nop\n");
+                }
+            },
+            .conditional_goto => |branch| {
+                var inverse = branch.condition;
+                inverse.op = switch (inverse.op) {
+                    .eq => .ne,
+                    .ne => .eq,
+                    .lt => .ge,
+                    .le => .gt,
+                    .gt => .le,
+                    .ge => .lt,
+                };
+                try writeConditionBranchFalse(writer, context, inverse, branch.target, 0, branch.delay_slot == null);
+                if (branch.delay_slot) |delay_slot| {
+                    if (delay_slot.len != 1) return error.InvalidDelaySlot;
+                    try writeStatements(writer, functions, context, delay_slot);
+                }
+            },
+            .conditional_direct_goto => |branch| {
+                if (branch.target.module != null) return error.UnresolvedModuleCall;
+                if (branch.condition.op != .eq and branch.condition.op != .ne) {
+                    return error.ConditionalDirectGotoRequiresEquality;
+                }
+                const lhs = try context.lookup(branch.condition.lhs);
+                const lhs_reg = lhs.reg orelse return error.ConditionLhsMustBeRegister;
+                const rhs = switch (branch.condition.rhs) {
+                    .number => |number| number,
+                    else => return error.ConditionalDirectGotoRequiresZero,
+                };
+                if (rhs != 0) return error.ConditionalDirectGotoRequiresZero;
+                try writer.print("  {s} {s}, {s}\n", .{
+                    if (branch.condition.op == .eq) "beqz" else "bnez",
+                    regName(lhs_reg),
+                    branch.target.name,
+                });
+                if (branch.delay_slot) |delay_slot| {
+                    if (delay_slot.len != 1) return error.InvalidDelaySlot;
+                    try writeStatements(writer, functions, context, delay_slot);
+                } else {
+                    try writer.writeAll("  nop\n");
+                }
+            },
             .while_loop => |loop| try writeWhile(writer, functions, context, loop),
             .if_statement => |if_statement| try writeIf(writer, functions, context, if_statement),
             .asm_line => |asm_line| try writer.print("  {s}\n", .{asm_line}),
@@ -326,12 +423,15 @@ fn writeStorageBlocks(
                     .scalar => element_size,
                     .packed_struct => 1,
                 };
-                offset = std.mem.alignForward(usize, offset, alignment);
-                if (alignment > 1) try writer.print(".balign {d}\n", .{alignment});
-                try writer.print("{s}:\n", .{declaration.name});
-                if (!declaration.initialized) {
+                if (!declaration.external) {
+                    offset = std.mem.alignForward(usize, offset, alignment);
+                    if (alignment > 1) try writer.print(".balign {d}\n", .{alignment});
+                    if (declaration.public) try writer.print(".globl {s}\n", .{declaration.name});
+                    try writer.print("{s}:\n", .{declaration.name});
+                }
+                if (!declaration.external and !declaration.initialized) {
                     try writer.print("  .space {d}\n", .{declaration.array_len * element_size});
-                } else switch (declaration.storage_type) {
+                } else if (!declaration.external) switch (declaration.storage_type) {
                     .scalar => |data_type| for (declaration.values) |value| {
                         try validateDataValue(data_type, value);
                         try writer.print("  {s} {d}\n", .{ dataDirective(data_type), value });
@@ -347,8 +447,8 @@ fn writeStorageBlocks(
                             try writer.print("  {s} {d}\n", .{ dataDirective(field.data_type), value });
                         }
                     },
-                }
-                if (declaration.initialized) switch (declaration.storage_type) {
+                };
+                if (!declaration.external and declaration.initialized) switch (declaration.storage_type) {
                     .scalar => {
                         const remaining = declaration.array_len - declaration.values.len;
                         if (remaining > 0) {
@@ -364,7 +464,7 @@ fn writeStorageBlocks(
                     .constant = null,
                     .data_label = declaration.name,
                 });
-                offset += declaration.array_len * element_size;
+                if (!declaration.external) offset += declaration.array_len * element_size;
             }
         };
         if (wrote_section) {
@@ -447,7 +547,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
             .name = decl.name,
             .data_type = decl.data_type,
             .reg = null,
-            .constant = try valueAsImmediate(context, decl.value),
+            .constant = try valueAsImmediate(context, decl.value orelse return error.ExpectedConstant),
         });
         return;
     }
@@ -456,7 +556,9 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         if (decl.reg != null) return error.InvalidVectorRegister;
         const vector_reg = decl.vector_reg orelse try context.allocVectorRegister(decl.data_type);
         try validateVectorRegisterBinding(context, decl.data_type, vector_reg);
-        try writeVectorInitialValue(writer, context, vector_reg, decl.data_type, decl.value);
+        if (decl.value) |value| {
+            try writeVectorInitialValue(writer, context, vector_reg, decl.data_type, value);
+        }
         try context.add(.{
             .name = decl.name,
             .data_type = decl.data_type,
@@ -474,21 +576,26 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         return error.RegisterReservedForBackend;
     }
     if (context.isRegisterInUse(reg)) return error.RegisterAlreadyInUse;
-    switch (decl.value) {
+    if (decl.value) |value| switch (value) {
         .load => |load| {
-            if (decl.data_type != load.data_type) return error.RegisterTypeMismatch;
+            if (!isCompatibleScalarLoad(decl.data_type, load.data_type)) return error.RegisterTypeMismatch;
             try writeLoadInto(writer, context, reg, load);
         },
         .ident => |name| {
             const source = try context.lookup(name);
-            if (source.data_label) |label| {
+            try expectSameType(.{ .name = decl.name, .data_type = decl.data_type, .reg = reg, .constant = null }, source);
+            if (source.reg) |source_reg| {
+                try writer.print("  or {s}, {s}, {s}\n", .{
+                    regName(reg), regName(source_reg), regName(.zero),
+                });
+            } else if (source.data_label) |label| {
                 try loadDataAddress(writer, reg, label);
             } else {
                 try loadImmediateInto(writer, reg, source.constant orelse return error.ExpectedConstant);
             }
         },
-        else => try loadImmediateInto(writer, reg, try valueAsImmediate(context, decl.value)),
-    }
+        else => try loadImmediateInto(writer, reg, try valueAsImmediate(context, value)),
+    };
     try context.add(.{
         .name = decl.name,
         .data_type = decl.data_type,
@@ -901,8 +1008,8 @@ fn writeSet(
             if (source.reg) |source_reg| {
                 try writer.print("  or {s}, {s}, {s}\n", .{
                     regName(destination_reg),
-                    regName(.zero),
                     regName(source_reg),
+                    regName(.zero),
                 });
             } else if (source.data_label) |label| {
                 try loadDataAddress(writer, destination_reg, label);
@@ -924,10 +1031,15 @@ fn writeSet(
         .vector_operation => return error.RegisterTypeMismatch,
         .accumulator_read => return error.RegisterTypeMismatch,
         .load => |load| {
-            if (destination.data_type != load.data_type) return error.RegisterTypeMismatch;
+            if (!isCompatibleScalarLoad(destination.data_type, load.data_type)) return error.RegisterTypeMismatch;
             try writeLoadInto(writer, context, destination_reg, load);
         },
     }
+}
+
+fn isCompatibleScalarLoad(destination: DataType, source: DataType) bool {
+    return destination == source or
+        (destination == .u32 and (source == .u8 or source == .u16));
 }
 
 fn writeBitNot(
@@ -1205,6 +1317,7 @@ fn expectSameType(lhs: Symbol, rhs: Symbol) !void {
 
 fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype) !void {
     if (isVectorType(store.data_type)) {
+        if (store.label_offset != null) return error.VectorMemorySymbolicOffsetUnsupported;
         const value_access: ast.VectorAccess = switch (store.value) {
             .ident => |name| .{ .name = name },
             .vector_access => |access| access,
@@ -1238,8 +1351,40 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
         return;
     }
     try validateMemoryOffset(store.offset);
-    const address_reg = try valueAsAddressReg(writer, context, store.address);
     const value_reg = try valueAsStoreReg(writer, context, store.value);
+    if (store.label_offset) |offset_name| {
+        const offset_symbol = try context.lookup(offset_name);
+        const address_reg = try valueAsAddressReg(writer, context, store.address);
+        if (offset_symbol.data_label) |label| {
+            try writer.print("  {s} {s}, %lo({s})({s})\n", .{
+                storeOp(store.data_type),
+                regName(value_reg),
+                label,
+                regName(address_reg),
+            });
+        } else {
+            const offset = offset_symbol.constant orelse return error.ExpectedConstant;
+            try validateMemoryOffset(offset);
+            try writer.print("  {s} {s}, {d}({s})\n", .{
+                storeOp(store.data_type),
+                regName(value_reg),
+                offset,
+                regName(address_reg),
+            });
+        }
+        return;
+    }
+    if (store.offset == 0) {
+        if (memoryDataLabel(context, store.address)) |label| {
+            try writer.print("  {s} {s}, %lo({s})($zero)\n", .{
+                storeOp(store.data_type),
+                regName(value_reg),
+                label,
+            });
+            return;
+        }
+    }
+    const address_reg = try valueAsAddressReg(writer, context, store.address);
     try writer.print("  {s} {s}, {d}({s})\n", .{
         storeOp(store.data_type),
         regName(value_reg),
@@ -1283,6 +1428,7 @@ fn writeVectorLoad(
     destination: ast.VectorRegister,
     load: ast.Load,
 ) !void {
+    if (load.label_offset != null) return error.SymbolicOffsetRequiresScalarLoad;
     const address_reg = try valueAsAddressReg(writer, context, load.address);
     try writeVectorMemory(writer, true, destination, address_reg, load.offset);
     if (load.data_type == .vec32) {
@@ -1324,6 +1470,38 @@ fn writeVectorMemory(
 
 fn writeLoadInto(writer: *std.Io.Writer, context: *FunctionContext, destination_reg: Register, load: ast.Load) !void {
     try validateMemoryOffset(load.offset);
+    if (load.label_offset) |offset_name| {
+        const offset_symbol = try context.lookup(offset_name);
+        const address_reg = try valueAsAddressReg(writer, context, load.address);
+        if (offset_symbol.data_label) |label| {
+            try writer.print("  {s} {s}, %lo({s})({s})\n", .{
+                loadOp(load.data_type),
+                regName(destination_reg),
+                label,
+                regName(address_reg),
+            });
+        } else {
+            const offset = offset_symbol.constant orelse return error.ExpectedConstant;
+            try validateMemoryOffset(offset);
+            try writer.print("  {s} {s}, {d}({s})\n", .{
+                loadOp(load.data_type),
+                regName(destination_reg),
+                offset,
+                regName(address_reg),
+            });
+        }
+        return;
+    }
+    if (load.offset == 0) {
+        if (memoryDataLabel(context, load.address)) |label| {
+            try writer.print("  {s} {s}, %lo({s})($zero)\n", .{
+                loadOp(load.data_type),
+                regName(destination_reg),
+                label,
+            });
+            return;
+        }
+    }
     const address_reg = try valueAsAddressReg(writer, context, load.address);
     try writer.print("  {s} {s}, {d}({s})\n", .{
         loadOp(load.data_type),
@@ -1331,6 +1509,15 @@ fn writeLoadInto(writer: *std.Io.Writer, context: *FunctionContext, destination_
         load.offset,
         regName(address_reg),
     });
+}
+
+fn memoryDataLabel(context: *FunctionContext, address: ast.ValueRef) ?[]const u8 {
+    const name = switch (address) {
+        .ident => |name| name,
+        else => return null,
+    };
+    const symbol = context.lookup(name) catch return null;
+    return symbol.data_label;
 }
 
 fn validateMemoryOffset(offset: i64) !void {
@@ -1402,15 +1589,48 @@ fn writeCall(
     try writer.writeAll("  nop\n");
 }
 
-fn writeBuiltin(writer: *std.Io.Writer, context: *FunctionContext, builtin: ast.Builtin) !void {
+fn writeBuiltin(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+    builtin: ast.Builtin,
+) !void {
     switch (builtin) {
         .nop => try writer.writeAll("  nop\n"),
         .breakpoint => try writer.writeAll("  break\n"),
-        .jump => |address| {
-            const address_reg = try valueAsAddressReg(writer, context, address);
+        .jump => |jump| {
+            const address_reg = try valueAsAddressReg(writer, context, jump.address);
             try writer.print("  jr {s}\n", .{regName(address_reg)});
-            try writer.writeAll("  nop\n");
+            try writeDelaySlot(writer, functions, context, jump.delay_slot);
         },
+        .direct_goto => |branch| {
+            if (branch.target.module != null) return error.UnresolvedModuleCall;
+            try writer.print("  {s} {s}\n", .{
+                if (branch.encoding == .jump) "j" else "b",
+                branch.target.name,
+            });
+            try writeDelaySlot(writer, functions, context, branch.delay_slot);
+        },
+        .fallthrough => {},
+        .set_return => |target| try writer.print("  addiu $ra, $zero, %lo({s})\n", .{target}),
+        .move => |move| try writer.print("  or {s}, {s}, $zero\n", .{
+            regName(move.destination),
+            regName(move.source),
+        }),
+    }
+}
+
+fn writeDelaySlot(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    context: *FunctionContext,
+    delay_slot: ?[]ast.Statement,
+) !void {
+    if (delay_slot) |statements| {
+        if (statements.len != 1) return error.InvalidDelaySlot;
+        try writeStatements(writer, functions, context, statements);
+    } else {
+        try writer.writeAll("  nop\n");
     }
 }
 
@@ -1423,7 +1643,7 @@ fn writeWhile(
     const label = context.allocLabel();
 
     try writer.print("LABEL_{s}_while_{d}:\n", .{ context.label_prefix, label });
-    try writeConditionBranchFalse(writer, context, loop.condition, "whileend", label);
+    try writeConditionBranchFalse(writer, context, loop.condition, "whileend", label, true);
     const scope = context.pushScope();
     defer context.popScope(scope);
     try writeStatements(writer, functions, context, loop.statements);
@@ -1440,7 +1660,7 @@ fn writeIf(
 ) anyerror!void {
     const label = context.allocLabel();
     const false_suffix: []const u8 = if (if_statement.else_statements != null) "ifelse" else "ifend";
-    try writeConditionBranchFalse(writer, context, if_statement.condition, false_suffix, label);
+    try writeConditionBranchFalse(writer, context, if_statement.condition, false_suffix, label, true);
 
     const then_scope = context.pushScope();
     try writeStatements(writer, functions, context, if_statement.then_statements);
@@ -1463,6 +1683,7 @@ fn writeConditionBranchFalse(
     condition: ast.Condition,
     label_suffix: []const u8,
     label: usize,
+    emit_nop: bool,
 ) !void {
     const lhs = try context.lookup(condition.lhs);
     const lhs_reg = lhs.reg orelse return error.ConditionLhsMustBeRegister;
@@ -1520,7 +1741,7 @@ fn writeConditionBranchFalse(
                         label_suffix,
                         label,
                     });
-                    try writer.writeAll("  nop\n");
+                    if (emit_nop) try writer.writeAll("  nop\n");
                     return;
                 }
                 const adjusted = if (condition.op == .gt or condition.op == .le)
@@ -1549,7 +1770,7 @@ fn writeConditionBranchFalse(
                             label_suffix,
                             label,
                         });
-                        try writer.writeAll("  nop\n");
+                        if (emit_nop) try writer.writeAll("  nop\n");
                         return;
                     }
                 }
@@ -1583,7 +1804,7 @@ fn writeConditionBranchFalse(
             });
         },
     }
-    try writer.writeAll("  nop\n");
+    if (emit_nop) try writer.writeAll("  nop\n");
 }
 
 fn valueAsImmediate(context: *FunctionContext, value: ast.Value) !i64 {

@@ -1,10 +1,11 @@
 const io = @import("io.zig");
+const cache = @import("../../cpu/cache.zig");
+const rsp = @import("../../rsp/rsp.zig");
 const ColorFormat = @import("../color.zig").Format;
 const BitDepth = @import("../color.zig").BitDepth;
 const cc = @import("combiner.zig");
 const blender = @import("blender.zig");
 const modes = @import("modes.zig");
-
 
 const CombineMode = cc.CombineMode;
 const OtherModes = modes.OtherModes;
@@ -15,7 +16,7 @@ pub const FixedQueue = struct {
     index: usize = 0,
 
     pub fn push(self: *FixedQueue, value: u64) void {
-        if(self.index >= self.buffer.len) @panic("RDP Queue Full");
+        if (self.index >= self.buffer.len) @panic("RDP Queue Full");
         self.buffer[self.index] = value;
         self.index += 1;
     }
@@ -29,6 +30,59 @@ pub const FixedQueue = struct {
     }
 
     pub fn clear(self: *FixedQueue) void {
+        self.index = 0;
+    }
+};
+
+// CPU-side raw RDP command sink submitted through the resident RSP queue.
+// The two dynamic buffers are shared with overlays that emit additional RDP
+// commands after this static CPU-generated buffer has been scheduled.
+pub const RspQueue = struct {
+    buffer: []align(8) u64,
+    dynamic_buffers: [2][]align(16) u8,
+    rsp_queue: *rsp.Queue,
+    index: usize = 0,
+    configured: bool = false,
+
+    pub fn init(
+        rsp_queue: *rsp.Queue,
+        buffer: []align(8) u64,
+        dynamic_buffers: [2][]align(16) u8,
+    ) RspQueue {
+        if (buffer.len == 0) @panic("RSP-backed RDP queue buffer must not be empty");
+        if (dynamic_buffers[0].len != rsp.rdp_dynamic_buffer_len or
+            dynamic_buffers[1].len != rsp.rdp_dynamic_buffer_len)
+        {
+            @panic("RSP-backed RDP dynamic buffers must each be 64 KiB");
+        }
+        return .{
+            .buffer = buffer,
+            .dynamic_buffers = dynamic_buffers,
+            .rsp_queue = rsp_queue,
+        };
+    }
+
+    pub fn push(self: *RspQueue, value: u64) void {
+        if (self.index >= self.buffer.len) @panic("RSP-backed RDP queue is full");
+        self.buffer[self.index] = value;
+        self.index += 1;
+    }
+
+    pub fn execute(self: *RspQueue) void {
+        if (self.index == 0) return;
+        if (!self.configured) {
+            self.rsp_queue.configureRdpBuffers(self.dynamic_buffers[0], self.dynamic_buffers[1]);
+            self.configured = true;
+        }
+        const commands = self.buffer[0..self.index];
+        cache.writebackData(commands);
+        const start: u32 = @truncate(@intFromPtr(commands.ptr) & 0x00ffffff);
+        const end = start + @as(u32, @intCast(commands.len * @sizeOf(u64)));
+        self.rsp_queue.setRdpBuffer(end, start, end);
+        rsp.flush(self.rsp_queue);
+    }
+
+    pub fn clear(self: *RspQueue) void {
         self.index = 0;
     }
 };
@@ -77,7 +131,6 @@ pub const SetTileOptions = struct {
     mirror_s: bool = false,
     mirror_t: bool = false,
 };
-
 
 // Thin command emitter. Every method pushes exactly the command(s) documented —
 // no hidden syncs, no state tracking. Callers are responsible for issuing
@@ -270,24 +323,22 @@ pub fn CommandQueue(comptime QueueType: type) type {
 
         // 0xFD
         pub fn setTextureImage(cq: *Self, format: ColorFormat, bit_depth: BitDepth, width: u32, addr: usize) void {
-            cq.queue.push(
-                (@as(u64, 0xFD) << 56) |
+            cq.queue.push((@as(u64, 0xFD) << 56) |
                 (@as(u64, @intFromEnum(format)) << 53) |
                 (@as(u64, @intFromEnum(bit_depth)) << 51) |
                 (@as(u64, lowBits(width - 1, 10)) << 32) |
-                lowBits(addr, 24)
-            );
+                lowBits(addr, 24));
         }
 
         // 0xFF
         pub fn setColorFrame(cq: *Self, image: anytype) void {
             cq.queue.push(buildImageCmd(0xFF, image));
         }
-
     };
 }
 
 pub const FixedCommandQueue = CommandQueue(FixedQueue);
+pub const RspCommandQueue = CommandQueue(RspQueue);
 
 fn buildTextureRectangleWords(opcode: u8, options: TextureRectangleOptions) [2]u64 {
     return .{
@@ -329,9 +380,9 @@ fn buildCombineCmd(mode: CombineMode) u64 {
         (@as(u64, @intFromEnum(c2.alpha_c)) << 18) |
         (@as(u64, @intFromEnum(c1.rgb_d)) << 15) |
         (@as(u64, @intFromEnum(c1.alpha_b)) << 12) |
-        (@as(u64, @intFromEnum(c1.alpha_d)) << 9)  |
-        (@as(u64, @intFromEnum(c2.rgb_d)) << 6)  |
-        (@as(u64, @intFromEnum(c2.alpha_b)) << 3)  |
+        (@as(u64, @intFromEnum(c1.alpha_d)) << 9) |
+        (@as(u64, @intFromEnum(c2.rgb_d)) << 6) |
+        (@as(u64, @intFromEnum(c2.alpha_b)) << 3) |
         (@as(u64, @intFromEnum(c2.alpha_d)));
 }
 
@@ -339,4 +390,3 @@ fn lowBits(value: anytype, bitCount: u6) u64 {
     const mask = (@as(u64, 1) << bitCount) - 1;
     return @as(u64, @intCast(value)) & mask;
 }
-

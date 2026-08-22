@@ -21,7 +21,7 @@ const OtherModes = modes.OtherModes;
 const Rgba32 = @import("../color.zig").Rgba32;
 
 pub const FixedRenderQueue = RenderQueue(FixedQueue);
-
+pub const RspRenderQueue = RenderQueue(q.RspQueue);
 
 // State-tracking layer over CommandQueue. Manages OtherModes/combiner dirty state,
 // texture caching in TMEM, and provides high-level draw calls.
@@ -42,8 +42,8 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
         tex_cache: [8]TexCacheEntry = [_]TexCacheEntry{.{}} ** 8,
         tex_cache_len: usize = 0,
-        tmem_next: u9 = 0,  // next free TMEM word offset (8-byte words, max 512)
-        next_tile: u3 = 0,     // next render tile; load tile = next_tile +% 1
+        tmem_next: u9 = 0, // next free TMEM word offset (8-byte words, max 512)
+        next_tile: u3 = 0, // next render tile; load tile = next_tile +% 1
 
         pub fn init(queue: QueueType) Self {
             var result: Self = .{ .cmd_queue = TCmdQueue.init(queue) };
@@ -148,7 +148,10 @@ pub fn RenderQueue(comptime QueueType: type) type {
             // Compute TMEM size: (w * h * bpp) bits rounded up to 64-bit words.
             const T = @TypeOf(image);
             const bpp: u16 = switch (T.bit_depth) {
-                .@"4" => 4, .@"8" => 8, .@"16" => 16, .@"32" => 32,
+                .@"4" => 4,
+                .@"8" => 8,
+                .@"16" => 16,
+                .@"32" => 32,
             };
             const tmem_words: u9 = @truncate((image.width * image.height * bpp + 63) / 64);
             // Evict entire cache when TMEM is full or all 4 render slots are used.
@@ -166,11 +169,10 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.tmem_next += tmem_words;
             rq.next_tile +%= 2;
             return tile;
-       }
-
+        }
 
         pub fn drawSprite(rq: *Self, image: anytype, x: f32, y: f32, opts: SpriteDrawOptions) void {
-            const src_width: f32  = if (opts.width  != 0) @floatFromInt(opts.width)  else @floatFromInt(image.width);
+            const src_width: f32 = if (opts.width != 0) @floatFromInt(opts.width) else @floatFromInt(image.width);
             const src_height: f32 = if (opts.height != 0) @floatFromInt(opts.height) else @floatFromInt(image.height);
 
             // Negative scale toggles flip; work with magnitudes.
@@ -178,20 +180,26 @@ pub fn RenderQueue(comptime QueueType: type) type {
             var flip_y = opts.flip_y;
             var scale_x: f32 = opts.scale_x;
             var scale_y: f32 = opts.scale_y;
-            if (scale_x < 0.0) { flip_x = !flip_x; scale_x = -scale_x; }
-            if (scale_y < 0.0) { flip_y = !flip_y; scale_y = -scale_y; }
+            if (scale_x < 0.0) {
+                flip_x = !flip_x;
+                scale_x = -scale_x;
+            }
+            if (scale_y < 0.0) {
+                flip_y = !flip_y;
+                scale_y = -scale_y;
+            }
 
             // Pivot in source-rect-local coordinates (0,0 = top-left of sub-rect).
             const cx: f32 = switch (opts.pivot) {
-                .top_left, .middle_left, .bottom_left       => 0.0,
-                .top_middle, .center, .bottom_middle         => src_width / 2.0,
-                .top_right, .middle_right, .bottom_right    => src_width,
+                .top_left, .middle_left, .bottom_left => 0.0,
+                .top_middle, .center, .bottom_middle => src_width / 2.0,
+                .top_right, .middle_right, .bottom_right => src_width,
                 .custom => |p| @floatFromInt(p.x),
             };
             const cy: f32 = switch (opts.pivot) {
-                .top_left, .top_middle, .top_right           => 0.0,
-                .middle_left, .center, .middle_right         => src_height / 2.0,
-                .bottom_left, .bottom_middle, .bottom_right  => src_height,
+                .top_left, .top_middle, .top_right => 0.0,
+                .middle_left, .center, .middle_right => src_height / 2.0,
+                .bottom_left, .bottom_middle, .bottom_right => src_height,
                 .custom => |p| @floatFromInt(p.y),
             };
 
@@ -199,13 +207,10 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
             if (opts.rotation == 0.0) {
                 rq.flushModes();
-                texture.drawNonRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, 
-                    src_width, src_height, flip_x, flip_y, scale_x, scale_y, cx, cy);
-            } 
-            else {
+                texture.drawNonRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, src_width, src_height, flip_x, flip_y, scale_x, scale_y, cx, cy);
+            } else {
                 rq.flushModes();
-                tri.drawRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, 
-                    src_width, src_height, flip_x, flip_y, opts.rotation, scale_x, scale_y, cx, cy);
+                tri.drawRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, src_width, src_height, flip_x, flip_y, opts.rotation, scale_x, scale_y, cx, cy);
             }
         }
     };

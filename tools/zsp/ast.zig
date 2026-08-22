@@ -70,6 +70,7 @@ pub const Load = struct {
     data_type: DataType,
     address: ValueRef,
     offset: i64 = 0,
+    label_offset: ?[]const u8 = null,
 };
 
 pub const ValueRef = union(enum) {
@@ -194,7 +195,7 @@ pub const VarDecl = struct {
     reg: ?Register,
     vector_reg: ?VectorRegister = null,
     name: []const u8,
-    value: Value,
+    value: ?Value,
 };
 
 pub const DataDecl = struct {
@@ -204,6 +205,8 @@ pub const DataDecl = struct {
     is_array: bool,
     values: []const i64,
     initialized: bool,
+    public: bool = false,
+    external: bool = false,
 };
 
 pub const DataStorageType = union(enum) {
@@ -224,7 +227,31 @@ pub const PackedStructField = struct {
 pub const Builtin = union(enum) {
     nop,
     breakpoint,
-    jump: ValueRef,
+    jump: struct {
+        address: ValueRef,
+        delay_slot: ?[]Statement,
+    },
+    direct_goto: struct {
+        target: FunctionRef,
+        encoding: DirectGotoEncoding = .jump,
+        delay_slot: ?[]Statement,
+    },
+    fallthrough: FunctionRef,
+    set_return: []const u8,
+    move: struct {
+        destination: Register,
+        source: Register,
+    },
+};
+
+pub const DirectGotoEncoding = enum {
+    jump,
+    branch,
+};
+
+pub const FunctionRef = struct {
+    module: ?[]const u8 = null,
+    name: []const u8,
 };
 
 pub const AssignOp = enum {
@@ -271,9 +298,25 @@ pub const Statement = union(enum) {
         address: ValueRef,
         value: ValueRef,
         offset: i64 = 0,
+        label_offset: ?[]const u8 = null,
     },
     call: Call,
     builtin: Builtin,
+    label: []const u8,
+    goto: struct {
+        target: []const u8,
+        delay_slot: ?[]Statement,
+    },
+    conditional_goto: struct {
+        condition: Condition,
+        target: []const u8,
+        delay_slot: ?[]Statement,
+    },
+    conditional_direct_goto: struct {
+        condition: Condition,
+        target: FunctionRef,
+        delay_slot: ?[]Statement,
+    },
     while_loop: struct {
         condition: Condition,
         statements: []Statement,
@@ -303,6 +346,14 @@ fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
                 allocator.free(declarations);
             },
             .while_loop => |loop| freeStatements(allocator, loop.statements),
+            .builtin => |builtin| switch (builtin) {
+                .jump => |jump| if (jump.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
+                .direct_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
+                else => {},
+            },
+            .goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
+            .conditional_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
+            .conditional_direct_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
             .if_statement => |if_statement| {
                 freeStatements(allocator, if_statement.then_statements);
                 if (if_statement.else_statements) |else_statements| freeStatements(allocator, else_statements);

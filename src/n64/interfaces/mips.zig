@@ -1,6 +1,6 @@
 const InterruptMask = @import("../interrupt.zig").InterruptMask;
 
-const mode:    *volatile u32 = @ptrFromInt(0xA4300000);
+const mode: *volatile u32 = @ptrFromInt(0xA4300000);
 const version: *volatile u32 = @ptrFromInt(0xA4300004);
 const interrupt: *volatile u32 = @ptrFromInt(0xA4300008);
 const interrupt_mask: *volatile u32 = @ptrFromInt(0xA430000C);
@@ -11,6 +11,10 @@ pub fn updateInterrupts(mask: InterruptSetMask) void {
 
 pub fn clearRdpInterrupt() void {
     mode.* = 1 << 11;
+}
+
+pub fn isRdpInterruptPending() bool {
+    return interrupt.* & (@as(u32, 1) << 5) != 0;
 }
 
 pub fn getCurrentInterrupt() InterruptMask {
@@ -26,7 +30,7 @@ pub fn isIQue() bool {
 }
 
 pub fn enableRepeatMode(repeatCount: u7) void {
-    mode.* = 0x100 | @as(u32 ,@intCast(repeatCount - 1));
+    mode.* = 0x100 | @as(u32, @intCast(repeatCount - 1));
 }
 
 pub fn setUpperMode() void {

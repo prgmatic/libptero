@@ -145,7 +145,30 @@ const Loader = struct {
                     call.module = null;
                     call.name = function.name;
                 },
+                .builtin => |*builtin| switch (builtin.*) {
+                    .direct_goto => |*branch| {
+                        try self.resolveFunctionRef(module_index, &branch.target);
+                        if (branch.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
+                    },
+                    .fallthrough => |*target| {
+                        try self.resolveFunctionRef(module_index, target);
+                    },
+                    .jump => |*jump| {
+                        if (jump.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
+                    },
+                    else => {},
+                },
                 .while_loop => |*loop| try self.resolveCalls(module_index, loop.statements),
+                .goto => |*branch| if (branch.delay_slot) |delay_slot| {
+                    try self.resolveCalls(module_index, delay_slot);
+                },
+                .conditional_goto => |*branch| if (branch.delay_slot) |delay_slot| {
+                    try self.resolveCalls(module_index, delay_slot);
+                },
+                .conditional_direct_goto => |*branch| {
+                    try self.resolveFunctionRef(module_index, &branch.target);
+                    if (branch.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
+                },
                 .if_statement => |*if_statement| {
                     try self.resolveCalls(module_index, if_statement.then_statements);
                     if (if_statement.else_statements) |else_statements| {
@@ -155,6 +178,20 @@ const Loader = struct {
                 else => {},
             }
         }
+    }
+
+    fn resolveFunctionRef(self: *Loader, module_index: usize, target: *ast.FunctionRef) !void {
+        var target_module = module_index;
+        if (target.module) |alias| {
+            target_module = try self.resolveImport(module_index, alias);
+        }
+        const function = findSourceFunction(
+            self.modules.items[target_module].functions,
+            target.name,
+        ) orelse return error.UnknownFunction;
+        if (target.module != null and !function.public) return error.PrivateFunction;
+        target.module = null;
+        target.name = function.name;
     }
 
     fn resolveImport(self: *Loader, module_index: usize, alias: []const u8) !usize {

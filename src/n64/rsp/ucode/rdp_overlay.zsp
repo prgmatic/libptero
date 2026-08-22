@@ -1,0 +1,6 @@
+const rdp = @import("rdp.zsp");
+
+// Minimal RDP overlay used to establish the overlay-to-resident emission ABI.
+command(0) fn _start(reg($a0) command: u32) {
+    rdp.send(0xe7000000, 0);
+}

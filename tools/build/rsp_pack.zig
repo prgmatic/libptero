@@ -52,7 +52,9 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const text = (try findSection(bytes, header, ".text")) orelse return error.MissingTextSection;
     const data = try findSection(bytes, header, ".data");
     const commands = try findSection(bytes, header, ".zsp_commands");
+    const command_table = try findSection(bytes, header, ".zsp_command_table");
     const state = try findSection(bytes, header, ".state");
+    const bss = try findSection(bytes, header, ".bss");
 
     if (header.entry < text.sh_addr or header.entry >= text.sh_addr + text.sh_size) return error.EntryOutsideText;
     const pc_start = header.entry - imem_base;
@@ -85,6 +87,13 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
         }
         state_offset = @intCast(section.sh_addr);
         state_size = @intCast(section.sh_size);
+    } else {
+        var state_start: u64 = if (data) |section| section.sh_addr + section.sh_size else 0;
+        if (bss) |section| state_start = @max(state_start, section.sh_addr + section.sh_size);
+        state_start = std.mem.alignForward(u64, state_start, 8);
+        if (state_start + 8 > 0x1000) return error.StateOutsideDmem;
+        state_offset = @intCast(state_start);
+        state_size = 8;
     }
     if (padded_text_size > 0x1000) return error.TextTooLarge;
     if (padded_data_size > 0x1000) return error.DataTooLarge;
@@ -116,11 +125,60 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
             return err;
         };
     }
+    if (command_table) |table| {
+        const d = data orelse return error.MissingDataSection;
+        const command_section = commands orelse return error.MissingCommandSection;
+        try patchCommandTable(out[data_offset..][0..data_size], bytes, table, command_section, text, d);
+    }
     if (commands) |section| {
         try packCommands(out[commands_offset..], bytes, section, text);
     }
 
     return out;
+}
+
+fn patchCommandTable(
+    data_image: []u8,
+    elf_bytes: []const u8,
+    table_section: elf.Elf64_Shdr,
+    command_section: elf.Elf64_Shdr,
+    text: elf.Elf64_Shdr,
+    data: elf.Elf64_Shdr,
+) !void {
+    const metadata = try sectionBytes(elf_bytes, table_section);
+    if (metadata.len != 8) return error.InvalidCommandTable;
+    const table_address = std.mem.readInt(u32, metadata[0..4], .big);
+    const table_len = std.mem.readInt(u32, metadata[4..8], .big);
+    if (table_len > 240 or table_address < data.sh_addr) return error.InvalidCommandTable;
+    const table_offset: usize = @intCast(table_address - data.sh_addr);
+    const table_size: usize = @intCast(table_len * 2);
+    if (table_offset + table_size > data_image.len) return error.InvalidCommandTable;
+    @memset(data_image[table_offset..][0..table_size], 0);
+
+    const commands = try sectionBytes(elf_bytes, command_section);
+    if (commands.len % command_source_size != 0) return error.InvalidCommandSection;
+    var seen = std.StaticBitSet(240).initEmpty();
+    for (0..commands.len / command_source_size) |record_index| {
+        const record = commands[record_index * command_source_size ..][0..command_source_size];
+        const handler = std.mem.readInt(u32, record[0..4], .big);
+        const index = record[4];
+        const command_size = record[5];
+        if (index >= table_len or seen.isSet(index)) return error.InvalidCommandIndex;
+        seen.set(index);
+        if (command_size & 3 != 0 or command_size > 0xfc) return error.InvalidCommandSize;
+        if (handler < text.sh_addr or handler >= text.sh_addr + text.sh_size or handler & 3 != 0) {
+            return error.InvalidCommandHandler;
+        }
+        const handler_words = (handler - imem_base) >> 2;
+        if (handler_words > 0x3ff) return error.InvalidCommandHandler;
+        const descriptor: u16 = @intCast(handler_words | (@as(u32, command_size) << 8));
+        std.mem.writeInt(
+            u16,
+            data_image[table_offset + @as(usize, index) * 2 ..][0..2],
+            descriptor,
+            .big,
+        );
+    }
 }
 
 fn packCommands(
@@ -165,6 +223,13 @@ fn copySection(dest: []u8, bytes: []const u8, section: elf.Elf64_Shdr) !void {
     const size: usize = @intCast(section.sh_size);
     if (offset + size > bytes.len) return error.BadElf;
     @memcpy(dest, bytes[offset..][0..size]);
+}
+
+fn sectionBytes(bytes: []const u8, section: elf.Elf64_Shdr) ![]const u8 {
+    const offset: usize = @intCast(section.sh_offset);
+    const size: usize = @intCast(section.sh_size);
+    if (offset + size > bytes.len) return error.BadElf;
+    return bytes[offset..][0..size];
 }
 
 fn findSection(bytes: []const u8, header: elf.Header, name: []const u8) !?elf.Elf64_Shdr {

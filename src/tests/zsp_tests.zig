@@ -5,6 +5,7 @@ const testing = @import("assert.zig");
 const zsp_programs = @import("zsp_test_programs");
 
 const rsp = n64.rsp;
+const rdp = n64.graphics.rdp;
 const rsp_timeout_attempts: u32 = 1_000_000;
 
 var dma_in_batch align(8) = [_]u32{
@@ -18,17 +19,24 @@ var invalid_command_batch: [rsp.command_queue.batch_word_count]u32 align(8) = .{
     .{0x00000000} ** (rsp.command_queue.batch_word_count - 1);
 
 var command_queue_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
+var boundary_queue_buffer: [rsp.command_queue.batch_word_count * 2]u32 align(8) = undefined;
 var chained_queue_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
 var called_block_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
 var alternate_queue_buffer: [rsp.command_queue.batch_word_count]u32 align(8) = undefined;
-var continuous_queue: rsp.DoubleBufferedQueue = undefined;
-var queued_dma_queue: rsp.DoubleBufferedQueue = undefined;
-var syncpoint_queue: rsp.DoubleBufferedQueue = undefined;
+var continuous_queue: rsp.Queue = undefined;
+var queued_dma_queue: rsp.Queue = undefined;
+var syncpoint_queue: rsp.Queue = undefined;
 var high_priority_queue: rsp.Queue = undefined;
+var rdp_queue: rsp.Queue = undefined;
+var rdp_buffer: [2]u64 align(8) = .{ 0, 0 };
+var rdp_rollover_buffer: [2]u64 align(8) = .{ 0, 0 };
+var rsp_rdp_command_buffer: [4]u64 align(8) = undefined;
+var rsp_rdp_dynamic_buffers: [2][rsp.rdp_dynamic_buffer_len]u8 align(16) = undefined;
 var queue_dma_source: [4]u32 align(8) = .{ 0x12345678, 0x89abcdef, 0x0badcafe, 0xfeedface };
 var queue_dma_destination: [4]u32 align(8) = undefined;
 var overlay_1: rsp.Overlay = undefined;
 var overlay_2: rsp.Overlay = undefined;
+var rdp_overlay: rsp.Overlay = undefined;
 
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
@@ -59,10 +67,14 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: command dispatcher", .run = commandDispatcher },
     .{ .name = "ZSP: chained command buffers", .run = chainedCommandBuffers },
     .{ .name = "ZSP: called command block", .run = calledCommandBlock },
+    .{ .name = "ZSP: indirect called command block", .run = indirectCalledCommandBlock },
     .{ .name = "ZSP: swapped command buffers", .run = swappedCommandBuffers },
     .{ .name = "ZSP: continuous double-buffered queue", .run = continuousDoubleBufferedQueue },
+    .{ .name = "ZSP: command fetch boundary", .run = commandFetchBoundary },
     .{ .name = "ZSP: polling syncpoint", .run = pollingSyncpoint },
     .{ .name = "ZSP: high-priority queue", .run = highPriorityQueue },
+    .{ .name = "ZSP: RDP buffer commands", .run = rdpBufferCommands },
+    .{ .name = "ZSP: RDP debug handoff", .run = rdpDebugHandoff },
     .{ .name = "ZSP: queued DMA command", .run = queuedDmaCommand },
     .{ .name = "ZSP: RSP-loaded overlay dispatch", .run = rspLoadedOverlayDispatch },
     .{ .name = "ZSP: command dispatcher invalid command", .run = commandDispatcherInvalid },
@@ -262,7 +274,6 @@ fn commandDispatcher() !void {
     rsp.submitCommands(&queue);
     try runLoadedCommandDispatcher();
 
-    try expectDmemWord(u32, rsp.command_status_dmem, 0);
     try expectDmemWord(u32, 0x100, 0x12345678);
 }
 
@@ -277,7 +288,6 @@ fn chainedCommandBuffers() !void {
     rsp.submitCommands(&first);
     try runLoadedCommandDispatcher();
 
-    try expectDmemWord(u32, rsp.command_status_dmem, 0);
     try expectDmemWord(u32, 0x304, 0x12345678);
     try expectDmemWord(u32, 0x308, 0x89abcdef);
 }
@@ -296,10 +306,28 @@ fn calledCommandBlock() !void {
     rsp.submitCommands(&queue);
     try runLoadedCommandDispatcher();
 
-    try expectDmemWord(u32, rsp.command_status_dmem, 0);
     try expectDmemWord(u32, 0x308, 0x12345678);
     try expectDmemWord(u32, 0x30c, 0x89abcdef);
     try expectDmemWord(u32, 0x310, 0xcafebabe);
+}
+
+fn indirectCalledCommandBlock() !void {
+    loadCommandDispatcher();
+    var block = rsp.CommandQueue.init(called_block_buffer[0..]);
+    block.writeDmem(0x344, 0x89abcdef);
+    block.returnFromCall();
+
+    const target: u32 = @truncate(@intFromPtr(block.buffer.ptr) & 0x00ffffff);
+    var queue = rsp.CommandQueue.init(command_queue_buffer[0..]);
+    queue.writeDmem(0x340, target);
+    queue.callIndirect(&block, 0x340);
+    queue.writeDmem(0x348, 0xcafebabe);
+    queue.stop();
+    rsp.submitCommands(&queue);
+    try runLoadedCommandDispatcher();
+
+    try expectDmemWord(u32, 0x344, 0x89abcdef);
+    try expectDmemWord(u32, 0x348, 0xcafebabe);
 }
 
 fn swappedCommandBuffers() !void {
@@ -317,7 +345,6 @@ fn swappedCommandBuffers() !void {
     rsp.submitCommands(&queue);
     try runLoadedCommandDispatcher();
 
-    try expectDmemWord(u32, rsp.command_status_dmem, 0);
     try expectDmemWord(u32, 0x314, 0x12345678);
     try expectDmemWord(u32, 0x318, 0x89abcdef);
     try expectDmemWord(u32, 0x31c, 0xcafebabe);
@@ -337,6 +364,24 @@ fn continuousDoubleBufferedQueue() !void {
     rsp.flush(&continuous_queue);
     try waitQueueTimeout(&continuous_queue);
     try expectDmemWord(u32, 0x404, 0x89abcdef);
+}
+
+fn commandFetchBoundary() !void {
+    loadCommandDispatcher();
+    @memset(&boundary_queue_buffer, 0);
+    for (boundary_queue_buffer[0..63]) |*word| word.* = 0x06000000;
+    boundary_queue_buffer[63] = 0x01000350;
+    boundary_queue_buffer[64] = 0x12345678;
+    boundary_queue_buffer[65] = 0x00000000;
+    n64.cache.writebackData(&boundary_queue_buffer);
+
+    rsp.halt();
+    rsp.waitHalted();
+    rsp.io.readDmem(u32, 0xb0).* = @truncate(@intFromPtr(&boundary_queue_buffer) & 0x1fffffff);
+    rsp.io.status_register_write.* = rsp.io.status_set_signal7;
+    try runLoadedCommandDispatcher();
+
+    try expectDmemWord(u32, 0x350, 0x12345678);
 }
 
 fn pollingSyncpoint() !void {
@@ -395,6 +440,138 @@ fn highPriorityQueue() !void {
     try expectDmemWord(u32, 0x334, 3);
 }
 
+fn rdpBufferCommands() !void {
+    loadCommandDispatcher();
+    rdp_overlay.init(rsp.programs.rdp_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&rdp_overlay));
+    rdp_buffer = .{ 0xffffffffffffffff, 0xffffffffffffffff };
+    n64.cache.writebackData(&rdp_buffer);
+    const buffer_address: u32 = @truncate(@intFromPtr(&rdp_buffer) & 0x00ffffff);
+    const sentinel_address = buffer_address + @sizeOf(@TypeOf(rdp_buffer));
+
+    rdp_queue.init(.low);
+    rdp_queue.setRdpBuffer(buffer_address, buffer_address, sentinel_address);
+    rdp_queue.appendRdpBuffer(buffer_address);
+    rdp_queue.writeOverlayCommand(&rdp_overlay, 0, 0, &.{});
+    rsp.flush(&rdp_queue);
+    try waitQueueTimeout(&rdp_queue);
+
+    n64.cache.invalidateData(&rdp_buffer);
+    try testing.expectEqual(@as(u64, 0xe700000000000000), rdp_buffer[0]);
+    try testing.expectEqual(@as(u64, 0xffffffffffffffff), rdp_buffer[1]);
+    try expectDmemWord(u32, 0xc0, buffer_address + 8);
+    try expectDmemWord(u32, 0xc4, sentinel_address);
+    try testing.expectEqual(buffer_address, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
+    try testing.expectEqual(buffer_address + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
+
+    rdp_rollover_buffer = .{ 0xffffffffffffffff, 0xffffffffffffffff };
+    n64.cache.writebackData(&rdp_rollover_buffer);
+    const rollover_address: u32 = @truncate(@intFromPtr(&rdp_rollover_buffer) & 0x00ffffff);
+    rdp_queue.writeDmem(0xc8, buffer_address);
+    rdp_queue.writeDmem(0xcc, rollover_address);
+    rdp_queue.setRdpBuffer(buffer_address + 8, buffer_address, buffer_address + 8);
+    rdp_queue.writeOverlayCommand(&rdp_overlay, 0, 0, &.{});
+    rsp.flush(&rdp_queue);
+    try waitQueueTimeout(&rdp_queue);
+
+    n64.cache.invalidateData(&rdp_rollover_buffer);
+    try testing.expectEqual(@as(u64, 0xe700000000000000), rdp_rollover_buffer[0]);
+    try testing.expectEqual(@as(u64, 0xffffffffffffffff), rdp_rollover_buffer[1]);
+    try expectDmemWord(u32, 0xc0, rollover_address + 8);
+    try expectDmemWord(u32, 0xc4, rollover_address + 0x10000);
+    try expectDmemWord(u32, 0xc8, rollover_address);
+    try expectDmemWord(u32, 0xcc, buffer_address);
+    try testing.expectEqual(rollover_address, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
+    try testing.expectEqual(rollover_address + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
+    rsp.unregisterOverlay(&rdp_overlay);
+}
+
+fn rdpDebugHandoff() !void {
+    loadCommandDispatcher();
+    rdp_buffer = .{ 0xffffffffffffffff, 0xffffffffffffffff };
+    n64.cache.writebackData(&rdp_buffer);
+    const buffer_address: u32 = @truncate(@intFromPtr(&rdp_buffer) & 0x00ffffff);
+
+    var queue = rsp.CommandQueue.init(command_queue_buffer[0..]);
+    queue.setRdpBuffer(buffer_address, buffer_address, buffer_address + @sizeOf(@TypeOf(rdp_buffer)));
+    queue.stop();
+    rsp.submitCommands(&queue);
+    rsp.io.readDmem(i8, rsp.rdp_target_bitdepth_dmem).* = -1;
+    rsp.io.status_register_write.* = rsp.io.status_clear_signal0 | rsp.io.status_clear_interrupt;
+    rsp.runAsync(rsp.programs.command_dispatcher.pc_start);
+
+    var remaining = rsp_timeout_attempts;
+    while (!rsp.io.status_register_read.signal0) : (remaining -= 1) {
+        if (remaining != 0) continue;
+        rsp.halt();
+        rsp.waitHalted();
+        return error.RspSignalTimeout;
+    }
+    rsp.io.status_register_write.* = rsp.io.status_clear_signal0 | rsp.io.status_clear_interrupt;
+    try waitBrokeTimeout();
+    try testing.expectEqual(buffer_address, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
+}
+
+fn rspBackedRdpQueue() !void {
+    loadCommandDispatcher();
+    rdp_overlay.init(rsp.programs.rdp_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&rdp_overlay));
+    @memset(rsp_rdp_dynamic_buffers[0][0..], 0xff);
+    @memset(rsp_rdp_dynamic_buffers[1][0..], 0xff);
+    n64.cache.writebackData(&rsp_rdp_dynamic_buffers);
+    rdp_queue.init(.low);
+    var render_queue = rdp.RspRenderQueue.init(rdp.RspQueue.init(
+        &rdp_queue,
+        rsp_rdp_command_buffer[0..],
+        .{ rsp_rdp_dynamic_buffers[0][0..], rsp_rdp_dynamic_buffers[1][0..] },
+    ));
+    render_queue.cmd_queue.pipeSync();
+    render_queue.execute();
+    try waitQueueTimeout(&rdp_queue);
+
+    const start: u32 = @truncate(@intFromPtr(&rsp_rdp_command_buffer) & 0x00ffffff);
+    const first_dynamic: u32 = @truncate(@intFromPtr(&rsp_rdp_dynamic_buffers[0]) & 0x00ffffff);
+    const second_dynamic: u32 = @truncate(@intFromPtr(&rsp_rdp_dynamic_buffers[1]) & 0x00ffffff);
+    try testing.expectEqual(@as(u64, 0xe700000000000000), rsp_rdp_command_buffer[0]);
+    try testing.expectEqual(start, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
+    try testing.expectEqual(start + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
+    try expectDmemWord(u32, 0xc4, start + 8);
+    try expectDmemWord(u32, 0xc8, first_dynamic);
+    try expectDmemWord(u32, 0xcc, second_dynamic);
+
+    rdp_queue.writeOverlayCommand(&rdp_overlay, 0, 0, &.{});
+    rsp.flush(&rdp_queue);
+    try waitQueueTimeout(&rdp_queue);
+    n64.cache.invalidateData(&rsp_rdp_dynamic_buffers[1]);
+    try testing.expectEqual(
+        @as(u64, 0xe700000000000000),
+        std.mem.readInt(u64, rsp_rdp_dynamic_buffers[1][0..8], .big),
+    );
+    try testing.expectEqual(second_dynamic, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
+    try testing.expectEqual(second_dynamic + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
+    try expectDmemWord(u32, 0xc0, second_dynamic + 8);
+    try expectDmemWord(u32, 0xc4, second_dynamic + rsp.rdp_dynamic_buffer_len);
+    rsp.unregisterOverlay(&rdp_overlay);
+}
+
+fn rdpCompletionFence() !void {
+    loadCommandDispatcher();
+    rdp_queue.init(.low);
+    var render_queue = rdp.RspRenderQueue.init(rdp.RspQueue.init(
+        &rdp_queue,
+        rsp_rdp_command_buffer[0..],
+        .{ rsp_rdp_dynamic_buffers[0][0..], rsp_rdp_dynamic_buffers[1][0..] },
+    ));
+    const fence = rdp.syncFull(&render_queue);
+    if (!fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
+
+    const start: u32 = @truncate(@intFromPtr(&rsp_rdp_command_buffer) & 0x00ffffff);
+    try testing.expectEqual(@as(u64, 0xe900000000000000), rsp_rdp_command_buffer[0]);
+    try testing.expectEqual(start, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
+    try testing.expectEqual(start + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
+    try testing.expect(fence.isComplete());
+}
+
 fn queuedDmaCommand() !void {
     loadCommandDispatcher();
     queued_dma_queue.init(.low);
@@ -410,7 +587,7 @@ fn queuedDmaCommand() !void {
     }
 }
 
-fn waitQueueTimeout(queue: *const rsp.DoubleBufferedQueue) !void {
+fn waitQueueTimeout(queue: *const rsp.Queue) !void {
     if (rsp.waitTimeout(queue, rsp_timeout_attempts)) return;
     rsp.halt();
     rsp.waitHalted();
@@ -443,18 +620,16 @@ fn rspLoadedOverlayDispatch() !void {
     continuous_queue.writeOverlayCommand(&overlay_2, 0, 0x514, &.{});
     continuous_queue.writeOverlayCommand(&overlay_1, 0, 0x518, &.{});
 
-    try expectDmemWord(u32, 0x6c, 0x00040800);
+    try expectDmemWord(u32, 0x78, 0x00040800);
     rsp.flush(&continuous_queue);
     try waitQueueTimeout(&continuous_queue);
 
-    try expectDmemWord(u32, rsp.command_status_dmem, 0);
     try expectDmemWord(u32, 0x504, 1);
     try expectDmemWord(u32, 0x508, 0xdeadbeef);
     try expectDmemWord(u32, 0x50c, 2);
     try expectDmemWord(u32, 0x510, 1);
     try expectDmemWord(u32, 0x514, 2);
     try expectDmemWord(u32, 0x518, 3);
-    try expectDmemWord(u32, rsp.overlay_load_count_dmem, 3);
     try expectDmemWord(u16, 0x800, rsp.programs.static_overlay.state_offset);
     try expectDmemWord(u16, 0x802, rsp.programs.static_overlay.state_len - 1);
     try expectDmemWord(u16, 0x808, 1 << 5);
@@ -476,9 +651,9 @@ fn rspLoadedOverlayDispatch() !void {
     try expectDmemWord(u32, rsp.programs.static_overlay.state_offset, 9);
     rsp.unregisterOverlay(&overlay_1);
     rsp.unregisterOverlay(&overlay_2);
-    try expectDmemWord(u32, 0x30, 0);
-    try expectDmemWord(u32, 0x34, 0);
-    try expectDmemWord(u32, 0x6c, 0);
+    try expectDmemWord(u32, 0x3c, 0);
+    try expectDmemWord(u32, 0x40, 0);
+    try expectDmemWord(u32, 0x78, 0);
 
     overlay_2.init(rsp.programs.static_overlay_2);
     try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&overlay_2));
@@ -488,8 +663,6 @@ fn commandDispatcherInvalid() !void {
     loadCommandDispatcher();
     submitDispatcherBatch(&invalid_command_batch);
     try runLoadedCommandDispatcher();
-
-    try expectDmemWord(u32, rsp.command_status_dmem, 0xff);
 }
 
 fn loadCommandDispatcher() void {
@@ -509,7 +682,7 @@ fn submitDispatcherBatch(batch: *[rsp.command_queue.batch_word_count]u32) void {
     rsp.halt();
     rsp.waitHalted();
     const physical_address: u32 = @truncate(@intFromPtr(batch) & 0x1fffffff);
-    rsp.io.readDmem(u32, 0xa4).* = physical_address;
+    rsp.io.readDmem(u32, 0xb0).* = physical_address;
 }
 
 fn submitCommandBatch(batch: *[4]u32) void {

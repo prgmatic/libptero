@@ -9,41 +9,93 @@ const cp0 = @import("cp0.zsp");
 //
 // Returns through $ra. Clobbers $t2 and $t3. For DMA reads, $s4 is adjusted
 // by the low three bits of the RDRAM address.
+pub fn out(
+    reg($t0) size: u32,
+    reg($t1) pitch: u32,
+    reg($s0) rdram: u32,
+    reg($s4) dmem: u32,
+) noreturn {
+    reg($t2) flags: u32 = -32756;
+    @goto(exec);
+}
+
+pub fn outAsync(
+    reg($t0) size: u32,
+    reg($t1) pitch: u32,
+    reg($s0) rdram: u32,
+    reg($s4) dmem: u32,
+) noreturn {
+    reg($t2) flags: u32 = -32768;
+    @goto(exec);
+}
+
+pub fn inAsync(
+    reg($t0) size: u32,
+    reg($t1) pitch: u32,
+    reg($s0) rdram: u32,
+    reg($s4) dmem: u32,
+) noreturn {
+    reg($t2) flags: u32 = 0;
+    @goto(exec);
+}
+
+pub fn in(
+    reg($t0) size: u32,
+    reg($t1) pitch: u32,
+    reg($s0) rdram: u32,
+    reg($s4) dmem: u32,
+) noreturn {
+    reg($t2) flags: u32 = 0x0c;
+}
+
 pub fn exec(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
     reg($s4) dmem: u32,
     reg($t2) flags: u32,
-) {
-    reg($t3) scratch: u32 = 0;
-    cp0.getDmaFull(scratch);
-    while(scratch != 0) {
-        cp0.getDmaFull(scratch);
-    }
+) noreturn {
+    asm("dma_exec_wait:");
+    asm("mfc0 $at, $5");
+    asm("bnez $at, dma_exec_wait");
+    asm("andi $at, $t0, 0x0fff");
+    asm("sub $at, $t1, $at");
+    asm("addi $at, $at, -1");
+    asm("sll $at, $at, 20");
+    asm("or $at, $at, $t0");
+    asm("mtc0 $s0, $1");
+    asm("bgez $t2, dma_exec_read");
+    asm("mtc0 $s4, $0");
+    asm("b dma_exec_done");
+    asm("mtc0 $at, $3");
+    asm("dma_exec_read:");
+    asm("mtc0 $at, $2");
+    asm("dma_exec_done:");
+    asm("andi $at, $s0, 7");
+    asm("add $s4, $s4, $at");
+    asm("andi $t2, $t2, 0x0f");
+    @fallthrough(waitStatus);
+}
 
-    scratch = size & 0x0fff;
-    scratch = pitch - scratch;
-    scratch -= 1;
-    scratch <<= 20;
-    scratch |= size;
+pub fn waitStatus(reg($t2) flags: u32) noreturn {
+    asm("mfc0 $at, $4");
+    asm("dma_status_wait:");
+    asm("and $at, $at, $t2");
+    asm("bnez $at, dma_status_wait");
+    asm("mfc0 $at, $4");
+    @fallthrough(returnToCaller);
+}
 
-    cp0.setDmaAddrRdram(rdram);
-    cp0.setDmaAddrRsp(dmem);
-    if(flags < 0x80000000) {
-        cp0.setDmaRead(scratch);
-    } else {
-        cp0.setDmaWrite(scratch);
-    }
+pub fn returnToCaller() noreturn {
+    reg($ra) return_address: u32 = undefined;    @jump(return_address);
+}
 
-    scratch = rdram & 7;
-    dmem += scratch;
-    flags &= 0x0f;
+pub fn waitIdle() noreturn {
+    reg($t2) flags: u32 = 0x0c;
+    @goto(waitStatus);
+}
 
-    cp0.getSpStatus(scratch);
-    scratch &= flags;
-    while(scratch != 0) {
-        cp0.getSpStatus(scratch);
-        scratch &= flags;
-    }
+pub fn waitOut() noreturn {
+    reg($t2) flags: u32 = 0x08;
+    @goto(waitStatus);
 }

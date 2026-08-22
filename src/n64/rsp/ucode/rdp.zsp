@@ -1,0 +1,57 @@
+const dma = @import("dma.zsp");
+const cp0 = @import("cp0.zsp");
+
+bss {
+    command_staging: [2]u32;
+    extern rdp_current: u32;
+    extern rdp_sentinel: u32;
+    extern rdp_buffers: [2]u32;
+}
+
+// Minimal stackless RDP emission ABI. The resident dispatcher owns these
+// fields; overlays stage one 64-bit command locally and DMA it to RDRAM.
+// $sp is libdragon's secondary return-address register (ra2).
+pub fn send(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) {
+    store(u32, command_staging, word0);
+    store(u32, command_staging, word1, 4);
+    @move($sp, $ra);
+
+    reg($s0) rdram: u32 = load(u32, rdp_current);
+    rdram &= 0x00ffffff;
+    reg($t4) next_start: u32 = 0;
+    reg($t3) sentinel: u32 = load(u32, rdp_sentinel);
+    sentinel -= 8;
+    if(sentinel < rdram) {
+        const dp_status_end_valid: u32 = 0x00000200;
+        cp0.getDpStatus(sentinel);
+        sentinel &= dp_status_end_valid;
+        while(sentinel != 0) {
+            cp0.getDpStatus(sentinel);
+            sentinel &= dp_status_end_valid;
+        }
+
+        next_start = load(u32, rdp_buffers, 4);
+        sentinel = load(u32, rdp_buffers);
+        store(u32, rdp_buffers, next_start);
+        store(u32, rdp_buffers, sentinel, 4);
+        rdram = next_start;
+        sentinel = rdram + 0x00010000;
+        store(u32, rdp_sentinel, sentinel);
+    }
+
+    reg($s4) dmem: u32 = command_staging;
+    dma.exec(7, 0, rdram, dmem, 0x8000000c);
+
+    rdram += 8;
+    store(u32, rdp_current, rdram);
+    if(next_start != 0) {
+        word1 = next_start;
+        cp0.setDpStart(word1);
+    }
+    word0 = rdram;
+    cp0.setDpEnd(word0);
+    @move($ra, $sp);
+}

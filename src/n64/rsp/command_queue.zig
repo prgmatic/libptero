@@ -17,7 +17,6 @@ pub const InternalCommand = enum(u8) {
     wait_then_write_status = 0x08,
     rdp_set_buffer = 0x09,
     rdp_append_buffer = 0x0a,
-    temporary_stop = 0x0f,
 };
 
 pub const CommandQueue = struct {
@@ -127,6 +126,14 @@ pub const CommandQueue = struct {
         self.writeRawCommand(@intFromEnum(InternalCommand.wait_then_write_status), status, &.{mask});
     }
 
+    pub fn setRdpBuffer(self: *CommandQueue, current: u32, start: u32, sentinel: u32) void {
+        self.writeRawCommand(@intFromEnum(InternalCommand.rdp_set_buffer), current, &.{ start, sentinel });
+    }
+
+    pub fn appendRdpBuffer(self: *CommandQueue, current: u32) void {
+        self.writeRawCommand(@intFromEnum(InternalCommand.rdp_append_buffer), current, &.{});
+    }
+
     pub fn call(self: *CommandQueue, block: *const CommandQueue) void {
         if (!block.sealed) @panic("RSP command block must end with returnFromCall()");
         if (block.call_target != null) @panic("nested RSP command blocks are not supported yet");
@@ -135,6 +142,19 @@ pub const CommandQueue = struct {
         }
         const target: u32 = @truncate((@intFromPtr(block.buffer.ptr) & 0x1fffffff) & 0x00ffffff);
         self.writeRawCommand(@intFromEnum(InternalCommand.call), target, &.{0});
+        self.call_target = block;
+    }
+
+    pub fn callIndirect(self: *CommandQueue, block: *const CommandQueue, dmem_address: u32) void {
+        if (!block.sealed) @panic("RSP command block must end with returnFromCall()");
+        if (block.call_target != null) @panic("nested RSP command blocks are not supported yet");
+        if (dmem_address & 3 != 0 or dmem_address > io.dmem_len - @sizeOf(u32)) {
+            @panic("RSP indirect call DMEM address is invalid");
+        }
+        if (self.call_target != null and self.call_target != block) {
+            @panic("minimal RSP command queues support one call target");
+        }
+        self.writeRawCommand(@intFromEnum(InternalCommand.call), dmem_address, &.{0x80000000});
         self.call_target = block;
     }
 
@@ -160,7 +180,7 @@ pub const CommandQueue = struct {
             return;
         }
 
-        self.buffer[self.index] = @as(u32, @intFromEnum(InternalCommand.temporary_stop)) << 24;
+        self.buffer[self.index] = @as(u32, @intFromEnum(InternalCommand.invalid)) << 24;
         self.index += 1;
         while (self.index < self.buffer.len) : (self.index += 1) {
             self.buffer[self.index] = 0;
@@ -177,14 +197,14 @@ pub const CommandQueue = struct {
     }
 };
 
-pub const DoubleBufferedQueue = struct {
+pub const QueueStorage = struct {
     buffers: [2][rdram_buffer_word_count]u32 align(8),
     queues: [2]CommandQueue,
     write_index: u1,
     submitted: bool,
     syncpoint_pending: bool,
 
-    pub fn init(self: *DoubleBufferedQueue) void {
+    pub fn init(self: *QueueStorage) void {
         self.queues[0] = CommandQueue.init(self.buffers[0][0..]);
         self.queues[1] = CommandQueue.init(self.buffers[1][0..]);
         self.write_index = 0;
@@ -192,7 +212,7 @@ pub const DoubleBufferedQueue = struct {
         self.syncpoint_pending = false;
     }
 
-    pub fn writeDmem(self: *DoubleBufferedQueue, offset: u32, value: u32) void {
+    pub fn writeDmem(self: *QueueStorage, offset: u32, value: u32) void {
         self.queues[self.write_index].writeDmem(offset, value);
     }
 };

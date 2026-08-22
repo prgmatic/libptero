@@ -1,6 +1,6 @@
 const command_queue = @import("command_queue.zig");
 const CommandQueue = command_queue.CommandQueue;
-const DoubleBufferedQueue = command_queue.DoubleBufferedQueue;
+const QueueStorage = command_queue.QueueStorage;
 const Overlay = @import("overlay.zig").Overlay;
 const UCode = @import("ucode.zig").UCode;
 const testing = @import("std").testing;
@@ -16,7 +16,7 @@ test "writeDmem encodes a fixed command batch" {
     const expected = [_]u32{
         0x01000100,
         0x12345678,
-        0x0f000000,
+        0x00000000,
     } ++ [_]u32{0} ** (command_queue.batch_word_count - 3);
     try testing.expectEqualSlices(u32, &expected, queue.buffer);
 }
@@ -44,7 +44,7 @@ test "writeRawCommand encodes a command" {
     const expected = [_]u32{
         0x10000104,
         0xcafebabe,
-        0x0f000000,
+        0x00000000,
     } ++ [_]u32{0} ** (command_queue.batch_word_count - 3);
     try testing.expectEqualSlices(u32, &expected, queue.buffer);
 }
@@ -60,7 +60,7 @@ test "writeRawCommand encodes a four-byte command without arguments" {
     const expected = [_]u32{
         0x10000104,
         0x20000108,
-        0x0f000000,
+        0x00000000,
     } ++ [_]u32{0} ** (command_queue.batch_word_count - 3);
     try testing.expectEqualSlices(u32, &expected, queue.buffer);
 }
@@ -78,7 +78,7 @@ test "a fixed queue holds two overlay commands and stop" {
         0xcafebabe,
         0x10000108,
         0xdeadbeef,
-        0x0f000000,
+        0x00000000,
     } ++ [_]u32{0} ** (command_queue.batch_word_count - 5);
     try testing.expectEqualSlices(u32, &expected, queue.buffer);
 }
@@ -101,7 +101,7 @@ test "jump links two complete command buffers" {
 }
 
 test "double-buffered queue initializes two writable buffers" {
-    var queue: DoubleBufferedQueue = undefined;
+    var queue: QueueStorage = undefined;
     queue.init();
 
     try testing.expectEqual(@as(u1, 0), queue.write_index);
@@ -162,6 +162,19 @@ test "waitThenWriteStatus matches the libdragon command layout" {
     try testing.expectEqual(@as(u32, 0x00001000), buffer[1]);
 }
 
+test "RDP buffer commands match the libdragon command layout" {
+    var buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var queue = CommandQueue.init(buffer[0..]);
+
+    queue.setRdpBuffer(0x00123450, 0x00123000, 0x00124000);
+    queue.appendRdpBuffer(0x00123458);
+
+    try testing.expectEqual(@as(u32, 0x09123450), buffer[0]);
+    try testing.expectEqual(@as(u32, 0x00123000), buffer[1]);
+    try testing.expectEqual(@as(u32, 0x00124000), buffer[2]);
+    try testing.expectEqual(@as(u32, 0x0a123458), buffer[3]);
+}
+
 test "call and return encode a minimal command block" {
     var block_buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
     var block = CommandQueue.init(block_buffer[0..]);
@@ -178,6 +191,20 @@ test "call and return encode a minimal command block" {
     try testing.expectEqual(@as(u32, 0x04000000), block_buffer[2]);
     try testing.expectEqual(&block, queue.call_target.?);
     try testing.expect(block.sealed);
+}
+
+test "indirect call matches the libdragon placeholder layout" {
+    var block_buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var block = CommandQueue.init(block_buffer[0..]);
+    block.returnFromCall();
+
+    var queue_buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var queue = CommandQueue.init(queue_buffer[0..]);
+    queue.callIndirect(&block, 0x340);
+
+    try testing.expectEqual(@as(u32, 0x03000340), queue_buffer[0]);
+    try testing.expectEqual(@as(u32, 0x80000000), queue_buffer[1]);
+    try testing.expectEqual(&block, queue.call_target.?);
 }
 
 test "swap buffers encodes libdragon pointer stack slots" {

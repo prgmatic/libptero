@@ -322,12 +322,12 @@ fn registerIndex(token: []const u8) ?u6 {
 fn isKnownOp(op: []const u8) bool {
     const ops = [_][]const u8{
         "nop",   "break", "j",     "jr",    "jal",   "beq",   "bne",   "bgez",  "bltz",  "blez",  "bgtz",
-        "addiu", "addu",  "subu",  "and",   "andi",  "or",    "ori",   "xor",   "xori",  "nor",   "slt",
-        "sltu",  "slti",  "sltiu", "sll",   "sllv",  "srl",   "srlv",  "sra",   "srav",  "lui",   "lb",
-        "lbu",   "lh",    "lhu",   "lw",    "sb",    "sh",    "sw",    "lqv",   "sqv",   "lsv",   "ssv",
-        "mtc0",  "mfc0",  "mtc2",  "mfc2",  "vadd",  "vaddc", "vsub",  "vsubc", "vand",  "vnand", "vor",
-        "vnor",  "vxor",  "vnxor", "vmulf", "vmulu", "vmacf", "vmacu", "vmudl", "vmudm", "vmudn", "vmudh",
-        "vmadl", "vmadm", "vmadn", "vmadh",
+        "addi",  "add",   "addiu", "addu",  "sub",   "subu",  "and",   "andi",  "or",    "ori",   "xor",
+        "xori",  "nor",   "slt",   "sltu",  "slti",  "sltiu", "sll",   "sllv",  "srl",   "srlv",  "sra",
+        "srav",  "lui",   "lb",    "lbu",   "lh",    "lhu",   "lw",    "sb",    "sh",    "sw",    "lqv",
+        "sqv",   "lsv",   "ssv",   "mtc0",  "mfc0",  "mtc2",  "mfc2",  "vadd",  "vaddc", "vsub",  "vsubc",
+        "vand",  "vnand", "vor",   "vnor",  "vxor",  "vnxor", "vmulf", "vmulu", "vmacf", "vmacu", "vmudl",
+        "vmudm", "vmudn", "vmudh", "vmadl", "vmadm", "vmadn", "vmadh",
     };
     for (ops) |known| if (std.mem.eql(u8, op, known)) return true;
     return false;

@@ -56,6 +56,13 @@ test "optimizer fills a branch delay slot with an independent instruction" {
     );
 }
 
+test "optimizer schedules signed scalar arithmetic" {
+    try expectOptimizedAsm(
+        "  lw $s0, 0($zero)\n  add $s0, $s0, $gp\n  j fetch\n  nop\nfetch:\n",
+        "  lw $s0, 0($zero)\n  j fetch\n  add $s0, $s0, $gp\nfetch:\n",
+    );
+}
+
 test "optimizer does not move a branch dependency into its delay slot" {
     const assembly = "  addiu $t0, $zero, 1\n  bne $t0, $zero, done\n  nop\ndone:\n";
     try expectOptimizedAsm(assembly, assembly);
@@ -198,8 +205,7 @@ test "data blocks emit scalar arrays and expose DMEM addresses" {
         \\_start:
         \\  addiu $t0, $zero, %lo(overlay_data_rdram)
         \\  addiu $t1, $zero, %lo(overlay_idmap)
-        \\  addiu $at, $zero, %lo(overlay_data_rdram)
-        \\  lw $t2, 0($at)
+        \\  lw $t2, %lo(overlay_data_rdram)($zero)
         \\  break
         \\
         \\
@@ -212,6 +218,39 @@ test "initialized data arrays require every element" {
         \\  values: [2]u32 = .{ 1 };
         \\}
     , .incorrect_array_initializer_count, 2, 3);
+}
+
+test "public and external storage labels form a linker ABI" {
+    try expectAsm(
+        \\bss {
+        \\  pub resident_value: u32;
+        \\  extern imported_value: u32;
+        \\}
+        \\export fn _start() noreturn {
+        \\  reg($t0) value: u32 = load(u32, imported_value);
+        \\  store(u32, resident_value, value);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.bss
+        \\.balign 4
+        \\.globl resident_value
+        \\resident_value:
+        \\  .space 4
+        \\
+        \\.text
+        \\
+        \\
+        \\.globl _start
+        \\_start:
+        \\  lw $t0, %lo(imported_value)($zero)
+        \\  sw $t0, %lo(resident_value)($zero)
+        \\  break
+        \\
+        \\
+    );
 }
 
 test "packed structs emit fields without padding" {
@@ -311,7 +350,7 @@ test "scalar assignment operators support every data type" {
         \\  addiu $t0, $zero, 14
         \\  addiu $t1, $zero, 18
         \\  addiu $t2, $zero, 0
-        \\  or $t2, $zero, $t0
+        \\  or $t2, $t0, $zero
         \\  addu $t2, $t2, $t0
         \\  addu $t2, $t0, $t1
         \\  subu $t2, $t2, $t0
@@ -1125,12 +1164,12 @@ test "load can assign an already defined register" {
     );
 }
 
-test "load destination type must match requested data type" {
+test "load destination rejects incompatible widening" {
     try expectAsmError(
         \\fn test() {
         \\  reg ptr: u32 = 0;
         \\  reg value: u32 = 0;
-        \\  value = load(u16, ptr);
+        \\  value = load(i16, ptr);
         \\}
     , error.RegisterTypeMismatch);
 }
@@ -1252,6 +1291,355 @@ test "jump transfers control through a scalar register" {
     );
 }
 
+test "goto transfers control directly to a function" {
+    try expectAsm(
+        \\fn target() noreturn {
+        \\  @break();
+        \\}
+        \\fn dispatch() noreturn {
+        \\  @goto(target);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\  break
+        \\
+        \\dispatch:
+        \\  j target
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "goto selects branch encoding and accepts a typed delay slot" {
+    try expectAsm(
+        \\fn target() noreturn {
+        \\  @break();
+        \\}
+        \\fn dispatch(reg($t0) value: u32) noreturn {
+        \\  @goto(target, .branch) delay {
+        \\    value = 7;
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\  break
+        \\
+        \\dispatch:
+        \\  b target
+        \\  addiu $t0, $zero, 7
+        \\
+        \\
+    );
+}
+
+test "setReturn materializes a function return label" {
+    try expectAsm(
+        \\fn loop() noreturn {
+        \\  @break();
+        \\}
+        \\fn dispatch(reg($t0) handler: u32) noreturn {
+        \\  @jump(handler);
+        \\  @setReturn(loop);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\loop:
+        \\  break
+        \\
+        \\dispatch:
+        \\  jr $t0
+        \\  nop
+        \\  addiu $ra, $zero, %lo(loop)
+        \\
+        \\
+    );
+}
+
+test "jump accepts a typed delay slot" {
+    try expectAsm(
+        \\fn loop() noreturn {
+        \\  @break();
+        \\}
+        \\fn dispatch(reg($t0) handler: u32) noreturn {
+        \\  @jump(handler) delay {
+        \\    @setReturn(loop);
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\loop:
+        \\  break
+        \\
+        \\dispatch:
+        \\  jr $t0
+        \\  addiu $ra, $zero, %lo(loop)
+        \\
+        \\
+    );
+}
+
+test "fallthrough places the target function immediately afterward" {
+    try expectAsm(
+        \\fn first() noreturn {
+        \\  @nop();
+        \\  @fallthrough(last);
+        \\}
+        \\fn middle() noreturn {
+        \\  @break();
+        \\}
+        \\fn last() noreturn {
+        \\  @nop();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\first:
+        \\  nop
+        \\
+        \\last:
+        \\  nop
+        \\
+        \\middle:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "local labels support direct and conditional goto" {
+    try expectAsm(
+        \\fn dispatch(reg($t0) value: u32) noreturn {
+        \\start:
+        \\  if(value == 0) goto done;
+        \\  goto start;
+        \\done:
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\dispatch:
+        \\LABEL_dispatch_start_0:
+        \\  beq $t0, $zero, LABEL_dispatch_done_0
+        \\  nop
+        \\  j LABEL_dispatch_start_0
+        \\  nop
+        \\LABEL_dispatch_done_0:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "local goto delay blocks emit typed delay-slot statements" {
+    try expectAsm(
+        \\fn dispatch(reg($t0) value: u32, reg($t1) next: u32) noreturn {
+        \\  if(value == 0) goto done delay {
+        \\    next += 1;
+        \\  }
+        \\  goto done delay {
+        \\    @move($t0, $t1);
+        \\  }
+        \\done:
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\dispatch:
+        \\  beq $t0, $zero, LABEL_dispatch_done_0
+        \\  addiu $t1, $t1, 1
+        \\  j LABEL_dispatch_done_0
+        \\  or $t0, $t1, $zero
+        \\LABEL_dispatch_done_0:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "conditional direct goto emits a tail branch and delay slot" {
+    try expectAsm(
+        \\fn target() noreturn {
+        \\  @break();
+        \\}
+        \\fn dispatch(reg($t0) value: u32) noreturn {
+        \\  if(value == 0) @goto(target) delay {
+        \\    @nop();
+        \\  }
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\  break
+        \\
+        \\dispatch:
+        \\  beqz $t0, target
+        \\  nop
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "delay blocks reject multiple source statements" {
+    try expectAsmError(
+        \\fn dispatch(reg($t0) value: u32) noreturn {
+        \\  goto done delay {
+        \\    value += 1;
+        \\    value += 2;
+        \\  }
+        \\done:
+        \\  @break();
+        \\}
+    , error.InvalidDelaySlot);
+}
+
+test "move copies between explicit scalar registers" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  @move($sp, $ra);
+        \\  @move($ra, $sp);
+        \\  @break();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  or $sp, $ra, $zero
+        \\  or $ra, $sp, $zero
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "narrow unsigned loads zero extend into u32 registers" {
+    try expectAsm(
+        \\fn test(reg($a0) address: u32) {
+        \\  reg($t0) byte: u32 = load(u8, address);
+        \\  reg($t1) half: u32 = 0;
+        \\  half = load(u16, address, 2);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  lbu $t0, 0($a0)
+        \\  addiu $t1, $zero, 0
+        \\  lhu $t1, 2($a0)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "scalar loads support symbolic offsets from an index register" {
+    try expectAsm(
+        \\bss {
+        \\  table: [16]u16;
+        \\}
+        \\fn test(reg($t0) index: u32) {
+        \\  reg($t1) value: u32 = load(u16, index, table);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.bss
+        \\.balign 2
+        \\table:
+        \\  .space 32
+        \\
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  lhu $t1, %lo(table)($t0)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "scalar stores support symbolic offsets from an index register" {
+    try expectAsm(
+        \\bss {
+        \\  table: [16]u32;
+        \\}
+        \\fn test(reg($t0) index: u32, reg($t1) value: u32) {
+        \\  store(u32, index, value, table);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.bss
+        \\.balign 4
+        \\table:
+        \\  .space 64
+        \\
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  sw $t1, %lo(table)($t0)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "undefined register declarations emit no instruction" {
+    try expectAsm(
+        \\fn test() {
+        \\  reg($t0) scratch: u32 = undefined;
+        \\  scratch = 7;
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 7
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
 test "function calls verify fixed-register arguments without moves" {
     try expectAsm(
         \\fn callee(
@@ -1347,6 +1735,7 @@ test "module imports public functions and qualified calls parse" {
         \\pub fn helper() {}
         \\export fn _start() noreturn {
         \\  dma.exec();
+        \\  @goto(dma.exec);
         \\}
     );
     const functions = try parser.parse();
@@ -1362,6 +1751,9 @@ test "module imports public functions and qualified calls parse" {
     const call = functions[1].statements[0].call;
     try testing.expectEqualStrings("dma", call.module.?);
     try testing.expectEqualStrings("exec", call.name);
+    const direct_goto = functions[1].statements[1].builtin.direct_goto;
+    try testing.expectEqualStrings("dma", direct_goto.target.module.?);
+    try testing.expectEqualStrings("exec", direct_goto.target.name);
 }
 
 test "while loop emits labels branch and back edge" {
@@ -1418,13 +1810,13 @@ test "command functions emit indexed handler metadata" {
         \\
         \\.globl first
         \\first:
-        \\  or $k1, $zero, $ra
+        \\  or $k1, $ra, $zero
         \\  jr $k1
         \\  nop
         \\
         \\.globl second
         \\second:
-        \\  or $k1, $zero, $ra
+        \\  or $k1, $ra, $zero
         \\  jr $k1
         \\  nop
         \\
@@ -1457,24 +1849,28 @@ test "command table materializes handlers, sizes, and empty slots" {
         \\.set noreorder
         \\.set noat
         \\.data
-        \\.balign 4
+        \\.balign 2
         \\commands:
-        \\  .word wait + 0x00000000
-        \\  .word 0
-        \\  .word jump + 0x04000000
+        \\  .short 0
+        \\  .short 0
+        \\  .short 0
+        \\.section .zsp_command_table,"",@progbits
+        \\  .word commands
+        \\  .word 3
+        \\.data
         \\
         \\.text
         \\
         \\
         \\.globl wait
         \\wait:
-        \\  or $k1, $zero, $ra
+        \\  or $k1, $ra, $zero
         \\  jr $k1
         \\  nop
         \\
         \\.globl jump
         \\jump:
-        \\  or $k1, $zero, $ra
+        \\  or $k1, $ra, $zero
         \\  jr $k1
         \\  nop
         \\
@@ -1518,7 +1914,7 @@ test "command functions support indices spanning overlay IDs" {
         \\
         \\.globl extended
         \\extended:
-        \\  or $k1, $zero, $ra
+        \\  or $k1, $ra, $zero
         \\  jr $k1
         \\  nop
         \\

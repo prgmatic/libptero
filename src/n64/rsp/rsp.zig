@@ -13,9 +13,10 @@ pub const overlay = @import("overlay.zig");
 pub const Overlay = overlay.Overlay;
 
 pub const Priority = enum { low, high };
+pub const rdp_dynamic_buffer_len = 64 * 1024;
 
 pub const Queue = struct {
-    storage: command_queue.DoubleBufferedQueue,
+    storage: command_queue.QueueStorage,
     priority: Priority,
 
     pub fn init(self: *Queue, priority: Priority) void {
@@ -78,6 +79,30 @@ pub const Queue = struct {
         self.current().waitThenWriteStatus(mask, status);
     }
 
+    pub fn setRdpBuffer(self: *Queue, end: u32, start: u32, sentinel: u32) void {
+        self.ensureCapacity(3);
+        self.current().setRdpBuffer(end, start, sentinel);
+    }
+
+    pub fn appendRdpBuffer(self: *Queue, end: u32) void {
+        self.ensureCapacity(1);
+        self.current().appendRdpBuffer(end);
+    }
+
+    pub fn configureRdpBuffers(
+        self: *Queue,
+        first: []align(16) u8,
+        second: []align(16) u8,
+    ) void {
+        if (first.len != rdp_dynamic_buffer_len or second.len != rdp_dynamic_buffer_len) {
+            @panic("RSP RDP dynamic buffers must each be 64 KiB");
+        }
+        cache.invalidateData(first);
+        cache.invalidateData(second);
+        self.writeDmem(rdp_buffers_dmem, physicalAddress(@intFromPtr(first.ptr)));
+        self.writeDmem(rdp_buffers_dmem + @sizeOf(u32), physicalAddress(@intFromPtr(second.ptr)));
+    }
+
     pub fn syncpoint(self: *Queue) void {
         if (self.priority != .low) @panic("syncpoints require a low-priority RSP queue");
         if (self.storage.syncpoint_pending) @panic("only one RSP syncpoint may be outstanding");
@@ -112,8 +137,6 @@ pub const Queue = struct {
     }
 };
 
-pub const DoubleBufferedQueue = Queue;
-
 fn validateQueueDma(rdram: anytype, dmem_address: u32) void {
     if (rdram.len == 0 or rdram.len & 7 != 0 or @intFromPtr(rdram.ptr) & 7 != 0) {
         @panic("RSP queue DMA buffer must have a nonzero 8-byte-aligned size and address");
@@ -125,14 +148,15 @@ fn validateQueueDma(rdram: anytype, dmem_address: u32) void {
     }
 }
 
-pub const command_status_dmem = 0xa8;
-pub const overlay_load_count_dmem = 0xb0;
+pub const rdp_syncfull_ongoing_dmem = 0xd0;
+pub const rdp_target_bitdepth_dmem = 0xd1;
 
-const overlay_table_dmem = 0x2c;
-const overlay_idmap_dmem = 0x6c;
-const pointer_stack_dmem = 0x7c;
-const queue_address_dmem = 0xa4;
-const current_overlay_id_dmem = 0xac;
+const overlay_table_dmem = 0x38;
+const overlay_idmap_dmem = 0x78;
+const pointer_stack_dmem = 0x88;
+const queue_address_dmem = 0xb0;
+const current_overlay_id_dmem = overlay_dmem_offset + 10;
+const rdp_buffers_dmem = 0xc8;
 const overlay_dmem_offset = overlay.dmem_offset;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
@@ -190,6 +214,8 @@ pub fn submitCommands(queue: *const CommandQueue) void {
             physicalAddress(@intFromPtr(alternate.buffer.ptr));
     }
     io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(queue.buffer.ptr));
+    io.readDmem(i8, rdp_target_bitdepth_dmem).* = 0;
+    io.status_register_write.* = io.status_set_signal7;
 }
 
 fn writebackCommandGraph(queue: *const CommandQueue, depth: usize) void {
@@ -323,8 +349,8 @@ pub fn unregisterOverlay(registered: *Overlay) void {
         io.readDmem(u32, overlay_table_dmem + @as(u32, slot_id) * @sizeOf(u32)).* = 0;
         writeDmemByte(overlay_idmap_dmem + slot_id, 0);
     }
-    if (io.readDmem(u32, current_overlay_id_dmem).* == @as(u32, overlay_id) << 2) {
-        io.readDmem(u32, current_overlay_id_dmem).* = 0;
+    if (io.readDmem(u16, current_overlay_id_dmem).* == @as(u16, overlay_id) << 2) {
+        io.readDmem(u16, current_overlay_id_dmem).* = 0;
     }
     std.mem.writeInt(u16, registered.data[8..10], 0, .big);
     cache.writebackData(registered.data[0..registered.data_len]);
@@ -347,7 +373,7 @@ pub fn writebackOverlayState(registered: *Overlay) void {
     const state = registered.state[0..registered.program.state_len];
     cache.writebackData(state);
     if (registered.id == 0 or
-        io.readDmem(u32, current_overlay_id_dmem).* != @as(u32, registered.id) << 2)
+        io.readDmem(u16, current_overlay_id_dmem).* != @as(u16, registered.id) << 2)
     {
         return;
     }
@@ -361,7 +387,7 @@ pub fn writebackOverlayState(registered: *Overlay) void {
 }
 
 fn syncOverlayState(registered: *Overlay) void {
-    if (io.readDmem(u32, current_overlay_id_dmem).* != @as(u32, registered.id) << 2) return;
+    if (io.readDmem(u16, current_overlay_id_dmem).* != @as(u16, registered.id) << 2) return;
     const state = registered.state[0..registered.program.state_len];
     io.waitDmaReady();
     io.dmaToDram(
@@ -387,8 +413,8 @@ fn registerOverlayInternal(registered: *Overlay, static_id: ?u8) u8 {
     {
         @panic("RSP overlay text does not fit in IMEM");
     }
-    if (program.data.len == 0 or program.data.len & 7 != 0) {
-        @panic("RSP overlay data must have a nonzero DMA-aligned size");
+    if (program.data.len & 7 != 0) {
+        @panic("RSP overlay data must be DMA-aligned");
     }
     if (program.commandCount() == 0) {
         @panic("RSP overlay does not define any commands");
@@ -398,10 +424,10 @@ fn registerOverlayInternal(registered: *Overlay, static_id: ?u8) u8 {
         highest_command_index = @max(highest_command_index, program.commandAt(metadata_index).index);
     }
     const slot_count: u8 = highest_command_index / overlay.commands_per_id + 1;
-    if (program.state_len == 0 or program.state_offset & 7 != 0 or program.state_len & 7 != 0 or
+    if ((program.state_len != 0 and (program.state_offset & 7 != 0 or program.state_len & 7 != 0)) or
         @as(u32, program.state_offset) + program.state_len > io.dmem_len)
     {
-        @panic("RSP overlay must define DMA-aligned persistent state");
+        @panic("RSP overlay persistent state must be DMA-aligned");
     }
     const overlay_data_len = overlay_payload_offset + program.data.len;
     if (overlay_data_len > io.dmem_len - overlay_dmem_offset) {
@@ -432,13 +458,16 @@ fn registerOverlayInternal(registered: *Overlay, static_id: ?u8) u8 {
     const state = registered.state[0..program.state_len];
     const header = OverlayHeader{
         .state_start = program.state_offset,
-        .state_size = program.state_len - 1,
+        .state_size = if (program.state_len == 0) std.math.maxInt(u16) else program.state_len - 1,
         .state_rdram = physicalAddress(@intFromPtr(state.ptr)),
         .command_base = @as(u16, overlay_id) << 5,
         .overlay_id = @as(u16, overlay_id) << 2,
-        .text_rdram = physicalAddress(@intFromPtr(program.text.ptr)),
+        .text_rdram = physicalAddress(@intFromPtr(program.text.ptr)) | 0x80000000,
         .text_size = @intCast(program.text.len - 1),
         .text_start = @intCast(imem_address),
+        .extra_rdram = physicalAddress(@intFromPtr(state.ptr)),
+        .extra_size = @intCast(state.len - 1),
+        .extra_start = program.state_offset,
     };
     header.write(overlay_data[0..OverlayHeader.byte_len]);
     for (0..program.commandCount()) |command_index| {

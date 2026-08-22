@@ -251,6 +251,32 @@ pub const Parser = struct {
             _ = try self.expect(.l_paren);
             const condition = try self.parseCondition();
             _ = try self.expect(.r_paren);
+            if (try self.eat(.at)) {
+                const builtin = try self.expect(.ident);
+                if (!std.mem.eql(u8, builtin.text, "goto")) return self.fail(builtin, .unsupported_builtin);
+                _ = try self.expect(.l_paren);
+                const target_name = try self.expect(.ident);
+                var target = ast.FunctionRef{ .name = target_name.text };
+                if (try self.eat(.dot)) {
+                    const function = try self.expect(.ident);
+                    target = .{ .module = target_name.text, .name = function.text };
+                }
+                _ = try self.expect(.r_paren);
+                return .{ .conditional_direct_goto = .{
+                    .condition = condition,
+                    .target = target,
+                    .delay_slot = try self.parseOptionalDelaySlot(),
+                } };
+            }
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "goto")) {
+                _ = try self.expect(.ident);
+                const target = try self.expect(.ident);
+                return .{ .conditional_goto = .{
+                    .condition = condition,
+                    .target = target.text,
+                    .delay_slot = try self.parseOptionalDelaySlot(),
+                } };
+            }
             _ = try self.expect(.l_brace);
             const then_statements = try self.parseBlockStatements();
 
@@ -268,6 +294,16 @@ pub const Parser = struct {
             } };
         }
 
+        if (std.mem.eql(u8, first.text, "goto")) {
+            const target = try self.expect(.ident);
+            return .{ .goto = .{
+                .target = target.text,
+                .delay_slot = try self.parseOptionalDelaySlot(),
+            } };
+        }
+
+        if (try self.eat(.colon)) return .{ .label = first.text };
+
         if (std.mem.eql(u8, first.text, "store")) {
             _ = try self.expect(.l_paren);
             const data_type = try self.expect(.ident);
@@ -275,10 +311,15 @@ pub const Parser = struct {
             const address = try self.parseValueRef();
             _ = try self.expect(.comma);
             const value = try self.parseValueRef();
-            const offset = if (try self.eat(.comma))
-                try self.parseLiteralOffset()
-            else
-                0;
+            var offset: i64 = 0;
+            var label_offset: ?[]const u8 = null;
+            if (try self.eat(.comma)) {
+                if (self.current.tag == .ident) {
+                    label_offset = (try self.expect(.ident)).text;
+                } else {
+                    offset = try self.parseLiteralOffset();
+                }
+            }
             _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
             return .{ .store = .{
@@ -286,6 +327,7 @@ pub const Parser = struct {
                 .address = address,
                 .value = value,
                 .offset = offset,
+                .label_offset = label_offset,
             } };
         }
 
@@ -382,6 +424,16 @@ pub const Parser = struct {
         return self.fail(first, .unsupported_statement);
     }
 
+    fn parseOptionalDelaySlot(self: *Parser) !?[]ast.Statement {
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "delay")) {
+            _ = try self.expect(.ident);
+            _ = try self.expect(.l_brace);
+            return try self.parseBlockStatements();
+        }
+        _ = try self.expect(.semicolon);
+        return null;
+    }
+
     fn parsePackedStructDecl(self: *Parser) !ast.PackedStructDecl {
         const struct_keyword = try self.expect(.ident);
         if (!std.mem.eql(u8, struct_keyword.text, "struct")) {
@@ -417,6 +469,15 @@ pub const Parser = struct {
         }
 
         while (!try self.eat(.r_brace)) {
+            var public = false;
+            var external = false;
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "pub")) {
+                public = true;
+                _ = try self.expect(.ident);
+            } else if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "extern")) {
+                external = true;
+                _ = try self.expect(.ident);
+            }
             const name = try self.expect(.ident);
             _ = try self.expect(.colon);
             const is_array = try self.eat(.l_bracket);
@@ -437,6 +498,7 @@ pub const Parser = struct {
             var values: std.ArrayList(i64) = .empty;
             errdefer values.deinit(self.allocator);
             if (initialized) {
+                if (external) return self.fail(name, .external_data_initializer);
                 _ = try self.expect(.equal);
                 if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "undefined")) {
                     return self.fail(self.current, .undefined_data_initializer);
@@ -476,6 +538,8 @@ pub const Parser = struct {
                 .is_array = is_array,
                 .values = try values.toOwnedSlice(self.allocator),
                 .initialized = initialized,
+                .public = public,
+                .external = external,
             });
         }
         return declarations.toOwnedSlice(self.allocator);
@@ -502,8 +566,67 @@ pub const Parser = struct {
         if (std.mem.eql(u8, name.text, "jump")) {
             const address = try self.parseValueRef();
             _ = try self.expect(.r_paren);
+            return .{ .builtin = .{ .jump = .{
+                .address = address,
+                .delay_slot = try self.parseOptionalDelaySlot(),
+            } } };
+        }
+
+        if (std.mem.eql(u8, name.text, "goto")) {
+            const first = try self.expect(.ident);
+            var target = ast.FunctionRef{ .name = first.text };
+            if (try self.eat(.dot)) {
+                const function = try self.expect(.ident);
+                target = .{ .module = first.text, .name = function.text };
+            }
+            var encoding: ast.DirectGotoEncoding = .jump;
+            if (try self.eat(.comma)) {
+                _ = try self.expect(.dot);
+                const encoding_name = try self.expect(.ident);
+                if (std.mem.eql(u8, encoding_name.text, "jump")) {
+                    encoding = .jump;
+                } else if (std.mem.eql(u8, encoding_name.text, "branch")) {
+                    encoding = .branch;
+                } else {
+                    return self.fail(encoding_name, .unsupported_builtin);
+                }
+            }
+            _ = try self.expect(.r_paren);
+            return .{ .builtin = .{ .direct_goto = .{
+                .target = target,
+                .encoding = encoding,
+                .delay_slot = try self.parseOptionalDelaySlot(),
+            } } };
+        }
+
+        if (std.mem.eql(u8, name.text, "fallthrough")) {
+            const target = try self.expect(.ident);
+            _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .jump = address } };
+            return .{ .builtin = .{ .fallthrough = .{ .name = target.text } } };
+        }
+
+        if (std.mem.eql(u8, name.text, "setReturn")) {
+            const target = try self.expect(.ident);
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .builtin = .{ .set_return = target.text } };
+        }
+
+        if (std.mem.eql(u8, name.text, "move")) {
+            const destination_token = try self.expect(.register);
+            const destination = parseRegister(destination_token) orelse
+                return self.fail(destination_token, .expected_scalar_register);
+            _ = try self.expect(.comma);
+            const source_token = try self.expect(.register);
+            const source = parseRegister(source_token) orelse
+                return self.fail(source_token, .expected_scalar_register);
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .builtin = .{ .move = .{
+                .destination = destination,
+                .source = source,
+            } } };
         }
 
         _ = try self.expect(.r_paren);
@@ -556,13 +679,19 @@ pub const Parser = struct {
         if (try self.eat(.colon)) {
             explicit_data_type = try self.parseDataType(try self.expect(.ident));
         }
-        _ = try self.expect(.equal);
-        const value = try self.parseValue();
+        var value: ?ast.Value = null;
+        if (try self.eat(.equal)) {
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "undefined")) {
+                _ = try self.expect(.ident);
+            } else {
+                value = try self.parseValue();
+            }
+        }
         _ = try self.expect(.semicolon);
-        const data_type = explicit_data_type orelse switch (value) {
+        const data_type = explicit_data_type orelse if (value) |initial_value| switch (initial_value) {
             .load => |load| load.data_type,
             else => return self.fail(name, .expected_data_type),
-        };
+        } else return self.fail(name, .expected_data_type);
         var reg: ?ast.Register = null;
         var vector_reg: ?ast.VectorRegister = null;
         if (register_token) |reg_token| {
@@ -592,12 +721,22 @@ pub const Parser = struct {
             const data_type = try self.parseDataType(try self.expect(.ident));
             _ = try self.expect(.comma);
             const address = try self.parseValueRef();
-            const offset = if (try self.eat(.comma))
-                try self.parseLiteralOffset()
-            else
-                0;
+            var offset: i64 = 0;
+            var label_offset: ?[]const u8 = null;
+            if (try self.eat(.comma)) {
+                if (self.current.tag == .ident) {
+                    label_offset = (try self.expect(.ident)).text;
+                } else {
+                    offset = try self.parseLiteralOffset();
+                }
+            }
             _ = try self.expect(.r_paren);
-            return .{ .load = .{ .data_type = data_type, .address = address, .offset = offset } };
+            return .{ .load = .{
+                .data_type = data_type,
+                .address = address,
+                .offset = offset,
+                .label_offset = label_offset,
+            } };
         }
 
         if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "accumulator")) {
@@ -844,6 +983,7 @@ pub const ErrorType = enum {
     expected_scalar_data_type,
     expected_data_literal,
     undefined_data_initializer,
+    external_data_initializer,
     expected_struct_declaration,
     invalid_array_length,
     invalid_command_index,
@@ -884,6 +1024,7 @@ pub fn errorString(code: ErrorType) []const u8 {
         .expected_scalar_data_type => "expected scalar data type",
         .expected_data_literal => "expected data initializer literal",
         .undefined_data_initializer => "data declarations must contain initialized bytes; reserve storage in a bss block",
+        .external_data_initializer => "external storage declarations cannot have initializers",
         .expected_struct_declaration => "expected packed struct declaration",
         .invalid_array_length => "invalid array length",
         .invalid_command_index => "command index must be between 0 and 239",
