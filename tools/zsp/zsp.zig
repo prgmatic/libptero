@@ -4,6 +4,7 @@ const asm_writer = @import("asm_writer.zig");
 const asm_optimizer = @import("asm_optimizer.zig");
 const diagnostics = @import("diagnostics.zig");
 const parser_mod = @import("parser.zig");
+const rspq = @import("rspq.zig");
 
 const ModuleState = enum {
     loading,
@@ -23,6 +24,8 @@ const Loader = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     module_dir: ?[]const u8,
+    module_override_name: ?[]const u8 = null,
+    module_override_path: ?[]const u8 = null,
     modules: std.ArrayList(Module) = .empty,
     generated_names: std.ArrayList([]u8) = .empty,
 
@@ -83,6 +86,12 @@ const Loader = struct {
         appended = true;
 
         for (imports, 0..) |import, import_index| {
+            if (self.module_override_name) |override_name| {
+                if (std.mem.eql(u8, import.path, override_name)) {
+                    self.modules.items[index].targets[import_index] = try self.load(self.module_override_path.?);
+                    continue;
+                }
+            }
             const parent = std.fs.path.dirname(resolved) orelse ".";
             const relative = try std.fs.path.resolve(self.allocator, &.{ parent, import.path });
             defer self.allocator.free(relative);
@@ -159,16 +168,9 @@ const Loader = struct {
                         try self.resolveFunctionRef(module_index, &branch.target);
                         if (branch.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
                     },
-                    .call_and_goto => |*call| {
-                        try self.resolveFunctionRef(module_index, &call.callee);
-                        try self.resolveFunctionRef(module_index, &call.continuation);
-                    },
                     .tail => |*tail| {
                         try self.resolveFunctionRef(module_index, &tail.target);
                         if (tail.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
-                    },
-                    .set_function_address => |*set_address| {
-                        try self.resolveFunctionRef(module_index, &set_address.target);
                     },
                     .jump => |*jump| {
                         if (jump.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
@@ -257,19 +259,34 @@ pub fn main(init: std.process.Init) !void {
     var input: ?[]const u8 = null;
     var output: ?[]const u8 = null;
     var module_dir: ?[]const u8 = null;
+    var module_override_name: ?[]const u8 = null;
+    var module_override_path: ?[]const u8 = null;
     var depfile: ?[]const u8 = null;
+    var interface_output: ?[]const u8 = null;
     var optimize = true;
     var report = false;
-    var i: usize = 1;
+    const explain = std.mem.eql(u8, args[1], "explain");
+    var i: usize = if (explain) 2 else 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--module-dir")) {
             i += 1;
             if (i >= args.len) return usage();
             module_dir = args[i];
+        } else if (std.mem.eql(u8, args[i], "--module-file")) {
+            i += 1;
+            if (i >= args.len) return usage();
+            module_override_name = args[i];
+            i += 1;
+            if (i >= args.len) return usage();
+            module_override_path = args[i];
         } else if (std.mem.eql(u8, args[i], "--depfile")) {
             i += 1;
             if (i >= args.len) return usage();
             depfile = args[i];
+        } else if (std.mem.eql(u8, args[i], "--interface")) {
+            i += 1;
+            if (i >= args.len) return usage();
+            interface_output = args[i];
         } else if (std.mem.eql(u8, args[i], "--no-optimize")) {
             optimize = false;
         } else if (std.mem.eql(u8, args[i], "--report")) {
@@ -288,6 +305,8 @@ pub fn main(init: std.process.Init) !void {
         .allocator = allocator,
         .io = init.io,
         .module_dir = module_dir,
+        .module_override_name = module_override_name,
+        .module_override_path = module_override_path,
     };
     defer loader.deinit();
     const root = loader.load(input_path) catch |err| {
@@ -299,6 +318,11 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
     defer allocator.free(functions);
+
+    if (explain) {
+        if (output != null or depfile != null or interface_output != null) return usage();
+        return writeExplain(init, allocator, input_path, functions, optimize);
+    }
 
     if (depfile) |depfile_path| {
         try writeDepfile(init.io, depfile_path, output orelse "zsp-output", loader.modules.items);
@@ -330,6 +354,15 @@ pub fn main(init: std.process.Init) !void {
         });
     }
 
+    if (interface_output) |interface_path| {
+        var interface_file = try std.Io.Dir.cwd().createFile(init.io, interface_path, .{});
+        defer interface_file.close(init.io);
+        var interface_buf: [4096]u8 = undefined;
+        var interface_writer = interface_file.writer(init.io, &interface_buf);
+        try asm_writer.writeInterface(&interface_writer.interface, functions, &backend_diagnostic);
+        try interface_writer.interface.flush();
+    }
+
     var out_buf: [4096]u8 = undefined;
     if (output) |output_path| {
         var out_file = try std.Io.Dir.cwd().createFile(init.io, output_path, .{});
@@ -346,10 +379,72 @@ pub fn main(init: std.process.Init) !void {
 
 fn usage() error{InvalidArgs} {
     std.debug.print(
-        "usage: zsp <input.zsp> [--module-dir <dir>] [--depfile <file>] [--no-optimize] [--report] [output.s]\n",
+        "usage: zsp <input.zsp> [--module-dir <dir>] [--module-file <name> <file>] [--depfile <file>] [--interface <file>] [--no-optimize] [--report] [output.s]\n" ++
+            "       zsp explain <input.zsp> [--module-dir <dir>] [--module-file <name> <file>] [--no-optimize]\n",
         .{},
     );
     return error.InvalidArgs;
+}
+
+fn writeExplain(
+    init: std.process.Init,
+    allocator: std.mem.Allocator,
+    input_path: []const u8,
+    functions: []const ast.Function,
+    optimize: bool,
+) !void {
+    var raw = std.Io.Writer.Allocating.init(allocator);
+    defer raw.deinit();
+    var explain_report: asm_writer.ExplainReport = .{};
+    var backend_diagnostic: asm_writer.Diagnostic = .{};
+    asm_writer.writeWithExplain(&raw.writer, functions, &backend_diagnostic, &explain_report) catch |err| {
+        reportCompileErrorInFunction(err, backend_diagnostic.function_name, backend_diagnostic.symbol_name);
+        return err;
+    };
+
+    var optimized = std.Io.Writer.Allocating.init(allocator);
+    defer optimized.deinit();
+    if (optimize) {
+        try asm_optimizer.writeOptimized(allocator, &optimized.writer, raw.written());
+    } else {
+        try optimized.writer.writeAll(raw.written());
+    }
+
+    const raw_stats = diagnostics.analyzeAssembly(raw.written());
+    const final_stats = diagnostics.analyzeAssembly(optimized.written());
+    const commands = try rspq.analyzeCommands(functions);
+
+    var buffer: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(init.io, &buffer);
+    const writer = &stdout.interface;
+    try writer.print("zsp explain {s}\n", .{input_path});
+    try explain_report.write(writer);
+    try writer.writeAll("command layout:\n");
+    var any_command = false;
+    for (commands.entries, 0..) |entry, index| {
+        const command = entry orelse continue;
+        try writer.print("  {d}: {s}, {d} bytes\n", .{ index, command.function.source_name, command.size });
+        any_command = true;
+    }
+    if (!any_command) try writer.writeAll("  none\n");
+    try writer.print("size:\n  before optimization: {d} instructions, {d} IMEM text bytes\n", .{
+        raw_stats.instruction_count,
+        raw_stats.text_bytes,
+    });
+    try writer.print("  final: {d} instructions, {d} IMEM text bytes, {d} IMEM bytes free\n", .{
+        final_stats.instruction_count,
+        final_stats.text_bytes,
+        4096 - final_stats.text_bytes,
+    });
+    try writer.print("optimization:\n  {s}; assembly {s}; {d} instructions removed or folded\n", .{
+        if (optimize) "enabled" else "disabled",
+        if (std.mem.eql(u8, raw.written(), optimized.written())) "unchanged" else "changed",
+        raw_stats.instruction_count -| final_stats.instruction_count,
+    });
+    if (optimize) {
+        try writer.writeAll("  passes: address folding, dead writes, polling loops, transfer slots, hazards, pipeline pairing\n");
+    }
+    try writer.flush();
 }
 
 fn reportCompileError(err: anyerror) void {

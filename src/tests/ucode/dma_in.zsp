@@ -1,8 +1,8 @@
-const dma = @import("dma.zsp");
+const dma = import("dma.zsp");
 
 export fn _start() noreturn {
     reg($s0) rdram: u32 = load(u32, 0);
 
     dma.exec(15, 0, rdram, 0x20, 0x0c);
-    @break();
+    rsp.halt();
 }

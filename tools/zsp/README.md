@@ -3,6 +3,52 @@
 ZSP is the in-repository RSP transpiler. It translates `.zsp` source files to
 GNU-style MIPS/RSP assembly, which can then be assembled into RSP microcode.
 
+## Language layers
+
+ZSP keeps three concerns visibly separate:
+
+- Core ZSP expresses values, functions, control flow, memory, and modules.
+- The `rsp.*` namespace exposes machine facilities. CP0 operations live under
+  `rsp.cp0.*`, vector transfers and control registers under `rsp.vector.*`, and
+  terminal operations such as `rsp.halt()` directly under `rsp`.
+- The `@rspq.*` namespace supplies queue-framework metadata. Command handlers,
+  encoded sizes, and command tables use `@rspq.command`,
+  `@rspq.commandSize`, and `@rspq.commandTable`.
+
+Start with core ZSP. Reach into `rsp.*` only when code communicates with the
+machine, and use `@rspq.*` only when declaring integration with the queue
+framework. The low-level `slot` and `exact` constructs are escape hatches for
+machine placement and exact instruction order; they are not routine
+optimization hints.
+
+## Compiler stages
+
+The parser produces the source AST. `rspq.zig` owns the framework-specific
+semantic stage by resolving the command-table declaration and validating command indices, encoded
+sizes, and parameter ABI bindings. Its `CommandAnalysis` is the invariant the
+assembly writer consumes for command-table layout and manifest serialization;
+the writer no longer rediscovers or validates those facts.
+
+Name and call resolution, writes inference, control-flow/lifetime analysis,
+register allocation, instruction selection, and function placement remain in
+`asm_writer.zig`. They will be extracted incrementally while preserving output.
+
+The current post-parse dependency map is:
+
+- `rspq.analyzeCommands` validates command metadata and produces
+  `CommandAnalysis`.
+- `FunctionClobberRegistry.init` combines call/write analysis with the current
+  lifetime and allocation simulation.
+- `FunctionContext.prepareLifetimes` builds statement-position control flow and
+  live ranges; `bindParameters` and the allocation helpers select registers.
+- `writeFunction` and `writeStatements` perform placement, instruction
+  selection, and direct assembly printing; `asm_optimizer.zig` then optimizes
+  assembly text.
+
+Command behavior and output coverage lives in the command-focused cases in
+`tests.zig`; `rspq.zig` additionally tests normalized metadata and semantic
+errors without depending on assembly text.
+
 This document describes the language implemented in this repository.
 
 ## Building and running
@@ -16,20 +62,36 @@ zig cc -target mips-freestanding-none -c output.s -o output.o
 The command-line syntax is:
 
 ```text
-zsp <input.zsp> [--module-dir <dir>] [--depfile <file>] [--no-optimize] [output.s]
+zsp <input.zsp> [--module-dir <dir>] [--module-file <name> <file>]
+    [--depfile <file>] [--interface <file>] [--no-optimize] [--report] [output.s]
+zsp explain <input.zsp> [--module-dir <dir>]
+    [--module-file <name> <file>] [--no-optimize]
 ```
 
 Assembly is written to standard output when `output.s` is omitted. Imports are
 resolved relative to the importing file, then relative to `--module-dir`.
 `--depfile` writes a Make-compatible dependency file containing every loaded
 module. Optimization is enabled by default; `--no-optimize` preserves the
-direct emitter output.
+direct emitter output. `--interface` writes declarations for public exports,
+and `--report` prints a compact function/instruction/IMEM summary.
 
 ## Types and literals
 
-The scalar types are `u8`, `u16`, `u32`, `i8`, `i16`, and `i32`. They describe
-the value's signedness and memory access width; scalar values live in 32-bit RSP
-general-purpose registers.
+The scalar types are `u8`, `u16`, `u32`, `i8`, `i16`, `i32`, and `dmem`. Every scalar
+still occupies one 32-bit RSP general-purpose register. The declared width is a
+type and memory contract, not an instruction inserted after every operation:
+
+- loads extend from the requested memory width (`u8`/`u16` zero-extend and
+  `i8`/`i16` sign-extend);
+- stores write the low 8, 16, or 32 bits selected by the store type;
+- signedness selects ordered comparisons and arithmetic right shift behavior;
+- register-to-register arithmetic requires matching declared types; and
+- arithmetic runs on the full 32-bit register value and does not implicitly
+  truncate a narrow result.
+
+Mask explicitly when an algorithm requires modulo-8-bit or modulo-16-bit
+register semantics. This keeps width conversions visible in source and avoids
+hidden instructions in hand-sized microcode.
 
 The vector types are:
 
@@ -69,26 +131,31 @@ analysis follows branches, loops, labels, gotos, nested blocks, and branch delay
 slots. A value produced in a call's delay slot is live across the callee, while
 a value defined by the callee is not treated as a live input.
 
-Calls constrain automatic arguments directly to fixed ABI registers. Values
-live across a call avoid the transitive register clobbers inferred from the
-call graph, and automatic callee locals avoid pinned caller locals that must
-survive the call. Inline function bodies receive the same lifetime and call
-analysis while reserving the caller's live registers.
+Calls prefer to allocate scalar arguments directly in their fixed
+calling-convention registers. When a scalar input is already in a different
+register, ZSP inserts the required move before the transfer. Values live across
+a call avoid the transitive register writes inferred from the call graph, and
+automatic callee locals avoid pinned caller locals that must survive the call.
+Inline function bodies receive the same lifetime and call analysis while
+reserving the caller's live registers.
 
-ZSP never inserts spills, argument moves, or save/restore instructions for
-automatic allocation. If no safe assignment exists without extra code,
-compilation fails.
+ZSP does not insert spills or save/restore instructions. Vector arguments and
+parameters written by the callee must already use the target parameter's
+register. Scalar argument moves are emitted as a parallel assignment, but a
+cyclic register permutation currently fails instead of using a temporary
+register. If no safe assignment exists under those restrictions, compilation
+fails.
 
-External functions can declare their complete register-clobber contract after
+External functions can declare their complete register-write contract after
 their parameter list:
 
 ```zig
-extern fn dmaWait(reg($t2) flags: u32) clobbers($at);
-extern fn resumeQueue() clobbers() noreturn;
+extern fn dmaWait(reg($t2) flags: u32) writes($at);
+extern fn resumeQueue() writes() noreturn;
 ```
 
-Both scalar and vector hardware registers are accepted by `clobbers(...)`.
-An external function without a contract is conservatively assumed to clobber
+Both scalar and vector hardware registers are accepted by `writes(...)`.
+An external function without a contract is conservatively assumed to write
 every register. A live explicitly pinned value that conflicts with an external
 contract is a compile error because the allocator cannot move that value or
 make the external routine preserve it.
@@ -97,7 +164,7 @@ make the external routine preserve it.
 immediates where possible and do not consume registers:
 
 ```zig
-const dmem_end: u16 = 0x1000;
+const dmem_end: dmem = 0x1000;
 ```
 
 Names may not be duplicated in a visible global or function scope. The old
@@ -106,13 +173,15 @@ Names may not be duplicated in a visible global or function scope. The old
 ## Scalar expressions
 
 All scalar types support assignment, arithmetic, shifts, bitwise operations,
-and comparisons. An unparenthesized assignment has one operator. An explicitly
-parenthesized chain is evaluated left-to-right in the destination register, so
-it adds no temporary registers or hidden instructions.
+and comparisons. Expressions use conventional precedence; parentheses override
+it. From strongest to weakest, the binary groups are `* /`, `+ +% - -%`,
+`<< >> >>>`, `&`, `^`, and `| ~|`. Operations of equal precedence associate
+left-to-right.
 
 ```zig
 value = left + right;
-value = (left & mask | bits); // `(left & mask) | bits`, reusing `value`
+value = left & mask | bits; // `(left & mask) | bits`
+value = left + count << 2;  // `(left + count) << 2`
 value += 1;
 value +%= 1;       // wrapping addition
 value -= amount;
@@ -176,15 +245,24 @@ the type; stores accept every scalar type. Signed narrow loads may widen into
 32-bit registers. Scalar offsets must fit the underlying 16-bit instruction
 immediate.
 
+The base address of every RSP memory operation has type `dmem`. Storage labels
+already have this type, and `dmem.addressOf(label, offset)` materializes a label
+plus a constant offset into a `dmem` register. Numeric memory addresses must be
+in the range `0..4095`; `4096` is accepted as a one-past-the-end `dmem` value
+for loop bounds but cannot be dereferenced. A `u32` or `i32` value can be
+assigned explicitly to a `dmem` register when an encoded command or memory word
+contains an address. That annotation is the trust boundary for runtime values;
+ZSP cannot prove the range of a register at compile time.
+
 Full-vector operations lower to `lqv` and `sqv`. Their byte offsets must be
 multiples of 16 in the signed seven-bit scaled range (-1024 through 1008). A
 `vec32` transfer emits two operations, with the fractional register at the next
 16-byte offset. A single `vec16` lane can be transferred with
 `lane = load(vec16, address, offset)` or `store(vec16, address, vector[lane],
-offset)`. `load_vec_u8(address, offset)` loads eight packed bytes and expands
-them as signed packed values into a `vec16`; `load_vec_u8_unsigned` performs
-the unsigned form. `load_vec_u32(address, offset, lane)` loads four bytes into
-the selected two-lane position without modifying the rest of the vector.
+offset)`. `loadVectorBytes(address, offset)` loads eight packed bytes and expands
+them as signed packed values into a `vec16`; `loadVectorBytesUnsigned` performs
+the unsigned form. `loadVectorWords(address, offset, lane)` loads four bytes into
+the selected two-lane position without modifying the rest of the rsp.vector.
 
 ZSP supports initialized data, zero/uninitialized storage, and persistent
 overlay state:
@@ -214,7 +292,7 @@ state {
 ```
 
 Packed structs contain scalar fields without padding. Use
-`@offsetOf(Header, address)` as a compile-time memory offset; it emits the same
+`offsetOf(Header, address)` as a compile-time memory offset; it emits the same
 immediate as writing the numeric byte offset directly. `data` requires literal
 initializers and arrays require exactly the declared number of elements. `bss`
 and `state` reserve addressable storage. The complete `state` section is padded
@@ -238,23 +316,50 @@ inline pub fn add(
 
 export fn _start() noreturn {
     add(1, 2);
-    @break();
+    rsp.halt();
 }
 ```
 
-Every parameter must specify a fixed scalar or vector register. Calls do not
-implement a conventional stack ABI: arguments must match the parameter type
-and register binding. Constants and literals can be materialized in pinned
-scalar parameters. Vector arguments must already occupy the exact required
-register. `inline` functions are expanded at the call site; other functions
-use the repository's stackless fixed-register calling convention. `export`
-emits a global assembly symbol, while `pub` permits access from another ZSP
-module.
+The first four unpinned scalar parameters use `$a0` through `$a3`. Parameters
+outside that default, and all vector parameters, must specify a register. Calls
+remain stackless, but scalar input arguments are moved into the lowered
+signature's registers when allocation cannot coalesce them there directly.
+Constants and literals can be materialized in pinned scalar parameters. Vector
+arguments and parameters written by the callee still require exact register
+matches, and cyclic scalar move permutations are not yet supported. Signed and
+unsigned scalar arguments of the same width are representation-compatible.
+`inline` functions are expanded at the call site; other functions use the
+repository's stackless fixed-register calling convention. `export` emits a
+global assembly symbol, while `pub` permits access from another ZSP module.
+
+Function pointers use structural lowered signatures. Unpinned types use the
+same default argument registers, and exceptional registers can be explicit:
+
+```zig
+reg writer: fn(u32, u32, u32, u32) = &write8;
+reg dma_writer: fn(reg($t0) u32, reg($s0) u32);
+reg continuation: fn() = &finish;
+```
+
+Public exported functions use their source name as their generated interface
+and linker name, just like C:
+
+```zig
+pub export fn out(reg($t0) size: u32) noreturn {
+    // ...
+}
+```
+
+`--interface <file>` writes importable external declarations for public
+exports, including their inferred transitive `writes()` contracts. Build tools
+use the accompanying `@zsp-symbol` metadata to bind those names to symbols in a
+separately linked resident program, including implementations from imported
+modules whose assembly labels are internally mangled.
 
 Modules use relative imports and qualified calls:
 
 ```zig
-const dma = @import("dma.zsp");
+const dma = import("dma.zsp");
 
 export fn _start() noreturn {
     dma.exec(15, 0, rdram, 0x20, 0x0c);
@@ -292,18 +397,18 @@ outer: while (active != 0) {
 }
 ```
 
-Structured conditionals may carry an explicit delay block when the delay-slot
+Structured conditionals may carry an explicit `slot` block when the transfer-slot
 instruction is part of the algorithm rather than merely scheduling:
 
 ```zig
-if (ready != 0) delay {
+if (ready != 0) slot {
     status = next_status;
 } {
     consume();
 }
 ```
 
-The delay block executes whether the branch is taken or not. The emitter may
+The slot block executes whether the branch is taken or not. The emitter may
 invert a condition and place a terminating arm first when that removes an
 otherwise necessary jump.
 
@@ -313,7 +418,7 @@ direct branch to the block end, without an intermediate jump:
 ```zig
 done: block {
     if (value == 0) {
-        break done delay {
+        break done slot {
             status = next_status;
         }
     }
@@ -321,58 +426,70 @@ done: block {
 }
 ```
 
-When the exit instruction must also fill the delay slot of a terminal
-conditional transfer, attach an explicit shared exit delay:
+When the exit instruction must also fill the hardware slot of a terminal
+conditional transfer, attach an explicit shared exit slot:
 
 ```zig
 done: block {
-    if (invalid != 0) @goto(failed);
-} exit delay {
+    if (invalid != 0) jump failed();
+} exit slot {
     status = next_status;
 }
 ```
 
 `break` and `continue` target the innermost loop unless followed by a loop
-label. A `do`/`while` loop can explicitly fill its backward branch delay slot
+label. A `do`/`while` loop can explicitly fill its backward branch slot
 without reverting to labels and gotos:
 
 ```zig
 do {
     status &= mask;
-} while (status != 0) delay {
-    status = cp0.read(4);
+} while (status != 0) slot {
+    status = rsp.cp0.read(4);
 }
 ```
 
-Local labels and explicit branches are also available. A `delay` block must
+Local labels and explicit branches are also available. A `slot` block must
 contain exactly one source statement:
 
 ```zig
 retry:
-if (status != 0) goto retry delay {
+if (status != 0) goto retry slot {
     status = load(u32, address);
 }
 
-goto done, .branch delay {
+goto done, .branch slot {
     result = 1;
 }
 done:
 ```
 
+`slot` is semantic, not a scheduling hint: its statement executes as the
+hardware transfer slot on both paths. Leave it off when the statement is only
+an optimization opportunity; ZSP fills safe slots automatically. A slot that
+contains only `rsp.nop()` is rejected as unnecessary.
+
 `goto label` targets a local label and accepts `.jump` (the default) or
-`.branch`. Function-level transfers use these builtins:
+`.branch`. Across functions, ZSP has three control-transfer forms:
 
 ```zig
-@goto(function);                 // direct jump
-@goto(module.function, .branch); // imported public function
-@jump(address);                  // indirect jump through a scalar value
-@setReturn(label);               // materialize this function's return label
-@setFunctionAddress(value, fn);  // materialize a function address in value's register
-@setDataAddress(value, data, 8); // materialize a data address plus an optional offset
+function(arguments);        // normal call; returns to the next statement
+tail function(arguments);   // tail call; does not return
+jump function(arguments);   // advanced raw direct jump
+jump(address);              // advanced raw indirect jump
+dmem.addressOf(data, 8);         // materialize a data address plus an optional offset
 ```
 
-`@goto` and `@jump` also accept a one-statement `delay` block. Conditional
-forms such as `if (condition) @goto(function) delay { ... }` are supported.
+Use a normal call unless the callee must not return. Use `tail` for the normal
+non-returning case. `jump` is the advanced escape hatch when code requires an
+exact direct transfer or already has a function address in a register. Direct
+jumps retain function argument type checking; indirect jumps accept a raw
+scalar address. Both forms accept a one-statement `slot` block. A direct raw
+jump may also be conditional, for example
+`if (condition) jump function(arguments) slot { ... }`.
+
+Function addresses are ordinary typed values. Pin a value to `$ra` when raw
+control flow needs an explicit continuation: `reg($ra) next: fn() = &finish;`.
 
 Use `tail` for a non-returning transfer with normal function argument checking:
 
@@ -388,57 +505,74 @@ bytes. If another placement edge has already claimed the target, `tail` emits
 `j target` and a `nop` delay slot. Function order is selected deterministically;
 source code does not specify physical layout.
 
-Other builtins are `@nop()` and `@break(code)`, where the optional break code
-is a 20-bit unsigned value. `asm("instruction")` emits a raw assembly line and
-acts as an optimization barrier when its effects are unknown.
-
-An `ordered` block preserves the emitted instruction order and forms an
-optimization barrier at both boundaries. Use it for hand-scheduled hardware
-sequences while retaining normal ZSP expressions and type checking:
+An adjacent normal call followed by a zero-argument tail call is treated as a
+continuation pair:
 
 ```zig
-ordered {
+append(arguments);
+tail commandLoop();
+```
+
+When `commandLoop` can be placed immediately after the caller, the call returns
+by falling through into it. If that placement is already claimed, ZSP emits a
+stackless continuation: it jumps to `append` while loading `commandLoop` into
+`$ra` in the jump's delay slot. This keeps the source in terms of ordinary call
+and tail-call semantics without requiring a combined control-transfer builtin.
+
+Machine operations use an explicit namespace: `rsp.nop()` emits a literal no-op
+and `rsp.halt(code)` emits the RSP break instruction, where the optional code is
+a 20-bit unsigned value. `asm("instruction")` emits a raw assembly line and
+acts as an optimization barrier when its effects are unknown.
+
+An `exact` block preserves the emitted instructions and their order, and forms
+an optimization barrier at both boundaries. Use it only for hand-authored
+hardware sequences whose exact encoding or timing is part of the program:
+
+```zig
+exact {
     mask = 0x3f000000;
     command ^= mask;
 }
 ```
 
 No optimizer transformation moves, removes, or rewrites instructions within an
-ordered block, or moves instructions across either boundary.
+exact block, or moves instructions across either boundary. Raw assembly uses
+the same construct: `exact { asm("instruction"); }`; there is no separate
+`asmExact` spelling.
 
-`@return()` emits `jr $ra`. It accepts the same optional one-statement delay
+`return;` emits `jr $ra`. It accepts the same optional one-statement `slot`
 block as other control transfers:
 
 ```zig
-@return() delay {
-    dma.writeLengthAndStart(length);
+return slot {
+    rsp.cp0.startDmaWrite(length);
 }
 ```
 
 ## Commands and command tables
 
-`command(index)` marks functions for the resident/overlay command ABI. Indices
+`@rspq.command(index)` marks functions for the resident/overlay command ABI. Indices
 range from 0 through 239 and must be unique:
 
 ```zig
-command(2) fn write(
-    reg($a0) header: u32,
+@rspq.command(2) fn write(
+    reg($a0) header: dmem,
     reg($a1) value: u32,
 ) noreturn {
     store(u32, header, value);
-    @goto(commandLoop);
+    tail commandLoop();
 }
 
-const commands = @commandTable();
+const commands = @rspq.commandTable();
 ```
 
 Command parameters describe fixed ABI registers and command size. A parameter
-named `_` contributes to the size without defining a symbol. `@commandTable()`
+named `_` contributes to the size without defining a symbol. `@rspq.commandTable()`
 emits handler and size metadata, including empty slots and extended overlay
 indices.
 
 Handlers that consume a variable-length command directly from `$gp` can use
-`commandSize(bytes)` to override the inferred size. The override must be a
+`@rspq.commandSize(bytes)` to override the inferred size. The override must be a
 nonzero multiple of four and cannot be smaller than the declared parameters.
 
 ## Vector registers and basic operations
@@ -556,12 +690,12 @@ The vector control registers use their full hardware names. Reads return a
 scalar value and writes consume one:
 
 ```zig
-carry = @readVectorCarryOut();
-compare = @readVectorCompareCode();
-extension = @readVectorCompareExtension();
-@writeVectorCarryOut(carry);
-@writeVectorCompareCode(compare);
-@writeVectorCompareExtension(extension);
+carry = rsp.vector.getCarryOut();
+compare = rsp.vector.getCompareCode();
+extension = rsp.vector.getCompareExtension();
+rsp.vector.setCarryOut(carry);
+rsp.vector.setCompareCode(compare);
+rsp.vector.setCompareExtension(extension);
 ```
 
 `vectorShiftLeft8(source, amount)` accepts amounts 8 through 15, and
@@ -573,43 +707,69 @@ Partial and packed vector transfers are statement builtins. Their lane and
 offset arguments are compile-time integers:
 
 ```zig
-@loadVector16(vector, lane, address, offset);
-@loadVector32(vector, lane, address, offset);
-@loadVector64(vector, lane, address, offset);
-@loadVector128(vector, address, offset);
-@storeVector16(vector, lane, address, offset);
-@storeVector32(vector, lane, address, offset);
-@storeVector64(vector, lane, address, offset);
-@storeVector128(vector, address, offset);
-@loadVectorPackedSigned(vector, address, offset);
-@loadVectorPackedUnsigned(vector, address, offset);
+rsp.vector.load16(vector, lane, address, offset);
+rsp.vector.load32(vector, lane, address, offset);
+rsp.vector.load64(vector, lane, address, offset);
+rsp.vector.load128(vector, address, offset);
+rsp.vector.store16(vector, lane, address, offset);
+rsp.vector.store32(vector, lane, address, offset);
+rsp.vector.store64(vector, lane, address, offset);
+rsp.vector.store128(vector, address, offset);
+rsp.vector.loadPackedSigned(vector, address, offset);
+rsp.vector.loadPackedUnsigned(vector, address, offset);
 ```
 
 Use `reserved reg($v1) name: u32 = undefined;` to give an ABI-reserved scalar
 register a name while preventing the backend from silently using `$v1` as its
 temporary register.
 
-The RSP hardware namespaces expose the CP0 operations needed by DMA and RDP
-command submission:
+The `cp0` hardware namespace exposes named, value-returning register reads and
+register-agnostic writes. The destination of a read is the register allocated
+to the receiving ZSP value; operation names never encode a scalar register:
 
 ```zig
-busy = dma.busy();
-dma.writeMemoryAddress(dmem_address);
-dma.writeRdramAddress(rdram_address);
-dma.writeLengthAndStart(length);
-rdp.writeCommandEnd(command_end);
+status = rsp.cp0.spStatus();
+busy = rsp.cp0.dmaBusy();
+rsp.cp0.setDmaMemoryAddress(dmem_address);
+rsp.cp0.setDmaRdramAddress(rdram_address);
+rsp.cp0.startDmaRead(length);
+rsp.cp0.setRdpCommandEnd(command_end);
 ```
 
-Any CP0 register can be accessed without inline assembly. `cp0.read(index)` is
-a scalar expression and `cp0.write(index, value)` is a statement. The
-`readRegister` and `writeRegister` forms accept an explicit fixed register for
-ABI helpers that intentionally operate on a register not declared as a value:
+Named reads also include `dmaMemoryAddress`, `dmaRdramAddress`, `dmaFull`,
+`rdpCommandStart`, `rdpCommandEnd`, and `rdpStatus`. Named writes include
+`setSpStatus`, `startDmaWrite`, and `setRdpCommandStart`.
+
+`rsp.cp0.dmaMemoryAddress()` returns `dmem`, and
+`rsp.cp0.setDmaMemoryAddress(address)` requires `dmem`. The RDRAM and other CP0
+registers remain ordinary 32-bit scalar values.
+
+Advanced code may access a numbered CP0 register with `rsp.cp0.read(index)` and
+`rsp.cp0.write(index, value)`. The `readRegister` and `writeRegister` forms operate
+on an explicit hardware register not represented by a ZSP value:
 
 ```zig
-status = cp0.read(4);
-cp0.write(9, command_end);
-cp0.readRegister(5, $at);
+status = rsp.cp0.read(4);
+rsp.cp0.write(9, command_end);
+rsp.cp0.readRegister(5, $at);
 ```
+
+## Explain
+
+`zsp explain <input.zsp>` compiles and links the program without writing an
+assembly file, then reports the compiler decisions that are otherwise hard to
+see from source:
+
+- each parameter and local's actual scalar or vector register, including
+  whether the choice was automatic or fixed;
+- each function's transitive scalar and vector write set;
+- command indices, handlers, and encoded command sizes;
+- IMEM text size before and after optimization; and
+- whether optimization changed the assembly and which pass families ran.
+
+Module lookup flags and `--no-optimize` work the same way as normal compilation.
+The report comes from the resolved allocator and write analysis, not from
+guessing register use after assembly emission.
 
 ## Optimizer
 
@@ -622,8 +782,8 @@ delay slots intact, and treats unknown raw assembly as a barrier. Use
 
 ## Current limitations
 
-Notable omissions include general scalar multiplication/division, precedence-
-based arbitrary expression trees, casts, ternary expressions, general vector shifts, packed
+Notable omissions include general scalar multiplication/division, casts,
+ternary expressions, general vector shifts, packed
 vector stores, unaligned vector operations, transposed vector operations,
 annotations, and macros.
 

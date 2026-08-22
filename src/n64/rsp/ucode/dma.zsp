@@ -1,5 +1,3 @@
-const cp0 = @import("cp0.zsp");
-
 // Stackless DMA ABI, matching libdragon's rsp_dma.inc:
 //   $t0: DMA size descriptor
 //   $t1: RDRAM pitch
@@ -9,11 +7,11 @@ const cp0 = @import("cp0.zsp");
 //
 // Returns through $ra. Clobbers $t2 and $t3. For DMA reads, $s4 is adjusted
 // by the low three bits of the RDRAM address.
-pub fn out(
+pub export fn out(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
-    reg($s4) dmem: u32,
+    reg($s4) dmem: dmem,
 ) noreturn {
     reg($t2) flags: u32 = -32756;
     jump exec(size, pitch, rdram, dmem, flags);
@@ -23,7 +21,7 @@ pub fn outAsync(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
-    reg($s4) dmem: u32,
+    reg($s4) dmem: dmem,
 ) noreturn {
     reg($t2) flags: u32 = -32768;
     jump exec(size, pitch, rdram, dmem, flags);
@@ -33,68 +31,68 @@ pub fn inAsync(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
-    reg($s4) dmem: u32,
+    reg($s4) dmem: dmem,
 ) noreturn {
     reg($t2) flags: u32 = 0;
     jump exec(size, pitch, rdram, dmem, flags);
 }
 
-pub fn in(
+pub export fn in(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
-    reg($s4) dmem: u32,
+    reg($s4) dmem: dmem,
 ) noreturn {
     reg($t2) flags: u32 = 0x0c;
+    tail exec(size, pitch, rdram, dmem, flags);
 }
 
-pub fn exec(
+pub export fn exec(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
-    reg($s4) dmem: u32,
+    reg($s4) dmem: dmem,
     reg($t2) flags: u32,
 ) noreturn {
     reg dma_full: u32;
     reg transfer_descriptor: u32;
     do {
-        cp0.getDmaFullAt(dma_full);
-    } while(dma_full != 0) delay {
+        dma_full = rsp.cp0.dmaFull();
+    } while(dma_full != 0) slot {
         transfer_descriptor = size & 0x0fff;
     }
     transfer_descriptor = pitch - transfer_descriptor;
     transfer_descriptor -= 1;
     transfer_descriptor <<= 20;
     transfer_descriptor |= size;
-    cp0.setDmaAddrRdram(rdram);
-    if(flags < 0x80000000) delay {
-        cp0.setDmaAddrRsp(dmem);
-    } {
-        cp0.setDmaReadAt(transfer_descriptor);
+    rsp.cp0.setDmaRdramAddress(rdram);
+    rsp.cp0.setDmaMemoryAddress(dmem);
+    if(flags < 0x80000000) {
+        rsp.cp0.startDmaRead(transfer_descriptor);
     } else {
-        cp0.setDmaWriteAt(transfer_descriptor);
+        rsp.cp0.startDmaWrite(transfer_descriptor);
     }
     reg rdram_alignment: u32;
     rdram_alignment = rdram & 7;
     dmem = dmem + rdram_alignment;
     flags &= 0x0f;
-    tail waitStatus(flags);
+    jump waitStatus(flags);
 }
 
-pub fn waitStatus(reg($t2) flags: u32) noreturn {
+pub export fn waitStatus(reg($t2) flags: u32) noreturn {
     reg status: u32;
-    cp0.getSpStatusAt(status);
+    status = rsp.cp0.spStatus();
     do {
         status &= flags;
-    } while(status != 0) delay {
-        cp0.getSpStatusAt(status);
+    } while(status != 0) slot {
+        status = rsp.cp0.spStatus();
     }
     tail returnToCaller();
 }
 
-pub fn returnToCaller() noreturn {
+pub export fn returnToCaller() noreturn {
     reg($ra) return_address: u32 = undefined;
-    @jump(return_address);
+    jump(return_address);
 }
 
 pub fn waitIdle() noreturn {
@@ -102,7 +100,7 @@ pub fn waitIdle() noreturn {
     jump waitStatus(flags);
 }
 
-pub fn waitOut() noreturn {
+pub export fn waitOut() noreturn {
     reg($t2) flags: u32 = 0x08;
-    jump waitStatus(flags);
+    tail waitStatus(flags);
 }

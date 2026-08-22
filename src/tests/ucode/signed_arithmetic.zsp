@@ -12,5 +12,5 @@ export fn _start() noreturn {
     store(i32, 0, product);
     store(i32, 4, quotient);
     store(i32, 8, sum);
-    @break();
+    rsp.halt();
 }

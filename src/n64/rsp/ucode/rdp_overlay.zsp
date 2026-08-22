@@ -1,6 +1,6 @@
-const rdp = @import("rdp.zsp");
-const dma = @import("resident_dma.zsp");
-const cp0 = @import("cp0.zsp");
+const rdp = import("rdp.zsp");
+const dma = import("resident_api.zsp");
+const queue = import("resident_api.zsp");
 
 enum RenderCycleType: u32 {
     two_cycle = 0x10200000;
@@ -38,20 +38,11 @@ packed struct OverlayRdpBufferState {
     previous: u32;
 }
 
-abi rspq_command(
-    reg($a0) argument_0: u32,
-    reg($a1) argument_1: u32,
-    reg($a2) argument_2: u32,
-    reg($a3) argument_3: u32,
-);
-
-abi continuation();
-const queue = @import("resident_queue.zsp");
 
 // Libdragon deliberately maps these reserved command slots straight back to
 // the resident queue loop. An external command target represents that table
 // alias without adding any overlay instructions.
-command(21, 23, 32, 33, 34, 35) extern fn resident_command_loop() commandSize(8) clobbers() noreturn;
+@rspq.command(21, 23, 32, 33, 34, 35) extern fn commandLoop() @rspq.commandSize(8) writes() noreturn;
 
 data {
     command_staging_ptr: u32 = 0x00000a60;
@@ -102,23 +93,25 @@ bss {
 
 // Libdragon command slots 0xC0 and the direct 64-bit RDP opcodes that do not
 // require overlay-side state fixups share this exact handler.
-command(0, 38, 39, 40, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 59, 60) fn _start(
+@rspq.command(0, 38, 39, 40, 42, 43, 44, 45, 46, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 59, 60) fn _start(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) noreturn {
-    call rdp.write8() then rdp.finalize;
+    rdp.write8(word0, word1);
+    tail rdp.finalize();
 }
 
-command(36, 37) fn passthrough16(
+@rspq.command(36, 37) fn passthrough16(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
     reg($a2) word2: u32,
     reg($a3) word3: u32,
 ) noreturn {
-    call rdp.write16() then rdp.finalize;
+    rdp.write16(word0, word1, word2, word3);
+    tail rdp.finalize();
 }
 
-command(1) fn setLookupAddress(
+@rspq.command(1) fn setLookupAddress(
     reg($a0) command: u32,
     reg($a1) address: u32,
 ) {
@@ -132,16 +125,16 @@ fn fixupAddress(reg($a1) address: u32) {
     address += base;
 }
 
-command(61, 62) fn setFixupImage(
+@rspq.command(61, 62) fn setFixupImage(
     reg($a0) word0: u32,
     reg($a1) address: u32,
 ) {
     reg opcode: u32 = undefined;
-    fixupAddress(address) delay {
-        opcode = 0xf0000000;
-    }
+    opcode = 0xf0000000;
+    fixupAddress(address);
     word0 |= opcode;
-    call rdp.write8() then rdp.finalize;
+    rdp.write8(word0, address);
+    tail rdp.finalize();
 }
 
 fn writeSetFillColor(reg($a1) color: u32) noreturn {
@@ -149,7 +142,7 @@ fn writeSetFillColor(reg($a1) color: u32) noreturn {
     reg bitdepth: u32 = load(u8, rdp_target_bitdepth);
     bitdepth &= 3;
     reg($a0) word0: u32 = undefined;
-    if(bitdepth == 3) tail rdp.write8(word0, color) delay {
+    if(bitdepth == 3) tail rdp.write8(word0, color) slot {
         word0 = 0xf7000000;
     }
 
@@ -174,7 +167,7 @@ fn writeSetFillColor(reg($a1) color: u32) noreturn {
     jump rdp.write8(word0, color);
 }
 
-command(63) fn setColorImage(
+@rspq.command(63) fn setColorImage(
     reg($a0) word0: u32,
     reg($a1) address: u32,
 ) {
@@ -186,23 +179,25 @@ command(63) fn setColorImage(
     bitdepth |= previous_bitdepth;
     store(u8, rdp_target_bitdepth, bitdepth);
     fixupAddress(address);
-    ordered {
+    exact {
         previous_bitdepth = 0xf0000000;
     }
-    rdp.write8(word0, address) delay {
-        ordered {
+    rdp.write8(word0, address) slot {
+        exact {
             word0 |= previous_bitdepth;
         }
     }
     address = load(u32, rdp_fill_color);
-    call writeSetFillColor() then rdp.finalize;
+    writeSetFillColor(address);
+    tail rdp.finalize();
 }
 
-command(22) fn setFillColor32(
+@rspq.command(22) fn setFillColor32(
     reg($a0) _: u32,
     reg($a1) color: u32,
 ) {
-    call writeSetFillColor() then rdp.finalize;
+    writeSetFillColor(color);
+    tail rdp.finalize();
 }
 
 inline fn prepareSyncFull(
@@ -215,56 +210,55 @@ inline fn prepareSyncFull(
     // Match libdragon's SpStatusWait: do not schedule another full sync while
     // its CPU callback or a queue syncpoint is still pending.
     reg wait_mask: u32 = 0x00000300;
-    dma.resident_dma_wait_status(wait_mask);
+    dma.waitStatus(wait_mask);
 
     rdram = load(u32, rdram_syncpoint_address);
     dmem = syncpoint_id;
     reg dma_size: u32 = 7;
     reg dma_pitch: u32 = undefined;
-    dma.resident_dma_in(dma_size, dma_pitch, rdram, dmem);
+    dma.in(dma_size, dma_pitch, rdram, dmem);
 
     dma_size = 0x00001000;
-    cp0.setSpStatusT0(dma_size);
+    rsp.cp0.setSpStatus(dma_size);
     store(u32, syncfull_command, word0);
     store(u32, syncfull_command, word1, 4);
 
     dmem = syncfull_command;
     rdram = load(u32, rdram_state_address);
     dma_size = 15;
-    dma.resident_dma_out(dma_size, dma_pitch, rdram, dmem);
+    dma.out(dma_size, dma_pitch, rdram, dmem);
 
 }
 
-command(41) fn syncFull(
+@rspq.command(41) fn syncFull(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) {
     prepareSyncFull(word0, word1);
     rdp.write8(word0, word1);
-    reg staging: u32;
-    reg staging_end: u32;
+    reg staging: dmem;
+    reg staging_end: dmem;
     rdp.prepareStagedSend(staging, staging_end);
-    rdp.sendStaged(staging, staging_end) delay {
-        store(u8, rdp_syncfull_ongoing, 0);
-    }
+    store(u8, rdp_syncfull_ongoing, 0);
+    rdp.sendStaged(staging, staging_end);
     reg busy: u32 = 0x40;
     store(u8, rdp_syncfull_ongoing, busy);
-    jump queue.resident_command_loop();
+    jump queue.commandLoop();
 }
 
-command(26) fn rdpWaitIdle(reg($a0) _: u32) {
+@rspq.command(26) fn rdpWaitIdle(reg($a0) _: u32) {
     reg status: u32;
     reg busy: u32;
     reg busy_mask: u32 = 0x40;
-    cp0.getDpStatusT2(status);
+    status = rsp.cp0.rdpStatus();
     do {
         busy = status & busy_mask;
-    } while(busy != 0) delay {
-        cp0.getDpStatusT2(status);
+    } while(busy != 0) slot {
+        status = rsp.cp0.rdpStatus();
     }
 }
 
-command(58) fn setPrimitiveColor(
+@rspq.command(58) fn setPrimitiveColor(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) noreturn {
@@ -273,7 +267,7 @@ command(58) fn setPrimitiveColor(
     jump _start(word0, word1);
 }
 
-command(19) fn setPrimitiveColorComponent(
+@rspq.command(19) fn setPrimitiveColorComponent(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) noreturn {
@@ -295,11 +289,9 @@ command(19) fn setPrimitiveColorComponent(
     }
     word0 |= saved_ex;
     store(u32, primitive_color_ex, word0);
-    reg staging: u32 = primitive_color_ex;
-    reg($s3) staging_end: u32 = undefined;
-    jump rdp.sendStaged(staging, staging_end) delay {
-        @setDataAddress(staging_end, primitive_color_ex, 8);
-    }
+    reg staging: dmem = primitive_color_ex;
+    reg($s3) staging_end: dmem = dmem.addressOf(primitive_color_ex, 8);
+    jump rdp.sendStaged(staging, staging_end);
 }
 
 fn writeSetScissor(
@@ -316,16 +308,17 @@ fn writeSetScissor(
     jump rdp.write8(word0, word1);
 }
 
-command(18) fn setScissorEx(
+@rspq.command(18) fn setScissorEx(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) {
     reg scissor_mask: u32;
-    ordered {
+    exact {
         scissor_mask = 0x3f000000;
         word0 ^= scissor_mask;
     }
-    call writeSetScissor() then rdp.finalize;
+    writeSetScissor(word0, word1);
+    tail rdp.finalize();
 }
 
 fn sendOtherModes(
@@ -333,10 +326,9 @@ fn sendOtherModes(
     reg($a1) word1: u32,
 ) {
     reg opcode: u32 = undefined;
-    rdp.write8(word0, word1) delay {
-        opcode = 0xef;
-    }
-    reg($s0) staging: u32 = undefined;
+    opcode = 0xef;
+    rdp.write8(word0, word1);
+    reg($s0) staging: dmem = undefined;
     store(u8, staging, opcode, -8);
     tail finalizeOtherModes(word0, word1);
 }
@@ -347,10 +339,11 @@ fn finalizeOtherModes(
 ) noreturn {
     word0 = load(ScissorState.first_word, rdp_scissor_rect);
     word1 = load(ScissorState.second_word, rdp_scissor_rect);
-    call writeSetScissor() then rdp.finalize;
+    writeSetScissor(word0, word1);
+    tail rdp.finalize();
 }
 
-command(47) fn setOtherModes(
+@rspq.command(47) fn setOtherModes(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) noreturn {
@@ -360,7 +353,7 @@ command(47) fn setOtherModes(
     jump sendOtherModes(word0, word1);
 }
 
-command(20) fn modifyOtherModes(
+@rspq.command(20) fn modifyOtherModes(
     reg($a0) command: i32,
     reg($a1) inverse_mask: u32,
     reg($a2) value: u32,
@@ -371,7 +364,7 @@ command(20) fn modifyOtherModes(
     updated |= value;
     store(u32, rdp_mode + command, updated, 24);
     command <<= 16;
-    if(command < 0) tail updateRenderMode() delay {
+    if(command < 0) tail updateRenderMode() slot {
         command = load(i32, rdp_mode, 24);
     }
     inverse_mask = load(RdpModeState.other_modes_low, rdp_mode);
@@ -383,23 +376,23 @@ fn updateRenderMode() {
     reg($a1) comb_lo: u32 = undefined;
     reg($a2) som_hi: u32 = load(RdpModeState.other_modes_high, rdp_mode);
     reg($a3) som_lo: u32 = undefined;
-    reg selected_combiner: u32 = undefined;
+    reg selected_combiner: dmem = undefined;
     reg mode_frozen: u32;
     mode_frozen = som_hi & OtherModeHigh.pipeline_frozen;
-    if(mode_frozen != 0) tail rdp.finalize() delay {
+    if(mode_frozen != 0) tail rdp.finalize() slot {
         som_lo = load(RdpModeState.other_modes_low, rdp_mode);
     }
     reg fill_or_copy_cycle: u32;
     fill_or_copy_cycle = som_hi << 10;
-    if(fill_or_copy_cycle >= 0x80000000) delay {
-        comb_hi = load(RdpModeState.combiner_high, rdp_mode);
-    } {
+    comb_hi = load(RdpModeState.combiner_high, rdp_mode);
+    if(fill_or_copy_cycle >= 0x80000000) {
         reg fill_combiner_mask: u32 = 0xff000000;
         comb_hi = som_hi | fill_combiner_mask;
         reg copy_cycle_bit: u32 = 0x10000000;
         comb_hi ^= copy_cycle_bit;
         comb_lo = som_lo;
-        call rdp.write8() then rdp.finalize;
+        rdp.write8(comb_hi, comb_lo);
+        tail rdp.finalize();
     }
     comb_lo = load(RdpModeState.combiner_low, rdp_mode);
     reg cycle_combiner_mask: u32;
@@ -410,47 +403,44 @@ fn updateRenderMode() {
         }
         reg($t2) invalid_cycle_flags: u32 = undefined;
         invalid_cycle_flags = som_hi & 1;
-        if(invalid_cycle_flags != 0) tail queue.resident_assertion_failed() delay {
+        if(invalid_cycle_flags != 0) tail queue.invalidCommand() slot {
             reg($at) assertion_code: u32 = 0xc0040000;
         }
         break store_combiner_2cycle;
-    } exit delay {
+    } exit slot {
         cycle_combiner_mask = 0x04000000;
     }
     check_mipmap: block {
         reg has_custom_combiner: u32;
         has_custom_combiner = som_hi & cycle_combiner_mask;
         reg comb_hi_no_id: u32 = undefined;
+        comb_hi_no_id = comb_hi << 8;
         if(has_custom_combiner == 0) {
-            break check_mipmap delay {
-                comb_hi_no_id = comb_hi << 8;
-            }
+            break check_mipmap;
         }
         comb_hi_no_id >>= 8;
         reg combiner_word: u32 = load(u32, combiner_tex_shade);
         fog_change: block {
             check_fog_shade: block {
                 if(combiner_word != comb_hi_no_id) {
-                    break check_fog_shade delay {
+                    break check_fog_shade slot {
                         combiner_word = load(u32, combiner_tex_shade, 4);
                     }
                 }
+                selected_combiner = combiner_tex_shade_fog;
                 if(combiner_word == comb_lo) {
-                    break fog_change delay {
-                        selected_combiner = combiner_tex_shade_fog;
-                    }
+                    break fog_change;
                 }
             }
             combiner_word = load(u32, combiner_shade);
             if(combiner_word != comb_hi_no_id) {
-                break check_mipmap delay {
+                break check_mipmap slot {
                     combiner_word = load(u32, combiner_shade, 4);
                 }
             }
+            selected_combiner = combiner_shade_fog;
             if(combiner_word != comb_lo) {
-                break check_mipmap delay {
-                    selected_combiner = combiner_shade_fog;
-                }
+                break check_mipmap;
             }
         }
         comb_hi = load(u32, selected_combiner);
@@ -458,7 +448,7 @@ fn updateRenderMode() {
     }
     reg mipmap_offset: u32;
     mipmap_offset = som_hi & 3;
-    if(mipmap_offset != 0) delay {
+    if(mipmap_offset != 0) slot {
         mipmap_offset <<= 3;
     } {
         reg combiner_high_mask: u32 = load(RdpModeState.combiner_high_mask, rdp_mode);
@@ -518,7 +508,7 @@ fn updateRenderMode() {
     reg texture_filter_bits: u32;
     texture_filter_bits = som_hi & 0x3e00;
     reg yuv_filter_mode: u32 = 0x2000;
-    if(texture_filter_bits == yuv_filter_mode) delay {
+    if(texture_filter_bits == yuv_filter_mode) slot {
         texture_filter_bits = 0x0a00;
     } {
         som_hi |= texture_filter_bits;
@@ -546,7 +536,7 @@ fn updateRenderMode() {
     reg aa_mode_bits: u32 = load(u32, aa_table_index, aa_blend_table);
     reg aa_mode_mask: u32 = load(u32, aa_blend_mask);
     aa_mode_bits = (aa_mode_bits | merged_blend) & aa_mode_mask;
-    ordered {
+    exact {
         aa_mode_mask = ~aa_mode_mask;
     }
     som_lo &= aa_mode_mask;
@@ -556,7 +546,7 @@ fn updateRenderMode() {
     active_copy_flags = som_lo & copy_mode_flags;
     if(copy_mode_flags == active_copy_flags) {
         som_lo |= 0x3000;
-        ordered {
+        exact {
             reg low_mode_clear_mask: u32 = -4;
             som_lo &= low_mode_clear_mask;
         }
@@ -578,26 +568,27 @@ fn updateRenderMode() {
     store(RdpModeState.other_modes_high, rdp_mode, som_hi);
     store(RdpModeState.other_modes_low, rdp_mode, som_lo);
     store(u8, rdp_mode, saved_mode_byte, 24);
-    call rdp.write16() then rdp.finalize;
+    rdp.write16(comb_hi, comb_lo, som_hi, som_lo);
+    tail rdp.finalize();
 }
 
-command(24) fn setBlendingMode(reg($a0) command: u32, reg($a1) formula: u32) noreturn {
+@rspq.command(24) fn setBlendingMode(reg($a0) command: u32, reg($a1) formula: u32) noreturn {
     jump rdpSetBlendingMode(command, formula);
 }
 
-command(25) fn setFogMode(reg($a0) command: u32, reg($a1) formula: u32) noreturn {
+@rspq.command(25) fn setFogMode(reg($a0) command: u32, reg($a1) formula: u32) noreturn {
     jump rdpSetFogMode(command, formula);
 }
 
-command(27) fn setCombineMode1Pass(reg($a0) word0: u32, reg($a1) word1: u32, reg($a2) mask0: u32, reg($a3) mask1: u32) noreturn {
+@rspq.command(27) fn setCombineMode1Pass(reg($a0) word0: u32, reg($a1) word1: u32, reg($a2) mask0: u32, reg($a3) mask1: u32) noreturn {
     jump rdpSetCombineMode1Pass(word0, word1, mask0, mask1);
 }
 
-command(5) fn setCombineMode2Pass(reg($a0) word0: u32, reg($a1) word1: u32) noreturn {
+@rspq.command(5) fn setCombineMode2Pass(reg($a0) word0: u32, reg($a1) word1: u32) noreturn {
     jump rdpSetCombineMode2Pass(word0, word1);
 }
 
-command(4) fn resetMode(
+@rspq.command(4) fn resetMode(
     reg($a0) comb_hi: u32,
     reg($a1) comb_lo: u32,
     reg($a2) som_hi: u32,
@@ -608,7 +599,7 @@ command(4) fn resetMode(
     freeze = previous_som_hi & OtherModeHigh.pipeline_frozen;
     som_hi |= freeze;
 
-    reg mode: u32 = rdp_mode;
+    reg mode: dmem = rdp_mode;
     reg($v00) zero_mode: vec16 = 0;
     store(vec16, mode, zero_mode);
     store(vec16, mode, zero_mode, 16);
@@ -631,9 +622,9 @@ command(4) fn resetMode(
     jump setCombineMode1Pass(comb_hi, comb_lo, som_hi, som_lo);
 }
 
-command(6) fn pushMode(reg($a0) _: u32) {
-    reg mode: u32 = rdp_mode;
-    reg stack: u32 = mode_stack;
+@rspq.command(6) fn pushMode(reg($a0) _: u32) {
+    reg mode: dmem = rdp_mode;
+    reg stack: dmem = mode_stack;
     reg mode0: vec16 = load(vec16, mode);
     reg mode1: vec16 = load(vec16, mode, 16);
     reg stack0: vec16 = load(vec16, stack);
@@ -648,9 +639,9 @@ command(6) fn pushMode(reg($a0) _: u32) {
     store(vec16, stack, stack3, 80);
 }
 
-command(7) fn popMode(reg($a0) scissor0: u32) {
-    reg stack: u32 = mode_stack;
-    reg mode: u32 = rdp_mode;
+@rspq.command(7) fn popMode(reg($a0) scissor0: u32) {
+    reg stack: dmem = mode_stack;
+    reg mode: dmem = rdp_mode;
     reg stack0: vec16 = load(vec16, stack);
     reg stack1: vec16 = load(vec16, stack, 16);
     reg stack2: vec16 = load(vec16, stack, 32);
@@ -665,7 +656,8 @@ command(7) fn popMode(reg($a0) scissor0: u32) {
     store(vec16, stack, stack5, 48);
     scissor0 = load(ScissorState.first_word, rdp_scissor_rect);
     reg($a1) scissor1: u32 = load(ScissorState.second_word, rdp_scissor_rect);
-    call writeSetScissor() then updateRenderMode;
+    writeSetScissor(scissor0, scissor1);
+    tail updateRenderMode();
 }
 
 fn rdpSetBlendingMode(
@@ -716,18 +708,18 @@ fn rdpSetCombineMode2Pass(
     tail updateRenderMode();
 }
 
-command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
+@rspq.command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
     reg($a0) _: u32,
-) commandSize(32, 48, 96, 112, 96, 112, 160, 176) noreturn {
-    reg($gp) relative_command_end: i32 = undefined;
+) @rspq.commandSize(32, 48, 96, 112, 96, 112, 160, 176) noreturn {
+    reg($gp) relative_command_end: dmem = undefined;
     reg($t7) command_size: i32 = undefined;
-    reg command_end: i32;
-    ordered {
+    reg command_end: dmem;
+    exact {
         command_end = relative_command_end + 0xe0;
     }
-    reg command_start: i32;
+    reg command_start: dmem;
     command_start = command_end - command_size;
-    reg($s4) staging: u32 = undefined;
+    reg($s4) staging: dmem = undefined;
     staging = command_staging;
     reg mipmap_bits: u32 = load(u8, rdp_mode, 24);
     reg triangle_byte: u32 = load(u8, command_start, 1);
@@ -735,7 +727,7 @@ command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
     triangle_byte |= mipmap_bits;
     store(u8, command_start, triangle_byte, 1);
     do {
-        reg($v00) chunk: vec16 = load_unaligned(vec16, command_start);
+        reg($v00) chunk: vec16 = loadUnaligned(vec16, command_start);
         store(vec16, staging, chunk);
         command_start += 16;
         staging += 16;
@@ -744,31 +736,30 @@ command(8, 9, 10, 11, 12, 13, 14, 15) fn passthroughTriangle(
     jump rdp.finalize();
 }
 
-command(30) fn triangle(
+@rspq.command(30) fn triangle(
     reg($a0) triangle_command: i32,
 ) noreturn {
-    reg staging_start: i32 = command_staging;
-    reg($s3) output: i32 = staging_start;
+    reg staging_start: dmem = command_staging;
+    reg($s3) output: dmem = staging_start;
     reg($v0) cull_mode: i32 = 2;
-    reg($a1) vertex1: i32 = triangle_data0;
-    reg($a2) vertex2: i32 = triangle_data1;
-    reg($a3) vertex3: i32 = undefined;
-    triangleAsync(triangle_command, vertex1, vertex2, vertex3, output, cull_mode) delay {
-        vertex3 = triangle_data2;
-    }
+    reg($a1) vertex1: dmem = triangle_data0;
+    reg($a2) vertex2: dmem = triangle_data1;
+    reg($a3) vertex3: dmem = triangle_data2;
+    triangleAsync(triangle_command, vertex1, vertex2, vertex3, output, cull_mode);
     tail triangleCull();
 }
 
 fn triangleCull() noreturn {
-    call triangleSendEnd() then queue.resident_command_loop;
+    triangleSendEnd();
+    tail queue.commandLoop();
 }
 
 fn triangleAsync(
     reg($a0) triangle_command: i32,
-    reg($a1) vertex1: i32,
-    reg($a2) vertex2: i32,
-    reg($a3) vertex3: i32,
-    reg($s3) output: i32,
+    reg($a1) vertex1: dmem,
+    reg($a2) vertex2: dmem,
+    reg($a3) vertex3: dmem,
+    reg($s3) output: dmem,
     reg($v0) cull_mode: i32,
 ) {
 
@@ -776,10 +767,10 @@ fn triangleAsync(
     store(u16, output, vertex2, 2);
     store(u16, output, vertex3, 4);
 
-    reg all1: vec16 = load_vec_u32(vertex1, 0);
-    reg all2: vec16 = load_vec_u32(vertex2, 0);
-    reg all3: vec16 = load_vec_u32(vertex3, 0);
-    reg clip1: i32 = load(u16, vertex1, 6);
+    reg all1: vec16 = loadVectorWords(vertex1, 0);
+    reg all2: vec16 = loadVectorWords(vertex2, 0);
+    reg all3: vec16 = loadVectorWords(vertex3, 0);
+    reg clip1: dmem = load(u16, vertex1, 6);
     reg($v00) vector_zero: vec16 = undefined;
     reg($v30) shift_constants: vec16 = undefined;
     reg negative_powers: vec16;
@@ -792,8 +783,8 @@ fn triangleAsync(
     all3[3] = load(vec16, output, 4);
     reg vector_one: vec16;
     vector_one = vector_zero + shift_constants.WWWWWWWW;
-    reg clip3: i32 = load(u16, vertex3, 6);
-    reg clip2: i32 = load(u16, vertex2, 6);
+    reg clip3: dmem = load(u16, vertex3, 6);
+    reg clip2: dmem = load(u16, vertex2, 6);
 
     reg all_tmp1: vec16;
     reg all_tmp2: vec16;
@@ -805,20 +796,20 @@ fn triangleAsync(
 
     // VGE/VLT consume VCO for equality tie-breaking. Match the reference's
     // vaddc-with-K1 setup, which also guarantees VCO is clear before sorting.
-    reg command_bits: i32 = 0x3f;
+    reg command_bits: dmem = 0x3f;
     y_tmp1 = vectorCompareGreaterOrEqual(y1, y2);
     clip1 |= clip3;
     all_tmp1 = vectorSelectByCompareCode(all1, all2);
     clip1 |= clip2;
     y1 = vectorCompareLessThan(y1, y2);
-    ordered {
-        did_swap0 = @readVectorCompareCode();
+    exact {
+        did_swap0 = rsp.vector.getCompareCode();
     }
     all1 = vectorSelectByCompareCode(all1, all2);
 
     did_swap1 = clip1 & 0x3f;
     reg hml_upper: vec16 = 0;
-    if(did_swap1 != command_bits) tail triangleCull() delay {
+    if(did_swap1 != command_bits) tail triangleCull() slot {
         y_tmp2 = vectorCompareGreaterOrEqual(y1, y3);
     }
 
@@ -826,23 +817,23 @@ fn triangleAsync(
     all_tmp2 = vectorSelectByCompareCode(all1, all3);
     command_bits = load(u8, rdp_mode, 24);
     y1 = vectorCompareLessThan(y1, y3);
-    ordered {
-        did_swap1 = @readVectorCompareCode();
+    exact {
+        did_swap1 = rsp.vector.getCompareCode();
     }
     all1 = vectorSelectByCompareCode(all1, all3);
 
-    @nop();
+    rsp.nop();
     y3 = vectorCompareGreaterOrEqual(y_tmp1, y_tmp2);
     command_bits &= 0x38;
     all3 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
     store(vec16, output, y1[0], 6);
     y2 = vectorCompareLessThan(y_tmp1, y_tmp2);
-    ordered {
-        did_swap2 = @readVectorCompareCode();
+    exact {
+        did_swap2 = rsp.vector.getCompareCode();
     }
     all2 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
 
-    if(clip1 != 0) tail triangleCull() delay {
+    if(clip1 != 0) tail triangleCull() slot {
         did_swap0 ^= did_swap1;
     }
 
@@ -855,7 +846,7 @@ fn triangleAsync(
 
     // Preserve the reference's hand-scheduled scalar/vector pairing. The raw
     // vector words are required because each element selector is significant.
-    ordered {
+    exact {
         hml = vectorSubtractCarry(all3, all1);
         did_swap0 ^= did_swap2;
         all_tmp2 = vectorSubtractCarry(all2, all1);
@@ -869,33 +860,33 @@ fn triangleAsync(
         negative_my = vectorSubtractCarry(vector_zero, all_tmp2.yyyyyyyy);
         vertex3 = all3[3];
         fy.sfract = vectorShiftLeft8(y1, 14);
-        @storeVector16(y2, 0, output, 4);
+        rsp.vector.store16(y2, 0, output, 4);
         fy.sint = vectorShiftRightArithmetic(y1, 2);
         did_swap0 ^= cull_mode;
         normal.sfract = vmudh(all_tmp2, hml.yyyyyyyy);
-        @storeVector16(y3, 0, output, 2);
+        rsp.vector.store16(y3, 0, output, 2);
         normal.sfract = vmadh(hml, negative_my);
-        @storeVector32(all_tmp2, 0, output, 8);
+        rsp.vector.store32(all_tmp2, 0, output, 8);
         normal.sint = readVectorAccumulatorHigh();
-        @storeVector32(all_tmp1, 0, output, 12);
+        rsp.vector.store32(all_tmp1, 0, output, 12);
         normal.sfract = readVectorAccumulatorMiddle();
-        @loadVector64(hml, 2, output, 8);
+        rsp.vector.load64(hml, 2, output, 8);
         fy.sfract = vectorSubtractCarry(vector_zero, fy.sfract);
         clip2 = output +% 0x20;
         fy.sint = vectorSubtract(fy.sint, fy.sint);
-        @loadVector16(y3, 0, vertex1, 18);
+        rsp.vector.load16(y3, 0, vertex1, 18);
         slope.sint[7] = vectorReciprocalHigh(normal.sint[0]);
         did_swap1 = normal.sint[0];
         slope.sfract[7] = vectorReciprocalLow(normal.sfract[0]);
-        @loadVector16(y3, 2, vertex2, 18);
+        rsp.vector.load16(y3, 2, vertex2, 18);
         slope.sint[7] = vectorReciprocalHigh(vector_zero[0]);
-        @loadVector16(y3, 4, vertex3, 18);
+        rsp.vector.load16(y3, 4, vertex3, 18);
         slope.sfract[0] = vectorReciprocal(hml[1]);
         did_swap1 = did_swap1 < 0;
         slope.sint[0] = vectorReciprocalHigh(hml[1]);
     }
-    if(did_swap1 == did_swap0) tail triangleCull() delay {
-        ordered {
+    if(did_swap1 == did_swap0) tail triangleCull() slot {
+        exact {
             slope.sfract[2] = vectorReciprocal(all_tmp2[1]);
         }
     }
@@ -906,31 +897,31 @@ fn triangleAsync(
     reg($v31) reciprocal_constants: vec16 = undefined;
     reg large_offset: i32 = undefined;
 
-    ordered {
+    exact {
         slope.sint[2] = vectorReciprocalHigh(all_tmp2[1]);
-        @loadVector16(y2, 0, vertex1, 16);
+        rsp.vector.load16(y2, 0, vertex1, 16);
         slope.sfract[4] = vectorReciprocal(all_tmp1[1]);
-        @loadVector16(y2, 2, vertex2, 16);
+        rsp.vector.load16(y2, 2, vertex2, 16);
         slope.sint[4] = vectorReciprocalHigh(all_tmp1[1]);
-        @loadVector16(y2, 4, vertex3, 16);
+        rsp.vector.load16(y2, 4, vertex3, 16);
         hml[7] = vectorMove(normal.sfract[0]);
         did_swap1 ^= 1;
         hml_upper[7] = vectorMove(normal.sint[0]);
         did_swap1 <<= 7;
         all1 = vmudn(slope.sfract, negative_powers.YYYYYYYY);
-        @loadVectorPackedUnsigned(attribute3, vertex3, 8);
+        rsp.vector.loadPackedUnsigned(attribute3, vertex3, 8);
         all2 = vmadh(slope.sint, negative_powers.YYYYYYYY);
-        @loadVectorPackedUnsigned(y_tmp1, vertex1, 8);
+        rsp.vector.loadPackedUnsigned(y_tmp1, vertex1, 8);
         negative_my = vectorSubtractCarry(y3, y3.zzzzzzzz);
-        @loadVectorPackedUnsigned(y_tmp2, vertex2, 8);
+        rsp.vector.loadPackedUnsigned(y_tmp2, vertex2, 8);
         y2 = vectorCompareLessThan(y2, y2.zzzzzzzz);
         triangle_command |= did_swap1;
         y3 = vectorSelectByCompareCode(y3, y3.zzzzzzzz);
-        @loadVector16(inverse_w.sfract, 6, vertex3, 22);
+        rsp.vector.load16(inverse_w.sfract, 6, vertex3, 22);
         all3 = vmudl(slope.sfract, hml.yywwYYWW);
-        @loadVector16(inverse_w.sfract, 4, vertex1, 22);
+        rsp.vector.load16(inverse_w.sfract, 4, vertex1, 22);
         all3 = vmadm(slope.sint, hml.yywwYYWW);
-        @loadVector16(inverse_w.sfract, 5, vertex2, 22);
+        rsp.vector.load16(inverse_w.sfract, 5, vertex2, 22);
         all3 = vmadn(slope.sfract, hml_upper);
         clip3 = triangle_command & 0x400;
         all_tmp1 = vmadh(slope.sint, hml_upper);
@@ -940,11 +931,11 @@ fn triangleAsync(
         all_tmp1 = vmadh(vector_one, negative_powers.WWWWWWWW);
         did_swap1 = hml[0];
         negative_my = vectorSubtractCarry(y3, y3.XXXXXXXX);
-        @loadVector16(inverse_w.sint, 5, vertex2, 20);
+        rsp.vector.load16(inverse_w.sint, 5, vertex2, 20);
         y2 = vectorCompareLessThan(y2, y2.XXXXXXXX);
-        @loadVector16(inverse_w.sint, 6, vertex3, 20);
+        rsp.vector.load16(inverse_w.sint, 6, vertex3, 20);
         y3 = vectorSelectByCompareCode(y3, y3.XXXXXXXX);
-        @loadVector16(inverse_w.sint, 4, vertex1, 20);
+        rsp.vector.load16(inverse_w.sint, 4, vertex1, 20);
         negative_my = vmudl(all3, all1);
         clip3 +%= clip2;
         negative_my = vmadm(all_tmp1, all1);
@@ -958,11 +949,11 @@ fn triangleAsync(
     reg($ra) return_address: i32 = undefined;
 
     // Exact remainder of libdragon's hand-scheduled triangle fast path.
-    ordered {
+    exact {
         negative_my = vmudl(inverse_w.sfract, y3.xxxxxxxx);
-        @loadVector32(all_tmp1, 4, vertex1, 12);
+        rsp.vector.load32(all_tmp1, 4, vertex1, 12);
         negative_my = vmadm(inverse_w.sint, y3.xxxxxxxx);
-        @loadVector32(all3, 4, vertex2, 12);
+        rsp.vector.load32(all3, 4, vertex2, 12);
         inverse_w.sfract = vmadn(inverse_w.sfract, y2.xxxxxxxx);
         did_swap0 = -did_swap0;
         negative_my = vmudn(normal.sfract, hml);
@@ -974,79 +965,79 @@ fn triangleAsync(
         slope.sint = readVectorAccumulatorHigh();
         did_swap0 = 0xcf;
         inverse_w.sfract = vectorSubtractCarry(inverse_w.sfract, shift_constants.WWWWWWWW);
-        @loadVector32(y1, 4, vertex3, 12);
+        rsp.vector.load32(y1, 4, vertex3, 12);
         y_tmp1 = vectorShiftRightLogical(y_tmp1, 7);
-        @writeVectorCompareCode(did_swap0);
+        rsp.vector.setCompareCode(did_swap0);
         y_tmp2 = vectorShiftRightLogical(y_tmp2, 7);
-        @loadVector16(y_tmp1, 7, vertex1, 4);
+        rsp.vector.load16(y_tmp1, 7, vertex1, 4);
         attribute3 = vectorShiftRightLogical(attribute3, 7);
-        @loadVector16(y_tmp2, 7, vertex2, 4);
+        rsp.vector.load16(y_tmp2, 7, vertex2, 4);
         inverse_w.sfract = vectorShiftRightLogical(inverse_w.sfract, 1);
-        @loadVector16(attribute3, 7, vertex3, 4);
+        rsp.vector.load16(attribute3, 7, vertex3, 4);
         negative_my = vmudl(slope.sfract, fy.sfract.XXXXXXXX);
         command_bits +%= clip3;
         negative_my = vmadm(slope.sint, fy.sfract.XXXXXXXX);
         clip1 = triangle_command & 0x100;
         edges.sfract = vmadn(slope.sfract, fy.sint.XXXXXXXX);
-        did_swap1 = dma.busy();
+        did_swap1 = rsp.cp0.dmaBusy();
         edges.sint = vmadh(slope.sint, fy.sint.XXXXXXXX);
-        @storeVector64(inverse_w.sfract, 4, output, 16);
+        rsp.vector.store64(inverse_w.sfract, 4, output, 16);
         all_tmp1 = vmulf(all_tmp1, inverse_w.sfract.xxxxXXXX);
-        @loadVector16(y_tmp1, 6, output, 16);
+        rsp.vector.load16(y_tmp1, 6, output, 16);
         all3 = vmulf(all3, inverse_w.sfract.yyyyYYYY);
-        @loadVector16(y_tmp2, 6, output, 18);
+        rsp.vector.load16(y_tmp2, 6, output, 18);
         y1 = vmulf(y1, inverse_w.sfract.zzzzZZZZ);
-        @loadVector16(attribute3, 6, output, 20);
+        rsp.vector.load16(attribute3, 6, output, 20);
         x12.sint = vectorShiftRightArithmetic(x12.sfract, 2);
-        if(did_swap1 != 0) delay {
+        if(did_swap1 != 0) slot {
             did_swap0 = load(u8, rdp_syncfull_ongoing);
         } {
         triangle_dma_wait: do {
-        } while(did_swap1 != 0) delay {
-            cp0.getDmaBusyT1(did_swap1);
+        } while(did_swap1 != 0) slot {
+            did_swap1 = rsp.cp0.dmaBusy();
         }
         }
     }
-    ordered {
+    exact {
         x12.sfract = vectorShiftLeft8(x12.sfract, 14);
         clip1 >>>= 4;
         y_tmp1 = vectorSelectByCompareCode(y_tmp1, all_tmp1);
         clip1 +%= command_bits;
         y_tmp2 = vectorSelectByCompareCode(y_tmp2, all3);
-        @storeVector16(slope.sint, 4, output, 12);
+        rsp.vector.store16(slope.sint, 4, output, 12);
         attribute3 = vectorSelectByCompareCode(attribute3, y1);
         triangle_command = load(i32, rdp_current);
         edges.sfract = vectorAddCarry(edges.sfract, x12.sfract.xxxxxxxx);
-        @storeVector16(x12.sint, 2, output, 8);
+        rsp.vector.store16(x12.sint, 2, output, 8);
         edges.sint = vectorAdd(edges.sint, x12.sint.xxxxxxxx);
-        if(did_swap0 == 0) delay {
-            @storeVector16(slope.sfract, 4, output, 14);
+        if(did_swap0 == 0) slot {
+            rsp.vector.store16(slope.sfract, 4, output, 14);
         } {
-            rdp.writeCommandEnd(triangle_command);
+            rsp.cp0.setRdpCommandEnd(triangle_command);
         }
     }
-    ordered {
+    exact {
         vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
         vector_one = vectorSubtract(y_tmp2, y_tmp1);
-        @storeVector16(x12.sfract, 2, output, 10);
+        rsp.vector.store16(x12.sfract, 2, output, 10);
         attribute_delta_high = vectorSubtract(attribute3, y_tmp1);
         clip1 = clip1 - output;
         normal.sfract = vmudn(normal.sfract, shift_constants.YYYYYYYY);
-        @storeVector16(slope.sint, 2, output, 28);
+        rsp.vector.store16(slope.sint, 2, output, 28);
         normal.sint = vmadh(normal.sint, shift_constants.YYYYYYYY);
-        @storeVector16(slope.sfract, 2, output, 30);
+        rsp.vector.store16(slope.sfract, 2, output, 30);
         all_tmp1 = vmudh(vector_one, hml.yyyyyyyy);
-        @storeVector16(edges.sint, 2, output, 24);
+        rsp.vector.store16(edges.sint, 2, output, 24);
         all_tmp1 = vmadh(attribute_delta_high, hml.wwwwwwww);
-        @storeVector16(edges.sfract, 2, output, 26);
+        rsp.vector.store16(edges.sfract, 2, output, 26);
         all_tmp1 = readVectorAccumulatorMiddle();
-        @storeVector16(edges.sint, 0, output, 16);
+        rsp.vector.store16(edges.sint, 0, output, 16);
         all3 = readVectorAccumulatorHigh();
-        @storeVector16(edges.sfract, 0, output, 18);
+        rsp.vector.store16(edges.sfract, 0, output, 18);
         y3 = vmudh(attribute_delta_high, hml.zzzzzzzz);
-        @storeVector16(slope.sint, 0, output, 20);
+        rsp.vector.store16(slope.sint, 0, output, 20);
         y3 = vmadh(vector_one, hml.xxxxxxxx);
-        @storeVector16(slope.sfract, 0, output, 22);
+        rsp.vector.store16(slope.sfract, 0, output, 22);
         y3 = readVectorAccumulatorMiddle();
         vertex2 = load(i32, rdp_sentinel);
         y2 = readVectorAccumulatorHigh();
@@ -1054,9 +1045,9 @@ fn triangleAsync(
         negative_my = vmudl(all_tmp1, normal.sfract.WWWWWWWW);
         triangle_command >>>= 8;
         negative_my = vmadm(all3, normal.sfract.WWWWWWWW);
-        dma.writeMemoryAddress(output);
+        rsp.cp0.setDmaMemoryAddress(output);
         all_tmp1 = vmadn(all_tmp1, normal.sint.WWWWWWWW);
-        dma.writeRdramAddress(triangle_command);
+        rsp.cp0.setDmaRdramAddress(triangle_command);
         all3 = vmadh(all3, normal.sint.WWWWWWWW);
         output +%= clip1;
         negative_my = vmudl(y3, normal.sfract.WWWWWWWW);
@@ -1064,18 +1055,18 @@ fn triangleAsync(
         negative_my = vmadm(y2, normal.sfract.WWWWWWWW);
         did_swap0 = vertex2 < triangle_command;
         y3 = vmadn(y3, normal.sint.WWWWWWWW);
-        @storeVector64(all_tmp1, 0, clip2, 24);
+        rsp.vector.store64(all_tmp1, 0, clip2, 24);
         y2 = vmadh(y2, normal.sint.WWWWWWWW);
-        @storeVector64(all_tmp1, 4, clip3, 24);
+        rsp.vector.store64(all_tmp1, 4, clip3, 24);
         negative_my = vmadl(all_tmp1, slope.sfract.xxxxxxxx);
-        @storeVector64(all3, 0, clip2, 8);
+        rsp.vector.store64(all3, 0, clip2, 8);
         negative_my = vmadm(all3, slope.sfract.xxxxxxxx);
-        @storeVector64(all3, 4, clip3, 8);
+        rsp.vector.store64(all3, 4, clip3, 8);
         y1 = vmadn(all_tmp1, slope.sint.xxxxxxxx);
-        @storeVector64(y3, 0, clip2, 56);
+        rsp.vector.store64(y3, 0, clip2, 56);
         all_tmp2 = vmadh(all3, slope.sint.xxxxxxxx);
-        if(did_swap0 != 0) delay {
-            @storeVector64(y3, 4, clip3, 56);
+        if(did_swap0 != 0) slot {
+            rsp.vector.store64(y3, 4, clip3, 56);
         } {
             vertex3 = return_address;
             triangle_command = load(i32, rdp_buffers, 4);
@@ -1083,50 +1074,50 @@ fn triangleAsync(
             store(OverlayRdpBufferState.current, rdp_buffers, triangle_command);
             store(OverlayRdpBufferState.previous, rdp_buffers, did_swap1);
             store(u8, clip2, clip1);
-            ordered {
+            exact {
                 // Keep the reference's trapping add; generic large-immediate lowering
                 // materializes this expression with a different instruction sequence.
                 large_offset = 0x10000;
                 vertex2 = triangle_command + large_offset;
             }
-            queue.resident_rdp_set_buffer(triangle_command, vertex1, vertex2) delay {
+            queue.rdpSetBuffer(triangle_command, vertex1, vertex2) slot {
                 vertex1 = triangle_command;
             }
-            cp0.setDmaAddrRdramA0(triangle_command);
+            rsp.cp0.setDmaRdramAddress(triangle_command);
             clip1 = load(u8, clip2);
             triangle_command +%= clip1;
             return_address = vertex3;
         }
     }
-    ordered {
+    exact {
         negative_my = vmudh(y_tmp1, shift_constants.WWWWWWWW);
-        @storeVector64(y2, 0, clip2, 40);
+        rsp.vector.store64(y2, 0, clip2, 40);
         negative_my = vmadl(y1, fy.sfract.XXXXXXXX);
-        @storeVector64(y2, 4, clip3, 40);
+        rsp.vector.store64(y2, 4, clip3, 40);
         negative_my = vmadm(all_tmp2, fy.sfract.XXXXXXXX);
-        @storeVector64(y1, 0, clip2, 48);
+        rsp.vector.store64(y1, 0, clip2, 48);
         all2 = vmadn(y1, fy.sint.XXXXXXXX);
-        @storeVector64(y1, 4, clip3, 48);
+        rsp.vector.store64(y1, 4, clip3, 48);
         all1 = vmadh(all_tmp2, fy.sint.XXXXXXXX);
-        @storeVector64(all_tmp2, 0, clip2, 32);
+        rsp.vector.store64(all_tmp2, 0, clip2, 32);
         y3[6] = vectorMove(y2[7]);
-        @storeVector64(all_tmp2, 4, clip3, 32);
+        rsp.vector.store64(all_tmp2, 4, clip3, 32);
         y1[6] = vectorMove(all_tmp2[7]);
         store(u32, rdp_current, triangle_command);
         y_tmp2[1] = vectorMove(all2[7]);
-        @storeVector64(all2, 0, clip2, 16);
+        rsp.vector.store64(all2, 0, clip2, 16);
         y_tmp2[0] = vectorMove(all1[7]);
-        @storeVector64(all2, 4, clip3, 16);
+        rsp.vector.store64(all2, 4, clip3, 16);
         y_tmp2[3] = vectorMove(all_tmp1[7]);
-        @storeVector64(all1, 0, clip2, 0);
+        rsp.vector.store64(all1, 0, clip2, 0);
         y_tmp2[2] = vectorMove(all3[7]);
-        @storeVector64(all1, 4, clip3, 0);
-        @storeVector32(y1, 6, command_bits, 8);
-        @storeVector32(y3, 6, command_bits, 12);
+        rsp.vector.store64(all1, 4, clip3, 0);
+        rsp.vector.store32(y1, 6, command_bits, 8);
+        rsp.vector.store32(y3, 6, command_bits, 12);
         clip1 -%= 1;
-        @storeVector64(y_tmp2, 0, command_bits, 0);
-        @return() delay {
-            dma.writeLengthAndStart(clip1);
+        rsp.vector.store64(y_tmp2, 0, command_bits, 0);
+        return slot {
+            rsp.cp0.startDmaWrite(clip1);
         }
     }
     tail triangleSendEnd();
@@ -1135,18 +1126,17 @@ fn triangleAsync(
 fn triangleSendEnd() noreturn {
     reg dma_busy: u32;
     do {
-        cp0.getDmaBusyT0(dma_busy);
+        dma_busy = rsp.cp0.dmaBusy();
     } while(dma_busy != 0);
     reg($a0) staging_end: u32 = undefined;
-    jump queue.resident_rdp_append_buffer(staging_end) delay {
-        rdp.loadCurrent(staging_end);
-    }
+    rdp.loadCurrent(staging_end);
+    jump queue.rdpAppendBuffer(staging_end);
 }
 
-command(2, 16) fn rectangleExclusive(
+@rspq.command(2, 16) fn rectangleExclusive(
     reg($a0) word0: i32,
     reg($a1) word1: u32,
- ) commandSize(8, 16) noreturn {
+ ) @rspq.commandSize(8, 16) noreturn {
     reg($a2) word2: u32 = undefined;
     reg($a3) word3: i32 = undefined;
     reg modes_byte: i32 = load(i8, rdp_mode, 25);
@@ -1164,17 +1154,16 @@ command(2, 16) fn rectangleExclusive(
     }
     word0 ^= opcode;
     modes_byte = word0 << 3;
-    reg($s0) writer: fn(rspq_command) = &rdp.write8;
+    reg($s0) writer: fn(u32, u32, u32, u32) = &rdp.write8;
     if(modes_byte >= 0) {
         writer = &rdp.write16;
     }
-    reg($ra) return_address: fn(continuation);
-    jump(writer) delay {
-        return_address = &rdp.finalize;
-    }
+    reg($ra) return_address: fn();
+    return_address = &rdp.finalize;
+    jump(writer);
 }
 
-command(3) fn clearZBuffer(
+@rspq.command(3) fn clearZBuffer(
     reg($a0) target: i32,
     reg($a1) target_dma_size: u32,
     reg($a2) temporary: u32,
@@ -1185,19 +1174,17 @@ command(3) fn clearZBuffer(
     reg($v00) vector_zero: vec16 = undefined;
     fill = vector_zero | fill.xxxxxxxx;
 
-    reg dmem: u32;
+    reg dmem: dmem;
 
-    reg overlay_data_end: i32;
-    @setDataAddress(overlay_data_end, triangle_padding2, 4);
+    reg overlay_data_end: dmem = dmem.addressOf(triangle_padding2, 4);
     // Libdragon compares its zero-based data end against 0x500. Libptero's
     // corresponding overlay DMEM coordinate is shifted by 0x800.
-    if(overlay_data_end > 0x0d00) tail queue.resident_assertion_failed() delay {
+    if(overlay_data_end > 0x0d00) tail queue.invalidCommand() slot {
         reg($at) assertion_code: u32 = 0xc0090000;
     }
     reg flags: i32 = undefined;
-    clearZBackup(overlay_data_end, flags, temporary) delay {
-        flags = -32756;
-    }
+    flags = -32756;
+    clearZBackup(overlay_data_end, flags, temporary);
 
     dmem = 1280;
     reg fill_end: u32;
@@ -1210,15 +1197,13 @@ command(3) fn clearZBuffer(
         store(vec16, dmem, fill, -16);
     } while(dmem != fill_end);
 
-    dma.resident_dma_wait_ready();
-    cp0.setDmaAddrRspZero();
-    cp0.setDmaAddrRdramA0(target);
-    cp0.setDmaWriteA1(target_dma_size);
+    dma.waitOut();
+    rsp.cp0.setDmaMemoryAddress(0);
+    rsp.cp0.setDmaRdramAddress(target);
+    rsp.cp0.startDmaWrite(target_dma_size);
     flags = 12;
-    reg($ra) return_address: u32 = undefined;
-    jump clearZBackup(overlay_data_end, flags, temporary) delay {
-        @setFunctionAddress(return_address, queue.resident_command_loop);
-    }
+    reg($ra) return_address: fn() = &queue.commandLoop;
+    jump clearZBackup(overlay_data_end, flags, temporary);
 }
 
 fn clearZBackup(
@@ -1226,17 +1211,16 @@ fn clearZBackup(
     reg($t2) flags: i32,
     reg($a2) temporary: u32,
 ) noreturn {
-    reg dmem: u32 = 0;
+    reg dmem: dmem = 0;
     reg rdram: u32 = temporary;
     reg($t0) dma_size: i32 = undefined;
     reg($t1) dma_pitch: u32 = undefined;
-    jump dma.resident_dma_exec(dma_size, dma_pitch, rdram, dmem, flags) delay {
-        dma_size = backup_size -% 1;
-    }
-    @nop();
+    dma_size = backup_size -% 1;
+    jump dma.exec(dma_size, dma_pitch, rdram, dmem, flags);
+    rsp.nop();
 }
 
-command(17) fn setDebugMode(reg($a0) command: u32) {
+@rspq.command(17) fn setDebugMode(reg($a0) command: u32) {
     reg bitdepth: u32 = load(u8, rdp_target_bitdepth);
     bitdepth &= 0x7f;
     if(command != 0) {
@@ -1245,29 +1229,28 @@ command(17) fn setDebugMode(reg($a0) command: u32) {
     store(u8, rdp_target_bitdepth, bitdepth);
 }
 
-command(28) fn autoTmemSetAddress(reg($a0) command: i32) noreturn {
+@rspq.command(28) fn autoTmemSetAddress(reg($a0) command: i32) noreturn {
     command <<= 16;
     command >>= 16;
     reg address: i32 = undefined;
     reg limit: i32;
     reg($at) invalid: u32 = undefined;
     reg($ra) return_address: u32 = undefined;
-    if(command < 0) tail autoTmemEnd() delay {
+    if(command < 0) tail autoTmemEnd() slot {
         address = load(u16, autotmem_address);
     }
-    if(command == 0) tail autoTmemBegin() delay {
+    if(command == 0) tail autoTmemBegin() slot {
         limit = load(u16, autotmem_limit);
     }
 
     store(u16, autotmem_previous_address, address);
     address += command;
     invalid = signedLessThan(limit, address);
-    if(invalid != 0) tail queue.resident_assertion_failed() delay {
+    if(invalid != 0) tail queue.invalidCommand() slot {
         invalid = 0xc0070000;
     }
-    @jump(return_address) delay {
-        store(u16, autotmem_address, address);
-    }
+    store(u16, autotmem_address, address);
+    jump(return_address);
 }
 
 fn autoTmemBegin() noreturn {
@@ -1276,15 +1259,14 @@ fn autoTmemBegin() noreturn {
     reg($ra) return_address: u32 = undefined;
     address = load(u8, autotmem_enabled);
     limit = address +% 1;
-    if(address != 0) tail queue.resident_return_to_caller() delay {
+    if(address != 0) tail dma.returnToCaller() slot {
         store(u8, autotmem_enabled, limit);
     }
     address = 512;
     store(u16, autotmem_limit, address);
     store(u16, autotmem_previous_address, 0);
-    @jump(return_address) delay {
-        store(u16, autotmem_address, 0);
-    }
+    store(u16, autotmem_address, 0);
+    jump(return_address);
 }
 
 fn autoTmemEnd() noreturn {
@@ -1293,15 +1275,14 @@ fn autoTmemEnd() noreturn {
     reg($ra) return_address: u32 = undefined;
     address = load(u8, autotmem_enabled);
     address -%= 1;
-    if(address < 0) tail queue.resident_assertion_failed() delay {
+    if(address < 0) tail queue.invalidCommand() slot {
         invalid = 0xc0080000;
     }
-    @jump(return_address) delay {
-        store(u8, autotmem_enabled, address);
-    }
+    store(u8, autotmem_enabled, address);
+    jump(return_address);
 }
 
-command(29) fn autoTmemSetTile(
+@rspq.command(29) fn autoTmemSetTile(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) noreturn {
@@ -1322,30 +1303,29 @@ command(29) fn autoTmemSetTile(
     valid_format: block {
         address = 3;
         if(use_previous == address) {
-            break valid_format delay {
+            break valid_format slot {
                 address = 6;
             }
         }
         if(use_previous == address) {
-            break valid_format delay {
+            break valid_format slot {
                 address = 8;
             }
         }
         if(use_previous == address) {
-            break valid_format delay {
+            break valid_format slot {
                 address = 9;
             }
         }
         if(use_previous != address) tail _start(word0, word1);
-    } exit delay {
+    } exit slot {
         address = 256;
     }
-    jump _start(word0, word1) delay {
-        store(u16, autotmem_limit, address);
-    }
+    store(u16, autotmem_limit, address);
+    jump _start(word0, word1);
 }
 
-command(31) fn setTriangleData(
+@rspq.command(31) fn setTriangleData(
     reg($a0) vertex_offset: u32,
     reg($a1) xy: u32,
     reg($a2) z: u32,
@@ -1360,7 +1340,7 @@ command(31) fn setTriangleData(
     reg st: u32 = 0xff;
     store(u8, vertex_offset, st, triangle_data0, 7);
 
-    reg($gp) command_end: u32 = undefined;
+    reg($gp) command_end: dmem = undefined;
     st = load(u32, command_end, 0xd4);
     reg w: u32 = load(u32, command_end, 0xd8);
     reg inverse_w: u32 = load(u32, command_end, 0xdc);

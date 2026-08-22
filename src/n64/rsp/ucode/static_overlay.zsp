@@ -8,10 +8,10 @@ state {
 
 // The resident dispatcher enters at _start with the normal command-handler
 // ABI and the handler returns through $ra.
-command(0) fn _start(
+@rspq.command(0) fn _start(
     reg($a0) command: u32,
 ) {
-    reg dmem_address: u32 = 0;
+    reg dmem_address: dmem = 0;
     dmem_address = command & 0x00ffffff;
     reg value: u32 = load(u32, persistent_counter);
     value +%= 1;
@@ -19,11 +19,11 @@ command(0) fn _start(
     store(u32, dmem_address, value);
 }
 
-command(1) fn writeArgument(
+@rspq.command(1) fn writeArgument(
     reg($a0) command: u32,
     reg($a1) value: u32,
 ) {
-    reg dmem_address: u32 = 0;
+    reg dmem_address: dmem = 0;
     dmem_address = command & 0x00ffffff;
     store(u32, dmem_address, value);
 }

@@ -10,7 +10,6 @@ pub const Parser = struct {
     diagnostic: ?Diagnostic = null,
     imports: std.ArrayList(ast.Import) = .empty,
     packed_structs: std.ArrayList(ast.PackedStructDecl) = .empty,
-    abi_definitions: std.ArrayList(AbiDefinition) = .empty,
     type_symbols: [256]TypeSymbol = undefined,
     type_symbol_count: usize = 0,
     compile_time_members: [256]CompileTimeMember = undefined,
@@ -21,12 +20,7 @@ pub const Parser = struct {
     const TypeSymbol = struct {
         name: []const u8,
         data_type: ast.DataType,
-        function_abi: ?[]const u8 = null,
-    };
-
-    const AbiDefinition = struct {
-        name: []const u8,
-        parameters: []const ast.Parameter,
+        function_type: ?ast.FunctionType = null,
     };
 
     const ParsedParameters = struct {
@@ -54,16 +48,10 @@ pub const Parser = struct {
 
     pub fn parse(self: *Parser) ![]ast.Function {
         defer self.packed_structs.deinit(self.allocator);
-        defer {
-            for (self.abi_definitions.items) |definition| self.allocator.free(definition.parameters);
-            self.abi_definitions.deinit(self.allocator);
-        }
         var functions: std.ArrayList(ast.Function) = .empty;
         while (self.current.tag != .eof) {
             if (self.isCompileTimeTypeStart()) {
                 try self.parseCompileTimeType();
-            } else if (self.isAbiStart()) {
-                try self.parseAbiDefinition();
             } else if (self.isImportStart()) {
                 try self.parseImport();
             } else if (self.isFunctionDeclarationStart()) {
@@ -88,19 +76,11 @@ pub const Parser = struct {
         var command_indices: std.ArrayList(u8) = .empty;
         errdefer command_indices.deinit(self.allocator);
         while (true) {
-            const prefix = try self.expect(.ident);
-            if (std.mem.eql(u8, prefix.text, "command")) {
-                _ = try self.expect(.l_paren);
-                while (true) {
-                    const index_token = try self.expect(.number);
-                    const index = try self.parseNumberValue(index_token);
-                    if (index < 0 or index > 239) return self.fail(index_token, .invalid_command_index);
-                    try command_indices.append(self.allocator, @intCast(index));
-                    if (!try self.eat(.comma)) break;
-                }
-                _ = try self.expect(.r_paren);
+            if (self.current.tag == .at) {
+                try self.parseRspqNumberAttribute("command", &command_indices);
                 continue;
             }
+            const prefix = try self.expect(.ident);
             if (std.mem.eql(u8, prefix.text, "export")) {
                 export_symbol = true;
                 continue;
@@ -165,21 +145,15 @@ pub const Parser = struct {
         var clobber_vector_regs: std.ArrayList(ast.VectorRegister) = .empty;
         errdefer clobber_vector_regs.deinit(self.allocator);
         var has_clobber_contract = false;
-        var abi_name: ?[]const u8 = null;
-        while (self.current.tag == .ident) {
+        while (self.current.tag == .ident or self.current.tag == .at) {
+            if (self.current.tag == .at) {
+                try self.parseRspqNumberAttribute("commandSize", &command_sizes);
+                continue;
+            }
             const modifier = try self.expect(.ident);
             if (std.mem.eql(u8, modifier.text, "noreturn")) {
                 no_return = true;
-            } else if (std.mem.eql(u8, modifier.text, "commandSize")) {
-                _ = try self.expect(.l_paren);
-                while (true) {
-                    const size = try self.parseNumberValue(try self.expect(.number));
-                    if (size < 0 or size > 255) return error.InvalidCommandSize;
-                    try command_sizes.append(self.allocator, @intCast(size));
-                    if (!try self.eat(.comma)) break;
-                }
-                _ = try self.expect(.r_paren);
-            } else if (std.mem.eql(u8, modifier.text, "clobbers")) {
+            } else if (std.mem.eql(u8, modifier.text, "writes")) {
                 if (has_clobber_contract) return self.fail(modifier, .duplicate_clobber_contract);
                 has_clobber_contract = true;
                 _ = try self.expect(.l_paren);
@@ -195,20 +169,11 @@ pub const Parser = struct {
                     if (try self.eat(.r_paren)) break;
                     _ = try self.expect(.comma);
                 };
-            } else if (std.mem.eql(u8, modifier.text, "using")) {
-                if (abi_name != null) return self.fail(modifier, .duplicate_abi_modifier);
-                _ = try self.expect(.l_paren);
-                abi_name = (try self.expect(.ident)).text;
-                _ = try self.expect(.r_paren);
             } else {
                 return self.fail(modifier, .unsupported_function_modifier);
             }
         }
-        if (abi_name) |requested_abi| {
-            try self.applyAbi(parameters, requested_abi, name);
-        } else if (parsed_parameters.first_unpinned) |unpinned| {
-            return self.fail(unpinned, .expected_fixed_register_parameter);
-        }
+        try self.applyDefaultParameterRegisters(parameters, parsed_parameters.first_unpinned);
         if (external) {
             if (inline_call or export_symbol) return error.InvalidExternalFunction;
             _ = try self.expect(.semicolon);
@@ -220,7 +185,6 @@ pub const Parser = struct {
                 .inline_call = false,
                 .external = true,
                 .no_return = no_return,
-                .abi_name = abi_name,
                 .command_indices = command_indices,
                 .command_sizes = try command_sizes.toOwnedSlice(self.allocator),
                 .has_clobber_contract = has_clobber_contract,
@@ -242,7 +206,6 @@ pub const Parser = struct {
             .inline_call = inline_call,
             .external = false,
             .no_return = no_return,
-            .abi_name = abi_name,
             .command_indices = command_indices,
             .command_sizes = try command_sizes.toOwnedSlice(self.allocator),
             .has_clobber_contract = has_clobber_contract,
@@ -257,7 +220,6 @@ pub const Parser = struct {
         _ = try self.expect(.ident);
         const name = try self.expect(.ident);
         _ = try self.expect(.equal);
-        _ = try self.expect(.at);
         const import_name = try self.expect(.ident);
         if (!std.mem.eql(u8, import_name.text, "import")) {
             return self.fail(import_name, .expected_import);
@@ -269,25 +231,6 @@ pub const Parser = struct {
         try self.imports.append(self.allocator, .{
             .name = name.text,
             .path = path.text,
-        });
-    }
-
-    fn parseAbiDefinition(self: *Parser) !void {
-        _ = try self.expect(.ident);
-        const name = try self.expect(.ident);
-        for (self.abi_definitions.items) |definition| {
-            if (std.mem.eql(u8, definition.name, name.text)) {
-                return self.fail(name, .duplicate_abi_definition);
-            }
-        }
-        _ = try self.expect(.l_paren);
-        const type_scope = self.type_symbol_count;
-        defer self.type_symbol_count = type_scope;
-        const parsed = try self.parseParameters(false);
-        _ = try self.expect(.semicolon);
-        try self.abi_definitions.append(self.allocator, .{
-            .name = name.text,
-            .parameters = parsed.items,
         });
     }
 
@@ -358,36 +301,19 @@ pub const Parser = struct {
         return null;
     }
 
-    fn applyAbi(
+    fn applyDefaultParameterRegisters(
         self: *Parser,
         parameters: []ast.Parameter,
-        requested_name: []const u8,
-        function_name: token.Token,
+        first_unpinned: ?token.Token,
     ) !void {
-        const definition = self.findAbi(requested_name) orelse
-            return self.fail(function_name, .unknown_abi);
-        if (parameters.len > definition.parameters.len) {
-            return self.fail(function_name, .abi_parameter_count_mismatch);
-        }
-        for (parameters, definition.parameters[0..parameters.len]) |*parameter, abi_parameter| {
-            if (!abiTypesCompatible(parameter.data_type, abi_parameter.data_type)) {
-                return self.fail(function_name, .abi_parameter_type_mismatch);
+        const argument_registers = [_]ast.Register{ .a0, .a1, .a2, .a3 };
+        for (parameters, 0..) |*parameter, index| {
+            if (parameter.reg != null or parameter.vector_reg != null) continue;
+            if (isVectorType(parameter.data_type) or index >= argument_registers.len) {
+                return self.fail(first_unpinned.?, .expected_fixed_register_parameter);
             }
-            if ((parameter.reg != null and parameter.reg != abi_parameter.reg) or
-                (parameter.vector_reg != null and parameter.vector_reg != abi_parameter.vector_reg))
-            {
-                return self.fail(function_name, .abi_parameter_register_mismatch);
-            }
-            parameter.reg = abi_parameter.reg;
-            parameter.vector_reg = abi_parameter.vector_reg;
+            parameter.reg = argument_registers[index];
         }
-    }
-
-    fn findAbi(self: *const Parser, name: []const u8) ?AbiDefinition {
-        for (self.abi_definitions.items) |definition| {
-            if (std.mem.eql(u8, definition.name, name)) return definition;
-        }
-        return null;
     }
 
     fn parseParameters(self: *Parser, allow_unpinned: bool) !ParsedParameters {
@@ -452,7 +378,7 @@ pub const Parser = struct {
     fn parseTopLevelStatements(self: *Parser) anyerror![]ast.Statement {
         var statements: std.ArrayList(ast.Statement) = .empty;
         while (self.current.tag != .eof and !self.isFunctionDeclarationStart() and
-            !self.isAbiStart() and !self.isCompileTimeTypeStart())
+            !self.isCompileTimeTypeStart() and !self.isImportStart())
         {
             try statements.append(self.allocator, try self.parseStatement());
         }
@@ -476,64 +402,34 @@ pub const Parser = struct {
 
         const first = try self.expect(.ident);
 
-        if ((std.mem.eql(u8, first.text, "dma") or std.mem.eql(u8, first.text, "rdp") or
-            std.mem.eql(u8, first.text, "cp0")) and
+        if (std.mem.eql(u8, first.text, "rsp") and self.current.tag == .dot) {
+            _ = try self.expect(.dot);
+            const facility = try self.expect(.ident);
+            if (std.mem.eql(u8, facility.text, "cp0")) {
+                _ = try self.expect(.dot);
+                return self.parseCp0Statement(try self.expect(.ident));
+            }
+            if (std.mem.eql(u8, facility.text, "vector")) {
+                _ = try self.expect(.dot);
+                return self.parseVectorStatement(try self.expect(.ident));
+            }
+            return self.parseRspStatement(facility);
+        }
+
+        if ((std.mem.eql(u8, first.text, "dma") or std.mem.eql(u8, first.text, "rdp")) and
             self.current.tag == .dot)
         {
             _ = try self.expect(.dot);
             const operation_name = try self.expect(.ident);
             _ = try self.expect(.l_paren);
-            if (std.mem.eql(u8, first.text, "cp0") and
-                (std.mem.eql(u8, operation_name.text, "readRegister") or
-                    std.mem.eql(u8, operation_name.text, "writeRegister")))
-            {
-                const register_token = try self.expect(.number);
-                const register = try self.parseNumberValue(register_token);
-                if (register < 0 or register > 15) return self.fail(register_token, .invalid_hardware_register);
-                _ = try self.expect(.comma);
-                const scalar_token = try self.expect(.register);
-                const scalar_register = parseRegister(scalar_token) orelse
-                    return self.fail(scalar_token, .expected_scalar_register);
-                _ = try self.expect(.r_paren);
-                _ = try self.expect(.semicolon);
-                if (std.mem.eql(u8, operation_name.text, "readRegister")) {
-                    return .{ .builtin = .{ .hardware_read_register = .{
-                        .hardware_register = @intCast(register),
-                        .destination = scalar_register,
-                    } } };
-                }
-                return .{ .builtin = .{ .hardware_write_register = .{
-                    .hardware_register = @intCast(register),
-                    .source = scalar_register,
-                } } };
-            }
-            if (std.mem.eql(u8, first.text, "cp0") and std.mem.eql(u8, operation_name.text, "write")) {
-                const register_token = try self.expect(.number);
-                const register = try self.parseNumberValue(register_token);
-                if (register < 0 or register > 15) return self.fail(register_token, .invalid_hardware_register);
-                _ = try self.expect(.comma);
-                const value = try self.parseValueRef();
-                _ = try self.expect(.r_paren);
-                _ = try self.expect(.semicolon);
-                return .{ .builtin = .{ .hardware_write = .{
-                    .operation = .{ .cp0 = @intCast(register) },
-                    .value = value,
-                } } };
-            }
-            const operation = hardwareWriteOperation(first.text, operation_name.text) orelse {
-                const arguments = try self.parseCallArguments();
-                const delay_slot = try self.parseOptionalDelaySlot();
-                return .{ .call = .{
-                    .module = first.text,
-                    .name = operation_name.text,
-                    .arguments = arguments,
-                    .delay_slot = delay_slot,
-                } };
-            };
-            const value = try self.parseValueRef();
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .hardware_write = .{ .operation = operation, .value = value } } };
+            const arguments = try self.parseCallArguments();
+            const delay_slot = try self.parseOptionalDelaySlot();
+            return .{ .call = .{
+                .module = first.text,
+                .name = operation_name.text,
+                .arguments = arguments,
+                .delay_slot = delay_slot,
+            } };
         }
 
         if (std.mem.eql(u8, first.text, "packed")) {
@@ -552,7 +448,7 @@ pub const Parser = struct {
             return .{ .state_block = try self.parseStorageBlock(false) };
         }
 
-        if (std.mem.eql(u8, first.text, "ordered")) {
+        if (std.mem.eql(u8, first.text, "exact")) {
             _ = try self.expect(.l_brace);
             return .{ .ordered_block = try self.parseBlockStatements() };
         }
@@ -570,6 +466,10 @@ pub const Parser = struct {
                 .arguments = arguments,
                 .delay_slot = try self.parseOptionalDelaySlot(),
             } } };
+        }
+
+        if (std.mem.eql(u8, first.text, "return")) {
+            return .{ .builtin = .{ .return_from_function = try self.parseOptionalDelaySlot() } };
         }
 
         if (std.mem.eql(u8, first.text, "jump")) {
@@ -590,34 +490,15 @@ pub const Parser = struct {
             return .{ .builtin = .{ .jump = .{
                 .address = address,
                 .delay_slot = try self.parseOptionalDelaySlot(),
-                .typed = true,
+                .typed = false,
             } } };
         }
 
-        if (std.mem.eql(u8, first.text, "call")) {
-            const callee = try self.parseFunctionReference();
-            _ = try self.expect(.l_paren);
-            _ = try self.expect(.r_paren);
-            const then_keyword = try self.expect(.ident);
-            if (!std.mem.eql(u8, then_keyword.text, "then")) {
-                return self.fail(then_keyword, .expected_continuation);
-            }
-            const continuation = try self.parseFunctionReference();
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .call_and_goto = .{
-                .callee = callee,
-                .continuation = continuation,
-            } } };
-        }
-
-        if (std.mem.eql(u8, first.text, "asm") or std.mem.eql(u8, first.text, "asmExact")) {
+        if (std.mem.eql(u8, first.text, "asm")) {
             _ = try self.expect(.l_paren);
             const asm_text = try self.expect(.string);
             _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
-            if (std.mem.eql(u8, first.text, "asmExact")) {
-                return .{ .exact_asm_line = asm_text.text };
-            }
             return .{ .asm_line = asm_text.text };
         }
 
@@ -654,8 +535,8 @@ pub const Parser = struct {
                 var exit_delay: ?[]ast.Statement = null;
                 if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "exit")) {
                     _ = try self.expect(.ident);
-                    const delay = try self.expect(.ident);
-                    if (!std.mem.eql(u8, delay.text, "delay")) return self.fail(delay, .unexpected_token);
+                    const slot = try self.expect(.ident);
+                    if (!std.mem.eql(u8, slot.text, "slot")) return self.fail(slot, .unexpected_token);
                     _ = try self.expect(.l_brace);
                     exit_delay = try self.parseBlockStatements();
                 }
@@ -701,20 +582,16 @@ pub const Parser = struct {
                     .delay_slot = try self.parseOptionalDelaySlot(),
                 } };
             }
-            if (try self.eat(.at)) {
-                const builtin = try self.expect(.ident);
-                if (!std.mem.eql(u8, builtin.text, "goto")) return self.fail(builtin, .unsupported_builtin);
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "jump")) {
+                _ = try self.expect(.ident);
+                const target = try self.parseFunctionReference();
                 _ = try self.expect(.l_paren);
-                const target_name = try self.expect(.ident);
-                var target = ast.FunctionRef{ .name = target_name.text };
-                if (try self.eat(.dot)) {
-                    const function = try self.expect(.ident);
-                    target = .{ .module = target_name.text, .name = function.text };
-                }
-                _ = try self.expect(.r_paren);
+                const arguments = try self.parseCallArguments();
                 return .{ .conditional_direct_goto = .{
                     .condition = condition,
                     .target = target,
+                    .arguments = arguments,
+                    .typed = true,
                     .delay_slot = try self.parseOptionalDelaySlot(),
                 } };
             }
@@ -728,7 +605,7 @@ pub const Parser = struct {
                 } };
             }
             var delay_slot: ?[]ast.Statement = null;
-            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "delay")) {
+            if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "slot")) {
                 _ = try self.expect(.ident);
                 _ = try self.expect(.l_brace);
                 delay_slot = try self.parseBlockStatements();
@@ -787,7 +664,7 @@ pub const Parser = struct {
             const value = try self.parseValueRef();
             var offset: i64 = memory_type.offset;
             if (try self.eat(.comma)) {
-                if (self.current.tag == .ident) {
+                if (self.current.tag == .ident and !std.mem.eql(u8, self.current.text, "offsetOf")) {
                     if (label_offset != null) return self.fail(self.current, .unexpected_token);
                     label_offset = (try self.expect(.ident)).text;
                     if (try self.eat(.comma)) offset += try self.parseLiteralOffset();
@@ -941,7 +818,7 @@ pub const Parser = struct {
     }
 
     fn parseOptionalDelaySlot(self: *Parser) !?[]ast.Statement {
-        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "delay")) {
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "slot")) {
             _ = try self.expect(.ident);
             _ = try self.expect(.l_brace);
             return try self.parseBlockStatements();
@@ -1118,7 +995,81 @@ pub const Parser = struct {
         const name = try self.expect(.ident);
         _ = try self.expect(.l_paren);
 
-        if (vectorControlRegisterForBuiltin(name.text, "write")) |register| {
+        return self.fail(name, .unsupported_builtin);
+    }
+
+    fn parseRspStatement(self: *Parser, operation: token.Token) !ast.Statement {
+        _ = try self.expect(.l_paren);
+        if (std.mem.eql(u8, operation.text, "halt")) {
+            var code: i64 = 0;
+            if (self.current.tag != .r_paren) code = try self.parseNumberValue(try self.expect(.number));
+            if (code < 0 or code > 0xfffff) return error.InvalidBreakCode;
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .builtin = .{ .breakpoint = @intCast(code) } };
+        }
+        if (std.mem.eql(u8, operation.text, "nop")) {
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .builtin = .nop };
+        }
+        return self.fail(operation, .unsupported_builtin);
+    }
+
+    fn parseCp0Statement(self: *Parser, operation_name: token.Token) !ast.Statement {
+        _ = try self.expect(.l_paren);
+        if (std.mem.eql(u8, operation_name.text, "readRegister") or
+            std.mem.eql(u8, operation_name.text, "writeRegister"))
+        {
+            const register_token = try self.expect(.number);
+            const register = try self.parseNumberValue(register_token);
+            if (register < 0 or register > 15) return self.fail(register_token, .invalid_hardware_register);
+            _ = try self.expect(.comma);
+            const scalar_token = try self.expect(.register);
+            const scalar_register = parseRegister(scalar_token) orelse
+                return self.fail(scalar_token, .expected_scalar_register);
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            if (std.mem.eql(u8, operation_name.text, "readRegister")) {
+                return .{ .builtin = .{ .hardware_read_register = .{
+                    .hardware_register = @intCast(register),
+                    .destination = scalar_register,
+                } } };
+            }
+            return .{ .builtin = .{ .hardware_write_register = .{
+                .hardware_register = @intCast(register),
+                .source = scalar_register,
+            } } };
+        }
+        if (std.mem.eql(u8, operation_name.text, "write")) {
+            const register_token = try self.expect(.number);
+            const register = try self.parseNumberValue(register_token);
+            if (register < 0 or register > 15) return self.fail(register_token, .invalid_hardware_register);
+            _ = try self.expect(.comma);
+            const value = try self.parseValueRef();
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .builtin = .{ .hardware_write = .{
+                .operation = .{ .cp0 = @intCast(register) },
+                .value = value,
+            } } };
+        }
+        if (cp0NamedWriteRegister(operation_name.text)) |register| {
+            const value = try self.parseValueRef();
+            _ = try self.expect(.r_paren);
+            _ = try self.expect(.semicolon);
+            return .{ .builtin = .{ .hardware_write = .{
+                .operation = .{ .cp0 = register },
+                .value = value,
+                .requires_dmem = register == 0,
+            } } };
+        }
+        return self.fail(operation_name, .unsupported_builtin);
+    }
+
+    fn parseVectorStatement(self: *Parser, operation_name: token.Token) !ast.Statement {
+        _ = try self.expect(.l_paren);
+        if (vectorControlRegisterForOperation(operation_name.text, "set")) |register| {
             const value = try self.parseValueRef();
             _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
@@ -1127,160 +1078,43 @@ pub const Parser = struct {
                 .value = value,
             } } };
         }
-
-        if (vectorMemoryOperationForBuiltin(name.text)) |operation| {
-            const vector_token = self.current;
-            const vector = try vectorAccessFromRef(try self.parseValueRef()) orelse
-                return self.fail(vector_token, .expected_vector_operand);
+        const operation = vectorMemoryOperationForBuiltin(operation_name.text) orelse
+            return self.fail(operation_name, .unsupported_builtin);
+        const vector_token = self.current;
+        const vector = try vectorAccessFromRef(try self.parseValueRef()) orelse
+            return self.fail(vector_token, .expected_vector_operand);
+        _ = try self.expect(.comma);
+        var lane: u3 = 0;
+        if (vectorMemoryOperationHasLane(operation)) {
+            const lane_token = try self.expect(.number);
+            const lane_value = try self.parseNumberValue(lane_token);
+            if (lane_value < 0 or lane_value > 7) return self.fail(lane_token, .invalid_vector_lane);
+            lane = @intCast(lane_value);
             _ = try self.expect(.comma);
-            var lane: u3 = 0;
-            if (vectorMemoryOperationHasLane(operation)) {
-                const lane_token = try self.expect(.number);
-                const lane_value = try self.parseNumberValue(lane_token);
-                if (lane_value < 0 or lane_value > 7) return self.fail(lane_token, .invalid_vector_lane);
-                lane = @intCast(lane_value);
-                _ = try self.expect(.comma);
-            }
-            const address = try self.parseValueRef();
-            var offset: i64 = 0;
-            if (try self.eat(.comma)) offset = try self.parseLiteralOffset();
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .vector_memory = .{
-                .operation = operation,
-                .vector = vector,
-                .lane = lane,
-                .address = address,
-                .offset = offset,
-            } } };
         }
-
-        if (std.mem.eql(u8, name.text, "jump")) {
-            const address = try self.parseValueRef();
-            _ = try self.expect(.r_paren);
-            return .{ .builtin = .{ .jump = .{
-                .address = address,
-                .delay_slot = try self.parseOptionalDelaySlot(),
-            } } };
-        }
-
-        if (std.mem.eql(u8, name.text, "return")) {
-            _ = try self.expect(.r_paren);
-            return .{ .builtin = .{ .return_from_function = try self.parseOptionalDelaySlot() } };
-        }
-
-        if (std.mem.eql(u8, name.text, "goto")) {
-            const first = try self.expect(.ident);
-            var target = ast.FunctionRef{ .name = first.text };
-            if (try self.eat(.dot)) {
-                const function = try self.expect(.ident);
-                target = .{ .module = first.text, .name = function.text };
-            }
-            var encoding: ast.DirectGotoEncoding = .jump;
-            if (try self.eat(.comma)) {
-                _ = try self.expect(.dot);
-                const encoding_name = try self.expect(.ident);
-                if (std.mem.eql(u8, encoding_name.text, "jump")) {
-                    encoding = .jump;
-                } else if (std.mem.eql(u8, encoding_name.text, "branch")) {
-                    encoding = .branch;
-                } else {
-                    return self.fail(encoding_name, .unsupported_builtin);
-                }
-            }
-            _ = try self.expect(.r_paren);
-            return .{ .builtin = .{ .direct_goto = .{
-                .target = target,
-                .encoding = encoding,
-                .delay_slot = try self.parseOptionalDelaySlot(),
-            } } };
-        }
-
-        if (std.mem.eql(u8, name.text, "callAndGoto")) {
-            const callee_first = try self.expect(.ident);
-            var callee = ast.FunctionRef{ .name = callee_first.text };
-            if (try self.eat(.dot)) {
-                const function = try self.expect(.ident);
-                callee = .{ .module = callee_first.text, .name = function.text };
-            }
-            _ = try self.expect(.comma);
-            const continuation_first = try self.expect(.ident);
-            var continuation = ast.FunctionRef{ .name = continuation_first.text };
-            if (try self.eat(.dot)) {
-                const function = try self.expect(.ident);
-                continuation = .{ .module = continuation_first.text, .name = function.text };
-            }
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .call_and_goto = .{
-                .callee = callee,
-                .continuation = continuation,
-            } } };
-        }
-
-        if (std.mem.eql(u8, name.text, "setReturn")) {
-            const target = try self.expect(.ident);
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .set_return = target.text } };
-        }
-
-        if (std.mem.eql(u8, name.text, "setFunctionAddress")) {
-            const destination = try self.expect(.ident);
-            _ = try self.expect(.comma);
-            const first = try self.expect(.ident);
-            var target = ast.FunctionRef{ .name = first.text };
-            if (try self.eat(.dot)) {
-                const function = try self.expect(.ident);
-                target = .{ .module = first.text, .name = function.text };
-            }
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .set_function_address = .{
-                .destination = destination.text,
-                .target = target,
-            } } };
-        }
-
-        if (std.mem.eql(u8, name.text, "setDataAddress")) {
-            const destination = try self.expect(.ident);
-            _ = try self.expect(.comma);
-            const label = try self.expect(.ident);
-            var offset: i64 = 0;
-            if (try self.eat(.comma)) offset = try self.parseNumberValue(try self.expect(.number));
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .set_data_address = .{
-                .destination = destination.text,
-                .label = label.text,
-                .offset = offset,
-            } } };
-        }
-
-        if (std.mem.eql(u8, name.text, "break")) {
-            var code: i64 = 0;
-            if (self.current.tag != .r_paren) code = try self.parseNumberValue(try self.expect(.number));
-            if (code < 0 or code > 0xfffff) return error.InvalidBreakCode;
-            _ = try self.expect(.r_paren);
-            _ = try self.expect(.semicolon);
-            return .{ .builtin = .{ .breakpoint = @intCast(code) } };
-        }
-
+        const address = try self.parseValueRef();
+        var offset: i64 = 0;
+        if (try self.eat(.comma)) offset = try self.parseLiteralOffset();
         _ = try self.expect(.r_paren);
         _ = try self.expect(.semicolon);
-
-        if (std.mem.eql(u8, name.text, "nop")) return .{ .builtin = .nop };
-        return self.fail(name, .unsupported_builtin);
+        return .{ .builtin = .{ .vector_memory = .{
+            .operation = operation,
+            .vector = vector,
+            .lane = lane,
+            .address = address,
+            .offset = offset,
+        } } };
     }
 
     fn parseConstStatement(self: *Parser) !ast.Statement {
         const name = try self.expect(.ident);
         if (try self.eat(.equal)) {
             _ = try self.expect(.at);
+            const namespace = try self.expect(.ident);
+            if (!std.mem.eql(u8, namespace.text, "rspq")) return self.fail(namespace, .unsupported_builtin);
+            _ = try self.expect(.dot);
             const builtin = try self.expect(.ident);
-            if (!std.mem.eql(u8, builtin.text, "commandTable")) {
-                return self.fail(builtin, .unsupported_builtin);
-            }
+            if (!std.mem.eql(u8, builtin.text, "commandTable")) return self.fail(builtin, .unsupported_builtin);
             _ = try self.expect(.l_paren);
             _ = try self.expect(.r_paren);
             _ = try self.expect(.semicolon);
@@ -1313,14 +1147,46 @@ pub const Parser = struct {
 
         const name = try self.expect(.ident);
         var explicit_data_type: ?ast.DataType = null;
-        var function_abi: ?[]const u8 = null;
+        var function_type: ?ast.FunctionType = null;
         if (try self.eat(.colon)) {
             const type_name = try self.expect(.ident);
             if (std.mem.eql(u8, type_name.text, "fn")) {
                 _ = try self.expect(.l_paren);
-                function_abi = (try self.expect(.ident)).text;
-                _ = try self.expect(.r_paren);
-                if (self.findAbi(function_abi.?) == null) return self.fail(type_name, .unknown_abi);
+                var parsed_type = ast.FunctionType{};
+                if (!try self.eat(.r_paren)) while (true) {
+                    if (parsed_type.parameter_count >= parsed_type.parameters.len) {
+                        return error.TooManyParameters;
+                    }
+                    var parameter_register_token: ?token.Token = null;
+                    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "reg")) {
+                        _ = try self.expect(.ident);
+                        _ = try self.expect(.l_paren);
+                        parameter_register_token = try self.expect(.register);
+                        _ = try self.expect(.r_paren);
+                    }
+                    const parameter_type = try self.parseDataType(try self.expect(.ident));
+                    var parameter = ast.FunctionParameterType{ .data_type = parameter_type };
+                    if (parameter_register_token) |reg_token| {
+                        if (isVectorType(parameter_type)) {
+                            parameter.vector_reg = parseVectorRegister(reg_token) orelse
+                                return self.fail(reg_token, .expected_vector_register);
+                        } else {
+                            parameter.reg = parseRegister(reg_token) orelse
+                                return self.fail(reg_token, .expected_scalar_register);
+                        }
+                    } else if (!isVectorType(parameter_type) and
+                        parsed_type.parameter_count < 4)
+                    {
+                        parameter.reg = ([_]ast.Register{ .a0, .a1, .a2, .a3 })[parsed_type.parameter_count];
+                    } else {
+                        return self.fail(type_name, .expected_fixed_register_parameter);
+                    }
+                    parsed_type.parameters[parsed_type.parameter_count] = parameter;
+                    parsed_type.parameter_count += 1;
+                    if (try self.eat(.r_paren)) break;
+                    _ = try self.expect(.comma);
+                };
+                function_type = parsed_type;
                 explicit_data_type = .u32;
             } else {
                 explicit_data_type = try self.parseDataType(type_name);
@@ -1341,7 +1207,7 @@ pub const Parser = struct {
             .ident => |source_name| blk: {
                 const source = self.lookupTypeSymbolInfo(source_name) orelse
                     return self.fail(name, .expected_data_type);
-                function_abi = source.function_abi;
+                function_type = source.function_type;
                 break :blk source.data_type;
             },
             .load => |load| load.data_type,
@@ -1350,7 +1216,11 @@ pub const Parser = struct {
             else
                 @as(ast.DataType, .u32),
             .accumulator_read => .vec16,
-            .vector_control_read, .hardware_read, .scalar_comparison, .signed_less_than => .u32,
+            .hardware_read => |read| if (read.returns_dmem)
+                @as(ast.DataType, .dmem)
+            else
+                @as(ast.DataType, .u32),
+            .vector_control_read, .scalar_comparison, .signed_less_than => .u32,
             else => return self.fail(name, .expected_data_type),
         } else return self.fail(name, .expected_data_type);
         var reg: ?ast.Register = null;
@@ -1365,34 +1235,34 @@ pub const Parser = struct {
             }
         }
 
-        try self.addTypeSymbolWithAbi(name.text, data_type, function_abi);
+        try self.addTypeSymbolWithFunctionType(name.text, data_type, function_type);
         return .{
             .is_const = false,
             .allow_undefined_read = allow_undefined_read,
             .data_type = data_type,
             .reg = reg,
             .vector_reg = vector_reg,
-            .function_abi = function_abi,
+            .function_type = function_type,
             .name = name.text,
             .value = value,
         };
     }
 
     fn addTypeSymbol(self: *Parser, name: []const u8, data_type: ast.DataType) !void {
-        return self.addTypeSymbolWithAbi(name, data_type, null);
+        return self.addTypeSymbolWithFunctionType(name, data_type, null);
     }
 
-    fn addTypeSymbolWithAbi(
+    fn addTypeSymbolWithFunctionType(
         self: *Parser,
         name: []const u8,
         data_type: ast.DataType,
-        function_abi: ?[]const u8,
+        function_type: ?ast.FunctionType,
     ) !void {
         if (self.type_symbol_count >= self.type_symbols.len) return error.TooManySymbols;
         self.type_symbols[self.type_symbol_count] = .{
             .name = name,
             .data_type = data_type,
-            .function_abi = function_abi,
+            .function_type = function_type,
         };
         self.type_symbol_count += 1;
     }
@@ -1415,38 +1285,50 @@ pub const Parser = struct {
         if (try self.eat(.ampersand)) {
             return .{ .function_address = try self.parseFunctionReference() };
         }
-        if (try self.eat(.at)) {
-            const name = try self.expect(.ident);
-            const register = vectorControlRegisterForBuiltin(name.text, "read") orelse
-                return self.fail(name, .unsupported_builtin);
+        var value_lookahead = self.lexer;
+        const value_next = try value_lookahead.next();
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "rsp") and value_next.tag == .dot) {
+            _ = try self.expect(.ident);
+            _ = try self.expect(.dot);
+            const facility = try self.expect(.ident);
+            _ = try self.expect(.dot);
+            const operation = try self.expect(.ident);
             _ = try self.expect(.l_paren);
-            _ = try self.expect(.r_paren);
-            return .{ .vector_control_read = register };
+            if (std.mem.eql(u8, facility.text, "vector")) {
+                const register = vectorControlRegisterForOperation(operation.text, "get") orelse
+                    return self.fail(operation, .unsupported_builtin);
+                _ = try self.expect(.r_paren);
+                return .{ .vector_control_read = register };
+            }
+            if (std.mem.eql(u8, facility.text, "cp0")) {
+                if (cp0NamedReadRegister(operation.text)) |register| {
+                    _ = try self.expect(.r_paren);
+                    return .{ .hardware_read = .{
+                        .register = register,
+                        .returns_dmem = register == 0,
+                    } };
+                }
+                if (!std.mem.eql(u8, operation.text, "read")) return self.fail(operation, .unsupported_builtin);
+                const register_token = try self.expect(.number);
+                const register = try self.parseNumberValue(register_token);
+                if (register < 0 or register > 15) return self.fail(register_token, .invalid_hardware_register);
+                _ = try self.expect(.r_paren);
+                return .{ .hardware_read = .{ .register = @intCast(register) } };
+            }
+            return self.fail(facility, .unsupported_builtin);
         }
-
-        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "dma")) {
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "dmem") and value_next.tag == .dot) {
             _ = try self.expect(.ident);
             _ = try self.expect(.dot);
             const operation = try self.expect(.ident);
-            if (!std.mem.eql(u8, operation.text, "busy")) return self.fail(operation, .unsupported_builtin);
+            if (!std.mem.eql(u8, operation.text, "addressOf")) return self.fail(operation, .unsupported_builtin);
             _ = try self.expect(.l_paren);
+            const label = try self.expect(.ident);
+            var offset: i64 = 0;
+            if (try self.eat(.comma)) offset = try self.parseNumberValue(try self.expect(.number));
             _ = try self.expect(.r_paren);
-            return .{ .hardware_read = 6 };
+            return .{ .data_address = .{ .label = label.text, .offset = offset } };
         }
-
-        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "cp0")) {
-            _ = try self.expect(.ident);
-            _ = try self.expect(.dot);
-            const operation = try self.expect(.ident);
-            if (!std.mem.eql(u8, operation.text, "read")) return self.fail(operation, .unsupported_builtin);
-            _ = try self.expect(.l_paren);
-            const register_token = try self.expect(.number);
-            const register = try self.parseNumberValue(register_token);
-            if (register < 0 or register > 15) return self.fail(register_token, .invalid_hardware_register);
-            _ = try self.expect(.r_paren);
-            return .{ .hardware_read = @intCast(register) };
-        }
-
         if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "signedLessThan")) {
             _ = try self.expect(.ident);
             _ = try self.expect(.l_paren);
@@ -1459,15 +1341,15 @@ pub const Parser = struct {
 
         if (self.current.tag == .ident and
             (std.mem.eql(u8, self.current.text, "load") or
-                std.mem.eql(u8, self.current.text, "load_unaligned") or
-                std.mem.eql(u8, self.current.text, "load_vec_u8") or
-                std.mem.eql(u8, self.current.text, "load_vec_u8_unsigned") or
-                std.mem.eql(u8, self.current.text, "load_vec_u32")))
+                std.mem.eql(u8, self.current.text, "loadUnaligned") or
+                std.mem.eql(u8, self.current.text, "loadVectorBytes") or
+                std.mem.eql(u8, self.current.text, "loadVectorBytesUnsigned") or
+                std.mem.eql(u8, self.current.text, "loadVectorWords")))
         {
-            const packed_u8 = std.mem.eql(u8, self.current.text, "load_vec_u8");
-            const packed_unsigned_u8 = std.mem.eql(u8, self.current.text, "load_vec_u8_unsigned");
-            const partial_u32 = std.mem.eql(u8, self.current.text, "load_vec_u32");
-            const unaligned = std.mem.eql(u8, self.current.text, "load_unaligned");
+            const packed_u8 = std.mem.eql(u8, self.current.text, "loadVectorBytes");
+            const packed_unsigned_u8 = std.mem.eql(u8, self.current.text, "loadVectorBytesUnsigned");
+            const partial_u32 = std.mem.eql(u8, self.current.text, "loadVectorWords");
+            const unaligned = std.mem.eql(u8, self.current.text, "loadUnaligned");
             _ = try self.expect(.ident);
             _ = try self.expect(.l_paren);
             var field_offset: i64 = 0;
@@ -1492,7 +1374,7 @@ pub const Parser = struct {
             }
             var partial_u32_lane: ?u3 = null;
             if (try self.eat(.comma)) {
-                if (self.current.tag == .ident) {
+                if (self.current.tag == .ident and !std.mem.eql(u8, self.current.text, "offsetOf")) {
                     if (label_offset != null) return self.fail(self.current, .unexpected_token);
                     label_offset = (try self.expect(.ident)).text;
                     if (try self.eat(.comma)) offset += try self.parseLiteralOffset();
@@ -1711,11 +1593,8 @@ pub const Parser = struct {
     }
 
     fn parseLiteralOffset(self: *Parser) !i64 {
-        if (try self.eat(.at)) {
-            const builtin = try self.expect(.ident);
-            if (!std.mem.eql(u8, builtin.text, "offsetOf")) {
-                return self.fail(builtin, .expected_literal_offset);
-            }
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "offsetOf")) {
+            _ = try self.expect(.ident);
             _ = try self.expect(.l_paren);
             const type_name = try self.expect(.ident);
             _ = try self.expect(.comma);
@@ -1739,7 +1618,7 @@ pub const Parser = struct {
                 offset += switch (field.data_type) {
                     .u8, .i8 => 1,
                     .u16, .i16 => 2,
-                    .u32, .i32 => 4,
+                    .u32, .i32, .dmem => 4,
                     .vec16, .vec32 => unreachable,
                 };
             }
@@ -1826,17 +1705,47 @@ pub const Parser = struct {
     }
 
     fn isFunctionDeclarationStart(self: *const Parser) bool {
+        if (self.current.tag == .at) {
+            var lexer = self.lexer;
+            const namespace = lexer.next() catch return false;
+            const dot = lexer.next() catch return false;
+            const attribute = lexer.next() catch return false;
+            return namespace.tag == .ident and std.mem.eql(u8, namespace.text, "rspq") and
+                dot.tag == .dot and attribute.tag == .ident and
+                std.mem.eql(u8, attribute.text, "command");
+        }
         if (self.current.tag != .ident) return false;
         return std.mem.eql(u8, self.current.text, "export") or
             std.mem.eql(u8, self.current.text, "extern") or
             std.mem.eql(u8, self.current.text, "inline") or
             std.mem.eql(u8, self.current.text, "pub") or
-            std.mem.eql(u8, self.current.text, "command") or
             std.mem.eql(u8, self.current.text, "fn");
     }
 
-    fn isAbiStart(self: *const Parser) bool {
-        return self.current.tag == .ident and std.mem.eql(u8, self.current.text, "abi");
+    fn parseRspqNumberAttribute(
+        self: *Parser,
+        expected_name: []const u8,
+        values: *std.ArrayList(u8),
+    ) !void {
+        _ = try self.expect(.at);
+        const namespace = try self.expect(.ident);
+        if (!std.mem.eql(u8, namespace.text, "rspq")) return self.fail(namespace, .unsupported_builtin);
+        _ = try self.expect(.dot);
+        const attribute = try self.expect(.ident);
+        if (!std.mem.eql(u8, attribute.text, expected_name)) return self.fail(attribute, .unsupported_builtin);
+        _ = try self.expect(.l_paren);
+        while (true) {
+            const value_token = try self.expect(.number);
+            const value = try self.parseNumberValue(value_token);
+            const maximum: i64 = if (std.mem.eql(u8, expected_name, "command")) 239 else 255;
+            if (value < 0 or value > maximum) {
+                if (maximum == 239) return self.fail(value_token, .invalid_command_index);
+                return error.InvalidCommandSize;
+            }
+            try values.append(self.allocator, @intCast(value));
+            if (!try self.eat(.comma)) break;
+        }
+        _ = try self.expect(.r_paren);
     }
 
     fn isCompileTimeTypeStart(self: *const Parser) bool {
@@ -1850,10 +1759,9 @@ pub const Parser = struct {
         var lexer = self.lexer;
         _ = lexer.next() catch return false;
         const separator = lexer.next() catch return false;
-        const at = lexer.next() catch return false;
         const import_name = lexer.next() catch return false;
-        return separator.tag == .equal and at.tag == .at and
-            import_name.tag == .ident and std.mem.eql(u8, import_name.text, "import");
+        return separator.tag == .equal and import_name.tag == .ident and
+            std.mem.eql(u8, import_name.text, "import");
     }
 
     fn expect(self: *Parser, tag: token.Tag) !token.Token {
@@ -1948,13 +1856,6 @@ pub const ErrorType = enum {
     invalid_command_index,
     invalid_hardware_register,
     duplicate_clobber_contract,
-    duplicate_abi_modifier,
-    duplicate_abi_definition,
-    unknown_abi,
-    abi_parameter_count_mismatch,
-    abi_parameter_type_mismatch,
-    abi_parameter_register_mismatch,
-    expected_continuation,
     duplicate_compile_time_type,
     duplicate_compile_time_member,
     expected_unsigned_scalar_type,
@@ -2005,13 +1906,6 @@ pub fn errorString(code: ErrorType) []const u8 {
         .invalid_command_index => "command index must be between 0 and 239",
         .invalid_hardware_register => "hardware register index must be between 0 and 15",
         .duplicate_clobber_contract => "function has more than one clobber contract",
-        .duplicate_abi_modifier => "function has more than one ABI modifier",
-        .duplicate_abi_definition => "duplicate ABI definition",
-        .unknown_abi => "unknown ABI",
-        .abi_parameter_count_mismatch => "ABI has too few parameters",
-        .abi_parameter_type_mismatch => "function parameter type does not match ABI",
-        .abi_parameter_register_mismatch => "function parameter register does not match ABI",
-        .expected_continuation => "expected 'then' before continuation target",
         .duplicate_compile_time_type => "duplicate compile-time type",
         .duplicate_compile_time_member => "duplicate compile-time member",
         .expected_unsigned_scalar_type => "expected unsigned scalar type",
@@ -2050,7 +1944,7 @@ fn scalarTypeSize(data_type: ast.DataType) i64 {
     return switch (data_type) {
         .u8, .i8 => 1,
         .u16, .i16 => 2,
-        .u32, .i32 => 4,
+        .u32, .i32, .dmem => 4,
         .vec16, .vec32 => unreachable,
     };
 }
@@ -2060,6 +1954,7 @@ fn literalFitsType(value: i64, data_type: ast.DataType) bool {
         .u8 => value >= 0 and value <= std.math.maxInt(u8),
         .u16 => value >= 0 and value <= std.math.maxInt(u16),
         .u32 => value >= 0 and value <= std.math.maxInt(u32),
+        .dmem => value >= 0 and value <= 4096,
         .i8 => value >= std.math.minInt(i8) and value <= std.math.maxInt(i8),
         .i16 => value >= std.math.minInt(i16) and value <= std.math.maxInt(i16),
         .i32 => value >= std.math.minInt(i32) and value <= std.math.maxInt(i32),
@@ -2073,6 +1968,7 @@ fn abiTypesCompatible(left: ast.DataType, right: ast.DataType) bool {
         .u8, .i8 => right == .u8 or right == .i8,
         .u16, .i16 => right == .u16 or right == .i16,
         .u32, .i32 => right == .u32 or right == .i32,
+        .dmem => false,
         .vec16, .vec32 => false,
     };
 }
@@ -2125,25 +2021,25 @@ fn parseAccumulatorPart(text: []const u8) ?ast.AccumulatorPart {
     return null;
 }
 
-fn vectorControlRegisterForBuiltin(name: []const u8, comptime prefix: []const u8) ?ast.VectorControlRegister {
-    if (std.mem.eql(u8, name, prefix ++ "VectorCarryOut")) return .carry_out;
-    if (std.mem.eql(u8, name, prefix ++ "VectorCompareCode")) return .compare_code;
-    if (std.mem.eql(u8, name, prefix ++ "VectorCompareExtension")) return .compare_extension;
+fn vectorControlRegisterForOperation(name: []const u8, comptime prefix: []const u8) ?ast.VectorControlRegister {
+    if (std.mem.eql(u8, name, prefix ++ "CarryOut")) return .carry_out;
+    if (std.mem.eql(u8, name, prefix ++ "CompareCode")) return .compare_code;
+    if (std.mem.eql(u8, name, prefix ++ "CompareExtension")) return .compare_extension;
     return null;
 }
 
 fn vectorMemoryOperationForBuiltin(name: []const u8) ?ast.VectorMemoryOperation {
     const names = .{
-        .{ "loadVector16", ast.VectorMemoryOperation.load16 },
-        .{ "storeVector16", ast.VectorMemoryOperation.store16 },
-        .{ "loadVector32", ast.VectorMemoryOperation.load32 },
-        .{ "storeVector32", ast.VectorMemoryOperation.store32 },
-        .{ "loadVector64", ast.VectorMemoryOperation.load64 },
-        .{ "storeVector64", ast.VectorMemoryOperation.store64 },
-        .{ "loadVector128", ast.VectorMemoryOperation.load128 },
-        .{ "storeVector128", ast.VectorMemoryOperation.store128 },
-        .{ "loadVectorPackedSigned", ast.VectorMemoryOperation.load_packed_signed },
-        .{ "loadVectorPackedUnsigned", ast.VectorMemoryOperation.load_packed_unsigned },
+        .{ "load16", ast.VectorMemoryOperation.load16 },
+        .{ "store16", ast.VectorMemoryOperation.store16 },
+        .{ "load32", ast.VectorMemoryOperation.load32 },
+        .{ "store32", ast.VectorMemoryOperation.store32 },
+        .{ "load64", ast.VectorMemoryOperation.load64 },
+        .{ "store64", ast.VectorMemoryOperation.store64 },
+        .{ "load128", ast.VectorMemoryOperation.load128 },
+        .{ "store128", ast.VectorMemoryOperation.store128 },
+        .{ "loadPackedSigned", ast.VectorMemoryOperation.load_packed_signed },
+        .{ "loadPackedUnsigned", ast.VectorMemoryOperation.load_packed_unsigned },
     };
     inline for (names) |entry| if (std.mem.eql(u8, name, entry[0])) return entry[1];
     return null;
@@ -2156,15 +2052,32 @@ fn vectorMemoryOperationHasLane(operation: ast.VectorMemoryOperation) bool {
     };
 }
 
-fn hardwareWriteOperation(namespace: []const u8, name: []const u8) ?ast.HardwareWriteOperation {
-    if (std.mem.eql(u8, namespace, "dma")) {
-        if (std.mem.eql(u8, name, "writeMemoryAddress")) return .rsp_dma_memory_address;
-        if (std.mem.eql(u8, name, "writeRdramAddress")) return .rsp_dma_rdram_address;
-        if (std.mem.eql(u8, name, "writeLengthAndStart")) return .rsp_dma_write_length;
-    }
-    if (std.mem.eql(u8, namespace, "rdp") and std.mem.eql(u8, name, "writeCommandEnd")) {
-        return .rdp_command_end;
-    }
+fn cp0NamedReadRegister(name: []const u8) ?u4 {
+    const names = [_]struct { []const u8, u4 }{
+        .{ "dmaMemoryAddress", 0 },
+        .{ "dmaRdramAddress", 1 },
+        .{ "spStatus", 4 },
+        .{ "dmaFull", 5 },
+        .{ "dmaBusy", 6 },
+        .{ "rdpCommandStart", 8 },
+        .{ "rdpCommandEnd", 9 },
+        .{ "rdpStatus", 11 },
+    };
+    inline for (names) |entry| if (std.mem.eql(u8, name, entry[0])) return entry[1];
+    return null;
+}
+
+fn cp0NamedWriteRegister(name: []const u8) ?u4 {
+    const names = [_]struct { []const u8, u4 }{
+        .{ "setDmaMemoryAddress", 0 },
+        .{ "setDmaRdramAddress", 1 },
+        .{ "startDmaRead", 2 },
+        .{ "startDmaWrite", 3 },
+        .{ "setSpStatus", 4 },
+        .{ "setRdpCommandStart", 8 },
+        .{ "setRdpCommandEnd", 9 },
+    };
+    inline for (names) |entry| if (std.mem.eql(u8, name, entry[0])) return entry[1];
     return null;
 }
 

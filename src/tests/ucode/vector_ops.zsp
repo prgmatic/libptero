@@ -7,7 +7,7 @@ inline fn addVectors(
 }
 
 export fn _start() noreturn {
-    reg input: u32 = 0;
+    reg input: dmem = 0;
 
     // Two vec16 inputs.
     reg seed: u32 = 0x00010002;
@@ -77,18 +77,18 @@ export fn _start() noreturn {
     reciprocal_result[2] = vrcph(a[0]);
     store(vec16, input, reciprocal_result, 0x1b0);
 
-    reg($v19) unsigned_bytes: vec16 = load_vec_u8_unsigned(input, 0);
+    reg($v19) unsigned_bytes: vec16 = loadVectorBytesUnsigned(input, 0);
     store(vec16, input, unsigned_bytes, 0x1c0);
     reg($v20) partial_words: vec16 = 0;
-    partial_words = load_vec_u32(input, 0);
-    partial_words = load_vec_u32(input, 8, 4);
+    partial_words = loadVectorWords(input, 0);
+    partial_words = loadVectorWords(input, 8, 4);
     store(vec16, input, partial_words, 0x1d0);
 
     seed = 0x80402010;
     store(u32, input, seed, 0x70);
     seed = 0x08040201;
     store(u32, input, seed, 0x74);
-    reg($v31) shift_vector: vec16 = load_vec_u8(input, 0x70);
+    reg($v31) shift_vector: vec16 = loadVectorBytes(input, 0x70);
     reg($v21) shifted_left: vec16 = undefined;
     reg($v22) shifted_arithmetic: vec16 = undefined;
     reg($v23) shifted_logical: vec16 = undefined;
@@ -99,7 +99,7 @@ export fn _start() noreturn {
     store(vec16, input, shifted_arithmetic, 0x1f0);
     store(vec16, input, shifted_logical, 0x200);
 
-    // A vec32 is an integer vector followed by its fractional vector.
+    // A vec32 is an integer vector followed by its fractional rsp.vector.
     seed = 0x00010001;
     store(u32, input, seed, 32);
     store(u32, input, seed, 36);
@@ -128,5 +128,5 @@ export fn _start() noreturn {
     wide_result = wide_a + wide_b;
     store(vec32, input, wide_result, 0x160);
 
-    @break();
+    rsp.halt();
 }

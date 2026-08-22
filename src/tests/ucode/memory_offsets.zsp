@@ -16,5 +16,5 @@ export fn _start() noreturn {
     store(i32, 20, signed_byte);
     store(u32, 24, half);
     store(u32, 28, misaligned);
-    @break();
+    rsp.halt();
 }

@@ -5,5 +5,5 @@ export fn _start() noreturn {
     result -= 2;
     result /= 2;
     store(u32, 0, result);
-    @break();
+    rsp.halt();
 }

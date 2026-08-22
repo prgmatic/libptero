@@ -45,5 +45,5 @@ export fn _start() noreturn {
     store(u32, 0x12c, undefined_halfwords_address);
     store(u32, 0x130, initialized_words_address);
 
-    @break();
+    rsp.halt();
 }

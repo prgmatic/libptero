@@ -22,7 +22,7 @@ fn expectAsm(source: []const u8, expected: []const u8) !void {
 
 test "assembly emission is deterministic" {
     const source =
-        \\fn second() noreturn { @break(2); }
+        \\fn second() noreturn { rsp.halt(2); }
         \\fn first() noreturn { tail second(); }
     ;
     var parser = try parser_mod.Parser.init(testing.allocator, source);
@@ -36,6 +36,27 @@ test "assembly emission is deterministic" {
     try asm_writer.write(&first.writer, functions);
     try asm_writer.write(&second.writer, functions);
     try testing.expectEqualStrings(first.written(), second.written());
+}
+
+test "named exports generate structural external interfaces" {
+    const source =
+        \\pub export fn increment(value: u32) noreturn {
+        \\  value += 1;
+        \\  rsp.halt();
+        \\}
+    ;
+    var parser = try parser_mod.Parser.init(testing.allocator, source);
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    try asm_writer.writeInterface(&output.writer, functions, null);
+    try testing.expectEqualStrings(
+        "// @zsp-symbol increment increment\n" ++
+            "pub extern fn increment(reg($a0) value: u32) writes($a0) noreturn;\n\n",
+        output.written(),
+    );
 }
 
 fn expectParseError(source: []const u8, err: parser_mod.ErrorType, line: usize, column: usize) !void {
@@ -56,6 +77,15 @@ fn expectAsmError(source: []const u8, expected_err: anyerror) !void {
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
     try testing.expectError(expected_err, asm_writer.write(&output.writer, functions));
+}
+
+fn expectSyntaxRejected(source: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var parser = try parser_mod.Parser.init(arena.allocator(), source);
+    const functions = parser.parse() catch return;
+    _ = functions;
+    return error.ExpectedSyntaxError;
 }
 
 fn expectOptimizedAsm(input: []const u8, expected: []const u8) !void {
@@ -112,10 +142,12 @@ test "optimizer preserves memory order and treats unknown asm as a barrier" {
     try expectOptimizedAsm(assembly, assembly);
 }
 
-test "exact assembly lines emit optimizer barriers" {
+test "exact blocks make raw assembly an optimizer barrier" {
     try expectAsm(
         \\fn test() {
-        \\  asmExact("addiu $t0, $zero, 1");
+        \\  exact {
+        \\    asm("addiu $t0, $zero, 1");
+        \\  }
         \\}
     ,
         \\.set noreorder
@@ -123,9 +155,9 @@ test "exact assembly lines emit optimizer barriers" {
         \\.text
         \\
         \\test:
-        \\# zsp exact assembly barrier
+        \\# zsp exact block begin
         \\  addiu $t0, $zero, 1
-        \\# zsp exact assembly barrier
+        \\# zsp exact block end
         \\  jr $ra
         \\  nop
         \\
@@ -133,10 +165,10 @@ test "exact assembly lines emit optimizer barriers" {
     );
 }
 
-test "ordered blocks preserve emitted instruction order" {
+test "exact blocks preserve emitted instruction order" {
     try expectAsm(
         \\fn test() {
-        \\  ordered {
+        \\  exact {
         \\    asm("addiu $t0, $zero, 1");
         \\    asm("addiu $t1, $zero, 2");
         \\    asm("bne $t0, $zero, done");
@@ -150,12 +182,12 @@ test "ordered blocks preserve emitted instruction order" {
         \\.text
         \\
         \\test:
-        \\# zsp ordered block begin
+        \\# zsp exact block begin
         \\  addiu $t0, $zero, 1
         \\  addiu $t1, $zero, 2
         \\  bne $t0, $zero, done
         \\  nop
-        \\# zsp ordered block end
+        \\# zsp exact block end
         \\LABEL_test_done_0:
         \\  jr $ra
         \\  nop
@@ -167,12 +199,12 @@ test "ordered blocks preserve emitted instruction order" {
 test "vector control registers use explicit read and write builtins" {
     try expectAsm(
         \\fn test() {
-        \\  reg($t0) carry: u32 = @readVectorCarryOut();
-        \\  reg($t1) compare: u32 = @readVectorCompareCode();
-        \\  reg($t2) extension: u32 = @readVectorCompareExtension();
-        \\  @writeVectorCarryOut(carry);
-        \\  @writeVectorCompareCode(compare);
-        \\  @writeVectorCompareExtension(extension);
+        \\  reg($t0) carry: u32 = rsp.vector.getCarryOut();
+        \\  reg($t1) compare: u32 = rsp.vector.getCompareCode();
+        \\  reg($t2) extension: u32 = rsp.vector.getCompareExtension();
+        \\  rsp.vector.setCarryOut(carry);
+        \\  rsp.vector.setCompareCode(compare);
+        \\  rsp.vector.setCompareExtension(extension);
         \\}
     ,
         \\.set noreorder
@@ -201,7 +233,7 @@ test "reserved scalar declarations claim the backend scratch register" {
         \\  reserved reg($v1) temporary: u32 = undefined;
         \\  temporary = left | right;
         \\  left |= temporary;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -221,7 +253,7 @@ test "reserved scalar declarations claim the backend scratch register" {
         \\  reg($t0) value: u32 = undefined;
         \\  reserved reg($v1) temporary: u32 = undefined;
         \\  value +%= 0x12345678;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.BackendScratchRegisterUnavailable);
 }
@@ -229,15 +261,15 @@ test "reserved scalar declarations claim the backend scratch register" {
 test "DMA and RDP operations compose with an explicit return delay slot" {
     try expectAsm(
         \\fn test() {
-        \\  reg($t1) busy: u32 = dma.busy();
-        \\  reg($s3) memory: u32 = undefined;
+        \\  reg($t1) busy: u32 = rsp.cp0.dmaBusy();
+        \\  reg($s3) memory: dmem = undefined;
         \\  reg($a0) rdram: u32 = undefined;
         \\  reg($t3) length: u32 = undefined;
-        \\  dma.writeMemoryAddress(memory);
-        \\  dma.writeRdramAddress(rdram);
-        \\  rdp.writeCommandEnd(rdram);
-        \\  @return() delay {
-        \\    dma.writeLengthAndStart(length);
+        \\  rsp.cp0.setDmaMemoryAddress(memory);
+        \\  rsp.cp0.setDmaRdramAddress(rdram);
+        \\  rsp.cp0.setRdpCommandEnd(rdram);
+        \\  return slot {
+        \\    rsp.cp0.startDmaWrite(length);
         \\  }
         \\}
     ,
@@ -260,11 +292,11 @@ test "DMA and RDP operations compose with an explicit return delay slot" {
 test "CP0 intrinsics support values and explicit fixed registers" {
     try expectAsm(
         \\fn test(reg($t0) value: u32) noreturn {
-        \\  value = cp0.read(4);
-        \\  cp0.write(9, value);
-        \\  cp0.readRegister(5, $at);
-        \\  cp0.writeRegister(2, $at);
-        \\  @break();
+        \\  value = rsp.cp0.read(4);
+        \\  rsp.cp0.write(9, value);
+        \\  rsp.cp0.readRegister(5, $at);
+        \\  rsp.cp0.writeRegister(2, $at);
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -276,6 +308,27 @@ test "CP0 intrinsics support values and explicit fixed registers" {
         \\  mtc0 $t0, $9
         \\  mfc0 $at, $5
         \\  mtc0 $at, $2
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "named CP0 operations return values and accept arbitrary scalar registers" {
+    try expectAsm(
+        \\fn test(reg($t0) value: u32) noreturn {
+        \\  value = rsp.cp0.spStatus();
+        \\  rsp.cp0.setRdpCommandEnd(value);
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  mfc0 $t0, $4
+        \\  mtc0 $t0, $9
         \\  break
         \\
         \\
@@ -295,7 +348,7 @@ test "scalar comparison expressions produce normalized register results" {
         \\  result = left == right;
         \\  result = left != right;
         \\  result = right != 0;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -345,7 +398,7 @@ test "parenthesized scalar expression chains reuse the destination register" {
     try expectAsm(
         \\fn test(reg($t0) a: u32, reg($t1) b: u32, reg($t2) c: u32, reg($t3) result: u32) noreturn {
         \\  result = (a & b | c);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -373,7 +426,7 @@ test "nested scalar expressions honor precedence and allocate predictable tempor
         \\  result = (a + b) & c;
         \\  result = a + (b - c);
         \\  result = (a + b) + result;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -396,11 +449,57 @@ test "nested scalar expressions honor precedence and allocate predictable tempor
     );
 }
 
+test "addition binds more tightly than shifts and multiplication binds more tightly than addition" {
+    try expectAsm(
+        \\fn test(reg($a0) a: u32, reg($a1) b: u32, reg($t0) result: u32) noreturn {
+        \\  result = a + b << 2;
+        \\  result = a + b * 4;
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  add $t0, $a0, $a1
+        \\  sll $t0, $t0, 2
+        \\  sll $t1, $a1, 2
+        \\  add $t0, $a0, $t1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "narrow scalar arithmetic stays 32 bit until an explicit narrow store" {
+    try expectAsm(
+        \\fn test(reg($t0) value: u8, reg($t1) amount: u8, reg($a0) address: dmem) noreturn {
+        \\  value += amount;
+        \\  value >>= 1;
+        \\  store(u8, address, value);
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  add $t0, $t0, $t1
+        \\  srl $t0, $t0, 1
+        \\  sb $t0, 0($a0)
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "nested scalar expressions reject side effects" {
     try expectAsmError(
-        \\fn test(reg($a0) address: u32, reg($t0) result: u32) noreturn {
+        \\fn test(reg($a0) address: dmem, reg($t0) result: u32) noreturn {
         \\  result = result + load(u32, address);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.SideEffectsNotAllowedInScalarExpression);
 }
@@ -434,7 +533,7 @@ test "optimizer rotates a two-operation CP0 polling recurrence" {
 test "unsigned high-bit comparison emits a signed zero branch" {
     try expectAsm(
         \\fn test(reg($t2) flags: u32) {
-        \\  if(flags < 0x80000000) { @nop(); }
+        \\  if(flags < 0x80000000) { rsp.nop(); }
         \\}
     ,
         \\.set noreorder
@@ -492,7 +591,7 @@ test "data blocks emit scalar arrays and expose DMEM addresses" {
         \\  reg($t0) table: u32 = overlay_data_rdram;
         \\  reg($t1) idmap: u32 = overlay_idmap;
         \\  reg($t2) first: u32 = load(u32, overlay_data_rdram);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -578,7 +677,7 @@ test "public and external storage labels form a linker ABI" {
         \\export fn _start() noreturn {
         \\  reg($t0) value: u32 = load(u32, imported_value);
         \\  store(u32, resident_value, value);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -617,8 +716,8 @@ test "packed structs emit fields without padding" {
         \\  headers: [2]Header;
         \\}
         \\export fn _start() noreturn {
-        \\  reg($t0) address: u32 = header;
-        \\  @break();
+        \\  reg($t0) address: dmem = header;
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -666,7 +765,7 @@ test "compile-time enums and flags lower to qualified immediates" {
         \\  reg($t0) cycle: u32 = CycleType.copy;
         \\  reg($t1) flags: u32;
         \\  flags = RenderFlags.antialias | RenderFlags.force_blend | RenderFlags.alpha_compare;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -697,10 +796,10 @@ test "packed struct field offsets are compile-time memory offsets" {
         \\  flags: u16;
         \\  address: u32;
         \\}
-        \\fn test(reg($t0) ptr: u32, reg($t1) value: u32) noreturn {
-        \\  value = load(u32, ptr, @offsetOf(Header, address));
-        \\  store(u16, ptr, value, @offsetOf(Header, flags));
-        \\  @break();
+        \\fn test(reg($t0) ptr: dmem, reg($t1) value: u32) noreturn {
+        \\  value = load(u32, ptr, offsetOf(Header, address));
+        \\  store(u16, ptr, value, offsetOf(Header, flags));
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -724,11 +823,11 @@ test "packed struct fields provide typed load and store operands" {
         \\  flags: u16;
         \\  address: u32;
         \\}
-        \\fn test(reg($t0) ptr: u32, reg($t1) value: u32) noreturn {
+        \\fn test(reg($t0) ptr: dmem, reg($t1) value: u32) noreturn {
         \\  reg($t2) opcode = load(Header.opcode, ptr);
         \\  value = load(Header.address, ptr);
         \\  store(Header.flags, ptr, value);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -761,8 +860,8 @@ test "state blocks reserve addressable DMA-aligned storage" {
         \\  flags: [3]u8;
         \\}
         \\export fn _start() noreturn {
-        \\  reg($t0) address: u32 = counter;
-        \\  @break();
+        \\  reg($t0) address: dmem = counter;
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1072,7 +1171,7 @@ test "top level declarations allocate registers without label" {
     try expectAsm(
         \\reg a: u8 = 1;
         \\reg b: u16 = 2;
-        \\@nop();
+        \\rsp.nop();
     ,
         \\.set noreorder
         \\.set noat
@@ -1089,7 +1188,7 @@ test "top level declarations allocate registers without label" {
 test "vec16 and vec32 operations emit encoded RSP vector instructions" {
     try expectAsm(
         \\fn test() noreturn {
-        \\  reg($t0) ptr: u32 = 0;
+        \\  reg($t0) ptr: dmem = 0;
         \\  reg($v01) a: vec16 = load(vec16, ptr);
         \\  reg($v02) b: vec16 = load(vec16, ptr, 16);
         \\  reg($v03) c: vec16 = 0;
@@ -1100,7 +1199,7 @@ test "vec16 and vec32 operations emit encoded RSP vector instructions" {
         \\  reg($v08) z: vec32 = 0;
         \\  z = x ^ y;
         \\  store(vec32, ptr, z, 96);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1133,10 +1232,10 @@ test "vec16 and vec32 operations emit encoded RSP vector instructions" {
 test "unaligned vector loads emit paired lqv and lrv instructions" {
     try expectAsm(
         \\fn test() noreturn {
-        \\  reg($t0) ptr: u32 = 8;
-        \\  reg($v01) narrow: vec16 = load_unaligned(vec16, ptr);
-        \\  reg($v02) wide: vec32 = load_unaligned(vec32, ptr, 16);
-        \\  @break();
+        \\  reg($t0) ptr: dmem = 8;
+        \\  reg($v01) narrow: vec16 = loadUnaligned(vec16, ptr);
+        \\  reg($v02) wide: vec32 = loadUnaligned(vec32, ptr, 16);
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1160,12 +1259,12 @@ test "unaligned vector loads emit paired lqv and lrv instructions" {
 test "triangle packed and partial vector loads emit exact RSP encodings" {
     try expectAsm(
         \\fn test() noreturn {
-        \\  reg($t0) ptr: u32 = 8;
-        \\  reg($v01) unsigned_bytes: vec16 = load_vec_u8_unsigned(ptr, 8);
-        \\  reg($v02) signed_bytes: vec16 = load_vec_u8(ptr, 8);
-        \\  reg($v03) words: vec16 = load_vec_u32(ptr, 4);
-        \\  words = load_vec_u32(ptr, 8, 4);
-        \\  @break();
+        \\  reg($t0) ptr: dmem = 8;
+        \\  reg($v01) unsigned_bytes: vec16 = loadVectorBytesUnsigned(ptr, 8);
+        \\  reg($v02) signed_bytes: vec16 = loadVectorBytes(ptr, 8);
+        \\  reg($v03) words: vec16 = loadVectorWords(ptr, 4);
+        \\  words = loadVectorWords(ptr, 8, 4);
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1187,19 +1286,19 @@ test "triangle packed and partial vector loads emit exact RSP encodings" {
 test "explicit vector memory builtins emit each transfer width" {
     try expectAsm(
         \\fn test() noreturn {
-        \\  reg($t0) ptr: u32 = 8;
+        \\  reg($t0) ptr: dmem = 8;
         \\  reg($v01) value: vec16 = undefined;
-        \\  @loadVector16(value, 2, ptr, 4);
-        \\  @storeVector16(value, 2, ptr, 4);
-        \\  @loadVector32(value, 2, ptr, 4);
-        \\  @storeVector32(value, 2, ptr, 4);
-        \\  @loadVector64(value, 2, ptr, 8);
-        \\  @storeVector64(value, 2, ptr, 8);
-        \\  @loadVector128(value, ptr, 16);
-        \\  @storeVector128(value, ptr, 16);
-        \\  @loadVectorPackedSigned(value, ptr, 8);
-        \\  @loadVectorPackedUnsigned(value, ptr, 8);
-        \\  @break();
+        \\  rsp.vector.load16(value, 2, ptr, 4);
+        \\  rsp.vector.store16(value, 2, ptr, 4);
+        \\  rsp.vector.load32(value, 2, ptr, 4);
+        \\  rsp.vector.store32(value, 2, ptr, 4);
+        \\  rsp.vector.load64(value, 2, ptr, 8);
+        \\  rsp.vector.store64(value, 2, ptr, 8);
+        \\  rsp.vector.load128(value, ptr, 16);
+        \\  rsp.vector.store128(value, ptr, 16);
+        \\  rsp.vector.loadPackedSigned(value, ptr, 8);
+        \\  rsp.vector.loadPackedUnsigned(value, ptr, 8);
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1234,7 +1333,7 @@ test "triangle vector shifts use the resident shift constant vector" {
         \\  left = source << 14;
         \\  arithmetic = source >> 2;
         \\  logical = source >>> 7;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1259,7 +1358,7 @@ test "explicit vector shift names preserve vec32 views" {
         \\  shifted.sfract = vectorShiftLeft8(source, 14);
         \\  shifted.sint = vectorShiftRightArithmetic(source, 2);
         \\  source = vectorShiftRightLogical(source, 7);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1281,7 +1380,7 @@ test "scalar unary negation preserves signed instruction selection" {
         \\fn test(reg($t0) signed: i32, reg($t1) unsigned: u32) noreturn {
         \\  signed = -signed;
         \\  unsigned = -unsigned;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1312,7 +1411,7 @@ test "explicit vector operation names preserve RSP encodings" {
         \\  result = vectorCompareNotEqual(left, right);
         \\  result = vectorCompareGreaterOrEqual(left, right);
         \\  result = vectorSelectByCompareCode(left, right);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1346,7 +1445,7 @@ test "explicit accumulator and reciprocal names preserve RSP encodings" {
         \\  reciprocal_high[7] = vectorReciprocalHigh(high[0]);
         \\  reciprocal_low[7] = vectorReciprocalLow(middle[0]);
         \\  reciprocal_low[0] = vectorReciprocal(source[1]);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1367,11 +1466,11 @@ test "explicit accumulator and reciprocal names preserve RSP encodings" {
 
 test "command tail jumps omit unreachable command return scaffolding" {
     try expectAsm(
-        \\command(1) fn commandTail(reg($a0) value: u32) {
-        \\  @goto(target);
+        \\@rspq.command(1) fn commandTail(reg($a0) value: u32) {
+        \\  jump target(value);
         \\}
         \\fn target(reg($a0) value: u32) noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1396,46 +1495,13 @@ test "command tail jumps omit unreachable command return scaffolding" {
     );
 }
 
-test "callAndGoto emits the libdragon jump-and-continuation idiom" {
+test "call followed by tail uses a fallthrough continuation when available" {
     try expectAsm(
         \\fn append() {}
-        \\fn finish() noreturn { @break(); }
-        \\command(1) fn test() {
-        \\  @callAndGoto(append, finish);
-        \\}
-    ,
-        \\.set noreorder
-        \\.set noat
-        \\.text
-        \\
-        \\append:
-        \\  jr $ra
-        \\  nop
-        \\
-        \\finish:
-        \\  break
-        \\
-        \\.globl test
-        \\test:
-        \\  j append
-        \\  addiu $ra, $zero, %lo(finish)
-        \\
-        \\.section .zsp_commands,"",@progbits
-        \\  .word test
-        \\  .byte 1
-        \\  .byte 0
-        \\  .short 0
-        \\
-        \\
-    );
-}
-
-test "call then syntax emits a stackless continuation transfer" {
-    try expectAsm(
-        \\fn append() {}
-        \\fn finish() noreturn { @break(); }
+        \\fn finish() noreturn { rsp.halt(); }
         \\fn test() noreturn {
-        \\  call append() then finish;
+        \\  append();
+        \\  tail finish();
         \\}
     ,
         \\.set noreorder
@@ -1446,10 +1512,46 @@ test "call then syntax emits a stackless continuation transfer" {
         \\  jr $ra
         \\  nop
         \\
+        \\test:
+        \\  jal append
+        \\  nop
+        \\
         \\finish:
         \\  break
         \\
-        \\test:
+        \\
+    );
+}
+
+test "call followed by tail emits a stackless continuation when placement is claimed" {
+    try expectAsm(
+        \\fn append() {}
+        \\fn finish() noreturn { rsp.halt(); }
+        \\fn first() noreturn {
+        \\  append();
+        \\  tail finish();
+        \\}
+        \\fn second() noreturn {
+        \\  append();
+        \\  tail finish();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\append:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\first:
+        \\  jal append
+        \\  nop
+        \\
+        \\finish:
+        \\  break
+        \\
+        \\second:
         \\  j append
         \\  addiu $ra, $zero, %lo(finish)
         \\
@@ -1457,12 +1559,12 @@ test "call then syntax emits a stackless continuation transfer" {
     );
 }
 
-test "function call accepts one explicit delay-slot statement" {
+test "function call accepts one explicit slot statement" {
     try expectAsm(
         \\fn helper(reg($a0) value: u32) {}
-        \\command(1) fn test(reg($a0) value: u32) {
+        \\@rspq.command(1) fn test(reg($a0) value: u32) {
         \\  reg($t3) opcode: u32 = undefined;
-        \\  helper(value) delay { opcode = 0xf0000000; }
+        \\  helper(value) slot { opcode = 0xf0000000; }
         \\}
     ,
         \\.set noreorder
@@ -1503,7 +1605,7 @@ test "vector lane moves and reciprocal operations emit exact RSP encodings" {
         \\  reciprocal[0] = vrcph(input[5]);
         \\  reciprocal[1] = vrcpl(input[4]);
         \\  reciprocal[2] = vrcp(input[3]);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1566,11 +1668,11 @@ test "fixed vector parameters bind and inline with exact registers" {
         \\  value += addend;
         \\}
         \\fn test() noreturn {
-        \\  reg($t0) ptr: u32 = 0;
+        \\  reg($t0) ptr: dmem = 0;
         \\  reg($v01) a: vec16 = load(vec16, ptr);
         \\  reg($v02) b: vec16 = load(vec16, ptr, 16);
         \\  accumulate(a, b);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -1704,13 +1806,13 @@ test "vector operations reject mixed types, immediates, and invalid memory offse
     , error.VectorImmediateUnsupported);
     try expectAsmError(
         \\fn test() {
-        \\  reg ptr: u32 = 0;
+        \\  reg ptr: dmem = 0;
         \\  reg($v01) value: vec16 = load(vec16, ptr, 1);
         \\}
     , error.VectorMemoryOffsetUnaligned);
     try expectAsmError(
         \\fn test() {
-        \\  reg ptr: u32 = 0;
+        \\  reg ptr: dmem = 0;
         \\  reg($v01) value: vec16 = load(vec16, ptr, 1024);
         \\}
     , error.VectorMemoryOffsetOutOfRange);
@@ -1780,10 +1882,11 @@ test "vec32 views compose with lane and swizzle selection" {
         \\fn test() noreturn {
         \\  reg($v01) wide: vec32 = 0;
         \\  reg($t0) scalar: i32 = undefined;
+        \\  reg($t1) base: dmem = 0;
         \\  scalar = wide.sint[2];
         \\  wide.sfract[3] = vrcp(wide.sint[2]);
         \\  wide.sfract = wide.sfract.XXXXXXXX;
-        \\  store(vec16, scalar, wide.sfract[3]);
+        \\  store(vec16, base, wide.sfract[3]);
         \\}
     ,
         \\.set noreorder
@@ -1793,10 +1896,11 @@ test "vec32 views compose with lane and swizzle selection" {
         \\test:
         \\  .word 0x4a01086c # vxor $v01, $v01, $v01
         \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
+        \\  addiu $t1, $zero, 0
         \\  .word 0x48080a00 # mfc2 $t0, $v01[2]
         \\  .word 0x4b4118b0 # vrcp $v02[3], $v01[2]
         \\  .word 0x4b8200aa # vor $v02, $v00, $v02
-        \\  .word 0xe9020b00 # ssv $v02[3], 0($t0)
+        \\  .word 0xe9220b00 # ssv $v02[3], 0($t1)
         \\
         \\
     );
@@ -1857,7 +1961,7 @@ test "explicit saturated vector add and subtract emit VADD and VSUB" {
 test "half-vector stores emit SDV with exact lane and offset fields" {
     try expectAsm(
         \\fn test() noreturn {
-        \\  reg($t4) ptr: u32 = undefined;
+        \\  reg($t4) ptr: dmem = undefined;
         \\  reg($v04) values: vec16 = undefined;
         \\  store(vec64, ptr, values, 24);
         \\  store(vec64, ptr, values[4], 56);
@@ -1959,7 +2063,7 @@ test "accumulator reads select high middle and low portions" {
 test "indexed vector lanes support halfword memory transfers" {
     try expectAsm(
         \\fn test() noreturn {
-        \\  reg($t0) ptr: u32 = 0;
+        \\  reg($t0) ptr: dmem = 0;
         \\  reg($v01) value: vec16 = 0;
         \\  value[2] = load(vec16, ptr, 6);
         \\  store(vec16, ptr, value[5], -4);
@@ -2013,7 +2117,7 @@ test "vector comparison and merge instructions expose VCC-backed primitives" {
 test "store emits byte halfword and word writes" {
     try expectAsm(
         \\fn test() {
-        \\  reg($t0) ptr: u32 = 0x100;
+        \\  reg($t0) ptr: dmem = 0x100;
         \\  reg($t1) value: u32 = 0x55;
         \\  store(u8, ptr, value);
         \\  store(u16, ptr, 0x1234);
@@ -2052,7 +2156,7 @@ test "store emits byte halfword and word writes" {
 test "load emits signed and unsigned byte halfword and word reads" {
     try expectAsm(
         \\fn test() {
-        \\  reg($t0) ptr: u32 = 0x100;
+        \\  reg($t0) ptr: dmem = 0x100;
         \\  reg($t1) a = load(u8, ptr);
         \\  reg($t2) b = load(i8, ptr);
         \\  reg($t3) c = load(u16, ptr);
@@ -2084,10 +2188,10 @@ test "register declarations infer intrinsic initializer types" {
     try expectAsm(
         \\fn test(reg($a0) left: u32, reg($a1) right: u32) noreturn {
         \\  reg($t0) mask = 255;
-        \\  reg($t1) status = cp0.read(4);
+        \\  reg($t1) status = rsp.cp0.read(4);
         \\  reg($t2) ordered = signedLessThan(left, right);
         \\  reg($v01) accumulator = readVectorAccumulatorHigh();
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2112,7 +2216,7 @@ test "register declarations infer types from visible identifiers" {
         \\  copy >>= 1;
         \\  reg($v01) vector: vec16 = 0;
         \\  reg vector_copy = vector;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2133,13 +2237,13 @@ test "register declarations infer types from visible identifiers" {
 test "memory offsets must fit the instruction immediate" {
     try expectAsmError(
         \\fn test() {
-        \\  reg ptr: u32 = 0x100;
+        \\  reg ptr: dmem = 0x100;
         \\  reg value = load(u32, ptr, 32768);
         \\}
     , error.MemoryOffsetOutOfRange);
     try expectAsmError(
         \\fn test() {
-        \\  reg ptr: u32 = 0x100;
+        \\  reg ptr: dmem = 0x100;
         \\  store(u32, ptr, 1, -32769);
         \\}
     , error.MemoryOffsetOutOfRange);
@@ -2148,7 +2252,7 @@ test "memory offsets must fit the instruction immediate" {
 test "load can assign an already defined register" {
     try expectAsm(
         \\fn test() {
-        \\  reg($t0) ptr: u32 = 0x100;
+        \\  reg($t0) ptr: dmem = 0x100;
         \\  reg($t1) value: u16 = 0;
         \\  value = load(u16, ptr);
         \\}
@@ -2171,7 +2275,7 @@ test "load can assign an already defined register" {
 test "signed narrow loads can widen into u32 registers" {
     try expectAsm(
         \\fn test() {
-        \\  reg ptr: u32 = 0;
+        \\  reg ptr: dmem = 0;
         \\  reg value: u32 = 0;
         \\  value = load(i16, ptr);
         \\}
@@ -2195,16 +2299,16 @@ test "inline calls bind parameters and expand inside caller scope" {
     try expectAsm(
         \\inline fn write(
         \\  reg($t0) value: u32,
-        \\  reg($s0) destination: u32,
+        \\  reg($s0) destination: dmem,
         \\) {
         \\  store(u32, destination, value);
         \\}
         \\
         \\fn test() noreturn {
         \\  reg($t0) value: u32 = 0x1234;
-        \\  reg($s0) destination: u32 = 0x20;
+        \\  reg($s0) destination: dmem = 0x20;
         \\  write(value, destination);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2225,7 +2329,7 @@ test "fixed-register parameters bind without emitting initialization" {
     try expectAsm(
         \\fn write_word(
         \\  reg($t0) value: u32,
-        \\  reg($s0) destination: u32,
+        \\  reg($s0) destination: dmem,
         \\) {
         \\  store(u32, destination, value);
         \\}
@@ -2278,7 +2382,7 @@ test "pinned registers can be reused after their last use" {
         \\  dma_full += 1;
         \\  reg($t0) transfer_descriptor: u32 = 2;
         \\  transfer_descriptor += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2298,13 +2402,13 @@ test "pinned registers can be reused after their last use" {
 
 test "branch delay slots can reuse a condition's pinned register" {
     try expectAsm(
-        \\fn target() noreturn { @break(); }
+        \\fn target() noreturn { rsp.halt(); }
         \\fn test() noreturn {
         \\  reg($t0) dma_full: u32 = 0;
-        \\  if(dma_full == 0) @goto(target) delay {
+        \\  if(dma_full == 0) jump target() slot {
         \\    reg($t0) transfer_descriptor: u32 = 7;
         \\  }
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2324,26 +2428,43 @@ test "branch delay slots can reuse a condition's pinned register" {
     );
 }
 
-test "function parameters require explicit register bindings" {
+test "default function parameters use argument registers" {
+    try expectAsm(
+        \\fn add(first: u32, second: u32) noreturn {
+        \\  first += second;
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\add:
+        \\  add $a0, $a0, $a1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "parameters outside the default scalar convention require explicit registers" {
     try expectParseError(
-        \\fn invalid(value: u32) {}
+        \\fn invalid(a: u32, b: u32, c: u32, d: u32, value: u32) {}
+    , .expected_fixed_register_parameter, 1, 12);
+    try expectParseError(
+        \\fn invalid(value: vec16) {}
     , .expected_fixed_register_parameter, 1, 12);
 }
 
-test "named ABIs assign reusable parameter registers" {
+test "default argument registers are reusable across functions" {
     try expectAsm(
-        \\abi command_handler(
-        \\  reg($a0) argument_0: u32,
-        \\  reg($a1) argument_1: u32,
-        \\  reg($v01) vector_argument: vec16,
-        \\);
-        \\fn first(value: u32) using(command_handler) noreturn {
+        \\fn first(value: u32) noreturn {
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
-        \\fn second(value: u32, mask: u32) using(command_handler) noreturn {
+        \\fn second(value: u32, mask: u32) noreturn {
         \\  value &= mask;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2362,28 +2483,12 @@ test "named ABIs assign reusable parameter registers" {
     );
 }
 
-test "named ABIs validate parameter count type and explicit registers" {
-    try expectParseError(
-        \\abi one(reg($a0) value: u32);
-        \\fn test(first: u32, second: u32) using(one) {}
-    , .abi_parameter_count_mismatch, 2, 4);
-    try expectParseError(
-        \\abi one(reg($a0) value: u32);
-        \\fn test(value: u16) using(one) {}
-    , .abi_parameter_type_mismatch, 2, 4);
-    try expectParseError(
-        \\abi one(reg($a0) value: u32);
-        \\fn test(reg($a1) value: u32) using(one) {}
-    , .abi_parameter_register_mismatch, 2, 4);
-}
-
 test "typed function pointers validate addresses and support indirect jumps" {
     try expectAsm(
-        \\abi continuation();
-        \\fn first() using(continuation) noreturn { @break(); }
-        \\fn second() using(continuation) noreturn { @break(); }
+        \\fn first() noreturn { rsp.halt(); }
+        \\fn second() noreturn { rsp.halt(); }
         \\fn dispatch() noreturn {
-        \\  reg($t0) next: fn(continuation) = &first;
+        \\  reg($t0) next: fn() = &first;
         \\  next = &second;
         \\  jump(next);
         \\}
@@ -2408,21 +2513,14 @@ test "typed function pointers validate addresses and support indirect jumps" {
     );
 }
 
-test "typed function pointers reject incompatible function ABIs" {
+test "typed function pointer assignments reject incompatible structural signatures" {
     try expectAsmError(
-        \\abi first_abi();
-        \\abi second_abi();
-        \\fn target() using(second_abi) noreturn { @break(); }
+        \\fn target(reg($t0) value: u32) noreturn { rsp.halt(); }
         \\fn dispatch() noreturn {
-        \\  reg next: fn(first_abi) = &target;
+        \\  reg next: fn(u32) = &target;
         \\  jump(next);
         \\}
-    , error.FunctionAbiMismatch);
-    try expectAsmError(
-        \\fn dispatch(reg($t0) address: u32) noreturn {
-        \\  jump(address);
-        \\}
-    , error.TypedJumpRequiresFunctionPointer);
+    , error.FunctionTypeMismatch);
 }
 
 test "gp can be explicitly pinned but is not automatically allocated" {
@@ -2431,7 +2529,7 @@ test "gp can be explicitly pinned but is not automatically allocated" {
         \\  reg($gp) command_address: u32 = 0x20;
         \\  reg automatic: u32 = 1;
         \\  command_address += automatic;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2455,7 +2553,7 @@ test "automatic scalar allocation reuses a register after its final use" {
         \\  first += 1;
         \\  reg second: u32 = 2;
         \\  second += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2484,7 +2582,7 @@ test "automatic allocation preserves values across backward label edges" {
         \\  count -= scratch;
         \\  if(count != 0) goto loop;
         \\  reg result: u32 = 3;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2510,7 +2608,7 @@ test "automatic allocation preserves values across backward label edges" {
 test "jump transfers control through a scalar register" {
     try expectAsm(
         \\fn dispatch(reg($t0) handler: u32) noreturn {
-        \\  @jump(handler);
+        \\  jump(handler);
         \\}
     ,
         \\.set noreorder
@@ -2525,13 +2623,13 @@ test "jump transfers control through a scalar register" {
     );
 }
 
-test "goto transfers control directly to a function" {
+test "raw jump transfers control directly to a function" {
     try expectAsm(
         \\fn target() noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn dispatch() noreturn {
-        \\  @goto(target);
+        \\  jump target();
         \\}
     ,
         \\.set noreorder
@@ -2549,13 +2647,13 @@ test "goto transfers control directly to a function" {
     );
 }
 
-test "goto selects branch encoding and accepts a typed delay slot" {
+test "raw direct jump accepts a typed delay slot" {
     try expectAsm(
         \\fn target() noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn dispatch(reg($t0) value: u32) noreturn {
-        \\  @goto(target, .branch) delay {
+        \\  jump target() slot {
         \\    value = 7;
         \\  }
         \\}
@@ -2568,7 +2666,7 @@ test "goto selects branch encoding and accepts a typed delay slot" {
         \\  break
         \\
         \\dispatch:
-        \\  b target
+        \\  j target
         \\  addiu $t0, $zero, 7
         \\
         \\
@@ -2577,12 +2675,12 @@ test "goto selects branch encoding and accepts a typed delay slot" {
 
 test "conditional function goto supports nonzero equality immediates" {
     try expectAsm(
-        \\fn target() noreturn { @break(); }
+        \\fn target() noreturn { rsp.halt(); }
         \\fn dispatch(reg($t0) value: u32) noreturn {
-        \\  if(value == 3) @goto(target) delay {
+        \\  if(value == 3) jump target() slot {
         \\    value = 7;
         \\  }
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2602,14 +2700,14 @@ test "conditional function goto supports nonzero equality immediates" {
     );
 }
 
-test "setReturn materializes a function return label" {
+test "function address values can materialize a return target" {
     try expectAsm(
         \\fn loop() noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn dispatch(reg($t0) handler: u32) noreturn {
-        \\  @jump(handler);
-        \\  @setReturn(loop);
+        \\  reg($ra) continuation: fn() = &loop;
+        \\  jump(handler);
         \\}
     ,
         \\.set noreorder
@@ -2620,23 +2718,22 @@ test "setReturn materializes a function return label" {
         \\  break
         \\
         \\dispatch:
+        \\  addiu $ra, $zero, %lo(loop)
         \\  jr $t0
         \\  nop
-        \\  addiu $ra, $zero, %lo(loop)
         \\
         \\
     );
 }
 
-test "setFunctionAddress materializes a function label in a typed register" {
+test "function address initialization materializes a typed function label" {
     try expectAsm(
         \\fn append(reg($a0) value: u32) noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn dispatch() noreturn {
-        \\  reg($t5) next: u32 = undefined;
-        \\  @setFunctionAddress(next, append);
-        \\  @jump(next);
+        \\  reg($t5) next: fn(u32) = &append;
+        \\  jump(next);
         \\}
     ,
         \\.set noreorder
@@ -2655,13 +2752,12 @@ test "setFunctionAddress materializes a function label in a typed register" {
     );
 }
 
-test "setDataAddress materializes a data label with an offset" {
+test "dmem address values materialize a data label with an offset" {
     try expectAsm(
         \\bss { cached: [2]u32; }
         \\fn send() noreturn {
-        \\  reg($s3) end: u32 = undefined;
-        \\  @setDataAddress(end, cached, 8);
-        \\  @break();
+        \\  reg($s3) end: dmem = dmem.addressOf(cached, 8);
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2682,16 +2778,88 @@ test "setDataAddress materializes a data label with an offset" {
     );
 }
 
+test "RSP memory operations require dmem addresses" {
+    try expectAsmError(
+        \\fn test(reg($t0) address: u32, reg($t1) value: u32) noreturn {
+        \\  value = load(u32, address);
+        \\  rsp.halt();
+        \\}
+    , error.ExpectedDmemAddress);
+
+    try expectAsmError(
+        \\fn test(reg($t0) value: u32) noreturn {
+        \\  value = load(u32, 4096);
+        \\  rsp.halt();
+        \\}
+    , error.DmemAddressOutOfRange);
+}
+
+test "named CP0 DMA memory address operations use dmem" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) address = rsp.cp0.dmaMemoryAddress();
+        \\  rsp.cp0.setDmaMemoryAddress(address);
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  mfc0 $t0, $0
+        \\  mtc0 $t0, $0
+        \\  break
+        \\
+        \\
+    );
+
+    try expectAsmError(
+        \\fn test(reg($t0) address: u32) noreturn {
+        \\  rsp.cp0.setDmaMemoryAddress(address);
+        \\  rsp.halt();
+        \\}
+    , error.ExpectedDmemAddress);
+
+    try expectAsmError(
+        \\fn test(reg($t0) address: u32) noreturn {
+        \\  address = rsp.cp0.dmaMemoryAddress();
+        \\  rsp.halt();
+        \\}
+    , error.ExpectedDmemAddress);
+}
+
+test "raw CP0 access remains an untyped escape hatch" {
+    try expectAsm(
+        \\fn test(reg($t0) value: u32) noreturn {
+        \\  value = rsp.cp0.read(0);
+        \\  rsp.cp0.write(0, value);
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  mfc0 $t0, $0
+        \\  mtc0 $t0, $0
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "conditional direct goto supports signed register comparisons" {
     try expectAsm(
         \\fn failed() noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn check(reg($s3) end: i32, reg($s4) start: i32) noreturn {
-        \\  if(end < start) @goto(failed) delay {
+        \\  if(end < start) jump failed() slot {
         \\    reg($at) code: u32 = 0xc0060000;
         \\  }
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2713,12 +2881,12 @@ test "conditional direct goto supports signed register comparisons" {
 
 test "conditional direct goto lowers signed zero tests directly" {
     try expectAsm(
-        \\fn failed() noreturn { @break(); }
+        \\fn failed() noreturn { rsp.halt(); }
         \\fn check(reg($t0) value: i32) noreturn {
-        \\  if(value < 0) @goto(failed) delay {
+        \\  if(value < 0) jump failed() slot {
         \\    reg($at) code: u32 = 0xc0080000;
         \\  }
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2739,12 +2907,12 @@ test "conditional direct goto lowers signed zero tests directly" {
 
 test "conditional direct goto accepts a register rhs" {
     try expectAsm(
-        \\fn target() noreturn { @break(); }
+        \\fn target() noreturn { rsp.halt(); }
         \\fn check(reg($t1) value: u32, reg($t0) expected: u32) noreturn {
-        \\  if(value == expected) @goto(target) delay {
+        \\  if(value == expected) jump target() slot {
         \\    expected = 6;
         \\  }
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2763,14 +2931,14 @@ test "conditional direct goto accepts a register rhs" {
     );
 }
 
-test "jump accepts a typed delay slot" {
+test "jump accepts a typed slot" {
     try expectAsm(
         \\fn loop() noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn dispatch(reg($t0) handler: u32) noreturn {
-        \\  @jump(handler) delay {
-        \\    @setReturn(loop);
+        \\  jump(handler) slot {
+        \\    reg($ra) continuation: fn() = &loop;
         \\  }
         \\}
     ,
@@ -2796,11 +2964,11 @@ test "tail transfers place their target adjacent and emit no transfer instructio
         \\  tail last(value);
         \\}
         \\fn middle() noreturn {
-        \\  @break(2);
+        \\  rsp.halt(2);
         \\}
         \\fn last(reg($t3) value: u32) noreturn {
         \\  value += 1;
-        \\  @break(1);
+        \\  rsp.halt(1);
         \\}
     ,
         \\.set noreorder
@@ -2825,7 +2993,7 @@ test "conflicting tail placement emits a jump for the non-adjacent edge" {
     try expectAsm(
         \\fn first() noreturn { tail target(); }
         \\fn second() noreturn { tail target(); }
-        \\fn target() noreturn { @break(); }
+        \\fn target() noreturn { rsp.halt(); }
     ,
         \\.set noreorder
         \\.set noat
@@ -2846,7 +3014,7 @@ test "conflicting tail placement emits a jump for the non-adjacent edge" {
 
 test "tail transfers to external functions emit a jump" {
     try expectAsm(
-        \\extern fn target() clobbers() noreturn;
+        \\extern fn target() writes() noreturn;
         \\fn first() noreturn { tail target(); }
     ,
         \\.set noreorder
@@ -2867,9 +3035,9 @@ test "non-terminal tail transfers emit an explicit jump" {
         \\  if(flag != 0) {
         \\    tail target();
         \\  }
-        \\  @break();
+        \\  rsp.halt();
         \\}
-        \\fn target() noreturn { @break(1); }
+        \\fn target() noreturn { rsp.halt(1); }
     ,
         \\.set noreorder
         \\.set noat
@@ -2897,7 +3065,7 @@ test "local labels support direct and conditional goto" {
         \\  if(value == 0) goto done;
         \\  goto start;
         \\done:
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2917,17 +3085,17 @@ test "local labels support direct and conditional goto" {
     );
 }
 
-test "local goto delay blocks emit typed delay-slot statements" {
+test "local goto slot blocks emit typed transfer-slot statements" {
     try expectAsm(
         \\fn dispatch(reg($t0) value: u32, reg($t1) next: u32) noreturn {
-        \\  if(value == 0) goto done delay {
+        \\  if(value == 0) goto done slot {
         \\    next += 1;
         \\  }
-        \\  goto done delay {
+        \\  goto done slot {
         \\    value = next;
         \\  }
         \\done:
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2949,13 +3117,11 @@ test "local goto delay blocks emit typed delay-slot statements" {
 test "conditional direct goto emits a tail branch and delay slot" {
     try expectAsm(
         \\fn target() noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn dispatch(reg($t0) value: u32) noreturn {
-        \\  if(value == 0) @goto(target) delay {
-        \\    @nop();
-        \\  }
-        \\  @break();
+        \\  if(value == 0) jump target();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -2977,14 +3143,12 @@ test "conditional direct goto emits a tail branch and delay slot" {
 test "conditional tail validates arguments and preserves direct branch lowering" {
     try expectAsm(
         \\fn target(reg($a0) value: u32) noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn dispatch(reg($t0) condition: u32) noreturn {
         \\  reg value: u32 = 7;
-        \\  if(condition == 0) tail target(value) delay {
-        \\    @nop();
-        \\  }
-        \\  @break();
+        \\  if(condition == 0) tail target(value);
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3004,13 +3168,13 @@ test "conditional tail validates arguments and preserves direct branch lowering"
     );
 }
 
-test "tail delay slot becomes the final instruction before zero-byte fallthrough" {
+test "tail slot becomes the final instruction before zero-byte fallthrough" {
     try expectAsm(
         \\fn target(reg($a0) value: u32) noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn dispatch(reg($a0) value: u32) noreturn {
-        \\  tail target(value) delay {
+        \\  tail target(value) slot {
         \\    value += 1;
         \\  }
         \\}
@@ -3032,7 +3196,7 @@ test "tail delay slot becomes the final instruction before zero-byte fallthrough
 test "typed direct jump validates arguments without changing function layout" {
     try expectAsm(
         \\fn target(reg($a0) value: u32) noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn dispatch() noreturn {
         \\  reg value: u32 = 7;
@@ -3055,17 +3219,27 @@ test "typed direct jump validates arguments without changing function layout" {
     );
 }
 
-test "delay blocks reject multiple source statements" {
+test "slot blocks reject multiple source statements" {
     try expectAsmError(
         \\fn dispatch(reg($t0) value: u32) noreturn {
-        \\  goto done delay {
+        \\  goto done slot {
         \\    value += 1;
         \\    value += 2;
         \\  }
         \\done:
-        \\  @break();
+        \\  rsp.halt();
         \\}
-    , error.InvalidDelaySlot);
+    , error.InvalidSlot);
+}
+
+test "slot blocks reject semantic no-ops" {
+    try expectAsmError(
+        \\fn dispatch() noreturn {
+        \\  jump dispatch() slot {
+        \\    rsp.nop();
+        \\  }
+        \\}
+    , error.UnnecessarySlot);
 }
 
 test "assignment copies between explicit scalar registers" {
@@ -3075,7 +3249,7 @@ test "assignment copies between explicit scalar registers" {
         \\  reg($ra) return_address: u32 = undefined;
         \\  saved_return = return_address;
         \\  return_address = saved_return;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3093,7 +3267,7 @@ test "assignment copies between explicit scalar registers" {
 
 test "narrow unsigned loads zero extend into u32 registers" {
     try expectAsm(
-        \\fn test(reg($a0) address: u32) {
+        \\fn test(reg($a0) address: dmem) {
         \\  reg($t0) byte: u32 = load(u8, address);
         \\  reg($t1) half: u32 = 0;
         \\  half = load(u16, address, 2);
@@ -3197,12 +3371,12 @@ test "undefined register declarations emit no instruction" {
 test "automatic call arguments coalesce into fixed ABI registers" {
     try expectAsm(
         \\fn consume(reg($t3) value: u32) noreturn {
-        \\  @break();
+        \\  rsp.halt();
         \\}
         \\fn test() noreturn {
         \\  reg value: u32 = 7;
         \\  consume(value);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3231,7 +3405,7 @@ test "automatic values live across calls avoid inferred clobbers" {
         \\  reg value: u32 = 7;
         \\  consume(3);
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3263,7 +3437,7 @@ test "literal argument setup avoids unrelated automatic values live across calls
         \\  reg value: u32 = 7;
         \\  consume(3);
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3295,7 +3469,7 @@ test "constant argument setup avoids unrelated automatic values live across call
         \\  reg value: u32 = 7;
         \\  consume(input);
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3326,7 +3500,7 @@ test "read-only automatic arguments remain live in their ABI registers" {
         \\  reg value: u32 = 7;
         \\  consume(value);
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3356,7 +3530,7 @@ test "literal argument setup rejects conflicting pinned live values" {
         \\  reg($t0) value: u32 = 7;
         \\  consume(3);
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.PinnedRegisterOverwrittenByCallArgument);
 }
@@ -3372,7 +3546,7 @@ test "transitive literal argument setup rejects conflicting pinned live values" 
         \\  reg($t0) value: u32 = 7;
         \\  middle();
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.PinnedRegisterClobberedByCall);
 }
@@ -3387,7 +3561,7 @@ test "call clobber inference includes callee automatic registers" {
         \\  reg value: u32 = 7;
         \\  consume();
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3421,7 +3595,7 @@ test "automatic callees preserve pinned caller locals live across calls" {
         \\  reg($t0) preserved: u32 = 7;
         \\  consume();
         \\  preserved += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3454,7 +3628,7 @@ test "fixed callee clobbers reject conflicting pinned caller locals" {
         \\  reg($t0) preserved: u32 = 7;
         \\  consume();
         \\  preserved += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.PinnedRegisterClobberedByCall);
 }
@@ -3471,7 +3645,7 @@ test "transitive fixed clobbers reject conflicting pinned caller locals" {
         \\  reg($t0) preserved: u32 = 7;
         \\  middle();
         \\  preserved += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.PinnedRegisterClobberedByCall);
 }
@@ -3486,7 +3660,7 @@ test "automatic values overwritten after calls may use callee clobbers" {
         \\  consume(3);
         \\  value = 9;
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3514,13 +3688,13 @@ test "automatic values overwritten after calls may use callee clobbers" {
 test "calls may define automatic output arguments in fixed registers" {
     try expectAsm(
         \\inline fn readStatus(reg($t2) value: u32) {
-        \\  value = cp0.read(11);
+        \\  value = rsp.cp0.read(11);
         \\}
         \\fn test() noreturn {
         \\  reg value: u32;
         \\  readStatus(value);
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3541,7 +3715,7 @@ test "uninitialized registers require assignment before reads" {
         \\fn test() noreturn {
         \\  reg value: u32;
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.RegisterReadBeforeAssignment);
 
@@ -3552,16 +3726,16 @@ test "uninitialized registers require assignment before reads" {
         \\    value = 1;
         \\  }
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.RegisterReadBeforeAssignment);
 }
 
-test "definite assignment accepts all-path and delay-slot definitions" {
+test "definite assignment accepts all-path and slot definitions" {
     try expectAsm(
         \\fn test(reg($a0) flag: u32) noreturn {
         \\  reg value: u32;
-        \\  if(flag != 0) delay {
+        \\  if(flag != 0) slot {
         \\    value = 3;
         \\  } {
         \\    value = 1;
@@ -3569,7 +3743,7 @@ test "definite assignment accepts all-path and delay-slot definitions" {
         \\    value = 2;
         \\  }
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3597,7 +3771,7 @@ test "explicit undefined preserves unchecked register reads" {
         \\fn test() noreturn {
         \\  reg value: u32 = undefined;
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3614,12 +3788,12 @@ test "explicit undefined preserves unchecked register reads" {
 
 test "extern clobber contracts constrain automatic values live across calls" {
     try expectAsm(
-        \\extern fn consume() clobbers($t0);
+        \\extern fn consume() writes($t0);
         \\fn test() noreturn {
         \\  reg value: u32 = 7;
         \\  consume();
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3639,7 +3813,7 @@ test "extern clobber contracts constrain automatic values live across calls" {
 
 test "extern clobber contracts parse scalar and vector registers" {
     var parser = try parser_mod.Parser.init(testing.allocator,
-        \\extern fn consume() clobbers($t0, $s4, $v03, $v20);
+        \\extern fn consume() writes($t0, $s4, $v03, $v20);
     );
     const functions = try parser.parse();
     defer ast.freeFunctions(testing.allocator, functions);
@@ -3649,15 +3823,24 @@ test "extern clobber contracts parse scalar and vector registers" {
     try testing.expectEqualSlices(ast.VectorRegister, &.{ .v03, .v20 }, functions[0].clobber_vector_regs);
 }
 
+test "legacy clobbers function modifier is rejected" {
+    try expectParseError(
+        "extern fn consume() clobbers($t0);",
+        .unsupported_function_modifier,
+        1,
+        21,
+    );
+}
+
 test "extern vector clobbers constrain automatic values live across calls" {
     try expectAsm(
-        \\extern fn consume() clobbers($v01);
+        \\extern fn consume() writes($v01);
         \\fn test() noreturn {
         \\  reg value: vec16 = 0;
         \\  consume();
         \\  reg addend: vec16 = 0;
         \\  value += addend;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3683,34 +3866,34 @@ test "extern calls without contracts conservatively clobber automatic registers"
         \\  reg value: u32 = 7;
         \\  consume();
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.OutOfFreeRegisters);
 }
 
 test "extern clobber contracts reject live pinned register conflicts" {
     try expectAsmError(
-        \\extern fn consume() clobbers($t0);
+        \\extern fn consume() writes($t0);
         \\fn test() noreturn {
         \\  reg($t0) value: u32 = 7;
         \\  consume();
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     , error.PinnedRegisterClobberedByExternalCall);
 }
 
-test "call delay-slot definitions survive callee clobbers" {
+test "call slot definitions survive callee clobbers" {
     try expectAsm(
-        \\fn consume() clobbers($t0) {
+        \\fn consume() writes($t0) {
         \\}
         \\fn test() noreturn {
         \\  reg value: u32 = undefined;
-        \\  consume() delay {
+        \\  consume() slot {
         \\    value = 7;
         \\  }
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3731,16 +3914,16 @@ test "call delay-slot definitions survive callee clobbers" {
     );
 }
 
-test "automatic values declared in call delay slots survive callee clobbers" {
+test "automatic values declared in call slots survive callee clobbers" {
     try expectAsm(
-        \\fn consume() clobbers($t0) {
+        \\fn consume() writes($t0) {
         \\}
         \\fn test() noreturn {
-        \\  consume() delay {
+        \\  consume() slot {
         \\    reg value: u32 = 7;
         \\  }
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3763,7 +3946,7 @@ test "automatic values declared in call delay slots survive callee clobbers" {
 
 test "control-flow liveness preserves values when a branch bypasses a write" {
     try expectAsm(
-        \\extern fn consume() clobbers($t0);
+        \\extern fn consume() writes($t0);
         \\fn test(reg($a0) flag: u32) noreturn {
         \\  reg value: u32 = 7;
         \\  consume();
@@ -3771,7 +3954,7 @@ test "control-flow liveness preserves values when a branch bypasses a write" {
         \\  value = 9;
         \\use_value:
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3793,9 +3976,9 @@ test "control-flow liveness preserves values when a branch bypasses a write" {
     );
 }
 
-test "control-flow liveness ignores clobbers on mutually exclusive paths" {
+test "control-flow liveness ignores writes on mutually exclusive paths" {
     try expectAsm(
-        \\extern fn consume() clobbers($t0);
+        \\extern fn consume() writes($t0);
         \\inline fn define(reg($t0) value: u32) {
         \\  value = 5;
         \\}
@@ -3809,7 +3992,7 @@ test "control-flow liveness ignores clobbers on mutually exclusive paths" {
         \\  define(value);
         \\done:
         \\  value += 1;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3838,14 +4021,14 @@ test "function calls verify fixed-register arguments without moves" {
     try expectAsm(
         \\fn callee(
         \\  reg($t0) size: u32,
-        \\  reg($s0) address: u32,
+        \\  reg($s0) address: dmem,
         \\) {}
         \\
         \\fn caller() noreturn {
         \\  reg($t0) size: u32 = 15;
-        \\  reg($s0) address: u32 = 0x1000;
+        \\  reg($s0) address: dmem = 0x1000;
         \\  callee(size, address);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3872,7 +4055,7 @@ test "inline calls do not force command return-address preservation" {
         \\inline fn primitive(reg($a0) value: u32) {
         \\  asm("mtc0 $a0, $9");
         \\}
-        \\command(1) fn commandHandler(reg($a0) value: u32) {
+        \\@rspq.command(1) fn commandHandler(reg($a0) value: u32) {
         \\  primitive(value);
         \\}
     ,
@@ -3907,7 +4090,7 @@ test "automatic locals in inline functions honor nested call registers" {
         \\}
         \\fn test(reg($a0) value: u32) noreturn {
         \\  helper(value);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -3955,25 +4138,112 @@ test "data addresses can initialize signed pointer registers" {
     );
 }
 
-test "function calls reject arguments that do not match pinned parameters" {
+test "function calls move scalar arguments that do not match pinned parameters" {
     try expectAsmError(
         \\fn callee(reg($t0) value: u32) {}
         \\fn caller() {
         \\  callee();
         \\}
     , error.FunctionArgumentCountMismatch);
-    try expectAsmError(
+    try expectAsm(
         \\fn callee(reg($t0) value: u32) {}
         \\fn caller() {
         \\  reg($t0) value: i32 = 1;
         \\  callee(value);
         \\}
-    , error.FunctionArgumentTypeMismatch);
-    try expectAsmError(
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\callee:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\caller:
+        \\  addiu $t0, $zero, 1
+        \\  jal callee
+        \\  nop
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+    try expectAsm(
         \\fn callee(reg($t0) value: u32) {}
         \\fn caller() {
         \\  reg($t1) value: u32 = 1;
         \\  callee(value);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\callee:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\caller:
+        \\  addiu $t1, $zero, 1
+        \\  or $t0, $t1, $zero
+        \\  jal callee
+        \\  nop
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "function calls order argument moves before destructive setup" {
+    try expectAsm(
+        \\fn callee(reg($t0) first: u32, reg($t1) second: u32) {}
+        \\fn caller() {
+        \\  reg($t0) second: u32 = 9;
+        \\  callee(3, second);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\callee:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\caller:
+        \\  addiu $t0, $zero, 9
+        \\  or $t1, $t0, $zero
+        \\  addiu $t0, $zero, 3
+        \\  jal callee
+        \\  nop
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "function calls reject scalar argument move cycles" {
+    try expectAsmError(
+        \\fn callee(reg($t0) first: u32, reg($t1) second: u32) {}
+        \\fn caller() {
+        \\  reg($t0) second: u32 = 1;
+        \\  reg($t1) first: u32 = 2;
+        \\  callee(first, second);
+        \\}
+    , error.FunctionArgumentMoveCycle);
+}
+
+test "function calls require matching registers for written scalar arguments" {
+    try expectAsmError(
+        \\fn update(reg($t0) value: u32) {
+        \\  value = 2;
+        \\}
+        \\fn caller() {
+        \\  reg($t1) value: u32 = 1;
+        \\  update(value);
         \\}
     , error.FunctionArgumentRegisterMismatch);
 }
@@ -3982,13 +4252,13 @@ test "function calls materialize constants and literals in pinned registers" {
     try expectAsm(
         \\fn callee(
         \\  reg($t0) size: u32,
-        \\  reg($s0) address: u32,
+        \\  reg($s0) address: dmem,
         \\) {}
         \\
         \\fn caller() noreturn {
-        \\  const address: u32 = 0x12345678;
+        \\  const address: dmem = 0x12345678;
         \\  callee(16, address);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -4013,11 +4283,11 @@ test "function calls materialize constants and literals in pinned registers" {
 
 test "module imports public functions and qualified calls parse" {
     var parser = try parser_mod.Parser.init(testing.allocator,
-        \\const dma = @import("dma.zsp");
+        \\const dma = import("dma.zsp");
         \\pub fn helper() {}
         \\export fn _start() noreturn {
         \\  dma.exec();
-        \\  @goto(dma.exec);
+        \\  jump dma.exec();
         \\  tail dma.exec();
         \\}
     );
@@ -4045,13 +4315,13 @@ test "module imports public functions and qualified calls parse" {
 test "while loop emits labels branch and back edge" {
     try expectAsm(
         \\export fn _start() noreturn {
-        \\  reg($t0) ptr: u16 = 0;
-        \\  const end: u16 = 4;
+        \\  reg($t0) ptr: dmem = 0;
+        \\  const end: dmem = 4;
         \\  while(ptr < end) {
         \\    store(u16, ptr, ptr);
         \\    ptr += 2;
         \\  }
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -4087,7 +4357,7 @@ test "labeled break and continue target the requested loop" {
         \\  }
         \\  continue outer;
         \\}
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -4124,7 +4394,7 @@ test "do while loops branch after executing their body" {
         \\again: do {
         \\  value += 1;
         \\} while(value < 3);
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -4145,15 +4415,15 @@ test "do while loops branch after executing their body" {
     );
 }
 
-test "structured if supports an explicit branch delay slot" {
+test "structured if supports an explicit branch slot" {
     try expectAsm(
         \\fn test(reg($t0) value: u32) noreturn {
-        \\  if(value != 0) delay {
+        \\  if(value != 0) slot {
         \\    value = 7;
         \\  } {
-        \\    @break(1);
+        \\    rsp.halt(1);
         \\  }
-        \\  @break(2);
+        \\  rsp.halt(2);
         \\}
     ,
         \\.set noreorder
@@ -4171,7 +4441,7 @@ test "structured if supports an explicit branch delay slot" {
     );
 }
 
-test "structured if preserves a load in an explicit branch delay slot" {
+test "structured if preserves a load in an explicit branch slot" {
     try expectAsm(
         \\bss {
         \\  delay_value: u16;
@@ -4179,13 +4449,13 @@ test "structured if preserves a load in an explicit branch delay slot" {
         \\}
         \\fn test(reg($a0) flag: i32) noreturn {
         \\  reg($t0) value: u32 = undefined;
-        \\  if(flag < 0) delay {
+        \\  if(flag < 0) slot {
         \\    value = load(u16, delay_value);
         \\  } {
         \\    value = load(u8, arm_value);
-        \\    @break(1);
+        \\    rsp.halt(1);
         \\  }
-        \\  @break(2);
+        \\  rsp.halt(2);
         \\}
     ,
         \\.set noreorder
@@ -4218,9 +4488,9 @@ test "if block placement avoids a jump when the else arm terminates" {
         \\  if(flag != 0) {
         \\    value += 1;
         \\  } else {
-        \\    @return();
+        \\    return;
         \\  }
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -4246,13 +4516,13 @@ test "conditional labeled block breaks branch directly to the block exit" {
         \\fn test(reg($t0) value: u32) noreturn {
         \\  done: block {
         \\    if(value == 0) {
-        \\      break done delay {
+        \\      break done slot {
         \\        value = 1;
         \\      }
         \\    }
         \\    value = 2;
         \\  }
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -4270,19 +4540,19 @@ test "conditional labeled block breaks branch directly to the block exit" {
     );
 }
 
-test "labeled block exit delay is shared with a terminal conditional transfer" {
+test "labeled block exit slot is shared with a terminal conditional transfer" {
     try expectAsm(
-        \\fn target() noreturn { @break(1); }
+        \\fn target() noreturn { rsp.halt(1); }
         \\fn test(reg($t0) value: u32) noreturn {
         \\  done: block {
         \\    if(value == 0) {
         \\      break done;
         \\    }
-        \\    if(value != 1) @goto(target);
-        \\  } exit delay {
+        \\    if(value != 1) jump target();
+        \\  } exit slot {
         \\    value = 7;
         \\  }
-        \\  @break(2);
+        \\  rsp.halt(2);
         \\}
     ,
         \\.set noreorder
@@ -4320,11 +4590,23 @@ test "syntax rejects unsupported function modifier" {
     , .unsupported_function_modifier, 1, 11);
 }
 
+test "RSPQ metadata requires its namespace" {
+    try expectSyntaxRejected(
+        \\command(0) fn legacy() {}
+    );
+    try expectSyntaxRejected(
+        \\const commands = commandTable();
+    );
+    try expectSyntaxRejected(
+        \\@rspq.command(0) fn legacy() commandSize(8) {}
+    );
+}
+
 test "command functions emit indexed handler metadata" {
     try expectAsm(
-        \\command(0) fn first(reg($a0) header: u32, reg($a1) _: u32) {
+        \\@rspq.command(0) fn first(reg($a0) header: u32, reg($a1) _: u32) {
         \\}
-        \\command(1) fn second(reg($a0) header: u32) {
+        \\@rspq.command(1) fn second(reg($a0) header: u32) {
         \\}
     ,
         \\.set noreorder
@@ -4357,8 +4639,8 @@ test "command functions emit indexed handler metadata" {
 
 test "commandSize overrides inferred command metadata size" {
     try expectAsm(
-        \\command(8) fn triangle(reg($a0) header: u32) commandSize(176) noreturn {
-        \\  @break();
+        \\@rspq.command(8) fn triangle(reg($a0) header: u32) @rspq.commandSize(176) noreturn {
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -4381,8 +4663,8 @@ test "commandSize overrides inferred command metadata size" {
 
 test "commandSize maps individual sizes onto shared command slots" {
     try expectAsm(
-        \\command(8, 9) fn triangles(reg($a0) header: u32) commandSize(32, 48) noreturn {
-        \\  @break();
+        \\@rspq.command(8, 9) fn triangles(reg($a0) header: u32) @rspq.commandSize(32, 48) noreturn {
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -4409,7 +4691,7 @@ test "commandSize maps individual sizes onto shared command slots" {
 
 test "command discard parameters describe trailing command words" {
     try expectAsm(
-        \\command(31) fn triangleData(
+        \\@rspq.command(31) fn triangleData(
         \\  reg($a0) offset: u32,
         \\  reg($a1) xy: u32,
         \\  reg($a2) z: u32,
@@ -4440,7 +4722,7 @@ test "command discard parameters describe trailing command words" {
 
 test "external resident functions can provide command table aliases" {
     try expectAsm(
-        \\command(21, 23) extern fn resident_command_loop() commandSize(8) noreturn;
+        \\@rspq.command(21, 23) extern fn resident_command_loop() @rspq.commandSize(8) noreturn;
     ,
         \\.set noreorder
         \\.set noat
@@ -4462,7 +4744,7 @@ test "external resident functions can provide command table aliases" {
 
 test "command trailing parameters must be discarded" {
     try expectAsmError(
-        \\command(0) fn bad(
+        \\@rspq.command(0) fn bad(
         \\  reg($a0) a: u32,
         \\  reg($a1) b: u32,
         \\  reg($a2) c: u32,
@@ -4474,14 +4756,14 @@ test "command trailing parameters must be discarded" {
 
 test "command table materializes handlers, sizes, and empty slots" {
     try expectAsm(
-        \\const commands = @commandTable();
-        \\command(0) fn wait() {
+        \\const commands = @rspq.commandTable();
+        \\@rspq.command(0) fn wait() {
         \\}
-        \\command(2) fn jump(reg($a0) target: u32) {
+        \\@rspq.command(2) fn jump(reg($a0) target: u32) {
         \\}
         \\export fn _start() noreturn {
         \\  reg($t0) table: u32 = commands;
-        \\  @break();
+        \\  rsp.halt();
         \\}
     ,
         \\.set noreorder
@@ -4531,17 +4813,17 @@ test "command table materializes handlers, sizes, and empty slots" {
 
 test "command functions require unique indices and ABI parameters" {
     try expectAsmError(
-        \\command(0) fn first(reg($a0) header: u32) {}
-        \\command(0) fn second(reg($a0) header: u32) {}
+        \\@rspq.command(0) fn first(reg($a0) header: u32) {}
+        \\@rspq.command(0) fn second(reg($a0) header: u32) {}
     , error.DuplicateCommandIndex);
     try expectAsmError(
-        \\command(0) fn bad(reg($a1) header: u32) {}
+        \\@rspq.command(0) fn bad(reg($a1) header: u32) {}
     , error.InvalidCommandParameters);
 }
 
 test "command functions support indices spanning overlay IDs" {
     try expectAsm(
-        \\command(16) fn extended(reg($a0) header: u32) {
+        \\@rspq.command(16) fn extended(reg($a0) header: u32) {
         \\}
     ,
         \\.set noreorder
@@ -4565,7 +4847,7 @@ test "command functions support indices spanning overlay IDs" {
 
 test "one command handler can occupy multiple command slots" {
     try expectAsm(
-        \\command(0, 15, 63) fn shared(reg($a0) header: u32) {}
+        \\@rspq.command(0, 15, 63) fn shared(reg($a0) header: u32) {}
     ,
         \\.set noreorder
         \\.set noat
@@ -4608,7 +4890,7 @@ test "optimizer does not move an ra read into a jal delay slot" {
 
 test "discard parameters contribute to command size without defining symbols" {
     try expectAsmError(
-        \\command(0) fn bad(reg($a0) _: u32) {
+        \\@rspq.command(0) fn bad(reg($a0) _: u32) {
         \\  reg($t0) value: u32 = _;
         \\}
     , error.UnknownSymbol);
@@ -4643,20 +4925,20 @@ test "syntax rejects removed var keyword" {
 test "resident instruction forms are expressible without inline assembly" {
     try expectAsm(
         \\fn test() noreturn {
-        \\  reg($gp) address: u32 = undefined;
+        \\  reg($gp) address: dmem = undefined;
         \\  reg($t7) size: u32 = undefined;
-        \\  reg($t0) next: u32 = undefined;
-        \\  reg($t1) limit: u32 = undefined;
+        \\  reg($t0) next: dmem = undefined;
+        \\  reg($t1) limit: dmem = undefined;
         \\  reg($at) comparison: u32 = undefined;
         \\  reg($v31) packed_vector: vec16 = undefined;
         \\  reg($v30) shifted: vec16 = undefined;
         \\  next = address +% size;
         \\  comparison = signedLessThan(next, limit);
-        \\  packed_vector = load_vec_u8(0);
+        \\  packed_vector = loadVectorBytes(0);
         \\  shifted = packed_vector >>> 8;
-        \\  goto done, .branch delay {
+        \\  goto done, .branch slot {
         \\done:
-        \\    @break(0xba);
+        \\    rsp.halt(0xba);
         \\  }
         \\}
     ,

@@ -1,4 +1,4 @@
 export fn _start() noreturn {
     store(u16, 0, 0xABCD);
-    @break();
+    rsp.halt();
 }

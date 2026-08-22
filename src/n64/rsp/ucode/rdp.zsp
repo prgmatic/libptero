@@ -1,20 +1,10 @@
-const dma = @import("resident_dma.zsp");
-const cp0 = @import("cp0.zsp");
-const queue = @import("resident_queue.zsp");
+const dma = import("resident_api.zsp");
+const queue = import("resident_api.zsp");
 
 packed struct StagedRdpBufferState {
     current: u32;
     previous: u32;
 }
-
-abi rspq_command(
-    reg($a0) argument_0: u32,
-    reg($a1) argument_1: u32,
-    reg($a2) argument_2: u32,
-    reg($a3) argument_3: u32,
-);
-
-abi continuation();
 
 bss {
     // Large enough for the longest RDP triangle command, matching libdragon.
@@ -28,8 +18,8 @@ bss {
 
 // Canonical libdragon append/finalize interface. Complex handlers can append
 // multiple RDP commands before a single DMA submission.
-pub fn write8(word0: u32, word1: u32) using(rspq_command) {
-    reg($s0) staging_end: u32 = load(u32, command_staging_ptr);
+pub fn write8(word0: u32, word1: u32) {
+    reg($s0) staging_end: dmem = load(u32, command_staging_ptr);
     store(u32, staging_end, word0);
     store(u32, staging_end, word1, 4);
     staging_end += 8;
@@ -41,8 +31,8 @@ pub fn write16(
     word1: u32,
     word2: u32,
     word3: u32,
-) using(rspq_command) {
-    reg($s0) staging_end: u32 = load(u32, command_staging_ptr);
+) {
+    reg($s0) staging_end: dmem = load(u32, command_staging_ptr);
     store(u32, staging_end, word0);
     store(u32, staging_end, word1, 4);
     store(u32, staging_end, word2, 8);
@@ -51,7 +41,7 @@ pub fn write16(
     store(u32, command_staging_ptr, staging_end);
 }
 
-pub inline fn setStagingEnd(reg($s4) staging_end: u32) {
+pub inline fn setStagingEnd(reg($s4) staging_end: dmem) {
     store(u32, command_staging_ptr, staging_end);
 }
 
@@ -60,32 +50,33 @@ pub inline fn loadCurrent(reg($a0) current: u32) {
 }
 
 pub inline fn prepareStagedSend(
-    reg($s4) staging: u32,
-    reg($s3) staging_end: u32,
+    reg($s4) staging: dmem,
+    reg($s3) staging_end: dmem,
 ) {
     staging = command_staging;
     staging_end = load(u32, command_staging_ptr);
     store(u32, command_staging_ptr, staging);
 }
 
-pub fn finalize() using(continuation) noreturn {
-    reg($s4) staging: u32 = command_staging;
-    reg($s3) staging_end: u32 = load(u32, command_staging_ptr);
+pub fn finalize() noreturn {
+    reg($s4) staging: dmem = command_staging;
+    reg($s3) staging_end: dmem = load(u32, command_staging_ptr);
     store(u32, command_staging_ptr, staging);
-    call sendStaged() then queue.resident_command_loop;
+    sendStaged(staging, staging_end);
+    tail queue.commandLoop();
 }
 
 // Stackless RDP emission ABI. $sp is libdragon's secondary return-address
 // register (ra2), while $t7 retains the staged byte count.
 pub fn sendStaged(
-    reg($s4) dmem: u32,
-    reg($s3) staging_end: u32,
+    reg($s4) dmem: dmem,
+    reg($s3) staging_end: dmem,
 ) noreturn {
     staging_end &= 0x0fff;
     dmem &= 0x0fff;
     reg($at) invalid_size: u32 = undefined;
     invalid_size = signedLessThan(staging_end, dmem);
-    if(invalid_size != 0) tail queue.resident_assertion_failed() delay {
+    if(invalid_size != 0) tail queue.invalidCommand() slot {
         invalid_size = 0xc0060000;
     }
 
@@ -94,7 +85,7 @@ pub fn sendStaged(
     size = staging_end - dmem;
     reg($sp) saved_return: u32 = undefined;
     reg($ra) return_address: u32 = undefined;
-    if(size == 0) tail queue.resident_return_to_caller() delay {
+    if(size == 0) tail dma.returnToCaller() slot {
         saved_return = return_address;
     }
 
@@ -103,40 +94,36 @@ pub fn sendStaged(
     rdram &= invalid_size;
     reg($a2) sentinel: u32 = load(u32, rdp_sentinel);
     sentinel -= size;
-    reg($t5) next_function: fn(rspq_command);
+    reg($t5) next_function: fn(i32, i32, i32);
     invalid_size = signedLessThan(sentinel, rdram);
     reg($t1) previous_start: u32 = undefined;
     reg($a1) start: u32 = undefined;
-    if(invalid_size != 0) delay {
-        next_function = &queue.resident_rdp_append_buffer;
-    } {
+    next_function = &queue.rdpAppendBuffer;
+    if(invalid_size != 0) {
         reg($t3) wait_mask: u32 = load(u8, rdp_syncfull_ongoing);
         wait_mask |= 0x00000200;
         reg($t0) dp_status: u32 = undefined;
         do {
-            cp0.getDpStatusT0(dp_status);
+            dp_status = rsp.cp0.rdpStatus();
             dp_status &= wait_mask;
-        } while(dp_status != 0) delay {
             rdram = load(StagedRdpBufferState.previous, rdp_buffers);
-        }
+        } while(dp_status != 0);
 
         previous_start = load(StagedRdpBufferState.current, rdp_buffers);
         store(StagedRdpBufferState.current, rdp_buffers, rdram);
-        ordered {
+        exact {
             store(StagedRdpBufferState.previous, rdp_buffers, previous_start);
             invalid_size = 0x00010000;
         }
         sentinel = rdram + invalid_size;
         start = rdram;
-        next_function = &queue.resident_rdp_set_buffer;
+        next_function = &queue.rdpSetBuffer;
     }
 
     dma_size = size - 1;
     reg($a0) next: u32 = undefined;
-    dma.resident_dma_out(dma_size, previous_start, rdram, dmem) delay {
-        next = rdram + size;
-    }
-    jump(next_function) delay {
-        return_address = saved_return;
-    }
+    next = rdram + size;
+    dma.out(dma_size, previous_start, rdram, dmem);
+    return_address = saved_return;
+    jump(next_function);
 }

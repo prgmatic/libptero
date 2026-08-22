@@ -9,7 +9,6 @@ pub const Function = struct {
     inline_call: bool,
     external: bool = false,
     no_return: bool,
-    abi_name: ?[]const u8 = null,
     command_indices: []const u8 = &.{},
     command_sizes: []const u8 = &.{},
     has_clobber_contract: bool = false,
@@ -31,6 +30,21 @@ pub const Parameter = struct {
     vector_reg: ?VectorRegister = null,
 };
 
+pub const FunctionType = struct {
+    parameters: [16]FunctionParameterType = undefined,
+    parameter_count: u8 = 0,
+
+    pub fn parameterSlice(self: *const FunctionType) []const FunctionParameterType {
+        return self.parameters[0..self.parameter_count];
+    }
+};
+
+pub const FunctionParameterType = struct {
+    data_type: DataType,
+    reg: ?Register = null,
+    vector_reg: ?VectorRegister = null,
+};
+
 pub const Value = union(enum) {
     ident: []const u8,
     vector_access: VectorAccess,
@@ -38,13 +52,20 @@ pub const Value = union(enum) {
     vector_shift: VectorShift,
     accumulator_read: AccumulatorPart,
     vector_control_read: VectorControlRegister,
-    hardware_read: u4,
+    hardware_read: struct {
+        register: u4,
+        returns_dmem: bool = false,
+    },
     scalar_comparison: ScalarComparison,
     signed_less_than: struct { lhs: ValueRef, rhs: ValueRef },
     number: i64,
     load: Load,
     scalar_expression: *ScalarExpression,
     function_address: FunctionRef,
+    data_address: struct {
+        label: []const u8,
+        offset: i64 = 0,
+    },
 };
 
 pub const ScalarExpression = struct {
@@ -135,6 +156,7 @@ pub const DataType = enum {
     u8,
     u16,
     u32,
+    dmem,
     i8,
     i16,
     i32,
@@ -183,10 +205,6 @@ pub const VectorMemoryOperation = enum {
 };
 
 pub const HardwareWriteOperation = union(enum) {
-    rsp_dma_memory_address,
-    rsp_dma_rdram_address,
-    rsp_dma_write_length,
-    rdp_command_end,
     cp0: u4,
 };
 
@@ -267,7 +285,7 @@ pub const VarDecl = struct {
     data_type: DataType,
     reg: ?Register,
     vector_reg: ?VectorRegister = null,
-    function_abi: ?[]const u8 = null,
+    function_type: ?FunctionType = null,
     name: []const u8,
     value: ?Value,
 };
@@ -314,24 +332,10 @@ pub const Builtin = union(enum) {
         encoding: DirectGotoEncoding = .jump,
         delay_slot: ?[]Statement,
     },
-    call_and_goto: struct {
-        callee: FunctionRef,
-        continuation: FunctionRef,
-    },
     tail: struct {
         target: FunctionRef,
         arguments: []const ValueRef,
         delay_slot: ?[]Statement = null,
-    },
-    set_return: []const u8,
-    set_function_address: struct {
-        destination: []const u8,
-        target: FunctionRef,
-    },
-    set_data_address: struct {
-        destination: []const u8,
-        label: []const u8,
-        offset: i64,
     },
     write_vector_control: struct {
         register: VectorControlRegister,
@@ -347,6 +351,7 @@ pub const Builtin = union(enum) {
     hardware_write: struct {
         operation: HardwareWriteOperation,
         value: ValueRef,
+        requires_dmem: bool = false,
     },
     hardware_read_register: struct {
         hardware_register: u4,
@@ -477,7 +482,6 @@ pub const Statement = union(enum) {
     },
     ordered_block: []Statement,
     asm_line: []const u8,
-    exact_asm_line: []const u8,
 };
 
 pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) void {

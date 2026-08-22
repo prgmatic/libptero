@@ -31,12 +31,12 @@ pub fn writeOptimized(allocator: std.mem.Allocator, writer: *std.Io.Writer, asse
     var ordered_depth: usize = 0;
     var it = std.mem.splitScalar(u8, assembly, '\n');
     while (it.next()) |line_text| {
-        if (std.mem.eql(u8, std.mem.trim(u8, line_text, " \t\r"), "# zsp ordered block begin")) {
+        if (std.mem.eql(u8, std.mem.trim(u8, line_text, " \t\r"), "# zsp exact block begin")) {
             ordered_depth += 1;
             try lines.append(allocator, .{ .text = line_text });
             continue;
         }
-        if (std.mem.eql(u8, std.mem.trim(u8, line_text, " \t\r"), "# zsp ordered block end")) {
+        if (std.mem.eql(u8, std.mem.trim(u8, line_text, " \t\r"), "# zsp exact block end")) {
             ordered_depth -= 1;
             try lines.append(allocator, .{ .text = line_text });
             continue;

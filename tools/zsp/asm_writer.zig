@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const rspq = @import("rspq.zig");
 
 const Register = ast.Register;
 const DataType = ast.DataType;
@@ -35,6 +36,74 @@ pub const Diagnostic = struct {
     symbol_name: ?[]const u8 = null,
 };
 
+pub const ExplainAllocation = struct {
+    function_name: []const u8,
+    symbol_name: []const u8,
+    data_type: DataType,
+    reg: ?Register,
+    vector_reg: ?ast.VectorRegister,
+    automatic: bool,
+};
+
+pub const ExplainWrites = struct {
+    function_name: []const u8,
+    scalar: u32,
+    vector: u32,
+};
+
+pub const ExplainReport = struct {
+    allocations: [2048]ExplainAllocation = undefined,
+    allocation_count: usize = 0,
+    writes: [1024]ExplainWrites = undefined,
+    writes_count: usize = 0,
+
+    fn addAllocation(self: *ExplainReport, allocation: ExplainAllocation) !void {
+        if (self.allocation_count >= self.allocations.len) return error.TooManyExplainAllocations;
+        self.allocations[self.allocation_count] = allocation;
+        self.allocation_count += 1;
+    }
+
+    pub fn write(self: *const ExplainReport, writer: *std.Io.Writer) !void {
+        try writer.writeAll("registers:\n");
+        var current_function: ?[]const u8 = null;
+        for (self.allocations[0..self.allocation_count]) |allocation| {
+            if (current_function == null or !std.mem.eql(u8, current_function.?, allocation.function_name)) {
+                current_function = allocation.function_name;
+                try writer.print("  {s}:\n", .{allocation.function_name});
+            }
+            try writer.print("    {s}: {s} -> ", .{ allocation.symbol_name, @tagName(allocation.data_type) });
+            if (allocation.reg) |reg| {
+                try writer.writeAll(regName(reg));
+            } else if (allocation.vector_reg) |reg| {
+                try writer.print("${s}", .{vectorRegName(reg)});
+                if (allocation.data_type == .vec32) {
+                    try writer.print("/${s}", .{vectorRegName(nextVectorRegister(reg).?)});
+                }
+            }
+            try writer.print(" ({s})\n", .{if (allocation.automatic) "automatic" else "fixed"});
+        }
+        if (self.allocation_count == 0) try writer.writeAll("  none\n");
+
+        try writer.writeAll("writes:\n");
+        for (self.writes[0..self.writes_count]) |entry| {
+            try writer.print("  {s}:", .{entry.function_name});
+            var any = false;
+            for (std.enums.values(Register)) |reg| {
+                if ((entry.scalar & registerBit(reg)) == 0) continue;
+                try writer.print(" {s}", .{regName(reg)});
+                any = true;
+            }
+            for (std.enums.values(ast.VectorRegister)) |reg| {
+                if ((entry.vector & vectorRegisterBit(reg)) == 0) continue;
+                try writer.print(" ${s}", .{vectorRegName(reg)});
+                any = true;
+            }
+            if (!any) try writer.writeAll(" none");
+            try writer.writeByte('\n');
+        }
+    }
+};
+
 pub fn write(writer: *std.Io.Writer, functions: []const ast.Function) !void {
     return writeWithDiagnostic(writer, functions, null);
 }
@@ -44,18 +113,50 @@ pub fn writeWithDiagnostic(
     functions: []const ast.Function,
     diagnostic: ?*Diagnostic,
 ) !void {
+    return writeInternal(writer, functions, diagnostic, null);
+}
+
+pub fn writeWithExplain(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    diagnostic: ?*Diagnostic,
+    explain: *ExplainReport,
+) !void {
+    return writeInternal(writer, functions, diagnostic, explain);
+}
+
+fn writeInternal(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    diagnostic: ?*Diagnostic,
+    explain: ?*ExplainReport,
+) !void {
     try writer.writeAll(".set noreorder\n");
     try writer.writeAll(".set noat\n");
 
     var clobbers = try FunctionClobberRegistry.init(functions, diagnostic);
+    if (explain) |report| {
+        for (functions) |function| {
+            if (report.writes_count >= report.writes.len) return error.TooManyFunctions;
+            const contract = clobbers.find(function.name) orelse return error.UnknownFunction;
+            report.writes[report.writes_count] = .{
+                .function_name = function.source_name,
+                .scalar = contract.scalar,
+                .vector = contract.vector,
+            };
+            report.writes_count += 1;
+        }
+    }
+    const command_analysis = try rspq.analyzeCommands(functions);
     var top_level_context = FunctionContext{
         .label_prefix = "top_level",
         .clobbers = &clobbers,
         .functions = functions,
         .diagnostic = diagnostic,
+        .explain = explain,
     };
     try writeStorageBlocks(writer, functions, &top_level_context);
-    try writeCommandTable(writer, functions, &top_level_context);
+    try writeCommandTable(writer, &command_analysis, &top_level_context);
     try writer.writeAll(".text\n\n");
     var emitted = [_]bool{false} ** 1024;
     if (functions.len > emitted.len) return error.TooManyFunctions;
@@ -90,7 +191,48 @@ pub fn writeWithDiagnostic(
             return err;
         };
     }
-    try writeCommandManifest(writer, functions);
+    try writeCommandManifest(writer, functions, &command_analysis);
+}
+
+pub fn writeInterface(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    diagnostic: ?*Diagnostic,
+) !void {
+    const contracts = try FunctionClobberRegistry.init(functions, diagnostic);
+    for (functions) |function| {
+        if (!function.public or !function.export_symbol or function.external or function.inline_call) continue;
+        const interface_name = function.source_name;
+        const contract = contracts.find(function.name) orelse return error.UnknownFunction;
+        try writer.print("// @zsp-symbol {s} {s}\n", .{ interface_name, function.name });
+        try writer.print("pub extern fn {s}(", .{interface_name});
+        for (function.parameters, 0..) |parameter, index| {
+            if (index != 0) try writer.writeAll(", ");
+            if (parameter.reg) |reg| {
+                try writer.print("reg({s}) ", .{regName(reg)});
+            } else if (parameter.vector_reg) |reg| {
+                try writer.print("reg(${s}) ", .{vectorRegName(reg)});
+            }
+            try writer.print("{s}: {s}", .{ parameter.name, @tagName(parameter.data_type) });
+        }
+        try writer.writeAll(") writes(");
+        var wrote_register = false;
+        for (std.enums.values(Register)) |reg| {
+            if ((contract.scalar & registerBit(reg)) == 0) continue;
+            if (wrote_register) try writer.writeAll(", ");
+            try writer.writeAll(regName(reg));
+            wrote_register = true;
+        }
+        for (std.enums.values(ast.VectorRegister)) |reg| {
+            if ((contract.vector & vectorRegisterBit(reg)) == 0) continue;
+            if (wrote_register) try writer.writeAll(", ");
+            try writer.print("${s}", .{vectorRegName(reg)});
+            wrote_register = true;
+        }
+        try writer.writeByte(')');
+        if (function.no_return) try writer.writeAll(" noreturn");
+        try writer.writeAll(";\n\n");
+    }
 }
 
 fn writeFunction(
@@ -107,7 +249,7 @@ fn writeFunction(
     if (!function.inline_call) {
         const terminal_jump = function.statements.len != 0 and switch (function.statements[function.statements.len - 1]) {
             .builtin => |builtin| switch (builtin) {
-                .direct_goto, .call_and_goto, .tail, .jump, .return_from_function => true,
+                .direct_goto, .tail, .jump, .return_from_function => true,
                 else => false,
             },
             else => false,
@@ -126,6 +268,7 @@ fn writeFunction(
             });
         }
         var function_context = top_level_context.child(function.name);
+        function_context.explain_function_name = function.source_name;
         const context = if (function.emit_label) &function_context else top_level_context;
         if (function.emit_label) {
             if (top_level_context.clobbers.?.find(function.name)) |function_clobber| {
@@ -180,6 +323,15 @@ fn findFunctionIndex(functions: []const ast.Function, name: []const u8) ?usize {
         if (std.mem.eql(u8, function.name, name)) return index;
     }
     return null;
+}
+
+fn isContinuationPairAt(statements: []const ast.Statement, index: usize) bool {
+    if (index + 1 >= statements.len or statements[index] != .call or
+        statements[index + 1] != .builtin) return false;
+    const call = statements[index].call;
+    const following = statements[index + 1].builtin;
+    return following == .tail and call.delay_slot == null and
+        following.tail.delay_slot == null and following.tail.arguments.len == 0;
 }
 
 fn statementsContainEmittedCall(functions: []const ast.Function, statements: []const ast.Statement) bool {
@@ -239,15 +391,16 @@ fn statementsContainEmittedCall(functions: []const ast.Function, statements: []c
     return false;
 }
 
-fn writeCommandManifest(writer: *std.Io.Writer, functions: []const ast.Function) !void {
-    var seen = std.StaticBitSet(256).initEmpty();
+fn writeCommandManifest(
+    writer: *std.Io.Writer,
+    functions: []const ast.Function,
+    analysis: *const rspq.CommandAnalysis,
+) !void {
     var wrote_section = false;
     for (functions) |function| {
         if (function.command_indices.len == 0) continue;
-        try validateCommandFunction(function);
-        for (function.command_indices, 0..) |index, command_position| {
-            if (seen.isSet(index)) return error.DuplicateCommandIndex;
-            seen.set(index);
+        for (function.command_indices) |index| {
+            const command = analysis.find(index).?;
             if (!wrote_section) {
                 try writer.writeAll(".section .zsp_commands,\"\",@progbits\n");
                 wrote_section = true;
@@ -255,80 +408,30 @@ fn writeCommandManifest(writer: *std.Io.Writer, functions: []const ast.Function)
             try writer.print("  .word {s}\n  .byte {d}\n  .byte {d}\n  .short 0\n", .{
                 function.name,
                 index,
-                if (function.command_sizes.len == 0)
-                    @as(u8, @intCast(function.parameters.len * 4))
-                else if (function.command_sizes.len == 1)
-                    function.command_sizes[0]
-                else
-                    function.command_sizes[command_position],
+                command.size,
             });
         }
     }
     if (wrote_section) try writer.writeByte('\n');
 }
 
-fn validateCommandFunction(function: ast.Function) !void {
-    if (function.inline_call) return error.InvalidCommandFunction;
-    if (function.parameters.len > 63) return error.InvalidCommandParameters;
-    if (function.command_sizes.len != 0 and function.command_sizes.len != 1 and
-        function.command_sizes.len != function.command_indices.len)
-    {
-        return error.InvalidCommandParameters;
-    }
-    for (function.command_sizes) |size| {
-        if (size == 0 or size & 3 != 0 or size < function.parameters.len * 4) {
-            return error.InvalidCommandParameters;
-        }
-    }
-    for (function.parameters, 0..) |parameter, parameter_index| {
-        if (isVectorType(parameter.data_type)) return error.InvalidCommandParameters;
-        if (parameter_index < 4) {
-            const expected: Register = @enumFromInt(@intFromEnum(Register.a0) + parameter_index);
-            if (parameter.reg != expected) return error.InvalidCommandParameters;
-        } else if (!std.mem.eql(u8, parameter.name, "_")) {
-            return error.InvalidCommandParameters;
-        }
-    }
-}
-
 fn writeCommandTable(
     writer: *std.Io.Writer,
-    functions: []const ast.Function,
+    analysis: *const rspq.CommandAnalysis,
     context: *FunctionContext,
 ) !void {
-    var table_name: ?[]const u8 = null;
-    for (functions) |function| for (function.statements) |statement| switch (statement) {
-        .command_table_decl => |name| {
-            if (table_name != null) return error.MultipleCommandTables;
-            table_name = name;
-        },
-        else => {},
-    };
-    const name = table_name orelse return;
-
-    var commands: [240]?*const ast.Function = @splat(null);
-    var table_len: usize = 0;
-    for (functions) |*function| {
-        if (function.command_indices.len == 0) continue;
-        try validateCommandFunction(function.*);
-        for (function.command_indices) |index| {
-            if (commands[index] != null) return error.DuplicateCommandIndex;
-            commands[index] = function;
-            table_len = @max(table_len, @as(usize, index) + 1);
-        }
-    }
-    if (table_len == 0) return error.EmptyCommandTable;
+    const name = analysis.table_name orelse return;
 
     try writer.writeAll(".data\n.balign 2\n");
     try writer.print("{s}:\n", .{name});
-    for (commands[0..table_len]) |_| try writer.writeAll("  .short 0\n");
+    for (analysis.entries[0..analysis.table_len]) |_| try writer.writeAll("  .short 0\n");
     try writer.writeAll(".section .zsp_command_table,\"\",@progbits\n");
-    try writer.print("  .word {s}\n  .word {d}\n", .{ name, table_len });
+    try writer.print("  .word {s}\n  .word {d}\n", .{ name, analysis.table_len });
     try writer.writeAll(".data\n");
     try writer.writeByte('\n');
     try context.add(.{
         .name = name,
-        .data_type = .u32,
+        .data_type = .dmem,
         .reg = null,
         .constant = null,
         .data_label = name,
@@ -366,7 +469,7 @@ const Symbol = struct {
     data_type: DataType,
     reg: ?Register,
     vector_reg: ?ast.VectorRegister = null,
-    function_abi: ?[]const u8 = null,
+    function_type: ?ast.FunctionType = null,
     constant: ?i64,
     data_label: ?[]const u8 = null,
     automatic: bool = false,
@@ -623,7 +726,7 @@ fn scanDirectStatementClobbers(statements: []const ast.Statement, result: *Funct
             .return_from_function => |delay| if (delay) |items| scanDirectStatementClobbers(items, result),
             else => {},
         },
-        .asm_line, .exact_asm_line => {
+        .asm_line => {
             result.scalar |= allAutomaticScalarRegisters();
             result.vector |= allAutomaticVectorRegisters();
         },
@@ -666,10 +769,6 @@ fn collectCalledFunctionClobbers(
         .ordered_block => |items| collectCalledFunctionClobbers(registry, items, scalar, vector),
         .builtin => |builtin| switch (builtin) {
             .direct_goto => |item| addNamedClobber(registry, item.target.module, item.target.name, scalar, vector),
-            .call_and_goto => |item| {
-                addNamedClobber(registry, item.callee.module, item.callee.name, scalar, vector);
-                addNamedClobber(registry, item.continuation.module, item.continuation.name, scalar, vector);
-            },
             .tail => |tail| {
                 addNamedClobber(registry, tail.target.module, tail.target.name, scalar, vector);
                 if (tail.delay_slot) |delay| collectCalledFunctionClobbers(registry, delay, scalar, vector);
@@ -725,7 +824,7 @@ fn simulateAutomaticRegisters(
                         .data_type = decl.data_type,
                         .reg = null,
                         .vector_reg = reg,
-                        .function_abi = decl.function_abi,
+                        .function_type = decl.function_type,
                         .constant = null,
                         .automatic = decl.vector_reg == null,
                         .first_live = context.firstLive(decl.name),
@@ -739,7 +838,7 @@ fn simulateAutomaticRegisters(
                         .name = decl.name,
                         .data_type = decl.data_type,
                         .reg = reg,
-                        .function_abi = decl.function_abi,
+                        .function_type = decl.function_type,
                         .constant = null,
                         .automatic = decl.reg == null,
                         .first_live = if (decl.is_reserved) 0 else context.firstLive(decl.name),
@@ -884,6 +983,8 @@ const FunctionContext = struct {
     label_prefix: []const u8,
     functions: []const ast.Function = &.{},
     diagnostic: ?*Diagnostic = null,
+    explain: ?*ExplainReport = null,
+    explain_function_name: ?[]const u8 = null,
     symbols: [128]Symbol = undefined,
     symbol_count: usize = 0,
     next_label: usize = 0,
@@ -922,6 +1023,20 @@ const FunctionContext = struct {
         if (self.contains(symbol.name)) return error.SymbolAlreadyDefined;
         self.symbols[self.symbol_count] = symbol;
         self.symbol_count += 1;
+        if (self.explain) |report| {
+            if ((symbol.reg != null or symbol.vector_reg != null) and
+                !std.mem.startsWith(u8, symbol.name, "__"))
+            {
+                try report.addAllocation(.{
+                    .function_name = self.explain_function_name orelse self.label_prefix,
+                    .symbol_name = symbol.name,
+                    .data_type = symbol.data_type,
+                    .reg = symbol.reg,
+                    .vector_reg = symbol.vector_reg,
+                    .automatic = symbol.automatic,
+                });
+            }
+        }
     }
 
     fn child(self: *const FunctionContext, label_prefix: []const u8) FunctionContext {
@@ -930,6 +1045,8 @@ const FunctionContext = struct {
             .clobbers = self.clobbers,
             .functions = self.functions,
             .diagnostic = self.diagnostic,
+            .explain = self.explain,
+            .explain_function_name = self.explain_function_name,
             .function_forbidden_scalar = self.function_forbidden_scalar,
             .function_forbidden_vector = self.function_forbidden_vector,
         };
@@ -1221,21 +1338,25 @@ const FunctionContext = struct {
         name: []const u8,
         reg: ?Register,
         vector_reg: ?ast.VectorRegister,
-    ) !void {
+    ) bool {
         var index = self.lifetime_count;
         while (index > 0) {
             index -= 1;
             const lifetime = &self.lifetimes[index];
-            if (!std.mem.eql(u8, lifetime.name, name) or !lifetime.automatic) continue;
+            if (!std.mem.eql(u8, lifetime.name, name)) continue;
+            if (!lifetime.automatic) {
+                return lifetime.fixed_reg == reg and lifetime.fixed_vector_reg == vector_reg;
+            }
             if ((lifetime.required_reg != null and lifetime.required_reg != reg) or
                 (lifetime.required_vector_reg != null and lifetime.required_vector_reg != vector_reg))
             {
-                return error.FunctionArgumentRegisterMismatch;
+                return false;
             }
             lifetime.required_reg = reg;
             lifetime.required_vector_reg = vector_reg;
-            return;
+            return true;
         }
+        return false;
     }
 
     fn requiredRegister(self: *const FunctionContext, name: []const u8) ?Register {
@@ -1418,7 +1539,7 @@ const FunctionContext = struct {
 
 fn statementsContainUnstructuredControlFlow(statements: []const ast.Statement) bool {
     for (statements) |statement| switch (statement) {
-        .asm_line, .exact_asm_line => return true,
+        .asm_line => return true,
         .conditional_direct_goto => |branch| {
             if (branch.delay_slot) |delay| if (statementsContainUnstructuredControlFlow(delay)) return true;
         },
@@ -1439,7 +1560,7 @@ fn statementsContainUnstructuredControlFlow(statements: []const ast.Statement) b
         },
         .ordered_block => |items| if (statementsContainUnstructuredControlFlow(items)) return true,
         .builtin => |builtin| switch (builtin) {
-            .call_and_goto, .tail => {},
+            .tail => {},
             .return_from_function => |delay| if (delay) |items| {
                 if (statementsContainUnstructuredControlFlow(items)) return true;
             },
@@ -1745,7 +1866,7 @@ fn buildStatementFlow(
                     addFlowSuccessor(context, current, current + 1);
                     buildStatementFlow(context, items, position, 0);
                 },
-                .direct_goto, .call_and_goto, .tail => {},
+                .direct_goto, .tail => {},
                 else => addFlowSuccessor(context, current, next),
             },
             else => addFlowSuccessor(context, current, next),
@@ -1825,12 +1946,6 @@ fn scanBuiltinLifetime(context: *FunctionContext, builtin: ast.Builtin, position
             if (branch.delay_slot) |delay| scanStatementLifetimes(context, delay, next);
         },
         .return_from_function => |delay| if (delay) |items| scanStatementLifetimes(context, items, next),
-        .set_return => |name| context.touchLifetime(name, position),
-        .set_function_address => |item| context.writeLifetime(item.destination, position),
-        .set_data_address => |item| {
-            context.writeLifetime(item.destination, position);
-            context.touchLifetime(item.label, position);
-        },
         .write_vector_control => |item| scanValueRefLifetime(context, item.value, position),
         .vector_memory => |item| {
             switch (item.operation) {
@@ -1862,7 +1977,9 @@ fn applyCallRequirements(
                                 switch (argument) {
                                     .ident => |name| {
                                         if (context.hasLifetime(name)) {
-                                            try context.requireRegister(name, parameter.reg, parameter.vector_reg);
+                                            if (!context.requireRegister(name, parameter.reg, parameter.vector_reg)) {
+                                                addParameterSetupClobber(context, current, parameter);
+                                            }
                                             var visited: [1024]ParameterWriteVisit = undefined;
                                             var visited_count: usize = 0;
                                             if (functionParameterIsWritten(
@@ -1895,7 +2012,9 @@ fn applyCallRequirements(
                                 switch (argument) {
                                     .ident => |name| {
                                         if (context.hasLifetime(name)) {
-                                            try context.requireRegister(name, parameter.reg, parameter.vector_reg);
+                                            if (!context.requireRegister(name, parameter.reg, parameter.vector_reg)) {
+                                                addParameterSetupClobber(context, current, parameter);
+                                            }
                                         } else {
                                             addParameterSetupClobber(context, current, parameter);
                                         }
@@ -1933,7 +2052,9 @@ fn applyCallRequirements(
                             if (branch.arguments.len == function.parameters.len) {
                                 for (branch.arguments, function.parameters) |argument, parameter| switch (argument) {
                                     .ident => |name| if (context.hasLifetime(name)) {
-                                        try context.requireRegister(name, parameter.reg, parameter.vector_reg);
+                                        if (!context.requireRegister(name, parameter.reg, parameter.vector_reg)) {
+                                            addParameterSetupClobber(context, current, parameter);
+                                        }
                                     },
                                     else => {},
                                 };
@@ -1948,7 +2069,9 @@ fn applyCallRequirements(
                             if (tail.arguments.len == function.parameters.len) {
                                 for (tail.arguments, function.parameters) |argument, parameter| switch (argument) {
                                     .ident => |name| if (context.hasLifetime(name)) {
-                                        try context.requireRegister(name, parameter.reg, parameter.vector_reg);
+                                        if (!context.requireRegister(name, parameter.reg, parameter.vector_reg)) {
+                                            addParameterSetupClobber(context, current, parameter);
+                                        }
                                     },
                                     else => {},
                                 };
@@ -2041,8 +2164,6 @@ fn statementsWriteParameter(
         },
         .ordered_block => |items| if (statementsWriteParameter(functions, items, name, visited, visited_count)) return true,
         .builtin => |builtin| switch (builtin) {
-            .set_function_address => |item| if (std.mem.eql(u8, item.destination, name)) return true,
-            .set_data_address => |item| if (std.mem.eql(u8, item.destination, name)) return true,
             .vector_memory => |item| switch (item.operation) {
                 .load16, .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned => if (std.mem.eql(u8, item.vector.name, name)) return true,
                 else => {},
@@ -2062,7 +2183,34 @@ fn writeStatements(
     context: *FunctionContext,
     statements: []const ast.Statement,
 ) anyerror!void {
-    for (statements) |statement| {
+    var statement_index: usize = 0;
+    while (statement_index < statements.len) : (statement_index += 1) {
+        const statement = statements[statement_index];
+        if (isContinuationPairAt(statements, statement_index)) {
+            const call = statement.call;
+            const following = statements[statement_index + 1].builtin.tail;
+            if (call.module != null or following.target.module != null) {
+                return error.UnresolvedModuleCall;
+            }
+            const callee = findFunction(functions, call.name) orelse return error.UnknownFunction;
+            const continuation = findFunction(functions, following.target.name) orelse return error.UnknownFunction;
+            if (callee.inline_call or continuation.parameters.len != 0) {
+                return error.InvalidContinuationCall;
+            }
+            if (context.track_statement_position) context.statement_position += 2;
+            if (context.omitted_tail_target != null and
+                std.mem.eql(u8, context.omitted_tail_target.?, following.target.name) and
+                context.omitted_tail_position == context.statement_position)
+            {
+                try writeCall(writer, functions, context, call);
+            } else {
+                try writeFunctionArguments(writer, functions, context, callee, call.arguments, true);
+                try writer.print("  j {s}\n", .{call.name});
+                try writer.print("  addiu $ra, $zero, %lo({s})\n", .{following.target.name});
+            }
+            statement_index += 1;
+            continue;
+        }
         if (context.track_statement_position) context.statement_position += 1;
         switch (statement) {
             .packed_struct_decl => {},
@@ -2096,7 +2244,7 @@ fn writeStatements(
                 };
                 try writeConditionBranchFalse(writer, context, inverse, branch.target, 0, branch.delay_slot == null);
                 if (branch.delay_slot) |delay_slot| {
-                    if (delay_slot.len != 1) return error.InvalidDelaySlot;
+                    try validateDelaySlot(delay_slot);
                     try writeStatements(writer, functions, context, delay_slot);
                 }
             },
@@ -2104,7 +2252,7 @@ fn writeStatements(
                 if (branch.target.module != null) return error.UnresolvedModuleCall;
                 if (branch.typed) {
                     const target = findFunction(functions, branch.target.name) orelse return error.UnknownFunction;
-                    try writeFunctionArguments(writer, context, target, branch.arguments, true);
+                    try writeFunctionArguments(writer, functions, context, target, branch.arguments, true);
                 }
                 const lhs = try context.lookup(branch.condition.lhs);
                 const lhs_reg = lhs.reg orelse return error.ConditionLhsMustBeRegister;
@@ -2218,15 +2366,11 @@ fn writeStatements(
             .labeled_block => |block| try writeLabeledBlock(writer, functions, context, block),
             .if_statement => |if_statement| try writeIf(writer, functions, context, if_statement),
             .ordered_block => |ordered| {
-                try writer.writeAll("# zsp ordered block begin\n");
+                try writer.writeAll("# zsp exact block begin\n");
                 try writeStatements(writer, functions, context, ordered);
-                try writer.writeAll("# zsp ordered block end\n");
+                try writer.writeAll("# zsp exact block end\n");
             },
             .asm_line => |asm_line| try writer.print("  {s}\n", .{asm_line}),
-            .exact_asm_line => |asm_line| try writer.print(
-                "# zsp exact assembly barrier\n  {s}\n# zsp exact assembly barrier\n",
-                .{asm_line},
-            ),
         }
     }
 }
@@ -2310,7 +2454,7 @@ fn writeStorageBlocks(
                 };
                 try context.add(.{
                     .name = declaration.name,
-                    .data_type = .u32,
+                    .data_type = .dmem,
                     .reg = null,
                     .constant = null,
                     .data_label = declaration.name,
@@ -2364,7 +2508,7 @@ fn scalarDataSize(data_type: DataType) !usize {
     return switch (data_type) {
         .u8, .i8 => 1,
         .u16, .i16 => 2,
-        .u32, .i32 => 4,
+        .u32, .i32, .dmem => 4,
         .vec16, .vec32 => error.ExpectedScalarType,
     };
 }
@@ -2373,7 +2517,7 @@ fn dataDirective(data_type: DataType) []const u8 {
     return switch (data_type) {
         .u8, .i8 => ".byte",
         .u16, .i16 => ".short",
-        .u32, .i32 => ".word",
+        .u32, .i32, .dmem => ".word",
         .vec16, .vec32 => unreachable,
     };
 }
@@ -2383,6 +2527,7 @@ fn validateDataValue(data_type: DataType, value: i64) !void {
         .u8 => value >= 0 and value <= std.math.maxInt(u8),
         .u16 => value >= 0 and value <= std.math.maxInt(u16),
         .u32 => value >= 0 and value <= std.math.maxInt(u32),
+        .dmem => value >= 0 and value <= 4096,
         .i8 => value >= std.math.minInt(i8) and value <= std.math.maxInt(i8),
         .i16 => value >= std.math.minInt(i16) and value <= std.math.maxInt(i16),
         .i32 => value >= std.math.minInt(i32) and value <= std.math.maxInt(i32),
@@ -2415,7 +2560,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
             .data_type = decl.data_type,
             .reg = null,
             .vector_reg = vector_reg,
-            .function_abi = decl.function_abi,
+            .function_type = decl.function_type,
             .constant = null,
             .automatic = decl.vector_reg == null,
             .first_live = context.firstLive(decl.name),
@@ -2450,14 +2595,14 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
                 try loadImmediateInto(writer, reg, source.constant orelse return error.ExpectedConstant);
             }
         },
-        .vector_control_read, .hardware_read, .scalar_comparison, .signed_less_than, .function_address => try writeSet(
+        .vector_control_read, .hardware_read, .scalar_comparison, .signed_less_than, .function_address, .data_address => try writeSet(
             writer,
             context,
             .{
                 .name = decl.name,
                 .data_type = decl.data_type,
                 .reg = reg,
-                .function_abi = decl.function_abi,
+                .function_type = decl.function_type,
                 .constant = null,
             },
             reg,
@@ -2469,7 +2614,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
         .name = decl.name,
         .data_type = decl.data_type,
         .reg = reg,
-        .function_abi = decl.function_abi,
+        .function_type = decl.function_type,
         .constant = null,
         .automatic = decl.reg == null,
         .first_live = if (decl.is_reserved) 0 else context.firstLive(decl.name),
@@ -2585,7 +2730,7 @@ fn writeVectorInitialValue(
             }
         },
         .scalar_expression => return error.UnsupportedScalarExpressionTree,
-        .function_address => return error.RegisterTypeMismatch,
+        .function_address, .data_address => return error.RegisterTypeMismatch,
     }
 }
 
@@ -2743,7 +2888,7 @@ fn writeVectorAssignment(
         if (assignment.lhs == .load) {
             const load = assignment.lhs.load;
             if (load.data_type != .vec16) return error.PartialVectorMemoryRequiresVec16;
-            const address_reg = try valueAsAddressReg(writer, context, load.address);
+            const address_reg = try valueAsDmemReg(writer, context, load.address);
             return writeVectorLaneMemory(
                 writer,
                 true,
@@ -2789,7 +2934,7 @@ fn writeVectorAssignment(
         .scalar_comparison => return error.InvalidAssignment,
         .signed_less_than => return error.InvalidAssignment,
         .scalar_expression => return error.UnsupportedVectorExpressionTree,
-        .function_address => return error.RegisterTypeMismatch,
+        .function_address, .data_address => return error.RegisterTypeMismatch,
         .number => return error.VectorImmediateUnsupported,
         .load => |load| {
             if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
@@ -3085,7 +3230,7 @@ fn writeSet(
             const source = try context.lookup(name);
             if (source.reg) |source_reg| {
                 try expectSameType(destination, source);
-                try expectSameFunctionAbi(destination, source);
+                try expectSameFunctionType(destination, source);
                 try writer.print("  or {s}, {s}, {s}\n", .{
                     regName(destination_reg),
                     regName(source_reg),
@@ -3122,11 +3267,13 @@ fn writeSet(
                 word, regName(destination_reg), @intFromEnum(control_register),
             });
         },
-        .hardware_read => |register| {
-            if (destination.data_type != .u32 and destination.data_type != .i32) {
+        .hardware_read => |read| {
+            if (read.returns_dmem) {
+                if (destination.data_type != .dmem) return error.ExpectedDmemAddress;
+            } else if (destination.data_type != .u32 and destination.data_type != .i32) {
                 return error.RegisterTypeMismatch;
             }
-            try writer.print("  mfc0 {s}, ${d}\n", .{ regName(destination_reg), register });
+            try writer.print("  mfc0 {s}, ${d}\n", .{ regName(destination_reg), read.register });
         },
         .scalar_comparison => |comparison| try writeScalarComparison(
             writer,
@@ -3148,27 +3295,47 @@ fn writeSet(
         },
         .scalar_expression => return error.UnsupportedScalarExpressionTree,
         .function_address => |target| {
-            const expected_abi = destination.function_abi orelse
+            const expected_type = destination.function_type orelse
                 return error.FunctionAddressRequiresTypedRegister;
             if (target.module != null) return error.UnresolvedModuleCall;
             const function = findFunction(context.functions, target.name) orelse
                 return error.UnknownFunction;
-            const actual_abi = function.abi_name orelse return error.FunctionHasNoAbi;
-            if (!std.mem.eql(u8, expected_abi, actual_abi)) return error.FunctionAbiMismatch;
+            if (!functionMatchesType(function, expected_type)) return error.FunctionTypeMismatch;
             try writer.print("  addiu {s}, $zero, %lo({s})\n", .{
                 regName(destination_reg), target.name,
             });
         },
+        .data_address => |address| {
+            if (destination.data_type != .dmem) return error.ExpectedDmemAddress;
+            const data = try context.lookup(address.label);
+            const label = data.data_label orelse return error.ExpectedDataLabel;
+            if (address.offset == 0) {
+                try writer.print("  addiu {s}, $zero, %lo({s})\n", .{ regName(destination_reg), label });
+            } else {
+                try writer.print("  addiu {s}, $zero, %lo({s} + {d})\n", .{
+                    regName(destination_reg), label, address.offset,
+                });
+            }
+        },
     }
 }
 
-fn expectSameFunctionAbi(left: Symbol, right: Symbol) !void {
-    if (left.function_abi == null and right.function_abi == null) return;
-    if (left.function_abi == null or right.function_abi == null or
-        !std.mem.eql(u8, left.function_abi.?, right.function_abi.?))
+fn expectSameFunctionType(left: Symbol, right: Symbol) !void {
+    if (left.function_type == null and right.function_type == null) return;
+    if (left.function_type == null or right.function_type == null or
+        !std.meta.eql(left.function_type.?, right.function_type.?))
     {
-        return error.FunctionAbiMismatch;
+        return error.FunctionTypeMismatch;
     }
+}
+
+fn functionMatchesType(function: ast.Function, expected: ast.FunctionType) bool {
+    if (function.parameters.len > expected.parameter_count) return false;
+    for (function.parameters, expected.parameterSlice()[0..function.parameters.len]) |actual, wanted| {
+        if (!scalarAbiTypesCompatible(actual.data_type, wanted.data_type) or
+            actual.reg != wanted.reg or actual.vector_reg != wanted.vector_reg) return false;
+    }
+    return true;
 }
 
 fn writeScalarExpression(
@@ -3280,7 +3447,8 @@ fn writeScalarExpressionLhs(
 
 fn isCompatibleScalarLoad(destination: DataType, source: DataType) bool {
     return destination == source or
-        ((destination == .u32 or destination == .i32) and
+        (destination == .dmem and (source == .u32 or source == .i32)) or
+        ((destination == .u32 or destination == .i32 or destination == .dmem) and
             (source == .u8 or source == .u16 or source == .i8 or source == .i16));
 }
 
@@ -3380,7 +3548,7 @@ fn writeBitNot(
         .number => return error.BitNotRequiresRegister,
         .load => return error.BitNotRequiresRegister,
         .scalar_expression => return error.BitNotRequiresRegister,
-        .function_address => return error.BitNotRequiresRegister,
+        .function_address, .data_address => return error.BitNotRequiresRegister,
     };
     try expectSameType(destination, source);
     const source_reg = source.reg orelse return error.BitNotRequiresRegister;
@@ -3440,7 +3608,7 @@ fn writeBinary(
         .number => return error.ArithmeticLhsMustBeRegister,
         .load => return error.ArithmeticLhsMustBeRegister,
         .scalar_expression => return error.ArithmeticLhsMustBeRegister,
-        .function_address => return error.ArithmeticLhsMustBeRegister,
+        .function_address, .data_address => return error.ArithmeticLhsMustBeRegister,
     };
     try expectSameType(destination, lhs);
     const lhs_reg = lhs.reg orelse return error.ArithmeticLhsMustBeRegister;
@@ -3456,7 +3624,11 @@ fn writeBinary(
     switch (rhs_value) {
         .ident => |name| {
             const rhs = try context.lookup(name);
-            try expectSameType(destination, rhs);
+            if (destination.data_type != rhs.data_type and
+                !isDmemScalarPair(destination.data_type, rhs.data_type))
+            {
+                return error.RegisterTypeMismatch;
+            }
             if (rhs.reg) |rhs_reg| {
                 const instruction = registerBinaryInstruction(op) orelse return error.UnsupportedOperator;
                 try writer.print("  {s} {s}, {s}, {s}\n", .{
@@ -3487,7 +3659,7 @@ fn writeBinary(
         .signed_less_than => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .load => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .scalar_expression => return error.ArithmeticRhsMustBeRegisterOrNumber,
-        .function_address => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .function_address, .data_address => return error.ArithmeticRhsMustBeRegisterOrNumber,
     }
 }
 
@@ -3592,7 +3764,7 @@ fn writePowerOfTwoMath(
         .signed_less_than => return error.PowerOfTwoConstantRequired,
         .load => return error.PowerOfTwoConstantRequired,
         .scalar_expression => return error.PowerOfTwoConstantRequired,
-        .function_address => return error.PowerOfTwoConstantRequired,
+        .function_address, .data_address => return error.PowerOfTwoConstantRequired,
     };
     if (value <= 0 or value > std.math.maxInt(u32)) return error.PowerOfTwoConstantRequired;
     const unsigned: u32 = @intCast(value);
@@ -3664,7 +3836,7 @@ fn writeShift(
         .signed_less_than => return error.ShiftAmountMustBeRegisterOrNumber,
         .load => return error.ShiftAmountMustBeRegisterOrNumber,
         .scalar_expression => return error.ShiftAmountMustBeRegisterOrNumber,
-        .function_address => return error.ShiftAmountMustBeRegisterOrNumber,
+        .function_address, .data_address => return error.ShiftAmountMustBeRegisterOrNumber,
     }
 }
 
@@ -3699,7 +3871,16 @@ fn shiftInstruction(op: ast.AssignOp, signed: bool, variable: bool) []const u8 {
 }
 
 fn expectSameType(lhs: Symbol, rhs: Symbol) !void {
-    if (lhs.data_type != rhs.data_type) return error.RegisterTypeMismatch;
+    if (lhs.data_type != rhs.data_type and
+        !isDmemScalarPair(lhs.data_type, rhs.data_type))
+    {
+        return error.RegisterTypeMismatch;
+    }
+}
+
+fn isDmemScalarPair(lhs: DataType, rhs: DataType) bool {
+    return (lhs == .dmem and (rhs == .u32 or rhs == .i32)) or
+        (rhs == .dmem and (lhs == .u32 or lhs == .i32));
 }
 
 fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype) !void {
@@ -3714,7 +3895,7 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
         const value_type: DataType = if (value_access.view != null) .vec16 else value.data_type;
         if (value_type != store.data_type) return error.RegisterTypeMismatch;
         const vector_reg = try vectorRegisterForView(value, value_access.view);
-        const address_reg = try valueAsAddressReg(writer, context, store.address);
+        const address_reg = try valueAsDmemReg(writer, context, store.address);
         if (store.quarter_vector) {
             if (store.data_type != .vec16 or value_access.view != null) {
                 return error.PartialVectorMemoryRequiresVec16;
@@ -3804,7 +3985,7 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
         }
         return;
     }
-    const address_reg = try valueAsAddressReg(writer, context, store.address);
+    const address_reg = try valueAsDmemReg(writer, context, store.address);
     try writer.print("  {s} {s}, {d}({s})\n", .{
         storeOp(store.data_type),
         regName(value_reg),
@@ -3907,7 +4088,7 @@ fn writeVectorLoad(
     load: ast.Load,
 ) !void {
     if (load.label_offset != null) return error.SymbolicOffsetRequiresScalarLoad;
-    const address_reg = try valueAsAddressReg(writer, context, load.address);
+    const address_reg = try valueAsDmemReg(writer, context, load.address);
     if (load.packed_u8 or load.packed_unsigned_u8) {
         if (@mod(load.offset, 8) != 0) return error.VectorMemoryOffsetUnaligned;
         const scaled_offset = @divExact(load.offset, 8);
@@ -4041,7 +4222,7 @@ fn writeLoadInto(writer: *std.Io.Writer, context: *FunctionContext, destination_
         }
         return;
     }
-    const address_reg = try valueAsAddressReg(writer, context, load.address);
+    const address_reg = try valueAsDmemReg(writer, context, load.address);
     try writer.print("  {s} {s}, {d}({s})\n", .{
         loadOp(load.data_type),
         regName(destination_reg),
@@ -4073,7 +4254,7 @@ fn writeCall(
 ) anyerror!void {
     if (call.module != null) return error.UnresolvedModuleCall;
     const function = findFunction(functions, call.name) orelse return error.UnknownFunction;
-    try writeFunctionArguments(writer, context, function, call.arguments, false);
+    try writeFunctionArguments(writer, functions, context, function, call.arguments, true);
 
     if (function.inline_call) {
         var inline_context = FunctionContext{
@@ -4119,12 +4300,63 @@ fn writeCall(
 
 fn writeFunctionArguments(
     writer: *std.Io.Writer,
+    functions: []const ast.Function,
     context: *FunctionContext,
     function: ast.Function,
     arguments: []const ast.ValueRef,
     allow_signedness_change: bool,
 ) !void {
     if (arguments.len != function.parameters.len) return error.FunctionArgumentCountMismatch;
+
+    // Register arguments form a parallel assignment. Emit copies before constants,
+    // and order them so a destination never destroys a source still needed by a
+    // later copy.
+    var pending: [64]bool = @splat(false);
+    if (arguments.len > pending.len) return error.TooManyFunctionArguments;
+    var pending_count: usize = 0;
+    for (arguments, function.parameters, 0..) |argument, parameter, index| {
+        const name = switch (argument) {
+            .ident => |name| name,
+            else => continue,
+        };
+        const symbol = try context.lookup(name);
+        if (isVectorType(parameter.data_type) or symbol.reg == null or symbol.reg == parameter.reg) continue;
+        var visited: [1024]ParameterWriteVisit = undefined;
+        var visited_count: usize = 0;
+        if (functionParameterIsWritten(functions, function, index, &visited, &visited_count)) {
+            return error.FunctionArgumentRegisterMismatch;
+        }
+        pending[index] = true;
+        pending_count += 1;
+    }
+    while (pending_count != 0) {
+        var emitted = false;
+        for (arguments, function.parameters, 0..) |argument, parameter, index| {
+            if (!pending[index]) continue;
+            const destination = parameter.reg.?;
+            var destination_is_source = false;
+            for (arguments, 0..) |other_argument, other_index| {
+                if (!pending[other_index] or other_index == index) continue;
+                const other_name = switch (other_argument) {
+                    .ident => |name| name,
+                    else => continue,
+                };
+                if ((try context.lookup(other_name)).reg == destination) {
+                    destination_is_source = true;
+                    break;
+                }
+            }
+            if (destination_is_source) continue;
+            const name = argument.ident;
+            const source = (try context.lookup(name)).reg.?;
+            try writer.print("  or {s}, {s}, $zero\n", .{ regName(destination), regName(source) });
+            pending[index] = false;
+            pending_count -= 1;
+            emitted = true;
+        }
+        if (!emitted) return error.FunctionArgumentMoveCycle;
+    }
+
     for (arguments, function.parameters) |argument, parameter| {
         switch (argument) {
             .vector_access => return error.FunctionArgumentTypeMismatch,
@@ -4143,8 +4375,9 @@ fn writeFunctionArguments(
                     if (symbol.vector_reg != parameter.vector_reg) {
                         return error.FunctionArgumentRegisterMismatch;
                     }
-                } else if (symbol.reg) |argument_reg| {
-                    if (argument_reg != parameter.reg.?) return error.FunctionArgumentRegisterMismatch;
+                } else if (symbol.reg) |_| {
+                    // A mismatched scalar register was copied by the parallel
+                    // assignment pass above.
                 } else {
                     try loadImmediateInto(
                         writer,
@@ -4176,7 +4409,7 @@ fn writeBuiltin(
                     else => return error.TypedJumpRequiresFunctionPointer,
                 };
                 const address = try context.lookup(address_name);
-                if (address.function_abi == null) return error.TypedJumpRequiresFunctionPointer;
+                if (address.function_type == null) return error.TypedJumpRequiresFunctionPointer;
             }
             const address_reg = try valueAsAddressReg(writer, context, jump.address);
             try writer.print("  jr {s}\n", .{regName(address_reg)});
@@ -4190,7 +4423,7 @@ fn writeBuiltin(
             if (branch.target.module != null) return error.UnresolvedModuleCall;
             if (branch.typed) {
                 const function = findFunction(functions, branch.target.name) orelse return error.UnknownFunction;
-                try writeFunctionArguments(writer, context, function, branch.arguments, true);
+                try writeFunctionArguments(writer, functions, context, function, branch.arguments, true);
             }
             try writer.print("  {s} {s}\n", .{
                 if (branch.encoding == .jump) "j" else "b",
@@ -4198,20 +4431,11 @@ fn writeBuiltin(
             });
             try writeDelaySlot(writer, functions, context, branch.delay_slot);
         },
-        .call_and_goto => |call| {
-            if (call.callee.module != null or call.continuation.module != null) {
-                return error.UnresolvedModuleCall;
-            }
-            // The continuation is written into $ra explicitly in the delay
-            // slot, matching libdragon's stackless tail-call idiom.
-            try writer.print("  j {s}\n", .{call.callee.name});
-            try writer.print("  addiu $ra, $zero, %lo({s})\n", .{call.continuation.name});
-        },
         .tail => |tail| {
             if (tail.target.module != null) return error.UnresolvedModuleCall;
             const function = findFunction(functions, tail.target.name) orelse return error.UnknownFunction;
             if (function.inline_call) return error.CannotTailInlineFunction;
-            try writeFunctionArguments(writer, context, function, tail.arguments, true);
+            try writeFunctionArguments(writer, functions, context, function, tail.arguments, true);
             if (context.statement_position != context.omitted_tail_position or
                 context.omitted_tail_target == null or
                 !std.mem.eql(u8, context.omitted_tail_target.?, tail.target.name))
@@ -4219,30 +4443,8 @@ fn writeBuiltin(
                 try writer.print("  j {s}\n", .{tail.target.name});
                 try writeDelaySlot(writer, functions, context, tail.delay_slot);
             } else if (tail.delay_slot) |delay_slot| {
-                if (delay_slot.len != 1) return error.InvalidDelaySlot;
+                try validateDelaySlot(delay_slot);
                 try writeStatements(writer, functions, context, delay_slot);
-            }
-        },
-        .set_return => |target| try writer.print("  addiu $ra, $zero, %lo({s})\n", .{target}),
-        .set_function_address => |set_address| {
-            if (set_address.target.module != null) return error.UnresolvedModuleCall;
-            const destination = try context.lookup(set_address.destination);
-            const destination_reg = destination.reg orelse return error.ExpectedScalarRegister;
-            try writer.print("  addiu {s}, $zero, %lo({s})\n", .{
-                regName(destination_reg), set_address.target.name,
-            });
-        },
-        .set_data_address => |set_address| {
-            const destination = try context.lookup(set_address.destination);
-            const destination_reg = destination.reg orelse return error.ExpectedScalarRegister;
-            const data = try context.lookup(set_address.label);
-            const label = data.data_label orelse return error.ExpectedDataLabel;
-            if (set_address.offset == 0) {
-                try writer.print("  addiu {s}, $zero, %lo({s})\n", .{ regName(destination_reg), label });
-            } else {
-                try writer.print("  addiu {s}, $zero, %lo({s} + {d})\n", .{
-                    regName(destination_reg), label, set_address.offset,
-                });
             }
         },
         .write_vector_control => |control_write| {
@@ -4261,7 +4463,7 @@ fn writeBuiltin(
             if (vector.data_type != .vec16 and memory.vector.view == null) {
                 return error.PartialVectorMemoryRequiresVec16;
             }
-            const address_reg = try valueAsAddressReg(writer, context, memory.address);
+            const address_reg = try valueAsDmemReg(writer, context, memory.address);
             switch (memory.operation) {
                 .load16 => try writeVectorLaneMemory(writer, true, vector_reg, memory.lane, address_reg, memory.offset),
                 .store16 => try writeVectorLaneMemory(writer, false, vector_reg, memory.lane, address_reg, memory.offset),
@@ -4281,12 +4483,11 @@ fn writeBuiltin(
             }
         },
         .hardware_write => |hardware_write| {
-            const source_reg = try valueAsAddressReg(writer, context, hardware_write.value);
+            const source_reg = if (hardware_write.requires_dmem)
+                try valueAsDmemReg(writer, context, hardware_write.value)
+            else
+                try valueAsAddressReg(writer, context, hardware_write.value);
             const register: u4 = switch (hardware_write.operation) {
-                .rsp_dma_memory_address => 0,
-                .rsp_dma_rdram_address => 1,
-                .rsp_dma_write_length => 3,
-                .rdp_command_end => 9,
                 .cp0 => |register| register,
             };
             try writer.print("  mtc0 {s}, ${d}\n", .{ regName(source_reg), register });
@@ -4312,8 +4513,7 @@ fn writeDelaySlot(
     delay_slot: ?[]ast.Statement,
 ) !void {
     if (delay_slot) |statements| {
-        if (statements.len != 1 and
-            !(statements.len == 2 and statements[0] == .label)) return error.InvalidDelaySlot;
+        try validateDelaySlot(statements);
         try writeStatements(writer, functions, context, statements);
     } else {
         try writer.writeAll("  nop\n");
@@ -4329,8 +4529,8 @@ fn writeConditionalDirectDelaySlot(
     if (delay_slot != null or context.shared_exit_label == null) {
         return writeDelaySlot(writer, functions, context, delay_slot);
     }
-    const delay = context.shared_exit_delay orelse return error.MissingSharedExitDelay;
-    if (delay.len != 1) return error.InvalidDelaySlot;
+    const delay = context.shared_exit_delay orelse return error.MissingSharedExitSlot;
+    try validateDelaySlot(delay);
     try writer.print("LABEL_{s}_blockend_{d}:\n", .{ context.label_prefix, context.shared_exit_label.? });
     try writeStatements(writer, functions, context, delay);
     context.shared_exit_consumed = true;
@@ -4395,7 +4595,7 @@ fn writeDoWhile(
     inverse.op = invertComparison(inverse.op);
     try writeConditionBranchFalse(writer, context, inverse, "dowhile", label, loop.delay_slot == null);
     if (loop.delay_slot) |delay| {
-        if (delay.len != 1) return error.InvalidDelaySlot;
+        try validateDelaySlot(delay);
         try writeStatements(writer, functions, context, delay);
     }
     try writer.print("LABEL_{s}_dowhileend_{d}:\n", .{ context.label_prefix, label });
@@ -4490,7 +4690,7 @@ fn statementsTerminateControlFlow(statements: []const ast.Statement) bool {
     return switch (statements[statements.len - 1]) {
         .break_loop, .continue_loop, .goto => true,
         .builtin => |builtin| switch (builtin) {
-            .jump, .return_from_function, .direct_goto, .call_and_goto, .tail => true,
+            .jump, .return_from_function, .direct_goto, .tail => true,
             else => false,
         },
         else => false,
@@ -4626,8 +4826,20 @@ fn writeStructuredDelaySlot(
     delay_slot: ?[]ast.Statement,
 ) !void {
     const delay = delay_slot orelse return;
-    if (delay.len != 1) return error.InvalidDelaySlot;
+    try validateDelaySlot(delay);
     try writeStatements(writer, functions, context, delay);
+}
+
+fn validateDelaySlot(statements: []const ast.Statement) !void {
+    const instruction_index: usize = if (statements.len == 2 and statements[0] == .label) 1 else 0;
+    if (statements.len != instruction_index + 1) return error.InvalidSlot;
+    switch (statements[instruction_index]) {
+        .builtin => |builtin| switch (builtin) {
+            .nop => return error.UnnecessarySlot,
+            else => {},
+        },
+        else => {},
+    }
 }
 
 fn writeConditionBranchFalse(
@@ -4663,7 +4875,7 @@ fn writeConditionBranchFalse(
         },
         .load => return error.ConditionRhsMustBeRegisterOrNumber,
         .scalar_expression => return error.ConditionRhsMustBeRegisterOrNumber,
-        .function_address => return error.ConditionRhsMustBeRegisterOrNumber,
+        .function_address, .data_address => return error.ConditionRhsMustBeRegisterOrNumber,
     }
 
     switch (condition.op) {
@@ -4800,7 +5012,7 @@ fn valueAsImmediate(context: *FunctionContext, value: ast.Value) !i64 {
         .signed_less_than => error.ExpectedConstant,
         .load => error.ExpectedConstant,
         .scalar_expression => error.ExpectedConstant,
-        .function_address => error.ExpectedConstant,
+        .function_address, .data_address => error.ExpectedConstant,
     };
 }
 
@@ -4824,6 +5036,32 @@ fn valueAsAddressReg(writer: *std.Io.Writer, context: *FunctionContext, value: a
             return compiler_scratch;
         },
         .vector_access => return error.AddressMustBeRegister,
+    }
+}
+
+fn valueAsDmemReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.ValueRef) !Register {
+    switch (value) {
+        .ident => |name| {
+            const symbol = try context.lookup(name);
+            if (symbol.data_label) |label| {
+                try loadDataAddress(writer, compiler_scratch, label);
+                return compiler_scratch;
+            }
+            if (symbol.data_type != .dmem) return error.ExpectedDmemAddress;
+            if (symbol.reg) |reg| return reg;
+            const address = symbol.constant orelse return error.AddressMustBeRegister;
+            if (address < 0 or address >= 4096) return error.DmemAddressOutOfRange;
+            if (address == 0) return .zero;
+            try loadImmediateInto(writer, compiler_scratch, address);
+            return compiler_scratch;
+        },
+        .number => |number| {
+            if (number < 0 or number >= 4096) return error.DmemAddressOutOfRange;
+            if (number == 0) return .zero;
+            try loadImmediateInto(writer, compiler_scratch, number);
+            return compiler_scratch;
+        },
+        .vector_access => return error.ExpectedDmemAddress,
     }
 }
 
@@ -4926,7 +5164,7 @@ fn isScalarRegister(reg: Register) bool {
 fn isSigned(data_type: DataType) bool {
     return switch (data_type) {
         .i8, .i16, .i32 => true,
-        .u8, .u16, .u32 => false,
+        .u8, .u16, .u32, .dmem => false,
         .vec16, .vec32 => unreachable,
     };
 }
@@ -4935,7 +5173,7 @@ fn storeOp(data_type: DataType) []const u8 {
     return switch (data_type) {
         .u8, .i8 => "sb",
         .u16, .i16 => "sh",
-        .u32, .i32 => "sw",
+        .u32, .i32, .dmem => "sw",
         .vec16, .vec32 => unreachable,
     };
 }
@@ -4946,7 +5184,7 @@ fn loadOp(data_type: DataType) []const u8 {
         .i8 => "lb",
         .u16 => "lhu",
         .i16 => "lh",
-        .u32, .i32 => "lw",
+        .u32, .i32, .dmem => "lw",
         .vec16, .vec32 => unreachable,
     };
 }

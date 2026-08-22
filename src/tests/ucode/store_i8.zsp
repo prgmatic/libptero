@@ -1,4 +1,4 @@
 export fn _start() noreturn {
     store(i8, 0, 0xAB);
-    @break();
+    rsp.halt();
 }

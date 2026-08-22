@@ -17,5 +17,5 @@ export fn _start() noreturn {
     store(i32, 4, arithmetic);
     store(i32, 8, forced_logical);
     store(u32, 12, inverted);
-    @break();
+    rsp.halt();
 }

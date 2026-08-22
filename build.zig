@@ -133,6 +133,7 @@ fn addGeneratedN64Assets(
 
     const overlay_link = b.addRunArtifact(tools.rsp_overlay_link);
     overlay_link.addArtifactArg(resident.elf);
+    overlay_link.addFileArg(resident.interface);
     const overlay_linker_script = overlay_link.addOutputFileArg("overlay.ld");
     n64_module.addAnonymousImport("static_overlay_rsp", .{
         .root_source_file = buildRspUcodeFromPath(
@@ -141,6 +142,7 @@ fn addGeneratedN64Assets(
             "static_overlay",
             b.path("src/n64/rsp/ucode/static_overlay.zsp"),
             overlay_linker_script,
+            resident.interface,
         ),
     });
     n64_module.addAnonymousImport("static_overlay_2_rsp", .{
@@ -150,6 +152,7 @@ fn addGeneratedN64Assets(
             "static_overlay_2",
             b.path("src/n64/rsp/ucode/static_overlay_2.zsp"),
             overlay_linker_script,
+            resident.interface,
         ),
     });
     n64_module.addAnonymousImport("multi_slot_overlay_rsp", .{
@@ -159,6 +162,7 @@ fn addGeneratedN64Assets(
             "multi_slot_overlay",
             b.path("src/n64/rsp/ucode/multi_slot_overlay.zsp"),
             overlay_linker_script,
+            resident.interface,
         ),
     });
     n64_module.addAnonymousImport("rdp_overlay_rsp", .{
@@ -168,6 +172,7 @@ fn addGeneratedN64Assets(
             "rdp_overlay",
             b.path("src/n64/rsp/ucode/rdp_overlay.zsp"),
             overlay_linker_script,
+            resident.interface,
         ),
     });
 }
@@ -257,12 +262,13 @@ fn buildRspUcode(
     name: []const u8,
     source: []const u8,
 ) std.Build.LazyPath {
-    return buildRspUcodeFromPath(b, tools, name, b.path(source), b.path("src/n64/rsp/link.ld"));
+    return buildRspUcodeFromPath(b, tools, name, b.path(source), b.path("src/n64/rsp/link.ld"), null);
 }
 
 const RspUcodeBuild = struct {
     rsp: std.Build.LazyPath,
     elf: *std.Build.Step.Compile,
+    interface: std.Build.LazyPath,
 };
 
 fn buildRspUcodeWithLinkerScript(
@@ -272,7 +278,7 @@ fn buildRspUcodeWithLinkerScript(
     source: []const u8,
     linker_script: []const u8,
 ) RspUcodeBuild {
-    return buildRspUcodeArtifactFromPath(b, tools, name, b.path(source), b.path(linker_script));
+    return buildRspUcodeArtifactFromPath(b, tools, name, b.path(source), b.path(linker_script), null);
 }
 
 fn buildRspUcodeFromPath(
@@ -281,8 +287,9 @@ fn buildRspUcodeFromPath(
     name: []const u8,
     source: std.Build.LazyPath,
     linker_script: std.Build.LazyPath,
+    resident_interface: ?std.Build.LazyPath,
 ) std.Build.LazyPath {
-    return buildRspUcodeArtifactFromPath(b, tools, name, source, linker_script).rsp;
+    return buildRspUcodeArtifactFromPath(b, tools, name, source, linker_script, resident_interface).rsp;
 }
 
 fn buildRspUcodeArtifactFromPath(
@@ -291,6 +298,7 @@ fn buildRspUcodeArtifactFromPath(
     name: []const u8,
     source: std.Build.LazyPath,
     linker_script: std.Build.LazyPath,
+    resident_interface: ?std.Build.LazyPath,
 ) RspUcodeBuild {
     const zsp = b.addRunArtifact(tools.zsp);
     zsp.addFileArg(source);
@@ -298,6 +306,13 @@ fn buildRspUcodeArtifactFromPath(
     zsp.addDirectoryArg(b.path("src/n64/rsp/ucode"));
     zsp.addArg("--depfile");
     _ = zsp.addDepFileOutputArg(b.fmt("{s}.d", .{name}));
+    if (resident_interface) |interface| {
+        zsp.addArg("--module-file");
+        zsp.addArg("resident_api.zsp");
+        zsp.addFileArg(interface);
+    }
+    zsp.addArg("--interface");
+    const interface = zsp.addOutputFileArg(b.fmt("{s}.zspi", .{name}));
     const asm_file = zsp.addOutputFileArg(b.fmt("{s}.S", .{name}));
 
     const elf = b.addExecutable(.{
@@ -319,6 +334,7 @@ fn buildRspUcodeArtifactFromPath(
     return .{
         .rsp = pack.addOutputFileArg(b.fmt("{s}.rsp", .{name})),
         .elf = elf,
+        .interface = interface,
     };
 }
 

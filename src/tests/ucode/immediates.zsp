@@ -8,5 +8,5 @@ export fn _start() noreturn {
     store(i32, 4, negative);
     store(u32, 8, upper_only);
     store(i32, 12, signed_small);
-    @break();
+    rsp.halt();
 }

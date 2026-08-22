@@ -4,5 +4,5 @@ export fn _start() noreturn {
         value += 1;
     }
     store(u32, 0, value);
-    @break();
+    rsp.halt();
 }

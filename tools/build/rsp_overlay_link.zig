@@ -8,7 +8,7 @@ pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.smp_allocator;
     const io = init.io;
     const args = try init.minimal.args.toSlice(alloc);
-    if (args.len != 3) return error.InvalidArguments;
+    if (args.len != 4) return error.InvalidArguments;
 
     const resident_elf = try readAll(io, alloc, args[1]);
     defer alloc.free(resident_elf);
@@ -17,10 +17,14 @@ pub fn main(init: std.process.Init) !void {
     if (header.is_64 or header.endian != .big) return error.UnsupportedElf;
     const text = (try findSection(resident_elf, header, ".text")) orelse return error.MissingTextSection;
     const text_start = try overlayTextStart(text.sh_addr, text.sh_size);
-    const symbols = try exportedSymbols(alloc, resident_elf, header);
+    const interface_source = try readAll(io, alloc, args[2]);
+    defer alloc.free(interface_source);
+    const aliases = try parseAliases(alloc, interface_source);
+    defer alloc.free(aliases);
+    const symbols = try exportedSymbols(alloc, resident_elf, header, aliases);
     defer alloc.free(symbols);
 
-    const output = try std.Io.Dir.cwd().createFile(io, args[2], .{});
+    const output = try std.Io.Dir.cwd().createFile(io, args[3], .{});
     defer output.close(io);
     var buffer: [4096]u8 = undefined;
     var file_writer = output.writer(io, &buffer);
@@ -37,6 +41,30 @@ fn readAll(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]u8 {
 }
 
 const ExportedSymbol = struct { name: []const u8, value: u32 };
+const SymbolAlias = struct { interface_name: []const u8, symbol_name: []const u8 };
+
+fn parseAliases(alloc: std.mem.Allocator, source: []const u8) ![]SymbolAlias {
+    const prefix = "// @zsp-symbol ";
+    var aliases: std.ArrayList(SymbolAlias) = .empty;
+    errdefer aliases.deinit(alloc);
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        var fields = std.mem.tokenizeScalar(u8, line[prefix.len..], ' ');
+        const interface_name = fields.next() orelse return error.InvalidInterfaceMetadata;
+        const symbol_name = fields.next() orelse return error.InvalidInterfaceMetadata;
+        if (fields.next() != null) return error.InvalidInterfaceMetadata;
+        for (aliases.items) |alias| {
+            if (std.mem.eql(u8, alias.interface_name, interface_name) or
+                std.mem.eql(u8, alias.symbol_name, symbol_name))
+            {
+                return error.DuplicateInterfaceSymbol;
+            }
+        }
+        try aliases.append(alloc, .{ .interface_name = interface_name, .symbol_name = symbol_name });
+    }
+    return aliases.toOwnedSlice(alloc);
+}
 
 fn overlayTextStart(address: u64, size: u64) !u16 {
     if (address < imem_base or size == 0) return error.InvalidResidentText;
@@ -49,6 +77,7 @@ fn exportedSymbols(
     alloc: std.mem.Allocator,
     bytes: []const u8,
     header: std.elf.Header,
+    aliases: []const SymbolAlias,
 ) ![]ExportedSymbol {
     const symtab = (try findSection(bytes, header, ".symtab")) orelse return error.MissingSymbolTable;
     const strtab = try sectionAt(bytes, header, symtab.sh_link);
@@ -58,6 +87,9 @@ fn exportedSymbols(
 
     var symbols: std.ArrayList(ExportedSymbol) = .empty;
     errdefer symbols.deinit(alloc);
+    const aliases_found = try alloc.alloc(bool, aliases.len);
+    defer alloc.free(aliases_found);
+    @memset(aliases_found, false);
     var offset: usize = 0;
     while (offset < symbol_bytes.len) : (offset += 16) {
         const entry = symbol_bytes[offset..][0..16];
@@ -68,35 +100,20 @@ fn exportedSymbols(
         if (section_index == 0 or name_offset >= strings.len) continue;
         const name = std.mem.sliceTo(strings[name_offset..], 0);
         if (value >= imem_base and value < imem_end) {
-            const alias: ?[]const u8 = if (std.mem.endsWith(u8, name, "_dma__out"))
-                "resident_dma_out"
-            else if (std.mem.endsWith(u8, name, "_dma__in"))
-                "resident_dma_in"
-            else if (std.mem.endsWith(u8, name, "_dma__exec"))
-                "resident_dma_exec"
-            else if (std.mem.endsWith(u8, name, "_dma__waitStatus"))
-                "resident_dma_wait_status"
-            else if (std.mem.endsWith(u8, name, "_dma__waitOut"))
-                "resident_dma_wait_ready"
-            else if (std.mem.eql(u8, name, "commandLoop"))
-                "resident_command_loop"
-            else if (std.mem.eql(u8, name, "rdpSetBuffer"))
-                "resident_rdp_set_buffer"
-            else if (std.mem.eql(u8, name, "rdpAppendBuffer"))
-                "resident_rdp_append_buffer"
-            else if (std.mem.endsWith(u8, name, "_dma__returnToCaller"))
-                "resident_return_to_caller"
-            else if (std.mem.eql(u8, name, "invalidCommand"))
-                "resident_assertion_failed"
-            else
-                null;
-            if (alias) |resident_name| try symbols.append(alloc, .{ .name = resident_name, .value = value });
+            for (aliases, 0..) |alias, alias_index| {
+                if (std.mem.eql(u8, name, alias.symbol_name)) {
+                    aliases_found[alias_index] = true;
+                    try symbols.append(alloc, .{ .name = alias.interface_name, .value = value });
+                    break;
+                }
+            }
             continue;
         }
         if (info >> 4 != 1 or value >= imem_base) continue;
         if (name.len == 0 or std.mem.eql(u8, name, "_start")) continue;
         try symbols.append(alloc, .{ .name = name, .value = value });
     }
+    for (aliases_found) |found| if (!found) return error.MissingInterfaceSymbol;
     const owned = try symbols.toOwnedSlice(alloc);
     std.mem.sort(ExportedSymbol, owned, {}, struct {
         fn lessThan(_: void, lhs: ExportedSymbol, rhs: ExportedSymbol) bool {
@@ -191,4 +208,19 @@ fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, symbols: []const E
 
 test "overlay text follows aligned resident text" {
     try std.testing.expectEqual(@as(u16, 0x11b0), try overlayTextStart(0x1000, 0x01a8));
+}
+
+test "generated interface symbol metadata is parsed" {
+    const aliases = try parseAliases(std.testing.allocator,
+        \\// @zsp-symbol out zsp_m1_dma__out
+        \\pub extern fn out() writes();
+        \\// @zsp-symbol commandLoop commandLoop
+        \\
+    );
+    defer std.testing.allocator.free(aliases);
+    try std.testing.expectEqual(@as(usize, 2), aliases.len);
+    try std.testing.expectEqualStrings("out", aliases[0].interface_name);
+    try std.testing.expectEqualStrings("zsp_m1_dma__out", aliases[0].symbol_name);
+    try std.testing.expectEqualStrings("commandLoop", aliases[1].interface_name);
+    try std.testing.expectEqualStrings("commandLoop", aliases[1].symbol_name);
 }

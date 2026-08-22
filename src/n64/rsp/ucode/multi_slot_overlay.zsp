@@ -1,14 +1,14 @@
 inline fn writeResult(reg($a0) command: u32, reg($a1) value: u32) {
-    reg address: u32 = command;
+    reg address: dmem = command;
     address &= 0x00ffffff;
     store(u32, address, value);
 }
 
-command(0) fn _start(reg($a0) command: u32) { writeResult(command, 0); }
-command(15) fn slot15(reg($a0) command: u32) { writeResult(command, 15); }
-command(16) fn slot16(reg($a0) command: u32) { writeResult(command, 16); }
-command(31) fn slot31(reg($a0) command: u32) { writeResult(command, 31); }
-command(32) fn slot32(reg($a0) command: u32) { writeResult(command, 32); }
-command(47) fn slot47(reg($a0) command: u32) { writeResult(command, 47); }
-command(48) fn slot48(reg($a0) command: u32) { writeResult(command, 48); }
-command(63) fn slot63(reg($a0) command: u32) { writeResult(command, 63); }
+@rspq.command(0) fn _start(reg($a0) command: u32) { writeResult(command, 0); }
+@rspq.command(15) fn slot15(reg($a0) command: u32) { writeResult(command, 15); }
+@rspq.command(16) fn slot16(reg($a0) command: u32) { writeResult(command, 16); }
+@rspq.command(31) fn slot31(reg($a0) command: u32) { writeResult(command, 31); }
+@rspq.command(32) fn slot32(reg($a0) command: u32) { writeResult(command, 32); }
+@rspq.command(47) fn slot47(reg($a0) command: u32) { writeResult(command, 47); }
+@rspq.command(48) fn slot48(reg($a0) command: u32) { writeResult(command, 48); }
+@rspq.command(63) fn slot63(reg($a0) command: u32) { writeResult(command, 63); }
