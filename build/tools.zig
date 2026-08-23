@@ -10,26 +10,27 @@ pub const Tools = struct {
     zsp: *std.Build.Step.Compile,
 };
 
-pub fn build(b: *std.Build) Tools {
+pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
     const srcmap_format = b.createModule(.{
-        .root_source_file = b.path("src/n64/debug/srcmap_format.zig"),
+        .root_source_file = root.path(b, "src/n64/debug/srcmap_format.zig"),
         .target = b.graph.host,
     });
     return .{
-        .srcmap = addTool(b, "srcmap", "tools/n64srcmap/main.zig", &.{
+        .srcmap = addTool(b, root, "srcmap", "tools/n64srcmap/main.zig", &.{
             .{ .name = "srcmap_format", .module = srcmap_format },
         }),
-        .elf_pack = addTool(b, "elf_pack", "tools/build/elf_pack.zig", &.{}),
-        .rsp_pack = addTool(b, "rsp_pack", "tools/build/rsp_pack.zig", &.{}),
-        .rsp_overlay_link = addTool(b, "rsp_overlay_link", "tools/build/rsp_overlay_link.zig", &.{}),
-        .ipl3_cat = addTool(b, "ipl3_cat", "tools/build/ipl3_cat.zig", &.{}),
-        .console_font_conv = addTool(b, "console_font_conv", "tools/console_font_conv.zig", &.{}),
-        .zsp = addTool(b, "zsp", "tools/zsp/zsp.zig", &.{}),
+        .elf_pack = addTool(b, root, "elf_pack", "tools/build/elf_pack.zig", &.{}),
+        .rsp_pack = addTool(b, root, "rsp_pack", "tools/build/rsp_pack.zig", &.{}),
+        .rsp_overlay_link = addTool(b, root, "rsp_overlay_link", "tools/build/rsp_overlay_link.zig", &.{}),
+        .ipl3_cat = addTool(b, root, "ipl3_cat", "tools/build/ipl3_cat.zig", &.{}),
+        .console_font_conv = addTool(b, root, "console_font_conv", "tools/console_font_conv.zig", &.{}),
+        .zsp = addTool(b, root, "zsp", "tools/zsp/zsp.zig", &.{}),
     };
 }
 
 fn addTool(
     b: *std.Build,
+    root: std.Build.LazyPath,
     name: []const u8,
     source: []const u8,
     imports: []const std.Build.Module.Import,
@@ -37,7 +38,7 @@ fn addTool(
     return b.addExecutable(.{
         .name = name,
         .root_module = b.createModule(.{
-            .root_source_file = b.path(source),
+            .root_source_file = root.path(b, source),
             .target = b.graph.host,
             .imports = imports,
         }),

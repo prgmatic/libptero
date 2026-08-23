@@ -1,55 +1,52 @@
 const std = @import("std");
+const sdk_build = @import("build/sdk.zig");
+
+pub const Sdk = sdk_build.Sdk;
+pub const InitOptions = struct {
+    root: ?std.Build.LazyPath = null,
+    target: ?std.Build.ResolvedTarget = null,
+};
+
+pub fn init(b: *std.Build, options: InitOptions) Sdk {
+    const root = options.root orelse b.dependencyFromBuildZig(@This(), .{}).path("");
+    return Sdk.init(b, .{ .root = root, .target = options.target });
+}
 
 const enable_ipl3_debug = false;
 
 pub fn build(b: *std.Build) void {
-    const target = b.resolveTargetQuery(target_query);
+    // A dependency imports this file for its public API. Its project-only ROMs
+    // and tests should not become part of the consumer's build graph.
+    if (b.pkg_hash.len != 0) return;
 
-    const n64_module = b.createModule(.{
-        .root_source_file = b.path("src/n64/n64.zig"),
-    });
-    const tools = @import("build/tools.zig").build(b);
+    const sdk = init(b, .{ .root = b.path("") });
 
     addToolTests(b);
-    addGeneratedN64Assets(b, n64_module, tools);
-    const zsp_test_programs = addZspTestPrograms(b, target, n64_module, tools);
+    const zsp_test_programs = addZspTestPrograms(b, &sdk);
 
-    const game = @import("build/rom.zig").build(b, .{
+    const game = sdk.addRom(.{
         .name = "game",
         .title = "Libptero",
-        .root_source_file = "src/game/entry.zig",
-        .linker_script = "src/game/link.ld",
-        .assembly_files = &.{"src/game/interrupt.S"},
-        .target = target,
-        .n64_module = n64_module,
-        .tools = tools,
+        .root_source_file = b.path("src/game/entry.zig"),
         .ipl3_debug = enable_ipl3_debug,
     });
 
     const game_step = game.addInstallStep(b, "game", "Build the game ROM");
     b.getInstallStep().dependOn(game_step);
 
-    const rdp_benchmark = @import("build/rom.zig").build(b, .{
+    const rdp_benchmark = sdk.addRom(.{
         .name = "rdp-stars-benchmark",
         .title = "RDP Stars Benchmark",
-        .root_source_file = "src/benchmarks/rdp_stars_entry.zig",
-        .linker_script = "src/game/link.ld",
-        .assembly_files = &.{"src/game/interrupt.S"},
-        .target = target,
-        .n64_module = n64_module,
-        .tools = tools,
+        .root_source_file = b.path("src/benchmarks/rdp_stars_entry.zig"),
         .ipl3_debug = enable_ipl3_debug,
     });
     _ = rdp_benchmark.addInstallStep(b, "rdp-benchmark", "Build the RDP star benchmark ROM");
 
-    const test_rom = @import("build/rom.zig").build(b, .{
+    const test_rom = sdk.addRom(.{
         .name = "tests",
         .title = "Libptero Tests",
-        .root_source_file = "src/tests/entry.zig",
-        .linker_script = "src/game/link.ld",
-        .target = target,
-        .n64_module = n64_module,
-        .tools = tools,
+        .root_source_file = b.path("src/tests/entry.zig"),
+        .assembly_files = &.{},
         .ipl3_debug = enable_ipl3_debug,
         .imports = &.{
             .{ .name = "zsp_test_programs", .module = zsp_test_programs },
@@ -121,80 +118,9 @@ fn addToolTests(b: *std.Build) void {
     test_step.dependOn(&run_test_protocol_tests.step);
 }
 
-fn addGeneratedN64Assets(
-    b: *std.Build,
-    n64_module: *std.Build.Module,
-    tools: @import("build/tools.zig").Tools,
-) void {
-    const font_step = b.addRunArtifact(tools.console_font_conv);
-    font_step.addFileArg(b.path("assets/console_font.png"));
-    n64_module.addAnonymousImport("console_font", .{
-        .root_source_file = font_step.addOutputFileArg("console.font"),
-    });
-
-    n64_module.addAnonymousImport("fill_dmem_rsp", .{
-        .root_source_file = buildRspUcode(b, tools, "fill_dmem", "src/n64/rsp/ucode/fill_dmem.zsp"),
-    });
-    const resident = buildRspUcodeWithLinkerScript(
-        b,
-        tools,
-        "command_dispatcher",
-        "src/n64/rsp/ucode/command_dispatcher.zsp",
-        "src/n64/rsp/resident.ld",
-    );
-    n64_module.addAnonymousImport("command_dispatcher_rsp", .{ .root_source_file = resident.rsp });
-
-    const overlay_link = b.addRunArtifact(tools.rsp_overlay_link);
-    overlay_link.addArtifactArg(resident.elf);
-    overlay_link.addFileArg(resident.interface);
-    const overlay_linker_script = overlay_link.addOutputFileArg("overlay.ld");
-    n64_module.addAnonymousImport("static_overlay_rsp", .{
-        .root_source_file = buildRspUcodeFromPath(
-            b,
-            tools,
-            "static_overlay",
-            b.path("src/n64/rsp/ucode/static_overlay.zsp"),
-            overlay_linker_script,
-            resident.interface,
-        ),
-    });
-    n64_module.addAnonymousImport("static_overlay_2_rsp", .{
-        .root_source_file = buildRspUcodeFromPath(
-            b,
-            tools,
-            "static_overlay_2",
-            b.path("src/n64/rsp/ucode/static_overlay_2.zsp"),
-            overlay_linker_script,
-            resident.interface,
-        ),
-    });
-    n64_module.addAnonymousImport("multi_slot_overlay_rsp", .{
-        .root_source_file = buildRspUcodeFromPath(
-            b,
-            tools,
-            "multi_slot_overlay",
-            b.path("src/n64/rsp/ucode/multi_slot_overlay.zsp"),
-            overlay_linker_script,
-            resident.interface,
-        ),
-    });
-    n64_module.addAnonymousImport("rdp_overlay_rsp", .{
-        .root_source_file = buildRspUcodeFromPath(
-            b,
-            tools,
-            "rdp_overlay",
-            b.path("src/n64/rsp/ucode/rdp_overlay.zsp"),
-            overlay_linker_script,
-            resident.interface,
-        ),
-    });
-}
-
 fn addZspTestPrograms(
     b: *std.Build,
-    target: std.Build.ResolvedTarget,
-    n64_module: *std.Build.Module,
-    tools: @import("build/tools.zig").Tools,
+    sdk: *const Sdk,
 ) *std.Build.Module {
     const fixtures = findZspTestFixtures(b, "src/tests/ucode");
 
@@ -217,9 +143,9 @@ fn addZspTestPrograms(
 
     const module = b.createModule(.{
         .root_source_file = module_source,
-        .target = target,
+        .target = sdk.target,
         .optimize = .ReleaseSmall,
-        .imports = &.{.{ .name = "n64", .module = n64_module }},
+        .imports = &.{.{ .name = "n64", .module = sdk.n64_module }},
     });
 
     for (fixtures) |fixture| {
@@ -227,7 +153,7 @@ fn addZspTestPrograms(
         const import_name = b.fmt("zsp_test_{s}_rsp", .{fixture});
         const source = b.fmt("src/tests/ucode/{s}.zsp", .{fixture});
         module.addAnonymousImport(import_name, .{
-            .root_source_file = buildRspUcode(b, tools, name, source),
+            .root_source_file = sdk.addRspUcode(name, b.path(source)),
         });
     }
 
@@ -268,92 +194,3 @@ fn findZspTestFixtures(b: *std.Build, comptime dir_path: []const u8) []const []c
     }.lessThan);
     return owned;
 }
-
-fn buildRspUcode(
-    b: *std.Build,
-    tools: @import("build/tools.zig").Tools,
-    name: []const u8,
-    source: []const u8,
-) std.Build.LazyPath {
-    return buildRspUcodeFromPath(b, tools, name, b.path(source), b.path("src/n64/rsp/link.ld"), null);
-}
-
-const RspUcodeBuild = struct {
-    rsp: std.Build.LazyPath,
-    elf: *std.Build.Step.Compile,
-    interface: std.Build.LazyPath,
-};
-
-fn buildRspUcodeWithLinkerScript(
-    b: *std.Build,
-    tools: @import("build/tools.zig").Tools,
-    name: []const u8,
-    source: []const u8,
-    linker_script: []const u8,
-) RspUcodeBuild {
-    return buildRspUcodeArtifactFromPath(b, tools, name, b.path(source), b.path(linker_script), null);
-}
-
-fn buildRspUcodeFromPath(
-    b: *std.Build,
-    tools: @import("build/tools.zig").Tools,
-    name: []const u8,
-    source: std.Build.LazyPath,
-    linker_script: std.Build.LazyPath,
-    resident_interface: ?std.Build.LazyPath,
-) std.Build.LazyPath {
-    return buildRspUcodeArtifactFromPath(b, tools, name, source, linker_script, resident_interface).rsp;
-}
-
-fn buildRspUcodeArtifactFromPath(
-    b: *std.Build,
-    tools: @import("build/tools.zig").Tools,
-    name: []const u8,
-    source: std.Build.LazyPath,
-    linker_script: std.Build.LazyPath,
-    resident_interface: ?std.Build.LazyPath,
-) RspUcodeBuild {
-    const zsp = b.addRunArtifact(tools.zsp);
-    zsp.addFileArg(source);
-    zsp.addArg("--module-dir");
-    zsp.addDirectoryArg(b.path("src/n64/rsp/ucode"));
-    zsp.addArg("--depfile");
-    _ = zsp.addDepFileOutputArg(b.fmt("{s}.d", .{name}));
-    if (resident_interface) |interface| {
-        zsp.addArg("--module-file");
-        zsp.addArg("resident_api.zsp");
-        zsp.addFileArg(interface);
-    }
-    zsp.addArg("--interface");
-    const interface = zsp.addOutputFileArg(b.fmt("{s}.zspi", .{name}));
-    const asm_file = zsp.addOutputFileArg(b.fmt("{s}.S", .{name}));
-
-    const elf = b.addExecutable(.{
-        .name = b.fmt("{s}_rsp.elf", .{name}),
-        .root_module = b.createModule(.{
-            .target = b.resolveTargetQuery(target_query),
-            .optimize = .ReleaseSmall,
-            .strip = false,
-        }),
-    });
-    elf.root_module.addAssemblyFile(asm_file);
-    elf.setLinkerScript(linker_script);
-    elf.entry = .{ .symbol_name = "_start" };
-    elf.bundle_compiler_rt = false;
-    elf.bundle_ubsan_rt = false;
-
-    const pack = b.addRunArtifact(tools.rsp_pack);
-    pack.addArtifactArg(elf);
-    return .{
-        .rsp = pack.addOutputFileArg(b.fmt("{s}.rsp", .{name})),
-        .elf = elf,
-        .interface = interface,
-    };
-}
-
-const target_query: std.Target.Query = .{
-    .cpu_arch = .mips,
-    .cpu_model = .{ .explicit = &std.Target.mips.cpu.mips3 },
-    .os_tag = .freestanding,
-    .abi = .none,
-};

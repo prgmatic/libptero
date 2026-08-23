@@ -1,0 +1,16 @@
+.{
+    .name = .libptero,
+    .version = "0.0.0",
+    .fingerprint = 0x2ae3748821c5a5b8, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "build",
+        "assets",
+        "src",
+        "tools",
+        "README.md",
+    },
+}

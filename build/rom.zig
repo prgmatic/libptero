@@ -4,12 +4,14 @@ const Tools = @import("tools.zig").Tools;
 pub const Options = struct {
     name: []const u8,
     title: []const u8,
-    root_source_file: []const u8,
-    linker_script: []const u8,
-    assembly_files: []const []const u8 = &.{},
+    root_source_file: std.Build.LazyPath,
+    linker_script: std.Build.LazyPath,
+    assembly_files: []const std.Build.LazyPath = &.{},
     target: std.Build.ResolvedTarget,
     n64_module: *std.Build.Module,
     tools: Tools,
+    libptero_root: std.Build.LazyPath,
+    optimize: std.builtin.OptimizeMode = .ReleaseSmall,
     ipl3_debug: bool = false,
     imports: []const std.Build.Module.Import = &.{},
 };
@@ -56,6 +58,7 @@ pub fn build(b: *std.Build, options: Options) Rom {
         .title = options.title,
         .target = options.target,
         .n64_module = options.n64_module,
+        .libptero_root = options.libptero_root,
         .debug_logging = options.ipl3_debug,
     });
 
@@ -64,9 +67,9 @@ pub fn build(b: *std.Build, options: Options) Rom {
     @memcpy(root_imports[1..], options.imports);
 
     const game_module = b.createModule(.{
-        .root_source_file = b.path(options.root_source_file),
+        .root_source_file = options.root_source_file,
         .target = options.target,
-        .optimize = .ReleaseSmall,
+        .optimize = options.optimize,
         .strip = false,
         .imports = root_imports,
     });
@@ -75,9 +78,9 @@ pub fn build(b: *std.Build, options: Options) Rom {
         .root_module = game_module,
     });
     debug_elf.link_z_max_page_size = 8;
-    debug_elf.setLinkerScript(b.path(options.linker_script));
+    debug_elf.setLinkerScript(options.linker_script);
     for (options.assembly_files) |assembly_file| {
-        debug_elf.root_module.addAssemblyFile(b.path(assembly_file));
+        debug_elf.root_module.addAssemblyFile(assembly_file);
     }
 
     const srcmap_step = b.addRunArtifact(options.tools.srcmap);

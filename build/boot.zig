@@ -7,6 +7,7 @@ pub const Options = struct {
     title: []const u8,
     target: std.Build.ResolvedTarget,
     n64_module: *std.Build.Module,
+    libptero_root: std.Build.LazyPath,
     debug_logging: bool = false,
 };
 
@@ -29,7 +30,7 @@ fn buildIpl3(
     const ipl3 = b.addExecutable(.{
         .name = b.fmt("{s}_ipl3.elf", .{options.name}),
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/boot/ipl3/ipl3.zig"),
+            .root_source_file = options.libptero_root.path(b, "src/boot/ipl3/ipl3.zig"),
             .optimize = optimization,
             .target = options.target,
             .imports = &.{
@@ -40,9 +41,9 @@ fn buildIpl3(
         }),
     });
 
-    ipl3.setLinkerScript(b.path("src/boot/ipl3/link.ld"));
-    ipl3.root_module.addAssemblyFile(b.path("src/boot/ipl3/boot_trampoline.S"));
-    ipl3.root_module.addAssemblyFile(b.path("src/boot/ipl3/ique_trampoline.S"));
+    ipl3.setLinkerScript(options.libptero_root.path(b, "src/boot/ipl3/link.ld"));
+    ipl3.root_module.addAssemblyFile(options.libptero_root.path(b, "src/boot/ipl3/boot_trampoline.S"));
+    ipl3.root_module.addAssemblyFile(options.libptero_root.path(b, "src/boot/ipl3/ique_trampoline.S"));
     ipl3.root_module.addAnonymousImport("loader.bin", .{
         .root_source_file = loader,
     });
@@ -58,7 +59,7 @@ fn buildElfLoader(
     const loader = b.addExecutable(.{
         .name = b.fmt("{s}_loader.elf", .{options.name}),
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/boot/loader/loader.zig"),
+            .root_source_file = options.libptero_root.path(b, "src/boot/loader/loader.zig"),
             .optimize = optimization,
             .target = options.target,
             .imports = &.{
@@ -70,6 +71,6 @@ fn buildElfLoader(
         }),
     });
 
-    loader.setLinkerScript(b.path("src/boot/loader/link.ld"));
+    loader.setLinkerScript(options.libptero_root.path(b, "src/boot/loader/link.ld"));
     return loader.addObjCopy(.{ .format = .bin }).getOutput();
 }
