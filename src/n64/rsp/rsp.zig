@@ -43,7 +43,7 @@ pub const Queue = struct {
 
     // Fast path for typed wrappers whose command ABI is fixed in code. Generic
     // callers should use writeOverlayCommand so metadata still validates them.
-    pub fn writeOverlayCommandKnown(
+    pub inline fn writeOverlayCommandKnown(
         self: *Queue,
         registered: *const Overlay,
         command_index: u8,
@@ -52,6 +52,11 @@ pub const Queue = struct {
     ) void {
         self.ensureCapacity(1 + arguments.len);
         self.current().writeRawCommand(registered.commandId(command_index), inline_argument, arguments);
+    }
+
+    pub inline fn reserveLowPriorityWords(self: *Queue, command_words: usize) void {
+        if (self.priority != .low) @panic("low-priority queue reservation requires a low-priority queue");
+        self.ensureCapacity(command_words);
     }
 
     pub fn dmaToDmem(
@@ -103,6 +108,16 @@ pub const Queue = struct {
         self.current().appendRdpBuffer(end);
     }
 
+    pub fn holdRdpPublication(self: *Queue) void {
+        self.ensureCapacity(2);
+        self.current().beginRdpBatch();
+    }
+
+    pub fn releaseRdpPublication(self: *Queue) void {
+        self.ensureCapacity(1);
+        self.current().releaseRdpBuffer();
+    }
+
     pub fn configureRdpBuffers(
         self: *Queue,
         first: []align(16) u8,
@@ -111,10 +126,19 @@ pub const Queue = struct {
         if (first.len != rdp_dynamic_buffer_len or second.len != rdp_dynamic_buffer_len) {
             @panic("RSP RDP dynamic buffers must each be 64 KiB");
         }
-        cache.invalidateData(first);
-        cache.invalidateData(second);
         const first_address = physicalAddress(@intFromPtr(first.ptr));
         const second_address = physicalAddress(@intFromPtr(second.ptr));
+        const buffers_attached = io.readDmem(u32, rdp_current_dmem).* != 0 and
+            io.readDmem(u32, rdp_sentinel_dmem).* != 0 and
+            io.readDmem(u32, rdp_buffers_dmem).* == first_address and
+            io.readDmem(u32, rdp_buffers_dmem + @sizeOf(u32)).* == second_address;
+        // The CPU has not touched buffers which remain RSP-owned, so repeating
+        // a 128 KiB invalidation is unnecessary. Keep the proven DMEM and DP
+        // reattachment sequence below unchanged.
+        if (!buffers_attached) {
+            cache.invalidateData(first);
+            cache.invalidateData(second);
+        }
         self.writeDmem(rdp_current_dmem, first_address);
         self.writeDmem(rdp_sentinel_dmem, first_address + rdp_dynamic_buffer_len);
         self.writeDmem(rdp_buffers_dmem, first_address);
@@ -188,6 +212,7 @@ fn validateQueueDma(rdram: anytype, dmem_address: u32) void {
 
 pub const rdp_syncfull_ongoing_dmem = 0xd0;
 pub const rdp_target_bitdepth_dmem = 0xd1;
+pub const rdp_publication_held_dmem = 0xd2;
 
 const overlay_table_dmem = 0x38;
 const overlay_idmap_dmem = 0x78;
@@ -262,6 +287,10 @@ pub fn submitCommands(queue: *const CommandQueue) void {
 // completed a full-sync fence and waited for its RSP Queue. Restore the empty
 // boot-state range expected by direct submitters and low-level test programs.
 pub fn releaseRdpToDirect() void {
+    // Queue signal6 is raised just before the dispatcher jumps to the next
+    // (empty) buffer. Do not rewrite its live DP/DMEM state until that jump has
+    // completed and the resident program has actually halted.
+    waitHalted();
     rdp_io.status_write.* = (1 << 5) | (1 << 3);
     rdp_io.status_write.* = 0x15;
     rdp_io.dma_start_addr.* = 0;
@@ -274,6 +303,7 @@ pub fn releaseRdpToDirect() void {
     io.readDmem(u32, rdp_current_dmem).* = 0;
     io.readDmem(u32, rdp_sentinel_dmem).* = 0;
     io.readDmem(u8, rdp_syncfull_ongoing_dmem).* = 0;
+    io.readDmem(u8, rdp_publication_held_dmem).* = 0;
 }
 
 fn writebackCommandGraph(queue: *const CommandQueue, depth: usize) void {
@@ -296,7 +326,7 @@ pub fn flush(queue: *Queue) void {
     if (storage.submitted) {
         while (!io.status_register_read.signal6) {}
         io.status_register_write.* = io.status_clear_signal6;
-        next.clear();
+        next.clearStreaming();
     }
 
     current.writeRawCommand(
@@ -305,8 +335,8 @@ pub fn flush(queue: *Queue) void {
         &.{},
     );
     current.jump(next);
-    cache.writebackData(current.buffer[0..]);
-    cache.writebackData(next.buffer[0..]);
+    cache.writebackData(current.buffer[0..current.index]);
+    cache.writebackData(next.buffer[0..command_queue.batch_word_count]);
 
     if (!storage.submitted) {
         halt();

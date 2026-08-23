@@ -20,7 +20,13 @@ pub const BlendMode = struct {
     /// Pixel color passes straight through; blender is disabled.
     pub const opaque_surface: BlendMode = .{};
     /// Standard src-alpha blend against the framebuffer.
-    pub const alpha: BlendMode = .{ .force_blend = true, .image_read_en = true };
+    pub const alpha: BlendMode = .{
+        .force_blend = true,
+        .image_read_en = true,
+        // The second blender cycle is ignored in one-cycle mode. Keep its
+        // otherwise-unused M selector clear to match the canonical mode word.
+        .pass2 = .{ .m = .pixel },
+    };
     /// Blend pixel with the fog color register using fog alpha.
     pub const fog: BlendMode = .{
                 .force_blend   = true,

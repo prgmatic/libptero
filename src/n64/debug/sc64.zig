@@ -15,6 +15,7 @@ const register_enable_1: u32 = 0x4F434B5F;
 const register_lock: u32 = 0xFFFFFFFF;
 const register_enable_reset: u32 = 0x00000000;
 const identity_value: u32 = 0x53437632;
+const usb_wait_attempts = 1_000_000;
 
 pub fn detect() bool {
     unlockRegisters();
@@ -32,18 +33,16 @@ fn unlockRegisters() void {
 }
 
 pub fn print(str: []const u8) void {
+    if (str.len == 0 or !waitUsbReady()) return;
     const len = str.len;
-    const ptr: [*]const u8 = @ptrCast(str);
-    var c = len / 4;
-    const rem = @mod(len, 4);
-    if (rem > 0)
-        c += 1;
-    for (0..c) |i| {
-        var val: u32 = @as(u32, ptr[i * 4]) << 24;
-        val |= @as(u32, ptr[i * 4 + 1]) << 16;
-        val |= @as(u32, ptr[i * 4 + 2]) << 8;
-        val |= @as(u32, ptr[i * 4 + 3]);
-        data_buffer[i] = val;
+    const word_count = std.mem.alignForward(usize, len, 4) / 4;
+    for (0..word_count) |word_index| {
+        var value: u32 = 0;
+        inline for (0..4) |byte_index| {
+            const index = word_index * 4 + byte_index;
+            if (index < len) value |= @as(u32, str[index]) << (24 - byte_index * 8);
+        }
+        data_buffer[word_index] = value;
         pi.waitIo();
     }
     flushBuffer(str.len);
@@ -57,16 +56,34 @@ pub fn flushBuffer(size: u32) void {
     pi.waitIo();
     status_write.* = 'M';
     pi.waitIo();
-    while (isUsbBusy()) {}
+    _ = waitUsbReady();
+}
+
+fn waitUsbReady() bool {
+    var remaining: u32 = usb_wait_attempts;
+    while (isUsbBusy()) {
+        if (remaining == 0) return false;
+        remaining -= 1;
+    }
+    return true;
 }
 
 pub fn isUsbBusy() bool {
     pi.waitIo();
-    while (status_read.command_busy) {}
+    if (!waitCommandReady()) return true;
     status_write.* = 'U';
     pi.waitIo();
-    while (status_read.command_busy) {}
+    if (!waitCommandReady()) return true;
     return data_0.* & (1 << 31) > 0;
+}
+
+fn waitCommandReady() bool {
+    var remaining: u32 = usb_wait_attempts;
+    while (status_read.command_busy) {
+        if (remaining == 0) return false;
+        remaining -= 1;
+    }
+    return true;
 }
 
 const Status = packed struct(u32) {

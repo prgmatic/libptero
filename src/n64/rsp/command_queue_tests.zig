@@ -34,6 +34,30 @@ test "clear reopens and empties a command queue" {
     try testing.expectEqualSlices(u32, &expected, queue.buffer);
 }
 
+test "streaming clear invalidates the resident fetch window" {
+    var buffer: [command_queue.batch_word_count * 2]u32 align(8) =
+        [_]u32{0xdeadbeef} ** (command_queue.batch_word_count * 2);
+    var queue = CommandQueue.init(buffer[0..]);
+    @memset(buffer[0..], 0xdeadbeef);
+    queue.index = 7;
+    queue.sealed = true;
+
+    queue.clearStreaming();
+
+    try testing.expectEqual(@as(usize, 0), queue.index);
+    try testing.expect(!queue.sealed);
+    try testing.expectEqualSlices(
+        u32,
+        &([_]u32{0} ** command_queue.batch_word_count),
+        buffer[0..command_queue.batch_word_count],
+    );
+    try testing.expectEqualSlices(
+        u32,
+        &([_]u32{0xdeadbeef} ** command_queue.batch_word_count),
+        buffer[command_queue.batch_word_count..],
+    );
+}
+
 test "writeRawCommand encodes a command" {
     var buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
     var queue = CommandQueue.init(buffer[0..]);
@@ -119,7 +143,7 @@ test "double-buffered queue initializes two writable buffers" {
     try testing.expect(!queue.syncpoint_pending);
     try testing.expect(!queue.queues[0].sealed);
     try testing.expect(!queue.queues[1].sealed);
-    try testing.expectEqual(@as(usize, 0x200), queue.queues[0].buffer.len);
+    try testing.expectEqual(@as(usize, command_queue.rdram_buffer_word_count), queue.queues[0].buffer.len);
     try testing.expectEqual(@as(usize, 0x100), command_queue.fetch_window_byte_len);
     try testing.expectEqual(&queue.buffers[0], queue.queues[0].buffer);
     try testing.expectEqual(&queue.buffers[1], queue.queues[1].buffer);

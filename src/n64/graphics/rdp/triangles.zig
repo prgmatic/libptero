@@ -41,10 +41,20 @@ pub inline fn drawRotatedSprite(cmd_queue: anytype, tile: u3, x: f32, y: f32, s0
     const k3x = m00 * ks0 + m10 * kt1 + m20;
     const k3y = m01 * ks0 + m11 * kt1 + m21;
 
-    // Triangle 1: k0 → k1 → k2  (texture coords always original, not flipped)
-    emitTexturedTriangle(cmd_queue, tile, .{ .x = k0x, .y = k0y, .s = s0f, .t = t0f }, .{ .x = k1x, .y = k1y, .s = s1f, .t = t0f }, .{ .x = k2x, .y = k2y, .s = s1f, .t = t1f });
-    // Triangle 2: k0 → k2 → k3
-    emitTexturedTriangle(cmd_queue, tile, .{ .x = k0x, .y = k0y, .s = s0f, .t = t0f }, .{ .x = k2x, .y = k2y, .s = s1f, .t = t1f }, .{ .x = k3x, .y = k3y, .s = s0f, .t = t1f });
+    const vertices = .{
+        TexVertex{ .x = k0x, .y = k0y, .s = s0f, .t = t0f },
+        TexVertex{ .x = k1x, .y = k1y, .s = s1f, .t = t0f },
+        TexVertex{ .x = k2x, .y = k2y, .s = s1f, .t = t1f },
+        TexVertex{ .x = k3x, .y = k3y, .s = s0f, .t = t1f },
+    };
+    const QueueType = @TypeOf(cmd_queue.queue);
+    if (@hasDecl(QueueType, "nativeTexturedQuad")) {
+        cmd_queue.queue.nativeTexturedQuad(tile, vertices);
+    } else {
+        // Triangle 1: k0 → k1 → k2; triangle 2: k0 → k2 → k3.
+        emitTexturedTriangle(cmd_queue, tile, vertices[0], vertices[1], vertices[2]);
+        emitTexturedTriangle(cmd_queue, tile, vertices[0], vertices[2], vertices[3]);
+    }
 }
 
 pub fn emitTexturedTriangle(cmd_queue: anytype, tile: u3, v1: TexVertex, v2: TexVertex, v3: TexVertex) void {

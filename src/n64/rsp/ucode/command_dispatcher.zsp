@@ -25,6 +25,7 @@ bss {
     pub rdp_buffers: [2]u32;
     pub rdp_syncfull_ongoing: u8;
     pub rdp_target_bitdepth: i8;
+    pub rdp_publication_held: u8;
     pub rdp_fill_color: u32;
     // The fixed command-fetch window occupies 0xe0..0x1df. Keep the shared
     // 32-byte RDP mode cache after it; the intervening range is intentionally
@@ -204,11 +205,29 @@ fn fetchCommandBufferWithPointer(
 @rspq.command(10) pub export fn rdpAppendBuffer(current: u32) noreturn {
     reg($ra) return_address: u32 = undefined;
     reg syncfull_ongoing: u32 = load(u8, rdp_syncfull_ongoing);
+    reg publication_held: u32 = load(u8, rdp_publication_held);
+    syncfull_ongoing |= publication_held;
     if(syncfull_ongoing != 0) tail dma.returnToCaller() slot {
         store(u32, rdp_current, current);
     }
     rsp.cp0.setRdpCommandEnd(current);
     jump(return_address);
+}
+
+@rspq.command(11) fn rdpReleaseBuffer() noreturn {
+    reg current: u32 = load(u32, rdp_current);
+    store(u8, rdp_publication_held, 0);
+    rsp.cp0.setRdpCommandEnd(current);
+    jump commandLoop();
+}
+
+@rspq.command(12) fn rdpBeginBatch(reg($a0) _: u32, reg($a1) _: u32) noreturn {
+    reg wait_mask: u32 = 0x00000300;
+    dma.waitStatus(wait_mask);
+    reg held: u32 = 1;
+    store(u8, rdp_syncfull_ongoing, 0);
+    store(u8, rdp_publication_held, held);
+    jump commandLoop();
 }
 
 // Resident command queue dispatcher.

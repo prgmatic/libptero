@@ -235,6 +235,7 @@ inline fn prepareSyncFull(
     reg($a1) word1: u32,
 ) {
     prepareSyncFull(word0, word1);
+    store(u8, rdp_publication_held, 0);
     rdp.write8(word0, word1);
     reg staging: dmem;
     reg staging_end: dmem;
@@ -739,12 +740,22 @@ fn rdpSetCombineMode2Pass(
 @rspq.command(30) fn triangle(
     reg($a0) triangle_command: i32,
 ) noreturn {
+    const batch_alternate: i32 = 0x00020000;
+    const batch_alternate_clear: i32 = -131073;
+    reg batch_flags: i32;
+    batch_flags = triangle_command;
+    triangle_command &= batch_alternate_clear;
+    batch_flags &= batch_alternate;
     reg staging_start: dmem = command_staging;
     reg($s3) output: dmem = staging_start;
     reg($v0) cull_mode: i32 = 2;
     reg($a1) vertex1: dmem = triangle_data0;
     reg($a2) vertex2: dmem = triangle_data1;
     reg($a3) vertex3: dmem = triangle_data2;
+    if(batch_flags != 0) {
+        vertex2 = triangle_data2;
+        vertex3 = triangle_data1;
+    }
     triangleAsync(triangle_command, vertex1, vertex2, vertex3, output, cull_mode);
     tail triangleCull();
 }

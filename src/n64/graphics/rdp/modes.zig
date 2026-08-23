@@ -9,7 +9,7 @@ pub const OtherModes = packed struct(u64) {
     z_update_en:           bool            = false,
     image_read_en:         bool            = false,
     write_on_cvg_overflow: bool            = false,
-    cvg_dest:              CoverageDest    = .clamp,
+    cvg_dest:              CoverageDest    = .full,
     z_mode:                ZMode           = .opaque_surface,
     blender_alpha:         BlenderAlphaSrc = .combiner,
     force_blend:           bool            = false,
@@ -25,8 +25,8 @@ pub const OtherModes = packed struct(u64) {
     blend_p0: bm.BlendColorSrc = .pixel,
 
     _pad1:                u4            = 0,
-    alpha_dither:         AlphaDither   = .same_as_rgb,
-    rgb_dither:           RgbDither     = .magic_square,
+    alpha_dither:         AlphaDither   = .disabled,
+    rgb_dither:           RgbDither     = .disabled,
     chroma_key_en:        bool          = false,
     tex_filter_use_tex0:  bool          = false,
     tex_filter_1:         TexFilter     = .bilinear,
@@ -114,3 +114,10 @@ pub const AlphaCompare = enum(u2) {
     threshold = 1,
     noise     = 2,
 };
+
+test "standard other modes match the reference renderer defaults" {
+    const standard = OtherModes{};
+    try @import("std").testing.expectEqual(CoverageDest.full, standard.cvg_dest);
+    try @import("std").testing.expectEqual(RgbDither.disabled, standard.rgb_dither);
+    try @import("std").testing.expectEqual(AlphaDither.disabled, standard.alpha_dither);
+}

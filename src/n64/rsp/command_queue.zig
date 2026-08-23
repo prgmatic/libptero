@@ -3,7 +3,13 @@ const Overlay = @import("overlay.zig").Overlay;
 
 pub const fetch_window_byte_len = 0x100;
 pub const batch_word_count = fetch_window_byte_len / @sizeOf(u32);
-pub const rdram_buffer_word_count = 0x200;
+pub const rdram_buffer_word_count = 0x140;
+
+comptime {
+    if (rdram_buffer_word_count % batch_word_count != 0) {
+        @compileError("resident queue buffer stride must preserve fetch-window alignment");
+    }
+}
 
 pub const InternalCommand = enum(u8) {
     invalid = 0x00,
@@ -17,6 +23,8 @@ pub const InternalCommand = enum(u8) {
     wait_then_write_status = 0x08,
     rdp_set_buffer = 0x09,
     rdp_append_buffer = 0x0a,
+    rdp_release_buffer = 0x0b,
+    rdp_begin_batch = 0x0c,
 };
 
 pub const CommandQueue = struct {
@@ -42,6 +50,18 @@ pub const CommandQueue = struct {
 
     pub fn clear(self: *CommandQueue) void {
         @memset(self.buffer[0..], 0);
+        self.index = 0;
+        self.sealed = false;
+        self.next = null;
+        self.call_target = null;
+        self.swap_target = null;
+    }
+
+    pub fn clearStreaming(self: *CommandQueue) void {
+        // The resident dispatcher fetches a complete 256-byte window. Clear
+        // that whole window before reuse so no stale command from the fetched
+        // cache line can survive beyond the invalid guard.
+        @memset(self.buffer[0..batch_word_count], 0);
         self.index = 0;
         self.sealed = false;
         self.next = null;
@@ -134,6 +154,14 @@ pub const CommandQueue = struct {
         self.writeRawCommand(@intFromEnum(InternalCommand.rdp_append_buffer), current, &.{});
     }
 
+    pub fn releaseRdpBuffer(self: *CommandQueue) void {
+        self.writeRawCommand(@intFromEnum(InternalCommand.rdp_release_buffer), 0, &.{});
+    }
+
+    pub fn beginRdpBatch(self: *CommandQueue) void {
+        self.writeRawCommand(@intFromEnum(InternalCommand.rdp_begin_batch), 0, &.{0});
+    }
+
     pub fn call(self: *CommandQueue, block: *const CommandQueue) void {
         if (!block.sealed) @panic("RSP command block must end with returnFromCall()");
         if (block.call_target != null) @panic("nested RSP command blocks are not supported yet");
@@ -198,7 +226,10 @@ pub const CommandQueue = struct {
 };
 
 pub const QueueStorage = struct {
-    buffers: [2][rdram_buffer_word_count]u32 align(8),
+    // The resident dispatcher fetches a complete 256-byte window at a time.
+    // Keep both the base and stride on that boundary so code/data layout
+    // changes cannot alter which neighboring cache lines a fetch observes.
+    buffers: [2][rdram_buffer_word_count]u32 align(fetch_window_byte_len),
     queues: [2]CommandQueue,
     write_index: u1,
     submitted: bool,

@@ -107,6 +107,8 @@ pub const OverlayQueue = struct {
     packet: [22]u64 = undefined,
     packet_len: usize = 0,
     packet_expected: usize = 0,
+    full_sync_pending: bool = false,
+    needs_publication_hold: bool = false,
     configured: bool = false,
 
     pub fn init(
@@ -130,7 +132,17 @@ pub const OverlayQueue = struct {
         self.ensureConfigured();
         if (self.packet_len == 0) {
             const opcode: u8 = @truncate(value >> 56);
+            if (opcode == 0xe9) self.full_sync_pending = true;
             self.packet_expected = packetWordCount(opcode);
+            if (self.packet_expected == 1) {
+                self.rsp_queue.writeOverlayCommandKnown(
+                    self.overlay,
+                    overlayCommandIndex(opcode),
+                    @as(u32, @truncate(value >> 32)) & 0x00ffffff,
+                    &.{@as(u32, @truncate(value))},
+                );
+                return;
+            }
         }
         self.packet[self.packet_len] = value;
         self.packet_len += 1;
@@ -139,7 +151,10 @@ pub const OverlayQueue = struct {
 
     pub fn execute(self: *OverlayQueue) void {
         if (self.packet_len != 0) @panic("incomplete RDP command packet");
+        if (!self.full_sync_pending) self.rsp_queue.releaseRdpPublication();
         rsp.flush(self.rsp_queue);
+        self.full_sync_pending = false;
+        self.needs_publication_hold = true;
     }
 
     pub fn clear(self: *OverlayQueue) void {
@@ -169,6 +184,46 @@ pub const OverlayQueue = struct {
             );
         }
         self.rsp_queue.writeOverlayCommandKnown(self.overlay, 30, 0xca00 | @as(u32, tile), &.{});
+    }
+
+    pub fn nativeTexturedQuad(self: *OverlayQueue, tile: u3, vertices: anytype) void {
+        if (self.packet_len != 0) @panic("native quad cannot split a raw RDP packet");
+        self.ensureConfigured();
+        // Keep both triangles and their four unique vertices together so a
+        // rollover cannot discard the shared vertex state between them.
+        self.rsp_queue.reserveLowPriorityWords(30);
+        inline for (0..3) |index| {
+            self.writeNativeVertex(index, vertices[index]);
+        }
+        const triangle_bits = 0xca00 | @as(u32, tile);
+        self.rsp_queue.writeOverlayCommandKnown(
+            self.overlay,
+            30,
+            triangle_bits,
+            &.{},
+        );
+        self.writeNativeVertex(1, vertices[3]);
+        self.rsp_queue.writeOverlayCommandKnown(
+            self.overlay,
+            30,
+            triangle_bits | 0x00020000,
+            &.{},
+        );
+    }
+
+    inline fn writeNativeVertex(
+        self: *OverlayQueue,
+        comptime index: usize,
+        vertex: anytype,
+    ) void {
+        const xy = packI16Pair(toS13_2(vertex.x), toS13_2(vertex.y));
+        const st = packI16Pair(toTexel5(vertex.s), toTexel5(vertex.t));
+        self.rsp_queue.writeOverlayCommandKnown(
+            self.overlay,
+            31,
+            index * 32,
+            &.{ xy, 0, 0, st, toS16_16(1.0 / vertex.inv_w), toS16_16(vertex.inv_w) },
+        );
     }
 
     fn emitPacket(self: *OverlayQueue) void {
@@ -213,10 +268,15 @@ pub const OverlayQueue = struct {
     }
 
     fn ensureConfigured(self: *OverlayQueue) void {
-        if (self.configured) return;
-        self.configureOverlayState();
-        self.rsp_queue.configureRdpBuffers(self.dynamic_buffers[0], self.dynamic_buffers[1]);
-        self.configured = true;
+        if (!self.configured) {
+            self.configureOverlayState();
+            self.rsp_queue.configureRdpBuffers(self.dynamic_buffers[0], self.dynamic_buffers[1]);
+            self.rsp_queue.holdRdpPublication();
+            self.configured = true;
+        } else if (self.needs_publication_hold) {
+            self.rsp_queue.holdRdpPublication();
+            self.needs_publication_hold = false;
+        }
     }
 };
 
@@ -225,11 +285,18 @@ fn packI16Pair(high: i16, low: i16) u32 {
 }
 
 fn toS13_2(value: f32) i16 {
-    return @intFromFloat(@max(-8192.0, @min(8191.75, @floor(value * 4.0))));
+    const scaled = value * 4.0;
+    if (scaled <= -32768.0) return -32768;
+    if (scaled >= 32767.0) return 32767;
+    var fixed: i32 = @intFromFloat(scaled);
+    if (scaled < 0.0 and @as(f32, @floatFromInt(fixed)) != scaled) fixed -= 1;
+    return @intCast(fixed);
 }
 
 fn toTexel5(value: f32) i16 {
-    return @intFromFloat(@max(-1024.0, @min(1023.96875, value)) * 32.0);
+    if (value <= -1024.0) return -32768;
+    if (value >= 1023.96875) return 32767;
+    return @intFromFloat(value * 32.0);
 }
 
 fn toS16_16(value: f32) u32 {
@@ -237,6 +304,17 @@ fn toS16_16(value: f32) u32 {
     if (value < -32768.0) return 0x80000000;
     const fixed: i32 = @intFromFloat(value * 65536.0);
     return @bitCast(fixed);
+}
+
+test "native triangle fixed-point conversion floors and saturates" {
+    try std.testing.expectEqual(@as(i16, 4), toS13_2(1.0));
+    try std.testing.expectEqual(@as(i16, -1), toS13_2(-0.1));
+    try std.testing.expectEqual(@as(i16, 32767), toS13_2(9000.0));
+    try std.testing.expectEqual(@as(i16, -32768), toS13_2(-9000.0));
+    try std.testing.expectEqual(@as(i16, 32), toTexel5(1.0));
+    try std.testing.expectEqual(@as(i16, -3), toTexel5(-0.1));
+    try std.testing.expectEqual(@as(i16, 32767), toTexel5(2000.0));
+    try std.testing.expectEqual(@as(i16, -32768), toTexel5(-2000.0));
 }
 
 pub const TextureRectangleOptions = struct {

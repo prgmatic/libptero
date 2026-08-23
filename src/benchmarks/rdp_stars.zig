@@ -63,7 +63,12 @@ fn render(count: usize) !struct { submit: u32, total: u32 } {
     rq.clear();
     rq.setFrameBuffer(framebuffer);
     rq.clearScreen(Rgba16.fromInt(0x404040FF));
-    rq.setCombineMode(.single(.{ .rgb_a = .tex0, .rgb_c = .primitive, .alpha_d = .tex0 }));
+    rq.setCombineMode(.single(.{
+        .rgb_a = .tex0,
+        .rgb_c = .primitive,
+        .alpha_a = .tex0,
+        .alpha_c = .primitive,
+    }));
     rq.setBlendMode(.alpha);
     for (0..count) |i| {
         rq.setPrimColor(colors[i % colors.len]);

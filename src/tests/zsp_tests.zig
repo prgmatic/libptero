@@ -519,7 +519,7 @@ fn rdpBufferCommands() !void {
     rdp_queue.writeOverlayCommand(&rdp_overlay, 36, 0, &.{ 0, 0, 0 });
     rdp_queue.writeOverlayCommand(&rdp_overlay, 26, 0, &.{});
     rsp.flush(&rdp_queue);
-    try waitQueueTimeout(&rdp_queue);
+    if (!rsp.waitTimeout(&rdp_queue, 100_000_000)) return error.RspSignalTimeout;
 
     n64.cache.invalidateData(&rdp_buffer);
     try testing.expectEqual(@as(u64, 0xe600000000000000), rdp_buffer[0]);
@@ -662,6 +662,9 @@ fn rdpFullSyncState() !void {
     dp_end_write.* = output_address;
 
     rdp_queue.init(.low);
+    // A held batch must preserve command order and become visible when the
+    // full-sync handler publishes its completed DMA range.
+    rdp_queue.writeDmem(rsp.rdp_syncfull_ongoing_dmem, 0x00000100);
     rdp_queue.writeOverlayCommand(&rdp_overlay, 41, 0x00abcdef, &.{0x89abcdef});
     rsp.flush(&rdp_queue);
     if (!rsp.waitTimeout(&rdp_queue, rsp_timeout_attempts)) {
@@ -696,6 +699,8 @@ fn rdpFullSyncState() !void {
     try testing.expectEqual(@as(u32, 0x2468ace0), rdp_sync_state_output[3]);
     try testing.expect(rsp.io.status_register_read.signal1);
     try expectDmemWord(u8, rsp.rdp_syncfull_ongoing_dmem, 0x40);
+    try expectDmemWord(u8, rsp.rdp_publication_held_dmem, 0);
+    try testing.expectEqual(output_address + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
 
     rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
     dp_status_write.* = 1 << 5;
@@ -1264,7 +1269,7 @@ fn rdpTriangleRender() !void {
         checksum = checksum *% 16777619 ^ bits;
     }
     try testing.expectEqual(@as(usize, 14), changed);
-    try testing.expectEqual(@as(u32, 0xebb3d374), checksum);
+    try testing.expectEqual(@as(u32, 0x8bc20d40), checksum);
 
     dp_status_write.* = 1 << 5;
     dp_status_write.* = (1 << 4) | (1 << 2) | (1 << 0);
@@ -1546,7 +1551,7 @@ fn nativeOverlayTexturedTriangle() !void {
     ));
     renderNativeTriangleScene(&overlay_render, overlay_image, texture_image, green);
     const overlay_fence = rdp.syncFull(&overlay_render);
-    if (!rsp.waitTimeout(&rdp_queue, 100_000_000)) return error.RspSignalTimeout;
+    try waitQueueTimeout(&rdp_queue);
     if (!overlay_fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
 
     n64.cache.invalidateData(&native_triangle_overlay_target);
@@ -1559,6 +1564,41 @@ fn nativeOverlayTexturedTriangle() !void {
     try testing.expectEqual(@as(usize, 63), overlay_changed);
     try testing.expectEqual(@as(u32, 0xee5baec0), overlay_checksum);
     try testing.expectEqual(n64.graphics.color.Rgba16.green, native_triangle_overlay_target[8 * 16 + 8]);
+
+    rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
+    @memset(&native_triangle_overlay_target, black);
+    n64.cache.writebackData(&native_triangle_overlay_target);
+    var next_overlay_render = rdp.OverlayRenderQueue.init(rdp.OverlayQueue.init(
+        &rdp_queue,
+        &rdp_overlay,
+        .{ rsp_rdp_dynamic_buffers[0][0..], rsp_rdp_dynamic_buffers[1][0..] },
+    ));
+    next_overlay_render.clear();
+    next_overlay_render.setFrameBuffer(overlay_image);
+    next_overlay_render.clearScreen(black);
+    next_overlay_render.setCombineMode(.single(.{ .rgb_a = .tex0, .rgb_c = .primitive, .alpha_d = .tex0 }));
+    next_overlay_render.setBlendMode(.alpha);
+    next_overlay_render.setPrimColor(green);
+    for (0..10) |_| {
+        next_overlay_render.drawSprite(texture_image, 8, 8, .{
+            .rotation = 0.35,
+            .pivot = .center,
+            .scale_x = 2,
+            .scale_y = 2,
+        });
+    }
+    const rollover_fence = rdp.syncFull(&next_overlay_render);
+    if (!rsp.waitTimeout(&rdp_queue, 100_000_000)) return error.RspSignalTimeout;
+    if (!rollover_fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
+    n64.cache.invalidateData(&native_triangle_overlay_target);
+    overlay_changed = 0;
+    overlay_checksum = 0;
+    for (native_triangle_overlay_target) |overlay_pixel| {
+        if (!std.meta.eql(overlay_pixel, black)) overlay_changed += 1;
+        overlay_checksum = overlay_checksum *% 16777619 ^ @as(u16, @bitCast(overlay_pixel));
+    }
+    try testing.expectEqual(@as(usize, 63), overlay_changed);
+    try testing.expectEqual(@as(u32, 0xee5baec0), overlay_checksum);
 
     rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
     rsp.releaseRdpToDirect();
