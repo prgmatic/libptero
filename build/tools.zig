@@ -10,10 +10,14 @@ pub const Tools = struct {
     zsp: *std.Build.Step.Compile,
 };
 
-pub fn build(b: *std.Build, n64_module: *std.Build.Module) Tools {
+pub fn build(b: *std.Build) Tools {
+    const srcmap_format = b.createModule(.{
+        .root_source_file = b.path("src/n64/debug/srcmap_format.zig"),
+        .target = b.graph.host,
+    });
     return .{
         .srcmap = addTool(b, "srcmap", "tools/n64srcmap/main.zig", &.{
-            .{ .name = "n64", .module = n64_module },
+            .{ .name = "srcmap_format", .module = srcmap_format },
         }),
         .elf_pack = addTool(b, "elf_pack", "tools/build/elf_pack.zig", &.{}),
         .rsp_pack = addTool(b, "rsp_pack", "tools/build/rsp_pack.zig", &.{}),

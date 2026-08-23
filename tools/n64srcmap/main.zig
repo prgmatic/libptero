@@ -2,10 +2,10 @@ const std = @import("std");
 const paths = @import("paths.zig");
 const elf_image = @import("elf_image.zig");
 
-const sm = @import("n64").debug.srcmap;
-const AddrInfo = sm.AddrInfo;
-const SourceLineInfo = sm.SourceLineInfo;
-const UnwindInfo = sm.UnwindInfo;
+const format = @import("srcmap_format");
+const AddrInfo = format.AddrInfo;
+const SourceLineInfo = format.SourceLineInfo;
+const UnwindInfo = format.UnwindInfo;
 
 const Allocator = std.mem.Allocator;
 
@@ -260,7 +260,7 @@ const Layout = struct {
     line_blob_size: u32,
 
     fn init(entry_count: u32, unwind_count: u32, blobs: Blobs) Layout {
-        const unwind_offset: u32 = @sizeOf(sm.Header) + entry_count * @sizeOf(AddrInfo);
+        const unwind_offset: u32 = @sizeOf(format.Header) + entry_count * @sizeOf(AddrInfo);
         const func_blob_offset: u32 = unwind_offset + unwind_count * @sizeOf(UnwindInfo);
         const func_blob_size: u32 = @intCast(blobs.func_names.bytes.items.len);
         const file_blob_offset: u32 = std.mem.alignForward(u32, func_blob_offset + func_blob_size, 4);
@@ -453,7 +453,7 @@ fn buildSourceLineBlob(
 
 fn appendSourceLineInfo(alloc: Allocator, bytes: *std.ArrayList(u8), info: SourceLineInfo) !void {
     var encoded: [8]u8 = undefined;
-    std.mem.writeInt(u64, &encoded, packSourceLineInfo(info), .big);
+    std.mem.writeInt(u64, &encoded, info.encode(), .big);
     try bytes.appendSlice(alloc, &encoded);
 }
 
@@ -486,7 +486,7 @@ fn writeFile(
 }
 
 fn writeHeader(w: *std.Io.Writer, layout: Layout) !void {
-    try w.writeAll("NSRC");
+    try w.writeAll(format.magic);
     try w.writeInt(u32, layout.entry_count, .big);
     try w.writeInt(u32, layout.unwind_count, .big);
     try w.writeInt(u32, layout.unwind_offset, .big);
@@ -500,11 +500,11 @@ fn writeHeader(w: *std.Io.Writer, layout: Layout) !void {
 
 fn writeAddrTable(w: *std.Io.Writer, addr_entries: []const AddrEntry, source_line_offsets: []const u32) !void {
     for (addr_entries) |entry| {
-        try w.writeInt(u64, packAddrInfo(.{
+        try w.writeInt(u64, (@as(AddrInfo, .{
             .start_addr = @truncate(entry.addr),
             .column = entry.column,
             .source_line_offset = @intCast(source_line_offsets[entry.source_line_idx]),
-        }), .big);
+        })).encode(), .big);
     }
 }
 
@@ -529,16 +529,4 @@ fn writeZeroPadding(w: *std.Io.Writer, count: u32) !void {
 
 fn sourceLineKey(file_idx: u16, line_num: u16) u32 {
     return (@as(u32, file_idx) << 16) | line_num;
-}
-
-fn packAddrInfo(info: AddrInfo) u64 {
-    return (@as(u64, info.start_addr) << 40) |
-        (@as(u64, info.column) << 24) |
-        @as(u64, info.source_line_offset);
-}
-
-fn packSourceLineInfo(info: SourceLineInfo) u64 {
-    return (@as(u64, info.line) << 48) |
-        (@as(u64, info.func_name_offset) << 28) |
-        @as(u64, info.file_name_offset);
 }

@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) void {
     const n64_module = b.createModule(.{
         .root_source_file = b.path("src/n64/n64.zig"),
     });
-    const tools = @import("build/tools.zig").build(b, n64_module);
+    const tools = @import("build/tools.zig").build(b);
 
     addToolTests(b);
     addGeneratedN64Assets(b, n64_module, tools);

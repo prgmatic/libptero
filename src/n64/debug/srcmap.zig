@@ -1,8 +1,13 @@
 const std = @import("std");
 const debug = @import("../debug.zig");
 const pi = @import("../interfaces/parallel.zig");
+const format = @import("srcmap_format.zig");
 
-const magic = "NSRC";
+pub const Header = format.Header;
+pub const UnwindInfo = format.UnwindInfo;
+pub const SourceLineInfo = format.SourceLineInfo;
+pub const AddrInfo = format.AddrInfo;
+
 const magic_word: u32 = 0x4e535243;
 const elf_magic_word: u32 = 0x7f454c46;
 const rom_kseg1_base: u32 = 0xb0000000;
@@ -36,7 +41,7 @@ pub const LineInfo = struct {
 pub fn getLineInfo(addr: u32, buffers: LineInfoBuffers) ?LineInfo {
     const header = readHeader() orelse return null;
     if (header.entry_count == 0) return null;
-    if (!header.isValid()) return null;
+    if (!headerIsValid(header)) return null;
 
     const target: u24 = @truncate(addr);
 
@@ -104,7 +109,7 @@ pub fn printLineInfo(depth: u32, addr: u32) bool {
 pub fn getUnwindInfo(addr: u32) ?UnwindInfo {
     const header = readHeader() orelse return null;
     if (header.unwind_count == 0) return null;
-    if (!header.isValid()) return null;
+    if (!headerIsValid(header)) return null;
 
     var lo: u32 = 0;
     var hi: u32 = header.unwind_count;
@@ -124,66 +129,12 @@ pub fn getUnwindInfo(addr: u32) ?UnwindInfo {
     return null;
 }
 
-pub const Header = extern struct {
-    magic: [4]u8,
-    entry_count: u32,
-    unwind_count: u32,
-    unwind_offset: u32,
-    func_blob_offset: u32,
-    func_blob_size: u32,
-    file_blob_offset: u32,
-    file_blob_size: u32,
-    line_blob_offset: u32,
-    line_blob_size: u32,
-
-    fn isValid(header: Header) bool {
-        const entry_bytes = @as(usize, header.entry_count) * @sizeOf(AddrInfo);
-        const unwind_bytes = @as(usize, header.unwind_count) * @sizeOf(UnwindInfo);
-        if (header.unwind_offset != @sizeOf(Header) + entry_bytes) return false;
-        if (header.func_blob_offset != header.unwind_offset + unwind_bytes) return false;
-        if (header.func_blob_size == 0 or header.file_blob_size == 0 or header.line_blob_size == 0) return false;
-        const func_end = header.func_blob_offset +% header.func_blob_size;
-        const file_end = header.file_blob_offset +% header.file_blob_size;
-        if (func_end < header.func_blob_offset or file_end < header.file_blob_offset) return false;
-        if (header.file_blob_offset < func_end) return false;
-        if (header.line_blob_offset < file_end) return false;
-        return rangeInSrcmap(header.line_blob_offset, header.line_blob_size);
-    }
-};
-
-pub const UnwindInfo = extern struct {
-    start_addr: u32,
-    end_addr: u32,
-    stack_size: u16,
-    ra_offset: u16,
-
-    pub fn compare(_: void, lhs: UnwindInfo, rhs: UnwindInfo) bool {
-        return lhs.start_addr < rhs.start_addr;
-    }
-};
-
-pub const SourceLineInfo = packed struct(u64) {
-    line: u16,
-    func_name_offset: u20,
-    file_name_offset: u28,
-};
-
-pub const AddrInfo = packed struct(u64) {
-    start_addr: u24,
-    column: u16,
-    source_line_offset: u24,
-
-    pub fn compare(_: void, lhs: AddrInfo, rhs: AddrInfo) bool {
-        return lhs.start_addr < rhs.start_addr;
-    }
-};
-
 fn readHeader() ?Header {
     if (__srcmap_rom_offset == 0xffffffff or __srcmap_rom_size < @sizeOf(Header)) return null;
     _ = findElfRomOffset() orelse return null;
     if (readRomU32(0) != magic_word) return null;
     return .{
-        .magic = magic.*,
+        .magic = format.magic.*,
         .entry_count = readRomU32(4),
         .unwind_count = readRomU32(8),
         .unwind_offset = readRomU32(12),
@@ -196,25 +147,31 @@ fn readHeader() ?Header {
     };
 }
 
+fn headerIsValid(header: Header) bool {
+    const entry_bytes = @as(usize, header.entry_count) * @sizeOf(AddrInfo);
+    const unwind_bytes = @as(usize, header.unwind_count) * @sizeOf(UnwindInfo);
+    if (header.unwind_offset != @sizeOf(Header) + entry_bytes) return false;
+    if (header.func_blob_offset != header.unwind_offset + unwind_bytes) return false;
+    if (header.func_blob_size == 0 or header.file_blob_size == 0 or header.line_blob_size == 0) return false;
+    const func_end = header.func_blob_offset +% header.func_blob_size;
+    const file_end = header.file_blob_offset +% header.file_blob_size;
+    if (func_end < header.func_blob_offset or file_end < header.file_blob_offset) return false;
+    if (header.file_blob_offset < func_end) return false;
+    if (header.line_blob_offset < file_end) return false;
+    return rangeInSrcmap(header.line_blob_offset, header.line_blob_size);
+}
+
 fn readAddrInfo(index: u32) ?AddrInfo {
     const offset = @sizeOf(Header) + index * @sizeOf(AddrInfo);
     if (!rangeInSrcmap(offset, @sizeOf(AddrInfo))) return null;
     const word = readRomU64(offset);
-    return .{
-        .start_addr = @truncate(word >> 40),
-        .column = @truncate(word >> 24),
-        .source_line_offset = @truncate(word),
-    };
+    return AddrInfo.decode(word);
 }
 
 fn readSourceLineInfo(offset: u32) ?SourceLineInfo {
     if (!rangeInSrcmap(offset, @sizeOf(SourceLineInfo))) return null;
     const word = readRomU64(offset);
-    return .{
-        .line = @truncate(word >> 48),
-        .func_name_offset = @truncate(word >> 28),
-        .file_name_offset = @truncate(word),
-    };
+    return SourceLineInfo.decode(word);
 }
 
 fn readUnwindInfo(header: Header, index: u32) ?UnwindInfo {
