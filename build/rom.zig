@@ -12,8 +12,35 @@ pub const Options = struct {
     tools: Tools,
     libptero_root: std.Build.LazyPath,
     optimize: std.builtin.OptimizeMode = .ReleaseSmall,
-    ipl3_debug: bool = false,
+    layout: MemoryLayout,
+    boot: BootOptions,
+    metadata: MetadataOptions,
     imports: []const std.Build.Module.Import = &.{},
+};
+
+pub const MemoryLayout = struct {
+    rdram: Rdram = .standard,
+    stack_size: u32 = 64 * 1024,
+    rom_length: u32 = 64 * 1024 * 1024,
+};
+
+pub const Rdram = enum(u32) {
+    standard = 4 * 1024 * 1024,
+    expansion_pak = 8 * 1024 * 1024,
+};
+
+pub const boot_reserve = 64 * 1024;
+
+pub const BootOptions = struct {
+    ipl3_debug_logging: bool = false,
+    ipl3_linker_script: ?std.Build.LazyPath = null,
+    loader_linker_script: ?std.Build.LazyPath = null,
+    ipl3_assembly_files: ?[]const std.Build.LazyPath = null,
+};
+
+pub const MetadataOptions = struct {
+    game_code: [4]u8 = .{ 0, 0, 0, 0 },
+    rom_version: u8 = 0,
 };
 
 pub const Rom = struct {
@@ -90,11 +117,19 @@ fn installPath(b: *std.Build, directory: []const u8, filename: []const u8) []con
 pub fn build(b: *std.Build, options: Options) Rom {
     const boot = @import("boot.zig").build(b, .{
         .name = options.name,
-        .title = options.title,
         .target = options.target,
         .n64_module = options.n64_module,
         .libptero_root = options.libptero_root,
-        .debug_logging = options.ipl3_debug,
+        .header = .{
+            .title = options.title,
+            .game_code = options.metadata.game_code,
+            .rom_version = options.metadata.rom_version,
+        },
+        .debug_logging = options.boot.ipl3_debug_logging,
+        .required_rdram = @intFromEnum(options.layout.rdram),
+        .ipl3_linker_script = options.boot.ipl3_linker_script,
+        .loader_linker_script = options.boot.loader_linker_script,
+        .ipl3_assembly_files = options.boot.ipl3_assembly_files,
     });
 
     const root_imports = b.allocator.alloc(std.Build.Module.Import, options.imports.len + 1) catch @panic("OOM");

@@ -17,8 +17,6 @@ pub fn init(b: *std.Build, options: InitOptions) Sdk {
     });
 }
 
-const enable_ipl3_debug = false;
-
 pub fn build(b: *std.Build) void {
     // A dependency imports this file for its public API. Its project-only ROMs
     // and tests should not become part of the consumer's build graph.
@@ -39,7 +37,7 @@ pub fn build(b: *std.Build) void {
         .name = "game",
         .title = "Libptero",
         .root_source_file = b.path("src/game/entry.zig"),
-        .ipl3_debug = enable_ipl3_debug,
+        .linker_script = b.path("src/game/link.ld"),
         .install = .{
             .outputs = .{ .rom = true, .packed_elf = true, .debug_elf = true, .source_map = true },
             .description = "Build the game ROM",
@@ -50,7 +48,6 @@ pub fn build(b: *std.Build) void {
         .name = "rdp-stars-benchmark",
         .title = "RDP Stars Benchmark",
         .root_source_file = b.path("src/benchmarks/rdp_stars_entry.zig"),
-        .ipl3_debug = enable_ipl3_debug,
         .install = .{
             .outputs = .{ .rom = true, .packed_elf = true, .debug_elf = true, .source_map = true },
             .step_name = "rdp-benchmark",
@@ -64,7 +61,6 @@ pub fn build(b: *std.Build) void {
         .title = "Libptero Tests",
         .root_source_file = b.path("src/tests/entry.zig"),
         .assembly_files = &.{},
-        .ipl3_debug = enable_ipl3_debug,
         .imports = &.{
             .{ .name = "zsp_test_programs", .module = zsp_test_programs },
         },

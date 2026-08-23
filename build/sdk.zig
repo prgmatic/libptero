@@ -23,13 +23,19 @@ pub const RomOptions = struct {
     linker_script: ?std.Build.LazyPath = null,
     assembly_files: ?[]const std.Build.LazyPath = null,
     optimize: std.builtin.OptimizeMode = .ReleaseSmall,
-    ipl3_debug: bool = false,
+    layout: MemoryLayout = .{},
+    boot: BootOptions = .{},
+    metadata: MetadataOptions = .{},
     imports: []const std.Build.Module.Import = &.{},
     install: ?InstallOptions = .{},
 };
 
 pub const InstallOptions = rom_build.InstallOptions;
 pub const OutputSelection = rom_build.OutputSelection;
+pub const MemoryLayout = rom_build.MemoryLayout;
+pub const Rdram = rom_build.Rdram;
+pub const BootOptions = rom_build.BootOptions;
+pub const MetadataOptions = rom_build.MetadataOptions;
 
 pub const HandlerOverrides = struct {
     entry: []const u8 = "main",
@@ -106,18 +112,21 @@ pub const Sdk = struct {
         const default_assembly = self.b.allocator.dupe(std.Build.LazyPath, &.{
             self.root.path(self.b, "src/game/interrupt.S"),
         }) catch @panic("OOM");
+        const linker_script = options.linker_script orelse makeLinkerScript(self.b, options.name, options.layout);
         var rom = rom_build.build(self.b, .{
             .name = options.name,
             .title = options.title,
             .root_source_file = root_source_file.?,
-            .linker_script = options.linker_script orelse self.root.path(self.b, "src/game/link.ld"),
+            .linker_script = linker_script,
             .assembly_files = options.assembly_files orelse default_assembly,
             .target = self.target,
             .n64_module = self.n64_module,
             .tools = self.tools,
             .libptero_root = self.root,
             .optimize = options.optimize,
-            .ipl3_debug = options.ipl3_debug,
+            .layout = options.layout,
+            .boot = options.boot,
+            .metadata = options.metadata,
             .imports = root_imports,
         });
         if (options.install) |install| _ = rom.configureInstall(self.b, install);
@@ -136,6 +145,54 @@ pub const Sdk = struct {
         );
     }
 };
+
+fn makeLinkerScript(b: *std.Build, name: []const u8, layout: MemoryLayout) std.Build.LazyPath {
+    const rdram_size: u32 = @intFromEnum(layout.rdram);
+    if (layout.stack_size < 1024) {
+        std.debug.panic("ROM '{s}' must reserve at least 1 KiB for the stack", .{name});
+    }
+    if (layout.stack_size + rom_build.boot_reserve >= rdram_size - 0x400) {
+        std.debug.panic("ROM '{s}' stack reservation leaves no space for program data", .{name});
+    }
+    const program_ram_length = rdram_size - rom_build.boot_reserve - layout.stack_size;
+    const source = b.fmt(
+        \\OUTPUT_ARCH (mips)
+        \\
+        \\MEMORY {{
+        \\    ROM : ORIGIN = 0x0, LENGTH = 0x{x}
+        \\    RAM : ORIGIN = 0x{x}, LENGTH = 0x{x}
+        \\}}
+        \\
+        \\SECTIONS {{
+        \\    .interrupt.text ORIGIN(RAM) : {{
+        \\        KEEP(*(.interrupt.text))
+        \\    }} > RAM AT > ROM
+        \\
+        \\    .text ORIGIN(RAM) + 0x400 : {{
+        \\        __text_start = .;
+        \\        *(.text.startup)
+        \\        *(.text*)
+        \\        __text_end = .;
+        \\    }} > RAM AT > ROM
+        \\
+        \\    .data : ALIGN(8) {{
+        \\        *(.data*)
+        \\        *(.sdata*)
+        \\        *(.rodata*)
+        \\    }} > RAM AT > ROM
+        \\
+        \\    .bss : ALIGN(8) {{
+        \\        __bss_start = .;
+        \\        *(.bss*)
+        \\        __bss_end = .;
+        \\    }} > RAM
+        \\
+        \\    /DISCARD/ : {{
+        \\    }}
+        \\}}
+    , .{ layout.rom_length, @as(u32, 0x80000000), program_ram_length });
+    return b.addWriteFiles().add(b.fmt("{s}.ld", .{name}), source);
+}
 
 fn addGeneratedN64Assets(
     b: *std.Build,

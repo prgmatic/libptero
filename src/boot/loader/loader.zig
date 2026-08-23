@@ -13,6 +13,15 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
         n64.debug.initFmtBuffer(fixed_buffer_alloc.allocator()) catch undefined;
     }
 
+    const detected_rdram: *volatile u32 = @ptrFromInt(0xA4000000);
+    if (detected_rdram.* < config.required_rdram) {
+        print("ROM requires {d} MiB RDRAM; detected {d} MiB\n", .{
+            config.required_rdram / (1024 * 1024),
+            detected_rdram.* / (1024 * 1024),
+        });
+        while (true) {}
+    }
+
     const entry = loadElf();
 
     si.pifTerminateBoot();
