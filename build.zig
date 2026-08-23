@@ -44,18 +44,6 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    _ = sdk.addRom(.{
-        .name = "rdp-stars-benchmark",
-        .title = "RDP Stars Benchmark",
-        .root_source_file = b.path("src/benchmarks/rdp_stars_entry.zig"),
-        .install = .{
-            .outputs = .{ .rom = true, .packed_elf = true, .debug_elf = true, .source_map = true },
-            .step_name = "rdp-benchmark",
-            .description = "Build the RDP star benchmark ROM",
-            .add_to_default = false,
-        },
-    });
-
     const test_rom = sdk.addRom(.{
         .name = "tests",
         .title = "Libptero Tests",
