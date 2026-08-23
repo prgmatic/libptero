@@ -22,35 +22,70 @@ pub const Rom = struct {
     elf: std.Build.LazyPath,
     srcmap: std.Build.LazyPath,
     image: std.Build.LazyPath,
+    install_step: ?*std.Build.Step = null,
 
-    pub fn addInstallStep(
-        self: Rom,
+    pub fn configureInstall(
+        self: *Rom,
         b: *std.Build,
-        step_name: []const u8,
-        description: []const u8,
+        options: InstallOptions,
     ) *std.Build.Step {
+        const install_name = options.name orelse self.name;
+        const step_name = options.step_name orelse self.name;
+        const description = options.description orelse b.fmt("Build and install the {s} ROM", .{self.name});
         const step = b.step(step_name, description);
-        step.dependOn(&b.addInstallArtifact(self.debug_elf, .{
-            .dest_dir = .{ .override = .prefix },
-        }).step);
-        step.dependOn(&b.addInstallFileWithDir(
-            self.elf,
-            .prefix,
-            b.fmt("{s}.elf", .{self.name}),
-        ).step);
-        step.dependOn(&b.addInstallFileWithDir(
-            self.srcmap,
-            .prefix,
-            b.fmt("{s}.srcmap", .{self.name}),
-        ).step);
-        step.dependOn(&b.addInstallFileWithDir(
-            self.image,
-            .prefix,
-            b.fmt("{s}.z64", .{self.name}),
-        ).step);
+        if (options.outputs.debug_elf) {
+            step.dependOn(&b.addInstallArtifact(self.debug_elf, .{
+                .dest_dir = .{ .override = .prefix },
+                .dest_sub_path = installPath(b, options.directory, b.fmt("{s}_debug.elf", .{install_name})),
+            }).step);
+        }
+        if (options.outputs.packed_elf) {
+            step.dependOn(&b.addInstallFileWithDir(
+                self.elf,
+                .prefix,
+                installPath(b, options.directory, b.fmt("{s}.elf", .{install_name})),
+            ).step);
+        }
+        if (options.outputs.source_map) {
+            step.dependOn(&b.addInstallFileWithDir(
+                self.srcmap,
+                .prefix,
+                installPath(b, options.directory, b.fmt("{s}.srcmap", .{install_name})),
+            ).step);
+        }
+        if (options.outputs.rom) {
+            step.dependOn(&b.addInstallFileWithDir(
+                self.image,
+                .prefix,
+                installPath(b, options.directory, b.fmt("{s}.z64", .{install_name})),
+            ).step);
+        }
+        if (options.add_to_default) b.getInstallStep().dependOn(step);
+        self.install_step = step;
         return step;
     }
 };
+
+pub const InstallOptions = struct {
+    outputs: OutputSelection = .{},
+    name: ?[]const u8 = null,
+    directory: []const u8 = "",
+    step_name: ?[]const u8 = null,
+    description: ?[]const u8 = null,
+    add_to_default: bool = true,
+};
+
+pub const OutputSelection = struct {
+    rom: bool = true,
+    packed_elf: bool = false,
+    debug_elf: bool = false,
+    source_map: bool = false,
+};
+
+fn installPath(b: *std.Build, directory: []const u8, filename: []const u8) []const u8 {
+    if (directory.len == 0) return filename;
+    return std.fs.path.join(b.allocator, &.{ directory, filename }) catch @panic("OOM");
+}
 
 pub fn build(b: *std.Build, options: Options) Rom {
     const boot = @import("boot.zig").build(b, .{

@@ -5,11 +5,16 @@ pub const Sdk = sdk_build.Sdk;
 pub const InitOptions = struct {
     root: ?std.Build.LazyPath = null,
     target: ?std.Build.ResolvedTarget = null,
+    generated: sdk_build.GeneratedFeatures = .{},
 };
 
 pub fn init(b: *std.Build, options: InitOptions) Sdk {
     const root = options.root orelse b.dependencyFromBuildZig(@This(), .{}).path("");
-    return Sdk.init(b, .{ .root = root, .target = options.target });
+    return Sdk.init(b, .{
+        .root = root,
+        .target = options.target,
+        .generated = options.generated,
+    });
 }
 
 const enable_ipl3_debug = false;
@@ -19,28 +24,40 @@ pub fn build(b: *std.Build) void {
     // and tests should not become part of the consumer's build graph.
     if (b.pkg_hash.len != 0) return;
 
-    const sdk = init(b, .{ .root = b.path("") });
+    var sdk = init(b, .{
+        .root = b.path(""),
+        .generated = .{
+            .console_font = true,
+            .rsp_programs = true,
+        },
+    });
 
     addToolTests(b);
     const zsp_test_programs = addZspTestPrograms(b, &sdk);
 
-    const game = sdk.addRom(.{
+    _ = sdk.addRom(.{
         .name = "game",
         .title = "Libptero",
         .root_source_file = b.path("src/game/entry.zig"),
         .ipl3_debug = enable_ipl3_debug,
+        .install = .{
+            .outputs = .{ .rom = true, .packed_elf = true, .debug_elf = true, .source_map = true },
+            .description = "Build the game ROM",
+        },
     });
 
-    const game_step = game.addInstallStep(b, "game", "Build the game ROM");
-    b.getInstallStep().dependOn(game_step);
-
-    const rdp_benchmark = sdk.addRom(.{
+    _ = sdk.addRom(.{
         .name = "rdp-stars-benchmark",
         .title = "RDP Stars Benchmark",
         .root_source_file = b.path("src/benchmarks/rdp_stars_entry.zig"),
         .ipl3_debug = enable_ipl3_debug,
+        .install = .{
+            .outputs = .{ .rom = true, .packed_elf = true, .debug_elf = true, .source_map = true },
+            .step_name = "rdp-benchmark",
+            .description = "Build the RDP star benchmark ROM",
+            .add_to_default = false,
+        },
     });
-    _ = rdp_benchmark.addInstallStep(b, "rdp-benchmark", "Build the RDP star benchmark ROM");
 
     const test_rom = sdk.addRom(.{
         .name = "tests",
@@ -51,9 +68,14 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "zsp_test_programs", .module = zsp_test_programs },
         },
+        .install = .{
+            .outputs = .{ .rom = true, .packed_elf = true, .debug_elf = true, .source_map = true },
+            .step_name = "test-rom",
+            .description = "Build the test ROM",
+            .add_to_default = false,
+        },
     });
-    const test_rom_step = test_rom.addInstallStep(b, "test-rom", "Build the test ROM");
-    b.step("tests", "Build the test ROM").dependOn(test_rom_step);
+    b.step("tests", "Build the test ROM").dependOn(test_rom.install_step.?);
 }
 
 fn addToolTests(b: *std.Build) void {

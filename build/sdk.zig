@@ -6,17 +6,36 @@ const tools_build = @import("tools.zig");
 pub const Options = struct {
     root: std.Build.LazyPath,
     target: ?std.Build.ResolvedTarget = null,
+    generated: GeneratedFeatures = .{},
+};
+
+pub const GeneratedFeatures = struct {
+    console_font: bool = false,
+    rsp_programs: bool = false,
 };
 
 pub const RomOptions = struct {
     name: []const u8,
     title: []const u8,
-    root_source_file: std.Build.LazyPath,
+    app_source_file: ?std.Build.LazyPath = null,
+    root_source_file: ?std.Build.LazyPath = null,
+    overrides: HandlerOverrides = .{},
     linker_script: ?std.Build.LazyPath = null,
     assembly_files: ?[]const std.Build.LazyPath = null,
     optimize: std.builtin.OptimizeMode = .ReleaseSmall,
     ipl3_debug: bool = false,
     imports: []const std.Build.Module.Import = &.{},
+    install: ?InstallOptions = .{},
+};
+
+pub const InstallOptions = rom_build.InstallOptions;
+pub const OutputSelection = rom_build.OutputSelection;
+
+pub const HandlerOverrides = struct {
+    entry: []const u8 = "main",
+    panic: []const u8 = "",
+    exception: []const u8 = "",
+    interrupt: []const u8 = "",
 };
 
 pub const Sdk = struct {
@@ -25,6 +44,7 @@ pub const Sdk = struct {
     target: std.Build.ResolvedTarget,
     n64_module: *std.Build.Module,
     tools: tools_build.Tools,
+    console_font_added: bool,
 
     pub fn init(b: *std.Build, options: Options) Sdk {
         const target = options.target orelse b.resolveTargetQuery(target_query);
@@ -32,7 +52,7 @@ pub const Sdk = struct {
             .root_source_file = options.root.path(b, "src/n64/n64.zig"),
         });
         const tools = tools_build.build(b, options.root);
-        addGeneratedN64Assets(b, options.root, n64_module, tools);
+        addGeneratedN64Assets(b, options.root, n64_module, tools, options.generated);
 
         return .{
             .b = b,
@@ -40,17 +60,56 @@ pub const Sdk = struct {
             .target = target,
             .n64_module = n64_module,
             .tools = tools,
+            .console_font_added = options.generated.console_font,
         };
     }
 
-    pub fn addRom(self: *const Sdk, options: RomOptions) rom_build.Rom {
+    pub fn addRom(self: *Sdk, options: RomOptions) rom_build.Rom {
+        const uses_default_entry = options.app_source_file != null;
+        if (uses_default_entry == (options.root_source_file != null)) {
+            std.debug.panic("ROM '{s}' must set exactly one of app_source_file or root_source_file", .{options.name});
+        }
+
+        var root_source_file = options.root_source_file;
+        var root_imports = options.imports;
+        if (options.app_source_file) |app_source_file| {
+            if (!self.console_font_added and
+                (options.overrides.panic.len == 0 or options.overrides.exception.len == 0))
+            {
+                addConsoleFont(self.b, self.root, self.n64_module, self.tools);
+                self.console_font_added = true;
+            }
+
+            const app_imports = self.b.allocator.alloc(std.Build.Module.Import, options.imports.len + 1) catch @panic("OOM");
+            app_imports[0] = .{ .name = "n64", .module = self.n64_module };
+            @memcpy(app_imports[1..], options.imports);
+            const app_module = self.b.createModule(.{
+                .root_source_file = app_source_file,
+                .target = self.target,
+                .optimize = options.optimize,
+                .strip = false,
+                .imports = app_imports,
+            });
+
+            const config = self.b.addOptions();
+            config.addOption([]const u8, "entry", options.overrides.entry);
+            config.addOption([]const u8, "panic_handler", options.overrides.panic);
+            config.addOption([]const u8, "exception_handler", options.overrides.exception);
+            config.addOption([]const u8, "interrupt_handler", options.overrides.interrupt);
+            root_source_file = self.root.path(self.b, "src/runtime/entry.zig");
+            root_imports = self.b.allocator.dupe(std.Build.Module.Import, &.{
+                .{ .name = "app", .module = app_module },
+                .{ .name = "runtime_config", .module = config.createModule() },
+            }) catch @panic("OOM");
+        }
+
         const default_assembly = self.b.allocator.dupe(std.Build.LazyPath, &.{
             self.root.path(self.b, "src/game/interrupt.S"),
         }) catch @panic("OOM");
-        return rom_build.build(self.b, .{
+        var rom = rom_build.build(self.b, .{
             .name = options.name,
             .title = options.title,
-            .root_source_file = options.root_source_file,
+            .root_source_file = root_source_file.?,
             .linker_script = options.linker_script orelse self.root.path(self.b, "src/game/link.ld"),
             .assembly_files = options.assembly_files orelse default_assembly,
             .target = self.target,
@@ -59,8 +118,10 @@ pub const Sdk = struct {
             .libptero_root = self.root,
             .optimize = options.optimize,
             .ipl3_debug = options.ipl3_debug,
-            .imports = options.imports,
+            .imports = root_imports,
         });
+        if (options.install) |install| _ = rom.configureInstall(self.b, install);
+        return rom;
     }
 
     pub fn addRspUcode(self: *const Sdk, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
@@ -81,12 +142,13 @@ fn addGeneratedN64Assets(
     root: std.Build.LazyPath,
     n64_module: *std.Build.Module,
     tools: tools_build.Tools,
+    features: GeneratedFeatures,
 ) void {
-    const font_step = b.addRunArtifact(tools.console_font_conv);
-    font_step.addFileArg(root.path(b, "assets/console_font.png"));
-    n64_module.addAnonymousImport("console_font", .{
-        .root_source_file = font_step.addOutputFileArg("console.font"),
-    });
+    if (features.console_font) {
+        addConsoleFont(b, root, n64_module, tools);
+    }
+
+    if (!features.rsp_programs) return;
 
     n64_module.addAnonymousImport("fill_dmem_rsp", .{
         .root_source_file = buildRspUcode(b, root, tools, "fill_dmem", "src/n64/rsp/ucode/fill_dmem.zsp"),
@@ -118,6 +180,19 @@ fn addGeneratedN64Assets(
             ),
         });
     }
+}
+
+fn addConsoleFont(
+    b: *std.Build,
+    root: std.Build.LazyPath,
+    n64_module: *std.Build.Module,
+    tools: tools_build.Tools,
+) void {
+    const font_step = b.addRunArtifact(tools.console_font_conv);
+    font_step.addFileArg(root.path(b, "assets/console_font.png"));
+    n64_module.addAnonymousImport("console_font", .{
+        .root_source_file = font_step.addOutputFileArg("console.font"),
+    });
 }
 
 fn buildRspUcode(

@@ -8,7 +8,7 @@ MEMORY {
 }
 
 SECTIONS {
-    .interrup.text : {
+    .interrupt.text : {
 	KEEP(*(.interrupt.text))
     } > RAM AT > ROM
 
