@@ -24,6 +24,7 @@ pub fn addToolTests(b: *std.Build) void {
         .{ "rsp-overlay-link-tests", "tools/build/rsp_overlay_link.zig" },
         .{ "rsp-pack-tests", "tools/build/rsp_pack.zig" },
         .{ "test-protocol-tests", "tools/test_protocol.zig" },
+        .{ "math-tests", "src/n64/math_tests.zig" },
     }) |test_config| {
         const test_artifact = b.addTest(.{
             .name = test_config[0],
