@@ -10,6 +10,7 @@ pub const UCode = struct {
     commands: []const u8 = &.{},
     state_offset: u16 = 0,
     state_len: u16 = 0,
+    state_init: []const u8 = &.{},
 
     pub fn fromBlob(blob: []const u8) UCode {
         if (blob.len < header_size) {
@@ -23,8 +24,10 @@ pub const UCode = struct {
         const data_end = data_start + header.data_len;
         const commands_start = header.commands_offset;
         const commands_end = commands_start + header.command_count * Command.encoded_len;
+        const state_init_start = header.state_init_offset;
+        const state_init_end = state_init_start + header.state_init_len;
 
-        if (text_end > blob.len or data_end > blob.len or commands_end > blob.len) {
+        if (text_end > blob.len or data_end > blob.len or commands_end > blob.len or state_init_end > blob.len) {
             @panic("RSP program blob has invalid segment bounds");
         }
 
@@ -36,6 +39,7 @@ pub const UCode = struct {
             .commands = blob[commands_start..commands_end],
             .state_offset = header.state_offset,
             .state_len = header.state_len,
+            .state_init = blob[state_init_start..state_init_end],
         };
     }
 
@@ -75,6 +79,8 @@ const Header = struct {
     command_count: u16,
     state_offset: u16,
     state_len: u16,
+    state_init_offset: u16,
+    state_init_len: u16,
 
     fn read(bytes: *const [header_size]u8) Header {
         return .{
@@ -87,6 +93,8 @@ const Header = struct {
             .command_count = std.mem.readInt(u16, bytes[12..14], .big),
             .state_offset = std.mem.readInt(u16, bytes[14..16], .big),
             .state_len = std.mem.readInt(u16, bytes[16..18], .big),
+            .state_init_offset = std.mem.readInt(u16, bytes[18..20], .big),
+            .state_init_len = std.mem.readInt(u16, bytes[20..22], .big),
         };
     }
 };

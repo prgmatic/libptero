@@ -12,9 +12,11 @@ SECTIONS {
         KEEP(*(.rodata*))
     } > DMEM
 
-    .bss 0x0038 (NOLOAD) : SUBALIGN(1) {
+    .bss (NOLOAD) : SUBALIGN(1) {
         *(.bss*)
     } > DMEM
+
+    ASSERT(. <= 0x01f8, "resident DMEM overlaps the overlay header")
 
     .text 0x1000 : {
         *(.text*)

@@ -79,6 +79,7 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
         break :blk count;
     } else 0;
     const commands_offset = data_offset + padded_data_size;
+    const state_init_offset = commands_offset + command_count * command_packed_size;
     var state_offset: u16 = 0;
     var state_size: u16 = 0;
     if (state) |section| {
@@ -100,7 +101,8 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     if (padded_text_size > std.math.maxInt(u16)) return error.TextTooLarge;
     if (padded_data_size > std.math.maxInt(u16)) return error.DataTooLarge;
     if (data_offset > std.math.maxInt(u16)) return error.DataOffsetTooLarge;
-    const out_size = commands_offset + command_count * command_packed_size;
+    const state_init_size: usize = if (state) |section| @intCast(section.sh_size) else 0;
+    const out_size = state_init_offset + state_init_size;
 
     const out = try alloc.alloc(u8, out_size);
     @memset(out, 0);
@@ -114,6 +116,8 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     w16(out, 12, @intCast(command_count));
     w16(out, 14, state_offset);
     w16(out, 16, state_size);
+    w16(out, 18, @intCast(state_init_offset));
+    w16(out, 20, @intCast(state_init_size));
 
     copySection(out[header_size..][0..text_size], bytes, text) catch |err| {
         alloc.free(out);
@@ -132,6 +136,12 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     }
     if (commands) |section| {
         try packCommands(out[commands_offset..], bytes, section, text);
+    }
+    if (state) |section| {
+        copySection(out[state_init_offset..][0..state_init_size], bytes, section) catch |err| {
+            alloc.free(out);
+            return err;
+        };
     }
 
     return out;

@@ -51,11 +51,31 @@ pub fn addZspPrograms(b: *std.Build, sdk: *Sdk) *std.Build.Module {
             resident,
         );
     }
+    assets.addZspOverlayWithStateStart(
+        "geometry_overlay",
+        sdk.root.path(b, "src/n64/rsp/ucode/geometry_overlay.zsp"),
+        resident,
+        0x0230,
+    );
+    assets.addZspOverlayWithStateStart(
+        "geometry_clipping",
+        sdk.root.path(b, "src/n64/rsp/ucode/geometry_clipping.zsp"),
+        resident,
+        0x0230,
+    );
 
     var module_source_bytes: std.ArrayList(u8) = .empty;
     module_source_bytes.appendSlice(b.allocator,
         \\const UCode = @import("n64").rsp.UCode;
         \\const assets = @import("assets");
+        \\
+    ) catch @panic("OOM");
+    module_source_bytes.appendSlice(b.allocator,
+        \\pub const geometry_overlay_rsp align(8) = assets.geometry_overlay;
+        \\pub const geometry_overlay = UCode.fromBlob(&geometry_overlay_rsp);
+        \\pub const geometry_clipping_rsp align(8) = assets.geometry_clipping;
+        \\pub const geometry_clipping = UCode.fromBlob(&geometry_clipping_rsp);
+        \\
         \\
     ) catch @panic("OOM");
     for (fixtures) |fixture| {

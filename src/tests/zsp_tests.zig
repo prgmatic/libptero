@@ -60,6 +60,12 @@ var overlay_1: rsp.Overlay = undefined;
 var overlay_2: rsp.Overlay = undefined;
 var multi_slot_overlay: rsp.Overlay = undefined;
 var rdp_overlay: rsp.Overlay = undefined;
+var geometry_overlay: rsp.Overlay = undefined;
+var geometry_matrix_input: [16]u32 align(16) = undefined;
+var geometry_matrix_stack: [32]u32 align(16) = undefined;
+var geometry_patch_target: [2]u32 align(8) = undefined;
+var geometry_vertex_input: [64]u8 align(16) = undefined;
+var geometry_triangle_output: [32]u64 align(16) = undefined;
 
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
@@ -114,6 +120,14 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: RDP reserved loop slots", .run = rdpReservedLoopSlots },
     .{ .name = "ZSP: RDP persistent scalar state", .run = rdpPersistentScalarState },
     .{ .name = "ZSP: command dispatcher invalid command", .run = commandDispatcherInvalid },
+    .{ .name = "ZSP: Geometry projection DMA", .run = geometryProjectionDma },
+    .{ .name = "ZSP: Geometry state commands", .run = geometryStateCommands },
+    .{ .name = "ZSP: Geometry matrix overlay", .run = geometryMatrixOverlay },
+    .{ .name = "ZSP: Geometry clipping swap", .run = geometryClippingSwap },
+    .{ .name = "ZSP: Geometry vertex transform", .run = geometryVertexTransform },
+    .{ .name = "ZSP: Geometry triangle submission", .run = geometryTriangleSubmission },
+    .{ .name = "ZSP: Geometry clipped triangle", .run = geometryClippedTriangle },
+    .{ .name = "ZSP: Geometry patch DMA", .run = geometryPatchDma },
 };
 
 fn arithmetic() !void {
@@ -223,6 +237,8 @@ fn vectorOperations() !void {
     try expectDmemWords(0x1a0, &multiply_expected);
     const reciprocal_expected = [_]u32{ 0x0002c000, 0x7fff0000, 0, 0 };
     try expectDmemWords(0x1b0, &reciprocal_expected);
+    const reciprocal_sqrt_expected = [_]u32{ 0xc0000000, 0, 0, 0 };
+    try expectDmemWords(0x210, &reciprocal_sqrt_expected);
     const unsigned_bytes_expected = [_]u32{ 0x00000080, 0x00000100, 0x7f807f80, 0x40000000 };
     try expectDmemWords(0x1c0, &unsigned_bytes_expected);
     const partial_words_expected = [_]u32{ 0x00010002, 0, 0x7fff1234, 0 };
@@ -380,7 +396,7 @@ fn commandFetchBoundary() !void {
 
     rsp.halt();
     rsp.waitHalted();
-    rsp.io.readDmem(u32, 0xb0).* = @truncate(@intFromPtr(&boundary_queue_buffer) & 0x1fffffff);
+    rsp.io.readDmem(u32, 0x80).* = @truncate(@intFromPtr(&boundary_queue_buffer) & 0x1fffffff);
     rsp.io.status_register_write.* = rsp.io.status_set_signal7;
     try runLoadedCommandDispatcher();
 
@@ -471,8 +487,8 @@ fn rdpBufferCommands() !void {
     try testing.expectEqual(@as(u64, 0xe700000000000000), rdp_buffer[1]);
     try testing.expectEqual(@as(u64, 0xe400000000000000), rdp_buffer[2]);
     try testing.expectEqual(@as(u64, 0), rdp_buffer[3]);
-    try expectDmemWord(u32, 0xc0, buffer_address + 32);
-    try expectDmemWord(u32, 0xc4, sentinel_address);
+    try expectDmemWord(u32, 0x1d0, buffer_address + 32);
+    try expectDmemWord(u32, 0x1d4, sentinel_address);
     try testing.expectEqual(buffer_address, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
     try testing.expectEqual(buffer_address + 32, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
     var dp_wait = rsp_timeout_attempts;
@@ -483,8 +499,8 @@ fn rdpBufferCommands() !void {
     rdp_rollover_buffer = .{ 0xffffffffffffffff, 0xffffffffffffffff };
     n64.cache.writebackData(&rdp_rollover_buffer);
     const rollover_address: u32 = @truncate(@intFromPtr(&rdp_rollover_buffer) & 0x00ffffff);
-    rdp_queue.writeDmem(0xc8, buffer_address);
-    rdp_queue.writeDmem(0xcc, rollover_address);
+    rdp_queue.writeDmem(0x1c8, buffer_address);
+    rdp_queue.writeDmem(0x1cc, rollover_address);
     rdp_queue.setRdpBuffer(buffer_address + 32, buffer_address, buffer_address + 32);
     rdp_queue.writeOverlayCommand(&rdp_overlay, 39, 0, &.{0});
     rsp.flush(&rdp_queue);
@@ -493,10 +509,10 @@ fn rdpBufferCommands() !void {
     n64.cache.invalidateData(&rdp_rollover_buffer);
     try testing.expectEqual(@as(u64, 0xe700000000000000), rdp_rollover_buffer[0]);
     try testing.expectEqual(@as(u64, 0xffffffffffffffff), rdp_rollover_buffer[1]);
-    try expectDmemWord(u32, 0xc0, rollover_address + 8);
-    try expectDmemWord(u32, 0xc4, rollover_address + 0x10000);
-    try expectDmemWord(u32, 0xc8, rollover_address);
-    try expectDmemWord(u32, 0xcc, buffer_address);
+    try expectDmemWord(u32, 0x1d0, rollover_address + 8);
+    try expectDmemWord(u32, 0x1d4, rollover_address + 0x10000);
+    try expectDmemWord(u32, 0x1c8, rollover_address);
+    try expectDmemWord(u32, 0x1cc, buffer_address);
     try testing.expectEqual(rollover_address, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
     try testing.expectEqual(rollover_address + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
     dp_wait = rsp_timeout_attempts;
@@ -516,7 +532,7 @@ fn rdpDebugHandoff() !void {
     queue.setRdpBuffer(buffer_address, buffer_address, buffer_address + @sizeOf(@TypeOf(rdp_buffer)));
     queue.stop();
     rsp.submitCommands(&queue);
-    rsp.io.readDmem(i8, rsp.rdp_target_bitdepth_dmem).* = -1;
+    rsp.writeDmemByte(rsp.rdp_target_bitdepth_dmem, 0xff);
     rsp.io.status_register_write.* = rsp.io.status_clear_signal0 | rsp.io.status_clear_interrupt;
     rsp.runAsync(rsp.programs.command_dispatcher.pc_start);
 
@@ -534,7 +550,7 @@ fn rdpDebugHandoff() !void {
 
 fn rdpAddressFixups() !void {
     loadCommandDispatcher();
-    rsp.io.readDmem(i8, rsp.rdp_target_bitdepth_dmem).* = 0;
+    rsp.writeDmemByte(rsp.rdp_target_bitdepth_dmem, 0);
     rdp_overlay.init(rsp.programs.rdp_overlay);
     rsp.registerOverlayStatic(&rdp_overlay, 12);
     rdp_buffer = .{ 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff };
@@ -545,8 +561,8 @@ fn rdpAddressFixups() !void {
     dp_status_write.* = 1 << 5;
     dp_status_write.* = (1 << 4) | (1 << 2) | (1 << 0);
     n64.interfaces.mips.clearRdpInterrupt();
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + 2 * @sizeOf(u64);
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + 2 * @sizeOf(u64);
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
@@ -599,8 +615,8 @@ fn rdpFullSyncState() !void {
     std.mem.writeInt(u32, state[16..20], state_output_address, .big);
     std.mem.writeInt(u32, state[20..24], syncpoint_address, .big);
     rsp.writebackOverlayState(&rdp_overlay);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(u64);
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(u64);
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
@@ -609,7 +625,7 @@ fn rdpFullSyncState() !void {
     rdp_queue.init(.low);
     // A held batch must preserve command order and become visible when the
     // full-sync handler publishes its completed DMA range.
-    rdp_queue.writeDmem(rsp.rdp_syncfull_ongoing_dmem, 0x00000100);
+    rdp_queue.holdRdpPublication();
     rdp_queue.writeOverlayCommand(&rdp_overlay, 41, 0x00abcdef, &.{0x89abcdef});
     rsp.flush(&rdp_queue);
     if (!rsp.waitTimeout(&rdp_queue, rsp_timeout_attempts)) {
@@ -619,7 +635,7 @@ fn rdpFullSyncState() !void {
         n64.debug.print("\n      sync PC=0x{x:0>4} status=0x{x:0>8} current=0x{x:0>8} ongoing=0x{x:0>2}\n", .{
             rsp.io.program_counter.*,
             status,
-            rsp.io.readDmem(u32, 0xc0).*,
+            rsp.io.readDmem(u32, 0x1d0).*,
             rsp.io.readDmem(u8, rsp.rdp_syncfull_ongoing_dmem).*,
         });
         n64.debug.print("      rdp=0x{x:0>16} state={x:0>8},{x:0>8},{x:0>8},{x:0>8}\n", .{
@@ -666,8 +682,8 @@ fn rdpColorImageFixup() !void {
     n64.cache.writebackData(&rdp_color_image_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_color_image_buffer) & 0x00ffffff);
     const image_base = output_address + 0x100;
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_color_image_buffer));
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_color_image_buffer));
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
@@ -699,7 +715,7 @@ fn rdpColorImageFixup() !void {
     dp_status_write.* = 1 << 5;
     dp_status_write.* = (1 << 4) | (1 << 2);
     n64.interfaces.mips.clearRdpInterrupt();
-    rsp.io.readDmem(i8, rsp.rdp_target_bitdepth_dmem).* = 0;
+    rsp.writeDmemByte(rsp.rdp_target_bitdepth_dmem, 0);
     rsp.unregisterOverlay(&rdp_overlay);
 }
 
@@ -714,8 +730,8 @@ fn rdpModeState() !void {
     rdp_mode_buffer = .{ 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff };
     n64.cache.writebackData(&rdp_mode_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_mode_buffer) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_mode_buffer));
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_mode_buffer));
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
@@ -723,7 +739,7 @@ fn rdpModeState() !void {
 
     const initial_mode = [_]u32{ 0x01020304, 0x11121314, 0x21222324, 0x31323334, 0x41424344, 0x51525354, 0, 0x71727374 };
     for (initial_mode, 0..) |word, index| {
-        rsp.io.readDmem(u32, 0x200 + @as(u32, @intCast(index * 4))).* = word;
+        rsp.io.readDmem(u32, rsp.rdp_mode_dmem + @as(u32, @intCast(index * 4))).* = word;
     }
     var state = rsp.overlayState(&rdp_overlay);
     for (0..24) |index| {
@@ -756,8 +772,8 @@ fn rdpModeState() !void {
             0x80000000 + @as(u32, @intCast(index)),
         );
     }
-    try expectDmemWord(u32, 0x200 + 24, 0x00200000);
-    try expectDmemWord(u32, 0x200 + 28, 0x12345678);
+    try expectDmemWord(u32, rsp.rdp_mode_dmem + 24, 0x00200000);
+    try expectDmemWord(u32, rsp.rdp_mode_dmem + 28, 0x12345678);
 
     dp_status_write.* = 1 << 5;
     dp_status_write.* = (1 << 4) | (1 << 2);
@@ -776,14 +792,14 @@ fn rdpRenderModeCommands() !void {
     rdp_render_mode_buffer = .{0xffffffffffffffff} ** 10;
     n64.cache.writebackData(&rdp_render_mode_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_render_mode_buffer) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_render_mode_buffer));
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_render_mode_buffer));
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
     dp_end_write.* = output_address;
     for (0..8) |index| {
-        rsp.io.readDmem(u32, 0x200 + @as(u32, @intCast(index * 4))).* = 0;
+        rsp.io.readDmem(u32, rsp.rdp_mode_dmem + @as(u32, @intCast(index * 4))).* = 0;
     }
 
     rdp_queue.init(.low);
@@ -806,10 +822,10 @@ fn rdpRenderModeCommands() !void {
     for (expected, rdp_render_mode_buffer) |expected_word, actual_word| {
         try testing.expectEqual(expected_word, actual_word);
     }
-    try expectDmemWord(u32, 0x200 + 16, 0);
-    try expectDmemWord(u32, 0x200 + 20, 0);
-    try expectDmemWord(u32, 0x200 + 24, 0x00100000);
-    try expectDmemWord(u32, 0x200 + 28, 0x208);
+    try expectDmemWord(u32, rsp.rdp_mode_dmem + 16, 0);
+    try expectDmemWord(u32, rsp.rdp_mode_dmem + 20, 0);
+    try expectDmemWord(u32, rsp.rdp_mode_dmem + 24, 0x00100000);
+    try expectDmemWord(u32, rsp.rdp_mode_dmem + 28, 0x208);
 
     dp_status_write.* = 1 << 5;
     dp_status_write.* = (1 << 4) | (1 << 2);
@@ -828,22 +844,22 @@ fn rdpModeStack() !void {
     rdp_mode_stack_buffer = .{0xffffffffffffffff} ** 4;
     n64.cache.writebackData(&rdp_mode_stack_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_mode_stack_buffer) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_mode_stack_buffer));
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_mode_stack_buffer));
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
     dp_end_write.* = output_address;
     for (0..8) |index| {
-        rsp.io.readDmem(u32, 0x200 + @as(u32, @intCast(index * 4))).* = 0;
+        rsp.io.readDmem(u32, rsp.rdp_mode_dmem + @as(u32, @intCast(index * 4))).* = 0;
     }
 
     rdp_queue.init(.low);
     rdp_queue.writeOverlayCommand(&rdp_overlay, 18, 0x001002, &.{0x003004});
     rdp_queue.writeOverlayCommand(&rdp_overlay, 6, 0, &.{});
-    rdp_queue.writeDmem(0x200, 0x7c123456);
-    rdp_queue.writeDmem(0x204, 0x89abcdef);
-    rdp_queue.writeDmem(0x21c, 0x12345678);
+    rdp_queue.writeDmem(rsp.rdp_mode_dmem, 0x7c123456);
+    rdp_queue.writeDmem(rsp.rdp_mode_dmem + 4, 0x89abcdef);
+    rdp_queue.writeDmem(rsp.rdp_mode_dmem + 28, 0x12345678);
     rdp_queue.writeOverlayCommand(&rdp_overlay, 7, 0, &.{});
     rsp.flush(&rdp_queue);
     try waitQueueTimeout(&rdp_queue);
@@ -859,9 +875,9 @@ fn rdpModeStack() !void {
         try testing.expectEqual(expected_word, actual_word);
     }
     for (0..7) |index| {
-        try expectDmemWord(u32, 0x200 + @as(u32, @intCast(index * 4)), 0);
+        try expectDmemWord(u32, rsp.rdp_mode_dmem + @as(u32, @intCast(index * 4)), 0);
     }
-    try expectDmemWord(u32, 0x200 + 28, 0x200);
+    try expectDmemWord(u32, rsp.rdp_mode_dmem + 28, 0x200);
 
     dp_status_write.* = 1 << 5;
     dp_status_write.* = (1 << 4) | (1 << 2);
@@ -880,16 +896,16 @@ fn rdpResetMode() !void {
     rdp_reset_mode_buffer = .{0xffffffffffffffff} ** 4;
     n64.cache.writebackData(&rdp_reset_mode_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_reset_mode_buffer) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_reset_mode_buffer));
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_reset_mode_buffer));
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
     dp_end_write.* = output_address;
     for (0..8) |index| {
-        rsp.io.readDmem(u32, 0x200 + @as(u32, @intCast(index * 4))).* = 0xffffffff;
+        rsp.io.readDmem(u32, rsp.rdp_mode_dmem + @as(u32, @intCast(index * 4))).* = 0xffffffff;
     }
-    rsp.io.readDmem(u32, 0x200 + 24).* = 0x00200000;
+    rsp.io.readDmem(u32, rsp.rdp_mode_dmem + 24).* = 0x00200000;
 
     rdp_queue.init(.low);
     rdp_queue.writeOverlayCommand(&rdp_overlay, 18, 0x001002, &.{0x003004});
@@ -909,7 +925,7 @@ fn rdpResetMode() !void {
     }
     const expected_mode = [_]u32{ 0x7c123456, 0x89abcdef, 0, 0, 0, 0, 0, 0x200 };
     for (expected_mode, 0..) |word, index| {
-        try expectDmemWord(u32, 0x200 + @as(u32, @intCast(index * 4)), word);
+        try expectDmemWord(u32, rsp.rdp_mode_dmem + @as(u32, @intCast(index * 4)), word);
     }
 
     dp_status_write.* = 1 << 5;
@@ -929,13 +945,13 @@ fn rdpPassthroughTriangles() !void {
     rdp_passthrough_triangle_buffer = .{0xffffffff} ** 52;
     n64.cache.writebackData(&rdp_passthrough_triangle_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_passthrough_triangle_buffer) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_passthrough_triangle_buffer));
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_passthrough_triangle_buffer));
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
     dp_end_write.* = output_address;
-    rsp.io.readDmem(u32, 0x200 + 24).* = 0x38000000;
+    rsp.io.readDmem(u32, rsp.rdp_mode_dmem + 24).* = 0x38000000;
 
     var short_arguments: [7]u32 = undefined;
     for (&short_arguments, 1..) |*word, index| word.* = 0x10000000 + @as(u32, @intCast(index));
@@ -981,8 +997,8 @@ fn rdpTriangleTrivialReject() !void {
     rdp_triangle_cull_buffer[0] = 0xffffffffffffffff;
     n64.cache.writebackData(&rdp_triangle_cull_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_triangle_cull_buffer) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_triangle_cull_buffer));
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_triangle_cull_buffer));
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
@@ -1008,7 +1024,7 @@ fn rdpTriangleTrivialReject() !void {
     rsp.writebackOverlayState(&rdp_overlay);
     rdp_triangle_cull_buffer[0] = 0xffffffffffffffff;
     n64.cache.writebackData(&rdp_triangle_cull_buffer);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
     dp_start_write.* = output_address;
     dp_end_write.* = output_address;
     rdp_queue.writeOverlayCommand(&rdp_overlay, 30, 0, &.{});
@@ -1044,9 +1060,9 @@ fn rdpTriangleSortAndNormal() !void {
     @memset(&rdp_triangle_buffer, 0xff);
     n64.cache.writebackData(&rdp_triangle_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_triangle_buffer) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_triangle_buffer));
-    rsp.io.readDmem(u8, rsp.rdp_syncfull_ongoing_dmem).* = 0x40;
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_triangle_buffer));
+    rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 0x40);
     rdp_queue.writeOverlayCommand(&rdp_overlay, 30, 0x700, &.{});
     rsp.flush(&rdp_queue);
     try waitQueueTimeout(&rdp_queue);
@@ -1091,11 +1107,11 @@ fn rdpTriangleSortAndNormal() !void {
     n64.cache.writebackData(&rdp_triangle_rollover_buffer);
     const rollover_address: u32 = @truncate(@intFromPtr(&rdp_triangle_rollover_buffer) & 0x00ffffff);
     const old_end = output_address;
-    rsp.io.readDmem(u32, 0xc0).* = old_end;
-    rsp.io.readDmem(u32, 0xc4).* = old_end;
-    rsp.io.readDmem(u32, 0xc8).* = output_address;
-    rsp.io.readDmem(u32, 0xcc).* = rollover_address;
-    rsp.io.readDmem(u8, rsp.rdp_syncfull_ongoing_dmem).* = 0;
+    rsp.io.readDmem(u32, 0x1d0).* = old_end;
+    rsp.io.readDmem(u32, 0x1d4).* = old_end;
+    rsp.io.readDmem(u32, 0x1c8).* = output_address;
+    rsp.io.readDmem(u32, 0x1cc).* = rollover_address;
+    rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 0);
     const dp_status_write: *volatile u32 = @ptrFromInt(0xa410000c);
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
@@ -1120,10 +1136,10 @@ fn rdpTriangleSortAndNormal() !void {
     for (expected_primitive, rollover_primitive[0..176]) |expected, actual| {
         try testing.expectEqual(expected, actual);
     }
-    try expectDmemWord(u32, 0xc0, rollover_address + 176);
-    try expectDmemWord(u32, 0xc4, rollover_address + rsp.rdp_dynamic_buffer_len);
-    try expectDmemWord(u32, 0xc8, rollover_address);
-    try expectDmemWord(u32, 0xcc, output_address);
+    try expectDmemWord(u32, 0x1d0, rollover_address + 176);
+    try expectDmemWord(u32, 0x1d4, rollover_address + rsp.rdp_dynamic_buffer_len);
+    try expectDmemWord(u32, 0x1c8, rollover_address);
+    try expectDmemWord(u32, 0x1cc, output_address);
     rsp.halt();
     rsp.waitHalted();
     rsp.io.waitDma();
@@ -1148,12 +1164,12 @@ fn rdpTriangleRender() !void {
     n64.cache.writebackData(&rdp_triangle_render_target);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_triangle_render_commands) & 0x00ffffff);
     const target_address: u32 = @truncate(@intFromPtr(&rdp_triangle_render_target) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_triangle_render_commands));
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_triangle_render_commands));
     // Suppress the triangle helper's live DP_END update while it constructs
     // the primitive. The completed bytes are submitted below with deterministic
     // setup commands so a malformed test cannot deadlock the resident queue.
-    rsp.io.readDmem(u8, rsp.rdp_syncfull_ongoing_dmem).* = 0x40;
+    rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 0x40);
 
     var overlay_state = rsp.overlayState(&rdp_overlay);
     @memset(overlay_state[208..304], 0);
@@ -1174,7 +1190,7 @@ fn rdpTriangleRender() !void {
     rsp.flush(&rdp_queue);
     try waitQueueTimeout(&rdp_queue);
 
-    const emitted_bytes = rsp.io.readDmem(u32, 0xc0).* - output_address;
+    const emitted_bytes = rsp.io.readDmem(u32, 0x1d0).* - output_address;
     if (emitted_bytes != 96) return error.UnexpectedRdpTriangleSize;
     n64.cache.invalidateData(&rdp_triangle_render_commands);
     const setup_words = 5;
@@ -1219,7 +1235,7 @@ fn rdpTriangleRender() !void {
     dp_status_write.* = 1 << 5;
     dp_status_write.* = (1 << 4) | (1 << 2) | (1 << 0);
     n64.interfaces.mips.clearRdpInterrupt();
-    rsp.io.readDmem(u8, rsp.rdp_syncfull_ongoing_dmem).* = 0;
+    rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 0);
     rsp.unregisterOverlay(&rdp_overlay);
 }
 
@@ -1258,18 +1274,18 @@ fn rdpExclusiveRectangles() !void {
     rdp_rectangle_buffer = .{ 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff };
     n64.cache.writebackData(&rdp_rectangle_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_rectangle_buffer) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + @sizeOf(@TypeOf(rdp_rectangle_buffer));
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(rdp_rectangle_buffer));
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
     dp_end_write.* = output_address;
-    rsp.io.readDmem(u32, 0x200 + 24).* = 0x00200000;
+    rsp.io.readDmem(u32, rsp.rdp_mode_dmem + 24).* = 0x00200000;
 
     rdp_queue.init(.low);
     rdp_queue.writeOverlayCommand(&rdp_overlay, 2, 0x00abcdef, &.{0x01234567});
     rdp_queue.writeOverlayCommand(&rdp_overlay, 16, 0x00123456, &.{ 0x89abcdef, 0x0badcafe, 0x12345678 });
-    rdp_queue.writeDmem(0x200 + 24, 0);
+    rdp_queue.writeDmem(rsp.rdp_mode_dmem + 24, 0);
     rdp_queue.writeOverlayCommand(&rdp_overlay, 2, 0x00abcdef, &.{0x76543210});
     rdp_queue.writeOverlayCommand(&rdp_overlay, 16, 0x00123456, &.{ 0xfedcba98, 0xfeedface, 0x87654321 });
     rsp.flush(&rdp_queue);
@@ -1322,6 +1338,7 @@ fn rdpClearZBuffer() !void {
 
 fn rspBackedRdpQueue() !void {
     loadCommandDispatcher();
+    rsp.releaseRdpToDirect();
     rdp_overlay.init(rsp.programs.rdp_overlay);
     rsp.registerOverlayStatic(&rdp_overlay, 12);
     @memset(rsp_rdp_dynamic_buffers[0][0..], 0xff);
@@ -1343,9 +1360,9 @@ fn rspBackedRdpQueue() !void {
     try testing.expectEqual(@as(u64, 0xe700000000000000), rsp_rdp_command_buffer[0]);
     try testing.expectEqual(start, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
     try testing.expectEqual(start + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
-    try expectDmemWord(u32, 0xc4, start + 8);
-    try expectDmemWord(u32, 0xc8, first_dynamic);
-    try expectDmemWord(u32, 0xcc, second_dynamic);
+    try expectDmemWord(u32, 0x1d4, start + 8);
+    try expectDmemWord(u32, 0x1c8, first_dynamic);
+    try expectDmemWord(u32, 0x1cc, second_dynamic);
 
     rdp_queue.writeOverlayCommand(&rdp_overlay, 39, 0, &.{0});
     rsp.flush(&rdp_queue);
@@ -1357,8 +1374,8 @@ fn rspBackedRdpQueue() !void {
     );
     try testing.expectEqual(second_dynamic, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
     try testing.expectEqual(second_dynamic + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
-    try expectDmemWord(u32, 0xc0, second_dynamic + 8);
-    try expectDmemWord(u32, 0xc4, second_dynamic + rsp.rdp_dynamic_buffer_len);
+    try expectDmemWord(u32, 0x1d0, second_dynamic + 8);
+    try expectDmemWord(u32, 0x1d4, second_dynamic + rsp.rdp_dynamic_buffer_len);
     rsp.unregisterOverlay(&rdp_overlay);
 }
 
@@ -1398,6 +1415,7 @@ fn rdpCompletionFence() !void {
     try testing.expectEqual(start, n64.interfaces.rdp.dma_start_addr.* & 0x00ffffff);
     try testing.expectEqual(start + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
     try testing.expect(fence.isComplete());
+    rsp.releaseRdpToDirect();
 }
 
 fn overlayBackedRdpRenderer() !void {
@@ -1582,17 +1600,18 @@ fn queuedDmaCommand() !void {
 fn waitQueueTimeout(queue: *const rsp.Queue) !void {
     if (rsp.waitTimeout(queue, rsp_timeout_attempts)) return;
     n64.debug.print(
-        "\n      RSP pc={x:0>3} sp={x:0>8} dp={x:0>8} current={x:0>8} sentinel={x:0>8}\n      buffers={x:0>8},{x:0>8} dp_start={x:0>8} dp_end={x:0>8}\n",
+        "\n      RSP pc={x:0>3} sp={x:0>8} dp={x:0>8} current={x:0>8} sentinel={x:0>8}\n      buffers={x:0>8},{x:0>8} dp_start={x:0>8} dp_end={x:0>8} assertion={x:0>8}\n",
         .{
             rsp.io.program_counter.*,
             @as(u32, @bitCast(rsp.io.status_register_read.*)),
             @as(u32, @bitCast(n64.interfaces.rdp.status.*)),
-            readDmemInt(u32, 0xc0),
-            readDmemInt(u32, 0xc4),
-            readDmemInt(u32, 0xc8),
-            readDmemInt(u32, 0xcc),
+            readDmemInt(u32, 0x1d0),
+            readDmemInt(u32, 0x1d4),
+            readDmemInt(u32, 0x1c8),
+            readDmemInt(u32, 0x1cc),
             n64.interfaces.rdp.dma_start_addr.*,
             n64.interfaces.rdp.dma_end_addr.*,
+            readDmemInt(u32, 0x84),
         },
     );
     rsp.halt();
@@ -1626,7 +1645,7 @@ fn rspLoadedOverlayDispatch() !void {
     continuous_queue.writeOverlayCommand(&overlay_2, 0, 0x514, &.{});
     continuous_queue.writeOverlayCommand(&overlay_1, 0, 0x518, &.{});
 
-    try expectDmemWord(u32, 0x78, 0x00040800);
+    try expectDmemWord(u32, 0x48, 0x00040800);
     rsp.flush(&continuous_queue);
     try waitQueueTimeout(&continuous_queue);
 
@@ -1636,19 +1655,18 @@ fn rspLoadedOverlayDispatch() !void {
     try expectDmemWord(u32, 0x510, 1);
     try expectDmemWord(u32, 0x514, 2);
     try expectDmemWord(u32, 0x518, 3);
-    try expectDmemWord(u16, 0x800, zsp_programs.static_overlay.state_offset);
-    try expectDmemWord(u16, 0x802, zsp_programs.static_overlay.state_len - 1);
-    try expectDmemWord(u16, 0x808, 1 << 5);
-    try expectDmemWord(u16, 0x80a, 1 << 2);
-    try expectDmemWord(u16, 0x810, @intCast(zsp_programs.static_overlay.text.len - 1));
-    try expectDmemWord(u16, 0x812, rsp.io.dma_imem_addr + zsp_programs.static_overlay.text_offset);
+    try expectDmemWord(u16, 0x1f8, zsp_programs.static_overlay.state_offset);
+    try expectDmemWord(u16, 0x200, 1 << 5);
+    try expectDmemWord(u16, 0x202, 1 << 2);
+    try expectDmemWord(u16, 0x208, @intCast(zsp_programs.static_overlay.text.len - 1));
+    try expectDmemWord(u16, 0x20a, rsp.io.dma_imem_addr + zsp_programs.static_overlay.text_offset);
     const first_command = zsp_programs.static_overlay.commandAt(0);
     const descriptor = @as(u16, first_command.size) << 8 | first_command.handler_offset >> 2;
-    try expectDmemWord(u16, 0x81c, descriptor);
+    try expectDmemWord(u16, 0x214, descriptor);
     const argument_command = zsp_programs.static_overlay.commandAt(1);
     const argument_descriptor = @as(u16, argument_command.size) << 8 |
         argument_command.handler_offset >> 2;
-    try expectDmemWord(u16, 0x81e, argument_descriptor);
+    try expectDmemWord(u16, 0x216, argument_descriptor);
 
     const overlay_1_state = rsp.overlayState(&overlay_1);
     try testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, overlay_1_state[0..4], .big));
@@ -1659,10 +1677,319 @@ fn rspLoadedOverlayDispatch() !void {
     rsp.unregisterOverlay(&overlay_2);
     try expectDmemWord(u32, 0x3c, 0);
     try expectDmemWord(u32, 0x40, 0);
-    try expectDmemWord(u32, 0x78, 0);
+    try expectDmemWord(u32, 0x48, 0);
 
     overlay_2.init(zsp_programs.static_overlay_2);
     try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&overlay_2));
+}
+
+fn geometryProjectionDma() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    const identity = [_]u32{
+        0x00010000, 0x00000000, 0, 0,
+        0x00000001, 0x00000000, 0, 0,
+        0x00000000, 0x00010000, 0, 0,
+        0x00000000, 0x00000001, 0, 0,
+    };
+    geometry_matrix_input = identity;
+    n64.cache.writebackData(&geometry_matrix_input);
+    const input_address: u32 = @truncate(@intFromPtr(&geometry_matrix_input) & 0x00ffffff);
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 7, input_address, &.{});
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+    const state = rsp.overlayState(&geometry_overlay);
+    try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(&identity), state[0..0x40]));
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryStateCommands() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(
+        &geometry_overlay,
+        1,
+        0x0302,
+        &.{ 0x00100020, 0x00300040, 0x12345678 },
+    );
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 9, 1, &.{});
+    continuous_queue.writeOverlayCommand(
+        &geometry_overlay,
+        5,
+        0x378,
+        &.{ 0x11223344, 0x55667788, 0x99aabbcc },
+    );
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 6, 2, &.{0x01000000});
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+
+    const state = rsp.overlayState(&geometry_overlay);
+    try testing.expectEqual(@as(u32, 0x00300040), std.mem.readInt(u32, state[0xe0..][0..4], .big));
+    try testing.expectEqual(@as(u32, 0x12345678), std.mem.readInt(u32, state[0xe4..][0..4], .big));
+    try testing.expectEqual(@as(u32, 0x00100020), std.mem.readInt(u32, state[0xe8..][0..4], .big));
+    try testing.expectEqual(@as(u16, 3), std.mem.readInt(u16, state[0x116..][0..2], .big));
+    try testing.expectEqual(@as(u8, 2), state[0x103]);
+    try testing.expectEqual(@as(u8, 2), state[0x107]);
+    try testing.expectEqual(@as(u8, 0xfe), state[0x10f]);
+    try testing.expectEqual(@as(u8, 0xfe), state[0x113]);
+    try testing.expectEqual(@as(u32, 0x11223344), std.mem.readInt(u32, state[0x148..][0..4], .big));
+    try testing.expectEqual(@as(u32, 0x11223344), std.mem.readInt(u32, state[0x14c..][0..4], .big));
+    try testing.expectEqual(@as(u32, 0x55667788), std.mem.readInt(u32, state[0x150..][0..4], .big));
+    try testing.expectEqual(@as(u32, 0x99aabbcc), std.mem.readInt(u32, state[0x154..][0..4], .big));
+    try testing.expectEqual(@as(u32, 0x01000000), std.mem.readInt(u32, state[0x1c0..][0..4], .big));
+    try testing.expectEqual(@as(u8, 2), state[0x1c8]);
+    try testing.expectEqual(@as(u8, 1), state[0x1c9]);
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryMatrixOverlay() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    const identity = [_]u32{
+        0x00010000, 0x00000000, 0, 0,
+        0x00000001, 0x00000000, 0, 0,
+        0x00000000, 0x00010000, 0, 0,
+        0x00000000, 0x00000001, 0, 0,
+    };
+    geometry_matrix_input = identity;
+    @memset(&geometry_matrix_stack, 0xcccccccc);
+    n64.cache.writebackData(&geometry_matrix_input);
+    n64.cache.writebackData(&geometry_matrix_stack);
+
+    const input_address: u32 = @truncate(@intFromPtr(&geometry_matrix_input) & 0x00ffffff);
+    const stack_address: u32 = @truncate(@intFromPtr(&geometry_matrix_stack) & 0x00ffffff);
+    var state = rsp.overlayState(&geometry_overlay);
+    @memcpy(state[0..0x40], std.mem.sliceAsBytes(&identity));
+    std.mem.writeInt(u32, state[0x1c4..0x1c8], stack_address, .big);
+    rsp.writebackOverlayState(&geometry_overlay);
+
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 2, 0, &.{input_address});
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+
+    n64.cache.invalidateData(&geometry_matrix_stack);
+    try testing.expect(std.mem.eql(u32, &identity, geometry_matrix_stack[0..16]));
+    state = rsp.overlayState(&geometry_overlay);
+    try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(&identity), state[0x40..0x80]));
+    try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(&identity), state[0x80..0xc0]));
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryVertexTransform() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    const identity = [_]u32{
+        0x00010000, 0x00000000, 0, 0,
+        0x00000001, 0x00000000, 0, 0,
+        0x00000000, 0x00010000, 0, 0,
+        0x00000000, 0x00000001, 0, 0,
+    };
+    @memset(&geometry_vertex_input, 0);
+    @memset(geometry_vertex_input[16..24], 0xff);
+    n64.cache.writebackData(&geometry_vertex_input);
+
+    const vertex_address: u32 = @truncate(@intFromPtr(&geometry_vertex_input) & 0x00ffffff);
+    var state = rsp.overlayState(&geometry_overlay);
+    @memcpy(state[0x40..0x80], std.mem.sliceAsBytes(&identity));
+    const vertex_handler = blk: {
+        for (0..zsp_programs.geometry_overlay.commandCount()) |index| {
+            const command = zsp_programs.geometry_overlay.commandAt(index);
+            if (command.index == 4) break :blk command.handler_offset;
+        }
+        return error.MissingGeometryVertexCommand;
+    };
+    std.mem.writeInt(u32, state[0x1c0..0x1c4], 0x01000000, .big);
+    std.mem.writeInt(u16, state[0x1cc..0x1ce], vertex_handler + 0x2bc, .big);
+    rsp.writebackOverlayState(&geometry_overlay);
+
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 4, 32, &.{ vertex_address, 0x0f100408 });
+    rsp.flush(&continuous_queue);
+    if (!rsp.waitTimeout(&continuous_queue, 100)) {
+        n64.debug.print("\n      Geometry vertex timeout: pc={x:0>3} status={x:0>8}\n", .{
+            rsp.io.program_counter.*,
+            @as(u32, @bitCast(rsp.io.status_register_read.*)),
+        });
+        return error.RspSignalTimeout;
+    }
+
+    try testing.expectEqual(@as(u8, 0), rsp.io.readDmem(u8, 0x40e).*);
+    try testing.expectEqual(@as(u8, 0xff), rsp.io.readDmem(u8, 0x40f).*);
+    try testing.expectEqual(@as(u8, 0), rsp.io.readDmem(u8, 0x432).*);
+    try testing.expectEqual(@as(u8, 0xff), rsp.io.readDmem(u8, 0x433).*);
+    try testing.expect(rsp.io.readDmem(u32, 0x410).* != 0);
+    try testing.expect(rsp.io.readDmem(u32, 0x434).* != 0);
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryClippingSwap() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    const clipping = zsp_programs.geometry_clipping;
+    const payload_offset = 0x08b0 - clipping.text_offset;
+    const payload_len = 0x3a0;
+    const original_offset = 0x08b0 - zsp_programs.geometry_overlay.text_offset;
+    const clipping_address: u32 = @truncate(
+        @intFromPtr(clipping.text.ptr + payload_offset) & 0x00ffffff,
+    );
+    const original_address: u32 = @truncate(
+        @intFromPtr(zsp_programs.geometry_overlay.text.ptr + original_offset) & 0x00ffffff,
+    );
+    var state = rsp.overlayState(&geometry_overlay);
+    std.mem.writeInt(u16, state[0x1ce..][0..2], payload_len, .big);
+    std.mem.writeInt(u32, state[0x1d0..][0..4], clipping_address, .big);
+    std.mem.writeInt(u32, state[0x1d4..][0..4], original_address, .big);
+    rsp.writebackOverlayState(&geometry_overlay);
+
+    rsp.halt();
+    rsp.waitHalted();
+    rsp.io.waitDmaReady();
+    rsp.io.dmaFromDram(0x18b0, clipping_address, payload_len - 1);
+    rsp.io.waitDma();
+    rsp.writeDmemByte(0x400, 1);
+    try testing.expectEqual(
+        std.mem.readInt(u32, clipping.text[payload_offset..][0..4], .big),
+        @as(*volatile u32, @ptrFromInt(0xa40018b0)).*,
+    );
+
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 10, 0, &.{});
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+    try expectDmemWord(u8, 0x400, 0);
+    try testing.expectEqual(
+        std.mem.readInt(u32, zsp_programs.geometry_overlay.text[original_offset..][0..4], .big),
+        @as(*volatile u32, @ptrFromInt(0xa40018b0)).*,
+    );
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryTriangleSubmission() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    var state = rsp.overlayState(&geometry_overlay);
+    std.mem.writeInt(u32, state[0x1c0..][0..4], 0x01000000, .big);
+    state[0x1c8] = 2;
+    const vertex_offsets = [_]usize{ 0x1d8, 0x1fc, 0x220 };
+    const screen_xy = [_]u32{ 0x000a001e, 0x0014000a, 0x001e0014 };
+    for (vertex_offsets, screen_xy) |offset, xy| {
+        @memset(state[offset..][0..36], 0);
+        std.mem.writeInt(u32, state[offset..][0..4], xy, .big);
+        std.mem.writeInt(u16, state[offset + 4 ..][0..2], 0x1234, .big);
+        std.mem.writeInt(u32, state[offset + 8 ..][0..4], 0x11223344, .big);
+        std.mem.writeInt(u32, state[offset + 16 ..][0..4], 0x00010000, .big);
+        std.mem.writeInt(u32, state[offset + 20 ..][0..4], 0x00010000, .big);
+    }
+    rsp.writebackOverlayState(&geometry_overlay);
+
+    @memset(&geometry_triangle_output, 0xff);
+    n64.cache.writebackData(&geometry_triangle_output);
+    const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
+    rsp.writeDmemByte(rsp.rdp_publication_held_dmem, 1);
+
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 0, 0x408, &.{0x042c0450});
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 10, 0, &.{});
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+
+    n64.cache.invalidateData(&geometry_triangle_output);
+    try testing.expect(geometry_triangle_output[0] != std.math.maxInt(u64));
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryClippedTriangle() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    const clipping = zsp_programs.geometry_clipping;
+    const payload_offset = 0x08b0 - clipping.text_offset;
+    const original_offset = 0x08b0 - zsp_programs.geometry_overlay.text_offset;
+    const clipping_address: u32 = @truncate(
+        @intFromPtr(clipping.text.ptr + payload_offset) & 0x00ffffff,
+    );
+    const original_address: u32 = @truncate(
+        @intFromPtr(zsp_programs.geometry_overlay.text.ptr + original_offset) & 0x00ffffff,
+    );
+
+    var state = rsp.overlayState(&geometry_overlay);
+    std.mem.writeInt(u32, state[0x1c0..][0..4], 0x01000000, .big);
+    state[0x1c8] = 2;
+    std.mem.writeInt(u16, state[0x1ce..][0..2], 0x3a0, .big);
+    std.mem.writeInt(u32, state[0x1d0..][0..4], clipping_address, .big);
+    std.mem.writeInt(u32, state[0x1d4..][0..4], original_address, .big);
+    const vertex_offsets = [_]usize{ 0x1d8, 0x1fc, 0x220 };
+    const screen_xy = [_]u32{ 0x000a001e, 0x0014000a, 0x001e0014 };
+    for (vertex_offsets, screen_xy, 0..) |offset, xy, index| {
+        @memset(state[offset..][0..36], 0);
+        std.mem.writeInt(u32, state[offset..][0..4], xy, .big);
+        state[offset + 6] = if (index == 0) 1 else 0;
+        std.mem.writeInt(u32, state[offset + 8 ..][0..4], 0x11223344, .big);
+        std.mem.writeInt(i16, state[offset + 16 ..][0..2], if (index == 0) 2 else 0, .big);
+        std.mem.writeInt(i16, state[offset + 18 ..][0..2], 0, .big);
+        std.mem.writeInt(i16, state[offset + 20 ..][0..2], 0, .big);
+        std.mem.writeInt(i16, state[offset + 22 ..][0..2], 1, .big);
+    }
+    rsp.writebackOverlayState(&geometry_overlay);
+
+    @memset(&geometry_triangle_output, 0xff);
+    n64.cache.writebackData(&geometry_triangle_output);
+    const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
+    rsp.writeDmemByte(rsp.rdp_publication_held_dmem, 1);
+
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 0, 0x408, &.{0x042c0450});
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 10, 0, &.{});
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+
+    try expectDmemWord(u8, 0x400, 0);
+    n64.cache.invalidateData(&geometry_triangle_output);
+    try testing.expect(geometry_triangle_output[0] != std.math.maxInt(u64));
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryPatchDma() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    geometry_patch_target = .{ 0, 0 };
+    n64.cache.writebackData(&geometry_patch_target);
+    const target: u32 = @truncate(@intFromPtr(&geometry_patch_target) & 0x00ffffff);
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 3, 0x3f0, &.{0x12345678});
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 3, 0x8000 | 0x3f8, &.{0x0000abcd});
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 13, target, &.{ 0x12345678, 0x89abcdef });
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+    n64.cache.invalidateData(&geometry_patch_target);
+    try testing.expectEqual(@as(u32, 0x12345678), geometry_patch_target[0]);
+    try testing.expectEqual(@as(u32, 0x89abcdef), geometry_patch_target[1]);
+    const state = rsp.overlayState(&geometry_overlay);
+    try testing.expectEqual(@as(u32, 0x12345678), std.mem.readInt(u32, state[0x1c0..0x1c4], .big));
+    try testing.expectEqual(@as(u16, 0xabcd), std.mem.readInt(u16, state[0x1c8..0x1ca], .big));
+    rsp.unregisterOverlay(&geometry_overlay);
 }
 
 fn multiSlotOverlayDispatch() !void {
@@ -1704,7 +2031,7 @@ fn rdpReservedLoopSlots() !void {
     rsp.flush(&continuous_queue);
     try waitQueueTimeout(&continuous_queue);
     try testing.expectEqual(@as(i8, -128), rsp.io.readDmem(i8, rsp.rdp_target_bitdepth_dmem).*);
-    rsp.io.readDmem(i8, rsp.rdp_target_bitdepth_dmem).* = 0;
+    rsp.writeDmemByte(rsp.rdp_target_bitdepth_dmem, 0);
     rsp.unregisterOverlay(&rdp_overlay);
 }
 
@@ -1736,7 +2063,7 @@ fn rdpPersistentScalarState() !void {
     try expectDmemWord(u16, state + 92, 512);
     try expectDmemWord(u8, state + 94, 0);
     try expectDmemWord(u32, 0x530, 1);
-    rsp.io.readDmem(i8, rsp.rdp_target_bitdepth_dmem).* = 0;
+    rsp.writeDmemByte(rsp.rdp_target_bitdepth_dmem, 0);
     rsp.unregisterOverlay(&overlay_1);
     rsp.unregisterOverlay(&rdp_overlay);
 }
@@ -1752,8 +2079,8 @@ fn rdpAutoTmemTileEmission() !void {
     rdp_buffer = .{ 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff };
     n64.cache.writebackData(&rdp_buffer);
     const output_address: u32 = @truncate(@intFromPtr(&rdp_buffer) & 0x00ffffff);
-    rsp.io.readDmem(u32, 0xc0).* = output_address;
-    rsp.io.readDmem(u32, 0xc4).* = output_address + 2 * @sizeOf(u64);
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + 2 * @sizeOf(u64);
     const dp_start_write: *volatile u32 = @ptrFromInt(0xa4100000);
     const dp_end_write: *volatile u32 = @ptrFromInt(0xa4100004);
     dp_start_write.* = output_address;
@@ -1773,13 +2100,13 @@ fn rdpAutoTmemTileEmission() !void {
             rsp.io.program_counter.*,
             status,
             output_address,
-            rsp.io.readDmem(u32, 0xc0).*,
+            rsp.io.readDmem(u32, 0x1d0).*,
         });
         n64.debug.print("      words=0x{x:0>16} 0x{x:0>16}\n", .{ rdp_buffer[0], rdp_buffer[1] });
         n64.debug.print("      queues=0x{x:0>8} 0x{x:0>8} queue_dmem=0x{x:0>8}\n", .{
             @as(u32, @truncate(@intFromPtr(&continuous_queue.storage.queues[0].buffer) & 0x00ffffff)),
             @as(u32, @truncate(@intFromPtr(&continuous_queue.storage.queues[1].buffer) & 0x00ffffff)),
-            rsp.io.readDmem(u32, 0xb0).*,
+            rsp.io.readDmem(u32, 0x80).*,
         });
         rsp.halt();
         rsp.waitHalted();
@@ -1817,7 +2144,7 @@ fn submitDispatcherBatch(batch: *[rsp.command_queue.batch_word_count]u32) void {
     rsp.halt();
     rsp.waitHalted();
     const physical_address: u32 = @truncate(@intFromPtr(batch) & 0x1fffffff);
-    rsp.io.readDmem(u32, 0xb0).* = physical_address;
+    rsp.io.readDmem(u32, 0x80).* = physical_address;
 }
 
 fn submitCommandBatch(batch: *[4]u32) void {

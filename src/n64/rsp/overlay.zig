@@ -4,8 +4,8 @@ const UCode = @import("ucode.zig").UCode;
 pub const max_id = 15;
 pub const commands_per_id = 16;
 pub const max_command_count = max_id * commands_per_id;
-pub const dmem_offset = 0x800;
-pub const payload_offset = 0x200;
+pub const dmem_offset = 0x1f8;
+pub const program_data_offset = 0x0a00;
 pub const backing_len = io.dmem_len - dmem_offset;
 
 pub const Overlay = struct {
@@ -26,6 +26,8 @@ pub const Overlay = struct {
             .state = undefined,
         };
         @memset(&self.state, 0);
+        @memcpy(self.state[program_data_offset..][0..program.data.len], program.data);
+        @memcpy(self.state[program.state_offset..][0..program.state_init.len], program.state_init);
     }
 
     pub fn commandId(self: *const Overlay, command_index: u8) u8 {

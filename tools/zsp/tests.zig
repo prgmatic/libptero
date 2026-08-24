@@ -866,7 +866,7 @@ test "state blocks reserve addressable DMA-aligned storage" {
     ,
         \\.set noreorder
         \\.set noat
-        \\.section .state,"aw",@nobits
+        \\.section .state,"aw",@progbits
         \\.balign 4
         \\counter:
         \\  .space 4
@@ -880,6 +880,50 @@ test "state blocks reserve addressable DMA-aligned storage" {
         \\.globl _start
         \\_start:
         \\  addiu $t0, $zero, %lo(counter)
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "state blocks preserve initialized persistent bytes" {
+    try expectAsm(
+        \\state {
+        \\  fog: [4]i16 = .{ 0, 0, 32767, 0 };
+        \\  clipping_planes: [8]i8 = .{ 1, 0, 0, 1, 1, 0, 0, -1 };
+        \\  scratch: [4]u8;
+        \\}
+        \\export fn _start() noreturn {
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.section .state,"aw",@progbits
+        \\.balign 2
+        \\fog:
+        \\  .short 0
+        \\  .short 0
+        \\  .short 32767
+        \\  .short 0
+        \\clipping_planes:
+        \\  .byte 1
+        \\  .byte 0
+        \\  .byte 0
+        \\  .byte 1
+        \\  .byte 1
+        \\  .byte 0
+        \\  .byte 0
+        \\  .byte -1
+        \\scratch:
+        \\  .space 4
+        \\.balign 8
+        \\
+        \\.text
+        \\
+        \\
+        \\.globl _start
+        \\_start:
         \\  break
         \\
         \\
@@ -1901,6 +1945,29 @@ test "vec32 views compose with lane and swizzle selection" {
         \\  .word 0x4b4118b0 # vrcp $v02[3], $v01[2]
         \\  .word 0x4b8200aa # vor $v02, $v00, $v02
         \\  .word 0xe9220b00 # ssv $v02[3], 0($t1)
+        \\
+        \\
+    );
+}
+
+test "reciprocal square root lane operations emit exact RSP encodings" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($v01) high: vec16 = undefined;
+        \\  reg($v02) low: vec16 = undefined;
+        \\  high[3] = vectorReciprocalSquareRootHigh(high[0]);
+        \\  low[3] = vectorReciprocalSquareRootLow(low[0]);
+        \\  high[3] = vectorReciprocalSquareRoot(high[0]);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  .word 0x4b015876 # vrsqh $v01[3], $v01[0]
+        \\  .word 0x4b0258b5 # vrsql $v02[3], $v02[0]
+        \\  .word 0x4b015874 # vrsq $v01[3], $v01[0]
         \\
         \\
     );
@@ -3854,6 +3921,29 @@ test "extern vector clobbers constrain automatic values live across calls" {
         \\  .word 0x4a01086c # vxor $v01, $v01, $v01
         \\  .word 0x4a011094 # vaddc $v02, $v02, $v01
         \\  break
+        \\
+        \\
+    );
+}
+
+test "external clobbered parameter is an explicit register output" {
+    try expectAsm(
+        \\extern fn advance(reg($s4) value: dmem) writes($s4, $ra);
+        \\fn test() noreturn {
+        \\  reg($s4) address: dmem = 256;
+        \\  advance(address);
+        \\  store(u32, address, 0);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $s4, $zero, 256
+        \\  jal advance
+        \\  nop
+        \\  sw $zero, 0($s4)
         \\
         \\
     );

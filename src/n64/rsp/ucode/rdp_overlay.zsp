@@ -716,7 +716,7 @@ fn rdpSetCombineMode2Pass(
     reg($t7) command_size: i32 = undefined;
     reg command_end: dmem;
     exact {
-        command_end = relative_command_end + 0xe0;
+        command_end = relative_command_end + 0xa0;
     }
     reg command_start: dmem;
     command_start = command_end - command_size;
@@ -1352,9 +1352,9 @@ fn autoTmemEnd() noreturn {
     store(u8, vertex_offset, st, triangle_data0, 7);
 
     reg($gp) command_end: dmem = undefined;
-    st = load(u32, command_end, 0xd4);
-    reg w: u32 = load(u32, command_end, 0xd8);
-    reg inverse_w: u32 = load(u32, command_end, 0xdc);
+    st = load(u32, command_end, 0x94);
+    reg w: u32 = load(u32, command_end, 0x98);
+    reg inverse_w: u32 = load(u32, command_end, 0x9c);
     store(u32, vertex_offset, st, triangle_data0, 12);
     store(u32, vertex_offset, w, triangle_data0, 16);
     store(u32, vertex_offset, inverse_w, triangle_data0, 20);

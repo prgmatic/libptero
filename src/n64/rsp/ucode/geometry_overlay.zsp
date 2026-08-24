@@ -1,0 +1,1074 @@
+// Geometry's primary RSP overlay, ported from rsp_geometry.rspl.  Keep storage
+// declarations in generated-assembly order: the final verification compares
+// section bytes while allowing symbol addresses to differ.
+const dma = import("resident_api.zsp");
+const queue = import("resident_api.zsp");
+
+const triangle_size: u32 = 36;
+
+state {
+    matrix_projection: [64]u8;
+    matrix_mvp: [64]u8;
+    matrix_mv: [64]u8;
+    matrix_normal: [24]u8;
+    fog_scale_offset: [4]i16 = .{ 0, 0, 32767, 0 };
+    screen_scale_offset: [8]i16 = .{ 0, 0, 0, 0, 0, 0, 16383, 255 };
+    normal_mask_shift: [8]u16 = .{ 63488, 2016, 31, 0, 1, 32, 2048, 0 };
+    clipping_planes: [20]i8 = .{ 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, -1, 0, 1, 0, -1 };
+    triangle_buffer_offset: u16 = 0;
+    screen_uvgen_scale: u16 = 0;
+    normalize_w_scale: [4]i16 = .{ -1, -1, -1, 0 };
+    clipping_return_address: u16 = 0;
+    uv_generation_parameters: [2]u16 = .{ 0, 0 };
+    color_exposure: u16 = 128;
+    segment_table: [8]u32 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+    ambient_color: [8]u8;
+    directional_light_color: [112]u8;
+    triangle_command: u32 = 0;
+    matrix_stack_pointer: i32 = 0;
+    face_culling: u8 = 0;
+    fog_store_offset: u8 = 72;
+    active_light_size: u8 = 0;
+    unused_state_byte: u8 = 0;
+    vertex_effect_function: u16 = 0;
+    clipping_code_size: u16 = 0;
+    clipping_code_address: u32 = 0;
+    original_code_address: u32 = 0;
+    vertex_buffer: [2520]u8;
+}
+
+bss {
+    clipping_buffer_temporary: [256]u8;
+    clipping_buffer_result: [288]u8;
+    extern rdp_mode: [8]u32;
+}
+
+// Fixed-register matrix kernel.  The register assignment and instruction
+// order mirror Geometry's generated rsp_geometry.S so this routine can be compared
+// instruction-for-instruction independently of its linked address.
+fn multiplyMatrices(
+    reg($s2) output: dmem,
+    reg($s3) left: dmem,
+    reg($s4) right: dmem,
+) {
+    reg($v01) l0i: vec16 = undefined;
+    reg($v02) l0f: vec16 = undefined;
+    reg($v03) l1i: vec16 = undefined;
+    reg($v04) l1f: vec16 = undefined;
+    reg($v05) l2i: vec16 = undefined;
+    reg($v06) l2f: vec16 = undefined;
+    reg($v07) l3i: vec16 = undefined;
+    reg($v08) l3f: vec16 = undefined;
+    reg($v09) r01i: vec16 = undefined;
+    reg($v10) r01f: vec16 = undefined;
+    reg($v11) r23i: vec16 = undefined;
+    reg($v12) r23f: vec16 = undefined;
+    reg($v13) result_i: vec16 = undefined;
+    reg($v14) result_f: vec16 = undefined;
+    reg($v29) accumulator_scratch: vec16 = undefined;
+
+    exact {
+        rsp.vector.load64(l0i, 0, left, 0);
+        rsp.vector.load64(r01f, 0, right, 8);
+        rsp.vector.load64(l0f, 0, left, 8);
+        rsp.vector.load64(r01i, 0, right, 0);
+        rsp.vector.load64(l0f, 4, left, 8);
+        rsp.vector.load64(r01f, 4, right, 24);
+        rsp.vector.load64(l0i, 4, left, 0);
+        rsp.vector.load64(r01i, 4, right, 16);
+        rsp.vector.load64(l1i, 0, left, 16);
+        rsp.vector.load64(l2i, 0, left, 32);
+        accumulator_scratch = vmudl(l0f, r01f.xxxxXXXX);
+        rsp.vector.load64(l1f, 0, left, 24);
+        rsp.vector.load64(l2f, 0, left, 40);
+        rsp.vector.load64(l2f, 4, left, 40);
+        rsp.vector.load64(l1f, 4, left, 24);
+        accumulator_scratch = vmadm(l0i, r01f.xxxxXXXX);
+        rsp.vector.load64(l1i, 4, left, 16);
+        result_f = vmadn(l0f, r01i.xxxxXXXX);
+        rsp.vector.load64(l3i, 0, left, 48);
+        rsp.vector.load64(l3f, 0, left, 56);
+        result_i = vmadh(l0i, r01i.xxxxXXXX);
+        accumulator_scratch = vmadl(l1f, r01f.yyyyYYYY);
+        rsp.vector.load64(l2i, 4, left, 32);
+        accumulator_scratch = vmadm(l1i, r01f.yyyyYYYY);
+        rsp.vector.load64(r23i, 0, right, 32);
+        rsp.vector.load64(r23f, 0, right, 40);
+        result_f = vmadn(l1f, r01i.yyyyYYYY);
+        result_i = vmadh(l1i, r01i.yyyyYYYY);
+        rsp.vector.load64(l3f, 4, left, 56);
+        accumulator_scratch = vmadl(l2f, r01f.zzzzZZZZ);
+        rsp.vector.load64(r23f, 4, right, 56);
+        rsp.vector.load64(l3i, 4, left, 48);
+        accumulator_scratch = vmadm(l2i, r01f.zzzzZZZZ);
+        result_f = vmadn(l2f, r01i.zzzzZZZZ);
+        rsp.vector.load64(r23i, 4, right, 48);
+        result_i = vmadh(l2i, r01i.zzzzZZZZ);
+        accumulator_scratch = vmadl(l3f, r01f.wwwwWWWW);
+        accumulator_scratch = vmadm(l3i, r01f.wwwwWWWW);
+        r01f = vmadn(l3f, r01i.wwwwWWWW);
+        r01i = vmadh(l3i, r01i.wwwwWWWW);
+
+        accumulator_scratch = vmudl(l0f, r23f.xxxxXXXX);
+        accumulator_scratch = vmadm(l0i, r23f.xxxxXXXX);
+        result_f = vmadn(l0f, r23i.xxxxXXXX);
+        result_i = vmadh(l0i, r23i.xxxxXXXX);
+        accumulator_scratch = vmadl(l1f, r23f.yyyyYYYY);
+        accumulator_scratch = vmadm(l1i, r23f.yyyyYYYY);
+        rsp.vector.store64(r01i, 0, output, 0);
+        result_f = vmadn(l1f, r23i.yyyyYYYY);
+        result_i = vmadh(l1i, r23i.yyyyYYYY);
+        accumulator_scratch = vmadl(l2f, r23f.zzzzZZZZ);
+        rsp.vector.store64(r01f, 4, output, 24);
+        rsp.vector.store64(r01i, 4, output, 16);
+        accumulator_scratch = vmadm(l2i, r23f.zzzzZZZZ);
+        result_f = vmadn(l2f, r23i.zzzzZZZZ);
+        result_i = vmadh(l2i, r23i.zzzzZZZZ);
+        accumulator_scratch = vmadl(l3f, r23f.wwwwWWWW);
+        accumulator_scratch = vmadm(l3i, r23f.wwwwWWWW);
+        r23f = vmadn(l3f, r23i.wwwwWWWW);
+        r23i = vmadh(l3i, r23i.wwwwWWWW);
+        rsp.vector.store64(r01f, 0, output, 8);
+        rsp.vector.store64(r23f, 0, output, 40);
+        rsp.vector.store64(r23i, 0, output, 32);
+        rsp.vector.store64(r23f, 4, output, 56);
+    }
+    return slot {
+        rsp.vector.store64(r23i, 4, output, 48);
+    }
+}
+
+fn normalizeMatrixVector(
+    reg($s4) input: dmem,
+    reg($t1) output: dmem,
+) {
+    reg($v01) value_i: vec16 = undefined;
+    reg($v02) value_f: vec16 = undefined;
+    reg($v03) inverse_i: vec16 = undefined;
+    reg($v04) inverse_f: vec16 = undefined;
+    reg($v05) sum_i: vec16 = undefined;
+    reg($v06) sum_f: vec16 = undefined;
+    reg($v29) accumulator_scratch: vec16 = undefined;
+    reg($v30) shift_constants: vec16 = undefined;
+    reg($v00) vector_zero: vec16 = undefined;
+
+    exact {
+        rsp.vector.load64(value_f, 0, input, 8);
+        rsp.vector.load64(value_i, 0, input, 0);
+        accumulator_scratch = vmudl(value_f, value_f.xyzwXYZW);
+        accumulator_scratch = vmadm(value_i, value_f.xyzwXYZW);
+        inverse_f = vmadn(value_f, value_i.xyzwXYZW);
+        input +%= 16;
+        inverse_i = vmadh(value_i, value_i.xyzwXYZW);
+        sum_f = vectorAddCarry(inverse_f, inverse_f.yyyyYYYY);
+        sum_i = vectorAdd(inverse_i, inverse_i.yyyyYYYY);
+        inverse_f = vectorAddCarry(inverse_f, sum_f.zzzzZZZZ);
+        inverse_i = vectorAdd(inverse_i, sum_i.zzzzZZZZ);
+        inverse_i[3] = vectorReciprocalSquareRootHigh(inverse_i[0]);
+        inverse_f[3] = vectorReciprocalSquareRootLow(inverse_f[0]);
+        inverse_i[3] = vectorReciprocalSquareRootHigh(vector_zero[0]);
+        inverse_f = vmudl(inverse_f, shift_constants.x);
+        inverse_i = vmadm(inverse_i, shift_constants.x);
+        inverse_f = vmadn(vector_zero, vector_zero);
+        accumulator_scratch = vmudl(value_f, inverse_f.wwwwWWWW);
+        accumulator_scratch = vmadm(value_i, inverse_f.wwwwWWWW);
+        value_f = vmadn(value_f, inverse_i.wwwwWWWW);
+        value_i = vmadh(value_i, inverse_i.wwwwWWWW);
+        value_f = vectorAdd(value_f, value_f.xyzwXYZW);
+        rsp.vector.store64(value_f, 0, output, 0);
+    }
+    return slot {
+        output +%= 8;
+    }
+}
+
+@rspq.command(0) fn drawTriangle(reg($a0) vertex0: dmem, reg($a1) packed_vertices: u32) noreturn {
+    exact {
+        asm("geometry__ovl_text_start:");
+        asm(".word 0x00053402");
+        asm(".word 0x900203f8");
+        asm("geometry_RDPQ_Triangle_Send_Async:");
+        asm(".word 0x48840b00");
+        asm(".word 0x48851300");
+        asm(".word 0xc8811000");
+        asm(".word 0xc8a21000");
+        asm(".word 0xc8c31000");
+        asm(".word 0x948b0006");
+        asm(".word 0x4a1e06d5");
+        asm(".word 0x4b2101aa");
+        asm(".word 0x340900ff");
+        asm(".word 0x4b2201ea");
+        asm(".word 0x94ac0006");
+        asm(".word 0x4b23022a");
+        asm(".word 0x48861b00");
+        asm(".word 0x4bfe0314");
+        asm(".word 0x94cd0006");
+        asm(".word 0x94170344");
+        asm(".word 0x4a073263");
+        asm(".word 0x016c5825");
+        asm(".word 0x4a020927");
+        asm(".word 0x016d5825");
+        asm(".word 0x4a0731a0");
+        asm(".word 0x48480800");
+        asm(".word 0x4a020867");
+        asm(".word 0x316100ff");
+        asm(".word 0x4a1ce72c");
+        asm(".word 0x1429ffdc");
+        asm(".word 0x4a0832a3");
+        asm(".word 0x000b0b42");
+        asm(".word 0x4a030967");
+        asm(".word 0x8c0703f0");
+        asm(".word 0x4a0831a0");
+        asm(".word 0x48490800");
+        asm(".word 0x4a030867");
+        asm(".word 0x316c1f00");
+        asm(".word 0x4a0a4a23");
+        asm(".word 0x26f30de0");
+        asm(".word 0x4a0520e7");
+        asm(".word 0xea660803");
+        asm(".word 0x4a0a49e0");
+        asm(".word 0x484a0800");
+        asm(".word 0x4a0520a7");
+        asm("bne $t4, $zero, geometryTriangleClip");
+        asm(".word 0x01094026");
+        asm(".word 0x4a011e15");
+        asm(".word 0x010a4026");
+        asm(".word 0x4a011155");
+        asm(".word 0x48040b00");
+        asm(".word 0x4a021915");
+        asm(".word 0x48051300");
+        asm(".word 0x4b0145f3");
+        asm(".word 0x31080001");
+        asm(".word 0x4b0255f3");
+        asm(".word 0x00484826");
+        asm(".word 0x4b250755");
+        asm(".word 0x48061b00");
+        asm(".word 0x4b3f3686");
+        asm(".word 0xea670802");
+        asm(".word 0x4b3f3645");
+        asm(".word 0x3af700b0");
+        asm(".word 0x4b382cc7");
+        asm(".word 0xea680801");
+        asm(".word 0x4a1dc4cf");
+        asm(".word 0xea651002");
+        asm(".word 0x4b00049d");
+        asm(".word 0xea641003");
+        asm(".word 0x4b2004dd");
+        asm(".word 0xca781a01");
+        asm(".word 0x4a1a0695");
+        asm(".word 0x266c0020");
+        asm(".word 0x4a19ce51");
+        asm(".word 0xc888080f");
+        asm(".word 0x4b127d32");
+        asm(".word 0x48089000");
+        asm(".word 0x4b137d71");
+        asm(".word 0xc8a80a0f");
+        asm(".word 0x4b007d32");
+        asm(".word 0xc8c80c0f");
+        asm(".word 0x4b384570");
+        asm(".word 0x0100402a");
+        asm(".word 0x4b384532");
+        asm(".word 0x1109ffa5");
+        asm(".word 0x4b255570");
+        asm(".word 0x4b255532");
+        asm(".word 0xc887080b");
+        asm(".word 0x4b246570");
+        asm(".word 0xc8a70a0b");
+        asm(".word 0x4b246532");
+        asm(".word 0xc8c70c0b");
+        asm(".word 0x4b137e33");
+        asm(".word 0x39080001");
+        asm(".word 0x4b127f33");
+        asm(".word 0x000841c0");
+        asm(".word 0x4bbba846");
+        asm(".word 0xc8cb3801");
+        asm(".word 0x4bbba08f");
+        asm(".word 0xc8893801");
+        asm(".word 0x4b484755");
+        asm(".word 0xc8aa3801");
+        asm(".word 0x4b4739e0");
+        asm(".word 0x00e83825");
+        asm(".word 0x4b484227");
+        asm(".word 0xc8cf0e11");
+        asm(".word 0x4a78a8c4");
+        asm(".word 0xc88f0c11");
+        asm(".word 0x4a78a0cd");
+        asm(".word 0xc8af0d11");
+        asm(".word 0x4a1ca8ce");
+        asm(".word 0x30ed0400");
+        asm(".word 0x4a1ca10f");
+        asm(".word 0x000d6902");
+        asm(".word 0x4bfb60ce");
+        asm(".word 0x4808c300");
+        asm(".word 0x4bfb610f");
+        asm(".word 0x4809c000");
+        asm(".word 0x4b884755");
+        asm(".word 0xc8ae0d10");
+        asm(".word 0x4b8739e0");
+        asm(".word 0xc8ce0e10");
+        asm(".word 0x4b884227");
+        asm(".word 0xc88e0c10");
+        asm(".word 0x4a011f44");
+        asm(".word 0x01ac6821");
+        asm(".word 0x4a01274d");
+        asm(".word 0x30ee0200");
+        asm(".word 0x4a021cce");
+        asm(".word 0x00e13825");
+        asm(".word 0x4a02248f");
+        asm(".word 0xa6670000");
+        asm(".word 0x4b087f44");
+        asm(".word 0xc8841403");
+        asm(".word 0x4b08774d");
+        asm(".word 0xc8a31403");
+        asm(".word 0x4b077bce");
+        asm(".word 0xc8c61403");
+        asm(".word 0x4a189f46");
+        asm(".word 0x00084022");
+        asm(".word 0x4a18974f");
+        asm(".word 0x00094822");
+        asm(".word 0x4b20055d");
+        asm(".word 0x4888c300");
+        asm(".word 0x4b00051d");
+        asm(".word 0x4889c000");
+        asm(".word 0x4bfe7bd5");
+        asm(".word 0x240800cf");
+        asm(".word 0x4bdf4a44");
+        asm(".word 0xc8890f02");
+        asm(".word 0x4bdf5284");
+        asm(".word 0x48c80800");
+        asm(".word 0x4bdf5ac4");
+        asm(".word 0xc8aa0f02");
+        asm(".word 0x4b1f7bc4");
+        asm(".word 0xc8cb0f02");
+        asm(".word 0x4b9aaf44");
+        asm(".word 0x000e70c2");
+        asm(".word 0x4b9aa74d");
+        asm(".word 0x30eb0100");
+        asm(".word 0x4b99ac4e");
+        asm(".word 0x40093000");
+        asm(".word 0x4b99a40f");
+        asm(".word 0xea6f1c02");
+        asm(".word 0x4a8f2100");
+        asm(".word 0xca690e08");
+        asm(".word 0x4aaf18c0");
+        asm(".word 0xca6a0e09");
+        asm(".word 0x4acf3180");
+        asm(".word 0xca6b0e0a");
+        asm(".word 0x4b3fbd85");
+        asm(".word 0x1520006c");
+        asm(".word 0x900801e1");
+        asm("geometry_rdpq_triangle_dma_idle:");
+        asm(".word 0x4b3fbdc6");
+        asm(".word 0x000b5902");
+        asm(".word 0x4a044a67");
+        asm(".word 0x01cd7021");
+        asm(".word 0x4a0352a7");
+        asm(".word 0xea740c06");
+        asm(".word 0x4a065ae7");
+        asm(".word 0x8c0401d0");
+        asm(".word 0x4b178c54");
+        asm(".word 0xea760a04");
+        asm(".word 0x4b168410");
+        asm(".word 0x15000002");
+        asm(".word 0xea750c07");
+        asm(".word 0x40844800");
+        asm(".word 0x4a000015");
+        asm(".word 0x4a095311");
+        asm(".word 0xea770a05");
+        asm(".word 0x4a095b51");
+        asm(".word 0x016e5821");
+        asm(".word 0x4bbe9cc6");
+        asm(".word 0xea740a0e");
+        asm(".word 0x4bbe948f");
+        asm(".word 0xea750a0f");
+        asm(".word 0x4b386107");
+        asm(".word 0xea700a0c");
+        asm(".word 0x4b78690f");
+        asm(".word 0xea710a0d");
+        asm(".word 0x4b20011d");
+        asm(".word 0xea700808");
+        asm(".word 0x4b0000dd");
+        asm(".word 0xea710809");
+        asm(".word 0x4b586a07");
+        asm(".word 0xea74080a");
+        asm(".word 0x4b18620f");
+        asm(".word 0xea75080b");
+        asm(".word 0x4b20021d");
+        asm(".word 0x40930000");
+        asm(".word 0x4b0001dd");
+        asm(".word 0x8c0601d4");
+        asm(".word 0x4bf32744");
+        asm(".word 0x01735822");
+        asm(".word 0x4bf31f4d");
+        asm(".word 0x026b9821");
+        asm(".word 0x4bf2210e");
+        asm(".word 0x40840800");
+        asm(".word 0x4bf218cf");
+        asm(".word 0xa4170344");
+        asm(".word 0x4bf34744");
+        asm(".word 0x008b2020");
+        asm(".word 0x4bf33f4d");
+        asm(".word 0x00c4402a");
+        asm(".word 0x4bf2420e");
+        asm(".word 0xe9841803");
+        asm(".word 0x4bf239cf");
+        asm(".word 0xe9a41c03");
+        asm(".word 0x4b15274c");
+        asm(".word 0xe9831801");
+        asm(".word 0x4b151f4d");
+        asm(".word 0xe9a31c01");
+        asm(".word 0x4b14218e");
+        asm(".word 0xe9881807");
+        asm(".word 0x4b14194f");
+        asm(".word 0x1500001d");
+        asm(".word 0xe9a81c07");
+        asm("geometry_rdpq_triangle_change_buffer_done:");
+        asm(".word 0x4bfe4f47");
+        asm(".word 0xe9871805");
+        asm(".word 0x4b9a374c");
+        asm(".word 0xe9a71c05");
+        asm(".word 0x4b9a2f4d");
+        asm(".word 0xe9861806");
+        asm(".word 0x4b99308e");
+        asm(".word 0xe9a61c06");
+        asm(".word 0x4b99284f");
+        asm(".word 0xe9851804");
+        asm(".word 0x4be77233");
+        asm(".word 0xe9a51c04");
+        asm(".word 0x4be571b3");
+        asm(".word 0xac0401d0");
+        asm(".word 0x4be24ab3");
+        asm(".word 0xe9821802");
+        asm(".word 0x4be142b3");
+        asm(".word 0xe9a21c02");
+        asm(".word 0x4be45ab3");
+        asm(".word 0xe9811800");
+        asm(".word 0x4be352b3");
+        asm(".word 0xe9a11c00");
+        asm(".word 0xe9c61602");
+        asm(".word 0xe9c81603");
+        asm(".word 0x256bffff");
+        asm(".word 0xe9ca1800");
+        asm(".word 0x03e00008");
+        asm(".word 0x408b1800");
+        asm("geometry_rdpq_triangle_change_buffer:");
+        asm(".word 0x03e03825");
+        asm(".word 0x8c0401cc");
+        asm(".word 0x8c0901c8");
+        asm(".word 0xac0401c8");
+        asm(".word 0xac0901cc");
+        asm(".word 0xa18b0000");
+        asm(".word 0x3c010001");
+        asm(".word 0x00813020");
+        asm("jal rdpSetBuffer");
+        asm(".word 0x00802825");
+        asm(".word 0x40840800");
+        asm(".word 0x918b0000");
+        asm(".word 0x008b2021");
+        asm("j geometry_rdpq_triangle_change_buffer_done");
+        asm(".word 0x00e0f825");
+        asm("geometry_rdpq_triangle_dma_busy:");
+        asm(".word 0x1520ffff");
+        asm(".word 0x40093000");
+        asm("j geometry_rdpq_triangle_dma_idle");
+        asm("geometry_RDPQ_Triangle_Send_End:");
+        asm(".word 0x40013000");
+        asm(".word 0xa4000344");
+        asm(".word 0x900801e1");
+        asm(".word 0x1420fffc");
+        asm(".word 0x8c0901d0");
+        asm(".word 0x1500fed9");
+        asm(".word 0xac0901d0");
+        asm(".word 0x03e00008");
+        asm(".word 0x40894800");
+    }
+}
+
+export fn _start() noreturn {
+    exact {
+        asm("lw $s0, %lo(clipping_code_address)($zero)");
+        asm("lhu $t0, %lo(clipping_code_size)($zero)");
+        asm("addiu $t2, $zero, 12");
+        asm("ori $ra, $zero, %lo(_start)");
+        asm("sb $t0, %lo(clipping_code_address)($zero)");
+        asm("j exec");
+        asm("addiu $t0, $t0, -1");
+    }
+}
+
+@rspq.command(4) fn loadVertices(
+    reg($a0) buffer_size: u32,
+    reg($a1) rdram_vertices: u32,
+    reg($a2) input_output_addresses: u32,
+) noreturn {
+    exact {
+        asm("srl $s4, $a2, 16");
+        asm("srl $s6, $a1, 24");
+        asm("andi $t0, $a0, 65535");
+        asm("lw $s6, %lo(segment_table)($s6)");
+        asm("addu $s7, $s4, $t0");
+        asm("addiu $t0, $t0, -1");
+        asm("or $t2, $zero, $zero");
+        asm("jal exec");
+        asm("addu $s0, $a1, $s6");
+        asm("ori $s6, $zero, %lo(matrix_normal)");
+        asm(".word 0xcad31801");
+        asm(".word 0xcad21802");
+        asm(".word 0xcad31c01");
+        asm(".word 0xcad41800");
+        asm(".word 0xcad41c00");
+        asm("jal loadCurrentMVPMat");
+        asm(".word 0xcad21c02");
+        asm("ori $at, $zero, %lo(normal_mask_shift)");
+        asm(".word 0xc8301801");
+        asm(".word 0xc8311800");
+        asm(".word 0xc8311c00");
+        asm(".word 0xc8301c01");
+        asm("ori $at, $zero, %lo(clipping_planes)");
+        asm(".word 0xc82f1000");
+        asm("ori $at, $zero, %lo(screen_scale_offset)");
+        asm(".word 0xc82c1801");
+        asm("andi $s6, $a2, 65535");
+        asm("addiu $s5, $s6, 65500");
+        asm("lbu $s2, %lo(active_light_size + 0)");
+        asm(".word 0xc82c1c01");
+        asm(".word 0xc82d1800");
+        asm(".word 0xc82d1c00");
+        asm("ori $at, $zero, %lo(fog_scale_offset)");
+        asm(".word 0x4b2f03ea");
+        asm(".word 0xc82b1800");
+        asm(".word 0x4bff0384");
+        asm("lbu $k0, %lo(triangle_command + 0)");
+        asm("lbu $s0, %lo(original_code_address + 0)");
+        asm(".word 0x4bff6b4d");
+        asm("ori $at, $zero, %lo(normalize_w_scale)");
+        asm(".word 0x4a00038e");
+        asm(".word 0xc82a1800");
+        asm(".word 0xc82a1c00");
+        asm("ori $at, $zero, %lo(uv_generation_parameters)");
+        asm(".word 0xc8291c00");
+        asm("addiu $s6, $s6, 65464");
+        asm(".word 0x4b4b72f3");
+        asm("ori $at, $zero, %lo(screen_uvgen_scale)");
+        asm("lbu $s1, %lo(fog_store_offset + 0)");
+        asm("addiu $s2, $s2, %lo(directional_light_color)");
+        asm(".word 0xc8290f00");
+        asm("ori $at, $zero, %lo(uv_generation_parameters)");
+        asm(".word 0xc8291000");
+        asm("jal waitIdle");
+        asm(".word 0xc8291200");
+        asm(".word 0xca882000");
+        asm(".word 0x4ae889e8");
+        asm(".word 0x4a1039c6");
+        asm("LOOP_START:");
+        asm(".word 0x4b4b00ea");
+        asm("lbu $a2, 19($s4)");
+        asm(".word 0x4a87a740");
+        asm("ori $s3, $zero, %lo(directional_light_color)");
+        asm(".word 0x4aa79f48");
+        asm("lbu $t8, 15($s3)");
+        asm(".word 0x4ac791c8");
+        asm(".word 0x4a88e186");
+        asm("addiu $s5, $s5, 72");
+        asm(".word 0x4a88d94f");
+        asm("and $a2, $a2, $s0");
+        asm(".word 0x4aa8d18e");
+        asm("lhu $k1, %lo(vertex_effect_function + 0)");
+        asm(".word 0x4aa8c94f");
+        asm(".word 0xca623001");
+        asm(".word 0x4ac8c18e");
+        asm("or $t9, $zero, $zero");
+        asm("addiu $s6, $s6, 72");
+        asm(".word 0x4ac8b94f");
+        asm(".word 0x4bfeb18e");
+        asm("bne $k0, $zero, LIGHT_LOOP_END");
+        asm(".word 0x4bfea94f");
+        asm("beq $s3, $s2, LIGHT_LOOP_END");
+        asm(".word 0xca63387f");
+        asm("LABEL_T3DCmd_VertLoad_0003:");
+        asm(".word 0x4a023840");
+        asm(".word 0xca643800");
+        asm("bne $t8, $zero, pointLight");
+        asm("ori $ra, $zero, %lo(LABEL_T3DCmd_VertLoad_0005)");
+        asm("LABEL_T3DCmd_VertLoad_0005:");
+        asm("addiu $s3, $s3, 16");
+        asm(".word 0x4a812741");
+        asm(".word 0x4aa12749");
+        asm("lbu $t8, 15($s3)");
+        asm(".word 0x4ac12749");
+        asm(".word 0xca623001");
+        asm("bne $s3, $s2, LABEL_T3DCmd_VertLoad_0003");
+        asm(".word 0x4a1d18d0");
+        asm("LIGHT_LOOP_END:");
+        asm(".word 0x4ae67885");
+        asm(".word 0xca843802");
+        asm("ori $ra, $zero, %lo(LABEL_T3DCmd_VertLoad_0006)");
+        asm(".word 0x4ae5784f");
+        asm(".word 0x4a00008e");
+        asm("bne $t9, $zero, loadCurrentMVPMat");
+        asm("addu $fp, $s6, $s1");
+        asm("LABEL_T3DCmd_VertLoad_0006:");
+        asm(".word 0x4ae52f65");
+        asm(".word 0x4ae63764");
+        asm(".word 0x484c0800");
+        asm(".word 0x4a012f65");
+        asm(".word 0x4a023764");
+        asm("addu $sp, $s5, $s1");
+        asm("TAG_LightMul:");
+        asm(".word 0x4a032100");
+        asm(".word 0xca882002");
+        asm(".word 0x4a0a3184");
+        asm(".word 0x484b0800");
+        asm(".word 0x4a0a294d");
+        asm("srl $t5, $t4, 4");
+        asm("andi $t5, $t5, 1799");
+        asm(".word 0x4a00018e");
+        asm("srl $t7, $t3, 4");
+        asm("andi $t6, $t4, 1799");
+        asm(".word 0x4bdf2105");
+        asm(".word 0xeac51802");
+        asm(".word 0x4b655b72");
+        asm(".word 0xeac61803");
+        asm(".word 0x4b665bb1");
+        asm(".word 0xeaa61c03");
+        asm(".word 0x4be55b72");
+        asm("andi $t8, $t3, 775");
+        asm(".word 0x4be67bb1");
+        asm(".word 0x4be07b72");
+        asm("srl $t2, $t8, 5");
+        asm(".word 0x4bc92107");
+        asm(".word 0xeaa51c02");
+        asm("or $t8, $t8, $t2");
+        asm(".word 0x4b2b30d4");
+        asm(".word 0x4b0b2890");
+        asm("andi $t7, $t7, 775");
+        asm("srl $t2, $t7, 5");
+        asm(".word 0x4aee3744");
+        asm(".word 0x4aee2f4d");
+        asm("or $t8, $t8, $a2");
+        asm(".word 0xeac43801");
+        asm(".word 0x4aed318e");
+        asm(".word 0xeace0b11");
+        asm(".word 0x4aed294f");
+        asm(".word 0x4b6b1087");
+        asm(".word 0xeaae0f11");
+        asm(".word 0xeacd0b10");
+        asm("or $t7, $t7, $t2");
+        asm(".word 0x4a0e3744");
+        asm("srl $t2, $t6, 5");
+        asm(".word 0x4a0e2f4d");
+        asm(".word 0xeaa43a01");
+        asm(".word 0x4a0d318e");
+        asm(".word 0x4a0d294f");
+        asm("or $t7, $t7, $a2");
+        asm(".word 0x4ac25f51");
+        asm(".word 0xeaad0f10");
+        asm("nor $t6, $t6, $t2");
+        asm("srl $t2, $t5, 5");
+        asm(".word 0x4bfe614f");
+        asm(".word 0xca831803");
+        asm("addiu $s4, $s4, 32");
+        asm("nor $t5, $t5, $t2");
+        asm(".word 0x4bdeef46");
+        asm(".word 0xeac51800");
+        asm(".word 0x4a0700aa");
+        asm(".word 0x4ae889e8");
+        asm(".word 0xeaa51c00");
+        asm("sb $t8, 6($s6)");
+        asm("sb $t6, 7($s6)");
+        asm("sb $t7, 6($s5)");
+        asm(".word 0xebdd0a00");
+        asm(".word 0x4a1039c6");
+        asm("sb $t5, 7($s5)");
+        asm(".word 0x4a0918d4");
+        asm("jal $k1");
+        asm(".word 0xebbd0e00");
+        asm("VertexFX_None:");
+        asm(".word 0xeac31003");
+        asm("bne $s4, $s7, LOOP_START");
+        asm(".word 0xeaa31203");
+        asm("j commandLoop");
+        asm("VertexFX_Spherical:");
+        asm(".word 0x4b002963");
+        asm(".word 0x4a0c2915");
+        asm(".word 0x4a0c2120");
+        asm(".word 0x4a0910c0");
+        asm(".word 0x4be92106");
+        asm(".word 0x4b0918d4");
+        asm(".word 0x4ac22100");
+        asm(".word 0x4b092100");
+        asm(".word 0x4a0418d4");
+        asm(".word 0xeac31003");
+        asm("bne $s4, $s7, LOOP_START");
+        asm(".word 0xeaa31403");
+        asm("j commandLoop");
+        asm("VertexFX_CelShadeColor:");
+        asm(".word 0x4a042123");
+        asm(".word 0x4a042123");
+        asm(".word 0x4b0440f3");
+        asm(".word 0x4b8450f3");
+        asm(".word 0xeaa31203");
+        asm("bne $s4, $s7, LOOP_START");
+        asm(".word 0xeac31003");
+        asm("j commandLoop");
+        asm("VertexFX_CelShadeAlpha:");
+        asm(".word 0x4b6440f3");
+        asm(".word 0x4be450f3");
+        asm(".word 0xeaa31203");
+        asm("bne $s4, $s7, LOOP_START");
+        asm(".word 0xeac31003");
+        asm("j commandLoop");
+        asm("VertexFX_Outline:");
+        asm(".word 0x4a091740");
+        asm(".word 0x4bfe294f");
+        asm(".word 0xeaa51400");
+        asm("bne $s4, $s7, LOOP_START");
+        asm(".word 0xeac51000");
+        asm("j commandLoop");
+        asm("nop");
+        asm("pointLight:");
+        asm("bne $t9, $zero, LABEL_pointLight_000C");
+        asm("lhu $t7, 14($s3)");
+        asm("ori $at, $zero, %lo(matrix_mv)");
+        asm(".word 0xc83a1803");
+        asm(".word 0xc83a1c03");
+        asm(".word 0xc83b1800");
+        asm(".word 0xc83c1801");
+        asm(".word 0xc8371804");
+        asm(".word 0xc8381805");
+        asm(".word 0xc83c1c01");
+        asm(".word 0xc83b1c00");
+        asm(".word 0xc8351806");
+        asm(".word 0xc8381c05");
+        asm(".word 0xc8391802");
+        asm(".word 0x4a88e706");
+        asm(".word 0xc8391c02");
+        asm(".word 0xc8371c04");
+        asm(".word 0xc8361807");
+        asm(".word 0x4a88decf");
+        asm(".word 0xc8361c07");
+        asm(".word 0x4aa8d70e");
+        asm(".word 0xc8351c06");
+        asm(".word 0x4aa8cecf");
+        asm(".word 0x4ac8c70e");
+        asm(".word 0x4ac8becf");
+        asm(".word 0x4bfeb70e");
+        asm(".word 0x4bfeaecf");
+        asm(".word 0x4b7fe704");
+        asm(".word 0x4b7fdecd");
+        asm("addiu $t9, $zero, 1");
+        asm(".word 0x4a00070e");
+        asm("LABEL_pointLight_000C:");
+        asm(".word 0xca771801");
+        asm(".word 0xca771c01");
+        asm("andi $t7, $t7, 32767");
+        asm(".word 0x4bbfbdc5");
+        asm(".word 0x4a00060e");
+        asm("sll $t7, $t7, 16");
+        asm(".word 0x4a1cc615");
+        asm(".word 0x4a1bbdd1");
+        asm(".word 0x4a18c744");
+        asm(".word 0x4a18bf4d");
+        asm(".word 0x4a17c58e");
+        asm(".word 0x4a17bd4f");
+        asm(".word 0x4ab6b694");
+        asm(".word 0x4ab5ae50");
+        asm(".word 0x4adab594");
+        asm(".word 0x488fd300");
+        asm(".word 0x4ad9ad50");
+        asm("srl $at, $t7, 16");
+        asm(".word 0x4b154576");
+        asm("lbu $t7, 14($s3)");
+        asm(".word 0x4b1645b5");
+        asm(".word 0x4881cb00");
+        asm("sra $t7, $t7, 7");
+        asm(".word 0x4b954576");
+        asm(".word 0x4b9665b5");
+        asm(".word 0x4b006576");
+        asm(".word 0x4b7ab744");
+        asm(".word 0x4b7aaf4d");
+        asm(".word 0x4b79b74e");
+        asm("bne $t7, $zero, LABEL_pointLight_000D");
+        asm(".word 0x4b79a84f");
+        asm(".word 0x4bffb586");
+        asm(".word 0x4bffad4f");
+        asm(".word 0x4a010840");
+        asm(".word 0x4a96c744");
+        asm(".word 0x4a96bf4d");
+        asm(".word 0x4a95c74e");
+        asm(".word 0x4a95ba0f");
+        asm(".word 0x4a814200");
+        asm("jr $ra");
+        asm(".word 0x4a074040");
+        asm("LABEL_pointLight_000D:");
+        asm(".word 0x4a010840");
+        asm(".word 0x4b006873");
+        asm(".word 0x4b007073");
+        asm(".word 0x4b005073");
+        asm("jr $ra");
+        asm(".word 0x4b004873");
+        asm("loadCurrentMVPMat:");
+        asm("ori $at, $zero, %lo(matrix_mvp)");
+        asm(".word 0xc83c1c01");
+        asm(".word 0xc8361c07");
+        asm(".word 0xc83c1801");
+        asm(".word 0xc8391c02");
+        asm(".word 0xc8361807");
+        asm(".word 0xc8351806");
+        asm(".word 0xc8371804");
+        asm(".word 0xc8381c05");
+        asm(".word 0xc8371c04");
+        asm(".word 0xc83a1c03");
+        asm(".word 0xc83b1800");
+        asm(".word 0xc8381805");
+        asm(".word 0xc83b1c00");
+        asm(".word 0xc83a1803");
+        asm(".word 0xc8391802");
+        asm("jr $ra");
+        asm(".word 0xc8351c06");
+    }
+}
+
+@rspq.command(1) fn setScreenSize(
+    reg($a0) guard_band_factor: u32,
+    reg($a1) screen_offset_xy: u32,
+    reg($a2) screen_scale_xy: u32,
+    reg($a3) depth_and_w_scale: u32,
+) noreturn {
+    exact {
+        asm(".word 0x0004ba02");
+        asm(".word 0xa407034e");
+        asm(".word 0x3084000f");
+        asm(".word 0x0004b023");
+        asm(".word 0xa0160343");
+        asm(".word 0xa4170346");
+        asm(".word 0xa0040337");
+        asm(".word 0xa0040333");
+        asm(".word 0xa016033f");
+        asm(".word 0xac070314");
+        asm(".word 0xac060310");
+        asm("j commandLoop");
+        asm(".word 0xac050318");
+    }
+}
+
+
+@rspq.command(9) fn setFogState(reg($a0) enabled: u8) noreturn {
+    jump queue.commandLoop() slot {
+        store(u8, fog_store_offset, enabled);
+    }
+}
+
+@rspq.command(5) fn setLight(
+    reg($a0) address: dmem,
+    reg($a1) rgba: u32,
+    reg($a2) direction0: u32,
+    reg($a3) direction1: u32,
+) noreturn {
+    exact {
+        asm("beq $a2, $zero, geometry_set_light_end");
+        asm("sw $a1, 0($a0)");
+        asm("sw $a3, 12($a0)");
+        asm("sw $a2, 8($a0)");
+        asm("geometry_set_light_end:");
+        asm("j commandLoop");
+        asm("sw $a1, 4($a0)");
+    }
+}
+
+@rspq.command(6) fn setRenderMode(
+    reg($a0) culling: u8,
+    reg($a1) command: u32,
+) noreturn {
+    exact {
+        asm("lbu $s7, %lo(rdp_mode + 28)($zero)");
+        asm("sb $a0, %lo(face_culling)($zero)");
+        asm("andi $s7, $s7, 0x38");
+        asm("or $a1, $a1, $s7");
+        asm("j commandLoop");
+        asm("sw $a1, %lo(triangle_command)($zero)");
+    }
+}
+
+@rspq.command(7) fn setProjectionMatrix(reg($a0) rdram: u32) noreturn {
+    exact {
+        asm("addiu $t2, $zero, 12");
+        asm("ori $t0, $zero, 63");
+        asm("or $s0, $zero, $a0");
+        asm("j exec");
+        asm("ori $s4, $zero, %lo(matrix_projection)");
+    }
+}
+
+@rspq.command(2) fn updateMatrixStack(
+    reg($a0) stack_control: i32,
+    reg($a1) matrix_address: i32,
+) noreturn {
+    exact {
+        asm("andi $s7, $a0, 1");
+        asm("andi $s6, $a0, 2");
+        asm(".word 0x87840099");
+        asm("lw $s5, %lo(matrix_stack_pointer)($zero)");
+        asm("addu $s5, $s5, $a0");
+        asm("bne $s6, $zero, commandLoop");
+        asm("sw $s5, %lo(matrix_stack_pointer)($zero)");
+        asm("srl $s3, $a1, 24");
+        asm("lw $s3, %lo(segment_table)($s3)");
+        asm("addu $a1, $a1, $s3");
+        asm("bgez $a0, geometry_matrix_loaded_address");
+        asm("ori $s4, $zero, %lo(matrix_mv)");
+        asm("or $a1, $zero, $s5");
+        asm("geometry_matrix_loaded_address:");
+        asm("lui $at, 0xff");
+        asm("ori $at, $at, 0xffff");
+        asm("ori $t0, $zero, 63");
+        asm("addiu $t2, $zero, 12");
+        asm("jal exec");
+        asm("and $s0, $a1, $at");
+        asm("beq $s7, $zero, geometry_matrix_ready");
+        asm("ori $t1, $zero, %lo(matrix_normal)");
+        asm("addiu $s0, $s5, -64");
+        asm("ori $t0, $zero, 63");
+        asm("addiu $t2, $zero, 12");
+        asm("jal exec");
+        asm("ori $s4, $zero, %lo(clipping_buffer_result)");
+        asm("ori $s3, $zero, %lo(clipping_buffer_result)");
+        asm("ori $s4, $zero, %lo(matrix_mv)");
+        asm("jal multiplyMatrices");
+        asm("ori $s2, $zero, %lo(matrix_mv)");
+        asm("geometry_matrix_ready:");
+        asm("ori $t0, $zero, 63");
+        asm("addiu $t2, $zero, -32756");
+        asm("jal exec");
+        asm("or $s0, $zero, $s5");
+        asm("jal normalizeMatrixVector");
+        asm("ori $s2, $zero, %lo(matrix_mvp)");
+        asm("jal normalizeMatrixVector");
+        asm("ori $s3, $zero, %lo(matrix_projection)");
+        asm("jal normalizeMatrixVector");
+        asm("nop");
+        asm("ori $ra, $zero, %lo(commandLoop)");
+        asm("j multiplyMatrices");
+        asm("ori $s4, $zero, %lo(matrix_mv)");
+    }
+}
+
+@rspq.command(3) fn setWord(
+    reg($a0) address: dmem,
+    reg($a1) value: u32,
+) noreturn {
+    reg($s7) is_halfword: u32;
+    is_halfword = address & 0x8000;
+    if(is_halfword != 0) tail queue.commandLoop() slot {
+        store(u16, address, value);
+    }
+    tail queue.commandLoop() slot {
+        store(u32, address, value);
+    }
+}
+
+fn triangleClip() noreturn {
+    exact {
+        asm("geometryTriangleClip:");
+        asm("sh $ra, %lo(clipping_return_address)($zero)");
+        asm("jal geometry_RDPQ_Triangle_Send_End");
+        asm("sh $s4, 0x92($zero)");
+        asm("j _start");
+        asm("ori $s4, $zero, %lo(_start)");
+    }
+}
+
+@rspq.command(10) extern fn syncTriangles() @rspq.commandSize(4) writes() noreturn;
+@rspq.command(12) extern fn drawTriangleSequence() @rspq.commandSize(8) writes() noreturn;
+
+@rspq.command(11) fn drawTriangleStrip(reg($a0) rdram: u32, reg($a1) count_and_dmem: u32) noreturn {
+    exact {
+        asm(".word 0x401f3000");
+        asm(".word 0x30a8ffff");
+        asm(".word 0x0005a403");
+        asm(".word 0x17e0fffc");
+        asm(".word 0x02889021");
+        asm("geometry_LABEL_T3DCmd_TriDraw_Strip_0015:");
+        asm(".word 0x40940000");
+        asm(".word 0x40840800");
+        asm(".word 0x40881000");
+        asm("geometry_T3DCmd_TriDraw_Strip_PostDMA:");
+        asm(".word 0x2652fffd");
+        asm(".word 0x2694fffe");
+        asm("geometry_LABEL_T3DCmd_TriDraw_Strip_0016:");
+        asm(".word 0x40033000");
+        asm(".word 0x1460fffe");
+        asm(".word 0x00000000");
+        asm("geometry_STRIP_LOOP_NEW:");
+        asm(".word 0x900203f8");
+        asm(".word 0x26940002");
+        asm("geometry_STRIP_LOOP_NEXT:");
+        asm(".word 0x12920008");
+        asm(".word 0x38420001");
+        asm(".word 0x86850004");
+        asm(".word 0x96840002");
+        asm(".word 0x96860000");
+        asm(".word 0x04a0fff8");
+        asm(".word 0x26940002");
+        asm("j geometry_RDPQ_Triangle_Send_Async");
+        asm("ori $ra, $zero, %lo(geometry_STRIP_LOOP_NEXT)");
+        asm("geometry_STRIP_LOOP_END:");
+        asm("bgez $s2, commandLoop");
+        asm("ori $ra, $zero, %lo(commandLoop)");
+        asm("syncTriangles:");
+        asm(".word 0x90170400");
+        asm("beq $s7, $zero, geometry_RDPQ_Triangle_Send_End");
+        asm("ori $s4, $zero, %lo(_start)");
+        asm(".word 0x940803fe");
+        asm(".word 0x00005025");
+        asm(".word 0x8c100404");
+        asm("jal exec");
+        asm(".word 0x2508ffff");
+        asm(".word 0xa0000400");
+        asm("j geometry_RDPQ_Triangle_Send_End");
+        asm("ori $ra, $zero, %lo(commandLoop)");
+        asm("drawTriangleSequence:");
+        asm(".word 0x00058c02");
+        asm(".word 0x30b4ffff");
+        asm(".word 0x900203f8");
+        asm(".word 0x3092ffff");
+        asm(".word 0x2623006c");
+        asm("geometry_SEQ_LOOP_NEXT:");
+        asm(".word 0x12540006");
+        asm(".word 0x26440048");
+        asm(".word 0x00123025");
+        asm(".word 0x26450024");
+        asm("ori $ra, $zero, %lo(geometry_SEQ_LOOP_NEXT)");
+        asm("j geometry_RDPQ_Triangle_Send_Async");
+        asm(".word 0x02439021");
+        asm("geometry_SEQ_LOOP_END:");
+        asm(".word 0x1220ffe8");
+        asm("ori $ra, $zero, %lo(commandLoop)");
+        asm(".word 0x9792009a");
+        asm(".word 0x38420001");
+        asm(".word 0x26940024");
+        asm(".word 0x26520024");
+        asm("j geometry_SEQ_LOOP_NEXT");
+        asm(".word 0x00008825");
+    }
+}
+
+@rspq.command(13) fn patchCode(
+    reg($a0) patch_address: u32,
+    reg($a1) opcode_0: u32,
+    reg($a2) opcode_1: u32,
+) noreturn {
+    reg($t0) size: u32 = undefined;
+    reg($t1) pitch: u32 = undefined;
+    reg($s0) rdram: u32 = undefined;
+    reg($s4) scratch: dmem = undefined;
+    exact {
+        asm("or $s0, $zero, $a0");
+        asm("ori $s4, $zero, 0x80");
+        store(u32, scratch, opcode_0);
+        store(u32, scratch, opcode_1, 4);
+    }
+    tail dma.out(size, pitch, rdram, scratch) slot {
+        size = 7;
+    }
+}

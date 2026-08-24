@@ -112,6 +112,9 @@ pub const VectorOp = enum(u6) {
     vrcpl = 0b110001,
     vrcph = 0b110010,
     vmov = 0b110011,
+    vrsq = 0b110100,
+    vrsql = 0b110101,
+    vrsqh = 0b110110,
 };
 
 pub const VectorOperation = struct {

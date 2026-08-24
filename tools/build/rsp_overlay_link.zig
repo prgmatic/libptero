@@ -2,13 +2,15 @@ const std = @import("std");
 
 const imem_base = 0x1000;
 const imem_end = 0x2000;
-const overlay_dmem_start = 0x0a00;
+const overlay_data_start = 0x0a00;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.smp_allocator;
     const io = init.io;
     const args = try init.minimal.args.toSlice(alloc);
-    if (args.len != 4) return error.InvalidArguments;
+    if (args.len != 5) return error.InvalidArguments;
+    const overlay_state_start = try std.fmt.parseInt(u16, args[3], 0);
+    if (overlay_state_start > overlay_data_start) return error.InvalidStateStart;
 
     const resident_elf = try readAll(io, alloc, args[1]);
     defer alloc.free(resident_elf);
@@ -24,11 +26,11 @@ pub fn main(init: std.process.Init) !void {
     const symbols = try exportedSymbols(alloc, resident_elf, header, aliases);
     defer alloc.free(symbols);
 
-    const output = try std.Io.Dir.cwd().createFile(io, args[3], .{});
+    const output = try std.Io.Dir.cwd().createFile(io, args[4], .{});
     defer output.close(io);
     var buffer: [4096]u8 = undefined;
     var file_writer = output.writer(io, &buffer);
-    try writeLinkerScript(&file_writer.interface, text_start, symbols);
+    try writeLinkerScript(&file_writer.interface, text_start, overlay_state_start, symbols);
     try file_writer.interface.flush();
 }
 
@@ -155,7 +157,67 @@ fn sectionBytes(bytes: []const u8, section: std.elf.Elf64_Shdr) ![]const u8 {
     return bytes[offset..][0..size];
 }
 
-fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, symbols: []const ExportedSymbol) !void {
+fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, state_start: u16, symbols: []const ExportedSymbol) !void {
+    if (state_start == overlay_data_start) {
+        try writeStandardLinkerScript(writer, text_start, symbols);
+        return;
+    }
+    try writer.print(
+        \\OUTPUT_ARCH(mips)
+        \\ENTRY(_start)
+        \\
+        \\MEMORY {{
+        \\    DATA_DMEM : ORIGIN = 0x{x:0>4}, LENGTH = 0x{x:0>4}
+        \\    STATE_DMEM : ORIGIN = 0x{x:0>4}, LENGTH = 0x{x:0>4}
+        \\    IMEM : ORIGIN = 0x{x:0>4}, LENGTH = 0x{x:0>4}
+        \\}}
+        \\
+        \\SECTIONS {{
+        \\    .state 0x{x:0>4} : SUBALIGN(1) {{
+        \\        KEEP(*(.state*))
+        \\    }} > STATE_DMEM
+        \\
+        \\    .bss (NOLOAD) : SUBALIGN(1) {{
+        \\        *(.bss*)
+        \\    }} > STATE_DMEM
+        \\
+        \\    .data 0x{x:0>4} : {{
+        \\        KEEP(*(.data*))
+        \\        KEEP(*(.rodata*))
+        \\    }} > DATA_DMEM
+        \\
+        \\    .text 0x{x:0>4} : {{
+        \\        *(.text*)
+        \\    }} > IMEM
+        \\
+        \\    .zsp_commands 0 : {{
+        \\        KEEP(*(.zsp_commands))
+        \\    }}
+        \\
+        \\    /DISCARD/ : {{
+        \\        *(.MIPS.abiflags)
+        \\        *(.reginfo)
+        \\        *(.got*)
+        \\    }}
+        \\}}
+        \\
+    , .{
+        overlay_data_start,
+        0x1000 - overlay_data_start,
+        state_start,
+        0x1000 - state_start,
+        text_start,
+        imem_end - text_start,
+        state_start,
+        overlay_data_start,
+        text_start,
+    });
+    for (symbols) |symbol| {
+        try writer.print("PROVIDE({s} = 0x{x});\n", .{ symbol.name, symbol.value });
+    }
+}
+
+fn writeStandardLinkerScript(writer: *std.Io.Writer, text_start: u16, symbols: []const ExportedSymbol) !void {
     try writer.print(
         \\OUTPUT_ARCH(mips)
         \\ENTRY(_start)
@@ -175,7 +237,7 @@ fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, symbols: []const E
         \\        *(.bss*)
         \\    }} > DMEM
         \\
-        \\    .state ALIGN(16) (NOLOAD) : SUBALIGN(1) {{
+        \\    .state ALIGN(16) : SUBALIGN(1) {{
         \\        KEEP(*(.state*))
         \\    }} > DMEM
         \\
@@ -189,16 +251,17 @@ fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, symbols: []const E
         \\
         \\    /DISCARD/ : {{
         \\        *(.MIPS.abiflags)
+        \\        *(.reginfo)
         \\        *(.got*)
         \\    }}
         \\}}
         \\
     , .{
-        overlay_dmem_start,
-        0x1000 - overlay_dmem_start,
+        overlay_data_start,
+        0x1000 - overlay_data_start,
         text_start,
         imem_end - text_start,
-        overlay_dmem_start,
+        overlay_data_start,
         text_start,
     });
     for (symbols) |symbol| {

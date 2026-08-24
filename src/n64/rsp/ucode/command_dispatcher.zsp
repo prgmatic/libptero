@@ -8,34 +8,25 @@ packed struct OverlaySection {
 
 data {
     shift_constants: [8]u8 = .{ 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 };
-}
-
-// Resident queue state is addressable DMEM, but is not part of the ucode image.
-bss {
     overlay_data_rdram: [16]u32;
     overlay_idmap: [16]u8;
     pointer_stack: [10]u32;
-
     queue_rdram_address: u32;
-    reserved_command_status: u32;
-    reserved_current_overlay_id: u32;
-    reserved_overlay_load_count: u32;
-    pub rdp_current: u32;
-    pub rdp_sentinel: u32;
-    pub rdp_buffers: [2]u32;
-    pub rdp_syncfull_ongoing: u8;
-    pub rdp_target_bitdepth: i8;
+    resident_scratch: [27]u8;
     pub rdp_publication_held: u8;
-    pub rdp_fill_color: u32;
-    // The fixed command-fetch window occupies 0xe0..0x1df. Keep the shared
-    // 32-byte RDP mode cache after it; the intervening range is intentionally
-    // linker-reserved rather than live resident state.
-    rdp_mode_alignment: [296]u8;
+    command_buffer_storage: [256]u8;
     pub rdp_mode: [8]u32;
     pub rdp_scissor_rect: [2]u32;
+    pub rdp_buffers: [2]u32;
+    pub rdp_current: u32;
+    pub rdp_sentinel: u32;
+    pub rdp_fill_color: u32;
+    pub rdp_target_bitdepth: i8;
+    pub rdp_syncfull_ongoing: u8;
 }
 
 const internal_commands = @rspq.commandTable();
+
 
 fn fetchCommandBuffer() noreturn {
     reg($s0) rdram: u32 = load(u32, queue_rdram_address);
@@ -47,7 +38,7 @@ fn fetchCommandBuffer() noreturn {
 fn fetchCommandBufferWithPointer(
     reg($s0) rdram: u32,
 ) noreturn {
-    const command_buffer: u32 = 0xe0;
+    const command_buffer: u32 = 0xa0;
     reg($s4) dma_destination: dmem = command_buffer;
     reg($gp) command_address: dmem = undefined;
     command_address = rdram & 7;
@@ -162,6 +153,8 @@ fn fetchCommandBufferWithPointer(
     start: u32,
     sentinel: u32,
 ) noreturn {
+    current <<= 8;
+    current >>>= 8;
     reg dp_value: u32;
     reg masked_status: u32;
     reg dp_status: u32;
@@ -237,10 +230,10 @@ export fn _start() noreturn {
 }
 
 pub export fn commandLoop() noreturn {
-    const command_buffer: u32 = 0xe0;
+    const command_buffer: u32 = 0xa0;
     const command_buffer_size: u32 = 256;
-    const overlay_idmap_address: u32 = 0x78;
-    const overlay_command_table: u32 = 0x81c;
+    const overlay_idmap_address: u32 = 0x48;
+    const overlay_command_table: u32 = 0x214;
     const status_high_priority_requested: u32 = 0x00000800;
     const status_high_priority_mask: u32 = 0x00000c00;
     const status_enter_high_priority: u32 = 0x00030000;
@@ -281,9 +274,9 @@ switch_high_priority: block {
         }
 
     resolve_overlay: do {
-        dma_pitch = load(u16, 0, 0x80a);
+        dma_pitch = load(u16, 0, 0x202);
         overlay_index = load(u8, command_size, overlay_idmap_address);
-        dma_size = load(u16, 0, 0x808);
+        dma_size = load(u16, 0, 0x200);
         shift_vector = loadVectorBytes(0);
         command_index = command_index - dma_size;
         if(overlay_index == dma_pitch) {
@@ -292,17 +285,17 @@ switch_high_priority: block {
 
         command_index +%= dma_size;
 
-        dma_size = load(u16, 0, 0x802);
-        rdram = load(u32, 0, 0x804);
-        dma_destination = load(u16, 0, 0x800);
+        dma_size = load(u16, 0, 0x1fa);
+        rdram = load(u32, 0, 0x1fc);
+        dma_destination = load(u16, 0, 0x1f8);
         dma.outAsync(dma_size, dma_pitch, rdram, dma_destination);
         if(overlay_index == 0) tail invalidCommand() slot {
             reg($at) assertion_code: u32 = 0xff010000;
         }
 
         rdram = load(u32, overlay_index, overlay_data_rdram);
-        dma_destination = 0x800;
-        dma_pitch = 0x80c;
+        dma_destination = 0x1f8;
+        dma_pitch = 0x204;
         dma_size = rdram >> 20;
         dma_size |= 0x0f;
         dma.in(dma_size, dma_pitch, rdram, dma_destination);
@@ -319,7 +312,7 @@ switch_high_priority: block {
         command_descriptor = load(u16, command_index, overlay_command_table);
     }
 
-    argument_1 = load(u32, command_address, 0xe4);
+    argument_1 = load(u32, command_address, 0xa4);
     shifted_vector = shift_vector >>> 8;
     dma_pitch = command_buffer_size;
     if(command_descriptor == 0) tail invalidCommand() slot {
@@ -332,9 +325,9 @@ switch_high_priority: block {
     reg($at) command_fits_buffer: u32 = undefined;
     command_fits_buffer = signedLessThan(dma_size, dma_pitch);
     if(command_fits_buffer == 0) tail fetchCommandBuffer() slot {
-        argument_2 = load(u32, command_address, 0xe8);
+        argument_2 = load(u32, command_address, 0xa8);
     }
-    argument_3 = load(u32, command_address, 0xec);
+    argument_3 = load(u32, command_address, 0xac);
     command_address = command_address + command_size;
     command_descriptor <<= 2;
     reg($ra) return_address: fn() = &commandLoop;
@@ -349,5 +342,7 @@ switch_high_priority: block {
 }
 
 pub export fn invalidCommand() noreturn {
+    reg($at) assertion_code: u32 = undefined;
+    store(u32, resident_scratch, assertion_code);
     rsp.halt(0xba);
 }

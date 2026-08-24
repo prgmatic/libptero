@@ -437,15 +437,15 @@ pub const Parser = struct {
         }
 
         if (std.mem.eql(u8, first.text, "data")) {
-            return .{ .data_block = try self.parseStorageBlock(true) };
+            return .{ .data_block = try self.parseStorageBlock(false, true) };
         }
 
         if (std.mem.eql(u8, first.text, "bss")) {
-            return .{ .bss_block = try self.parseStorageBlock(false) };
+            return .{ .bss_block = try self.parseStorageBlock(false, false) };
         }
 
         if (std.mem.eql(u8, first.text, "state")) {
-            return .{ .state_block = try self.parseStorageBlock(false) };
+            return .{ .state_block = try self.parseStorageBlock(false, true) };
         }
 
         if (std.mem.eql(u8, first.text, "exact")) {
@@ -892,7 +892,7 @@ pub const Parser = struct {
         };
     }
 
-    fn parseStorageBlock(self: *Parser, initialized: bool) ![]const ast.DataDecl {
+    fn parseStorageBlock(self: *Parser, require_initialized: bool, allow_initialized: bool) ![]const ast.DataDecl {
         _ = try self.expect(.l_brace);
         var declarations: std.ArrayList(ast.DataDecl) = .empty;
         errdefer {
@@ -929,6 +929,8 @@ pub const Parser = struct {
             } else .{ .packed_struct = type_token.text };
             var values: std.ArrayList(i64) = .empty;
             errdefer values.deinit(self.allocator);
+            const initialized = allow_initialized and self.current.tag == .equal;
+            if (require_initialized and !initialized) _ = try self.expect(.equal);
             if (initialized) {
                 if (external) return self.fail(name, .external_data_initializer);
                 _ = try self.expect(.equal);
@@ -1994,6 +1996,9 @@ fn parseVectorOp(text: []const u8) ?ast.VectorOp {
         .{ "vectorReciprocal", ast.VectorOp.vrcp },
         .{ "vectorReciprocalLow", ast.VectorOp.vrcpl },
         .{ "vectorReciprocalHigh", ast.VectorOp.vrcph },
+        .{ "vectorReciprocalSquareRoot", ast.VectorOp.vrsq },
+        .{ "vectorReciprocalSquareRootLow", ast.VectorOp.vrsql },
+        .{ "vectorReciprocalSquareRootHigh", ast.VectorOp.vrsqh },
         .{ "vectorMove", ast.VectorOp.vmov },
     };
     inline for (aliases) |alias| if (std.mem.eql(u8, text, alias[0])) return alias[1];
@@ -2011,7 +2016,8 @@ fn explicitAccumulatorPart(text: []const u8) ?ast.AccumulatorPart {
 }
 
 fn isUnaryVectorOp(op: ast.VectorOp) bool {
-    return op == .vrcp or op == .vrcpl or op == .vrcph or op == .vmov;
+    return op == .vrcp or op == .vrcpl or op == .vrcph or
+        op == .vrsq or op == .vrsql or op == .vrsqh or op == .vmov;
 }
 
 fn parseAccumulatorPart(text: []const u8) ?ast.AccumulatorPart {

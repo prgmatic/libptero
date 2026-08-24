@@ -95,7 +95,7 @@ pub export fn returnToCaller() noreturn {
     jump(return_address);
 }
 
-pub fn waitIdle() noreturn {
+pub export fn waitIdle() noreturn {
     reg($t2) flags: u32 = 0x0c;
     jump waitStatus(flags);
 }

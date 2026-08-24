@@ -2116,6 +2116,15 @@ fn functionParameterIsWritten(
     visited_count: *usize,
 ) bool {
     if (parameter_index >= function.parameters.len or visited_count.* >= visited.len) return true;
+    if (function.external) {
+        const parameter = function.parameters[parameter_index];
+        if (parameter.reg) |reg| {
+            for (function.clobber_regs) |written| if (written == reg) return true;
+        }
+        if (parameter.vector_reg) |reg| {
+            for (function.clobber_vector_regs) |written| if (written == reg) return true;
+        }
+    }
     for (visited[0..visited_count.*]) |item| {
         if (item.parameter == parameter_index and std.mem.eql(u8, item.function, function.name)) return false;
     }
@@ -2402,7 +2411,10 @@ fn writeStorageBlocks(
                 try writer.writeAll(switch (block_tag) {
                     .data_block => ".data\n",
                     .bss_block => ".bss\n",
-                    .state_block => ".section .state,\"aw\",@nobits\n",
+                    // Saved overlay state is part of the loadable DMEM image.
+                    // Keep zero-only declarations in the same PROGBITS section so
+                    // initialized and reserved state retain their source order.
+                    .state_block => ".section .state,\"aw\",@progbits\n",
                     else => unreachable,
                 });
                 wrote_section = true;
@@ -2826,7 +2838,10 @@ fn writeVectorAssignment(
     if (assignment.lhs == .vector_operation) {
         if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
         const operation = assignment.lhs.vector_operation;
-        if (operation.op == .vrcp or operation.op == .vrcpl or operation.op == .vrcph or operation.op == .vmov) {
+        if (operation.op == .vrcp or operation.op == .vrcpl or operation.op == .vrcph or
+            operation.op == .vrsq or operation.op == .vrsql or operation.op == .vrsqh or
+            operation.op == .vmov)
+        {
             const destination_lane = assignment.destination_lane orelse return error.VectorLaneOperationRequiresLane;
             const result_reg = try vectorRegisterForView(destination, assignment.destination_view);
             if (destination.data_type == .vec32 and assignment.destination_view == null) {

@@ -50,9 +50,20 @@ pub const AssetBundle = struct {
         source: std.Build.LazyPath,
         resident: Resident,
     ) void {
+        self.addZspOverlayWithStateStart(name, source, resident, 0x0a00);
+    }
+
+    pub fn addZspOverlayWithStateStart(
+        self: *AssetBundle,
+        name: []const u8,
+        source: std.Build.LazyPath,
+        resident: Resident,
+        state_start: u16,
+    ) void {
         const overlay_link = self.b.addRunArtifact(self.tools.rsp_overlay_link);
         overlay_link.addArtifactArg(resident.elf);
         overlay_link.addFileArg(resident.interface);
+        overlay_link.addArg(self.b.fmt("0x{x}", .{state_start}));
         const linker_script = overlay_link.addOutputFileArg(self.b.fmt("{s}.ld", .{name}));
         self.asset_module.addGeneratedFile(name, buildZsp(self, name, source, linker_script, resident.interface).rsp, 8);
     }
