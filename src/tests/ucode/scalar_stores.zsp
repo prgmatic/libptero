@@ -1,0 +1,9 @@
+export fn _start() noreturn {
+    store(u8, 0, 0xab);
+    store(i8, 1, 0xab);
+    store(u16, 2, 0xabcd);
+    store(i16, 4, 0xabcd);
+    store(u32, 8, 0x0abcdef0);
+    store(i32, 12, 0x00abcdef);
+    rsp.halt();
+}

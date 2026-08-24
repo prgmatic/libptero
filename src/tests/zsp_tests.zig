@@ -72,18 +72,8 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: register operations", .run = registerOperations },
     .{ .name = "ZSP: large immediates", .run = largeImmediates },
     .{ .name = "ZSP: memory offsets", .run = memoryOffsets },
-    .{ .name = "ZSP: store u8", .run = storeU8 },
-    .{ .name = "ZSP: store i8", .run = storeI8 },
-    .{ .name = "ZSP: store u16", .run = storeU16 },
-    .{ .name = "ZSP: store i16", .run = storeI16 },
-    .{ .name = "ZSP: store u32", .run = storeU32 },
-    .{ .name = "ZSP: store i32", .run = storeI32 },
-    .{ .name = "ZSP: load u8", .run = loadU8 },
-    .{ .name = "ZSP: load i8", .run = loadI8 },
-    .{ .name = "ZSP: load u16", .run = loadU16 },
-    .{ .name = "ZSP: load i16", .run = loadI16 },
-    .{ .name = "ZSP: load u32", .run = loadU32 },
-    .{ .name = "ZSP: load i32", .run = loadI32 },
+    .{ .name = "ZSP: scalar stores", .run = scalarStores },
+    .{ .name = "ZSP: scalar loads", .run = scalarLoads },
     .{ .name = "ZSP: vector operations", .run = vectorOperations },
     .{ .name = "ZSP: data blocks", .run = dataBlocks },
     .{ .name = "ZSP: DMA in", .run = dmaIn },
@@ -190,70 +180,25 @@ fn memoryOffsets() !void {
     try expectDmemWord(u32, 28, 0xaa334455);
 }
 
-fn storeU32() !void {
-    try run(zsp_programs.store_u32);
-    try expectDmemWord(u32, 0, 0xABCDEF0);
+fn scalarStores() !void {
+    try run(zsp_programs.scalar_stores);
+    try expectDmemWord(u8, 0, 0xab);
+    try expectDmemWord(i8, 1, -85);
+    try expectDmemWord(u16, 2, 0xabcd);
+    try expectDmemWord(i16, 4, -21555);
+    try expectDmemWord(u32, 8, 0x0abcdef0);
+    try expectDmemWord(i32, 12, 0x00abcdef);
 }
 
-fn storeI32() !void {
-    try run(zsp_programs.store_i32);
-    try expectDmemWord(i32, 0, 0xABCDEF);
-}
-
-fn storeU16() !void {
-    try run(zsp_programs.store_u16);
-    try expectDmemWord(u16, 0, 0xABCD);
-}
-
-fn storeI16() !void {
-    try run(zsp_programs.store_i16);
-    try expectDmemWord(i16, 0, -21555);
-}
-
-fn storeU8() !void {
-    try run(zsp_programs.store_u8);
-    try expectDmemWord(u8, 0, 0xAB);
-}
-
-fn storeI8() !void {
-    try run(zsp_programs.store_i8);
-    try expectDmemWord(i8, 0, -85);
-}
-
-fn loadU8() !void {
+fn scalarLoads() !void {
     seedLoadSource(0x80ff8001);
-    try run(zsp_programs.load_u8);
+    try run(zsp_programs.scalar_loads);
     try expectDmemWord(u32, 4, 0x00000080);
-}
-
-fn loadI8() !void {
-    seedLoadSource(0x80ff8001);
-    try run(zsp_programs.load_i8);
-    try expectDmemWord(i32, 4, -128);
-}
-
-fn loadU16() !void {
-    seedLoadSource(0x80ff8001);
-    try run(zsp_programs.load_u16);
-    try expectDmemWord(u32, 4, 0x000080ff);
-}
-
-fn loadI16() !void {
-    seedLoadSource(0x80ff8001);
-    try run(zsp_programs.load_i16);
-    try expectDmemWord(i32, 4, -32513);
-}
-
-fn loadU32() !void {
-    seedLoadSource(0x89abcdef);
-    try run(zsp_programs.load_u32);
-    try expectDmemWord(u32, 4, 0x89abcdef);
-}
-
-fn loadI32() !void {
-    seedLoadSource(0x80000000);
-    try run(zsp_programs.load_i32);
-    try expectDmemWord(i32, 4, -2147483648);
+    try expectDmemWord(i32, 8, -128);
+    try expectDmemWord(u32, 12, 0x000080ff);
+    try expectDmemWord(i32, 16, -32513);
+    try expectDmemWord(u32, 20, 0x80ff8001);
+    try expectDmemWord(i32, 24, -2130739199);
 }
 
 fn vectorOperations() !void {
@@ -1669,8 +1614,8 @@ fn waitDmemValueTimeout(offset: u32, expected: u32) !void {
 
 fn rspLoadedOverlayDispatch() !void {
     loadCommandDispatcher();
-    overlay_1.init(rsp.programs.static_overlay);
-    overlay_2.init(rsp.programs.static_overlay_2);
+    overlay_1.init(zsp_programs.static_overlay);
+    overlay_2.init(zsp_programs.static_overlay_2);
     try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&overlay_1));
     try testing.expectEqual(@as(u8, 2), rsp.registerOverlay(&overlay_2));
     continuous_queue.init(.low);
@@ -1691,16 +1636,16 @@ fn rspLoadedOverlayDispatch() !void {
     try expectDmemWord(u32, 0x510, 1);
     try expectDmemWord(u32, 0x514, 2);
     try expectDmemWord(u32, 0x518, 3);
-    try expectDmemWord(u16, 0x800, rsp.programs.static_overlay.state_offset);
-    try expectDmemWord(u16, 0x802, rsp.programs.static_overlay.state_len - 1);
+    try expectDmemWord(u16, 0x800, zsp_programs.static_overlay.state_offset);
+    try expectDmemWord(u16, 0x802, zsp_programs.static_overlay.state_len - 1);
     try expectDmemWord(u16, 0x808, 1 << 5);
     try expectDmemWord(u16, 0x80a, 1 << 2);
-    try expectDmemWord(u16, 0x810, @intCast(rsp.programs.static_overlay.text.len - 1));
-    try expectDmemWord(u16, 0x812, rsp.io.dma_imem_addr + rsp.programs.static_overlay.text_offset);
-    const first_command = rsp.programs.static_overlay.commandAt(0);
+    try expectDmemWord(u16, 0x810, @intCast(zsp_programs.static_overlay.text.len - 1));
+    try expectDmemWord(u16, 0x812, rsp.io.dma_imem_addr + zsp_programs.static_overlay.text_offset);
+    const first_command = zsp_programs.static_overlay.commandAt(0);
     const descriptor = @as(u16, first_command.size) << 8 | first_command.handler_offset >> 2;
     try expectDmemWord(u16, 0x81c, descriptor);
-    const argument_command = rsp.programs.static_overlay.commandAt(1);
+    const argument_command = zsp_programs.static_overlay.commandAt(1);
     const argument_descriptor = @as(u16, argument_command.size) << 8 |
         argument_command.handler_offset >> 2;
     try expectDmemWord(u16, 0x81e, argument_descriptor);
@@ -1709,20 +1654,20 @@ fn rspLoadedOverlayDispatch() !void {
     try testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, overlay_1_state[0..4], .big));
     std.mem.writeInt(u32, overlay_1_state[0..4], 9, .big);
     rsp.writebackOverlayState(&overlay_1);
-    try expectDmemWord(u32, rsp.programs.static_overlay.state_offset, 9);
+    try expectDmemWord(u32, zsp_programs.static_overlay.state_offset, 9);
     rsp.unregisterOverlay(&overlay_1);
     rsp.unregisterOverlay(&overlay_2);
     try expectDmemWord(u32, 0x3c, 0);
     try expectDmemWord(u32, 0x40, 0);
     try expectDmemWord(u32, 0x78, 0);
 
-    overlay_2.init(rsp.programs.static_overlay_2);
+    overlay_2.init(zsp_programs.static_overlay_2);
     try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&overlay_2));
 }
 
 fn multiSlotOverlayDispatch() !void {
     loadCommandDispatcher();
-    multi_slot_overlay.init(rsp.programs.multi_slot_overlay);
+    multi_slot_overlay.init(zsp_programs.multi_slot_overlay);
     try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&multi_slot_overlay));
     try testing.expectEqual(@as(u8, 4), multi_slot_overlay.slot_count);
 
@@ -1773,7 +1718,7 @@ fn rdpPersistentScalarState() !void {
     loadCommandDispatcher();
     rdp_overlay.init(rsp.programs.rdp_overlay);
     rsp.registerOverlayStatic(&rdp_overlay, 12);
-    overlay_1.init(rsp.programs.static_overlay);
+    overlay_1.init(zsp_programs.static_overlay);
     try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&overlay_1));
     continuous_queue.init(.low);
     continuous_queue.writeOverlayCommand(&rdp_overlay, 17, 1, &.{});

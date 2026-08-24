@@ -131,22 +131,48 @@ fn addToolTests(b: *std.Build) void {
 
 fn addZspTestPrograms(
     b: *std.Build,
-    sdk: *const Sdk,
+    sdk: *Sdk,
 ) *std.Build.Module {
     const fixtures = findZspTestFixtures(b, "src/tests/ucode");
+
+    var overlay_assets = sdk.createAssets("zsp_test_overlay_assets");
+    const resident = overlay_assets.addZspResident(
+        "command_dispatcher",
+        sdk.root.path(b, "src/n64/rsp/ucode/command_dispatcher.zsp"),
+    );
+    inline for (.{ "static_overlay", "static_overlay_2", "multi_slot_overlay" }) |name| {
+        overlay_assets.addZspOverlay(
+            name,
+            sdk.root.path(b, "src/tests/ucode/" ++ name ++ ".zsp"),
+            resident,
+        );
+    }
+    const overlay_assets_module = overlay_assets.createModule();
 
     var module_source_bytes: std.ArrayList(u8) = .empty;
     module_source_bytes.appendSlice(b.allocator,
         \\const UCode = @import("n64").rsp.UCode;
+        \\const overlay_assets = @import("overlay_assets");
         \\
     ) catch @panic("OOM");
     for (fixtures) |fixture| {
+        const is_overlay = std.mem.eql(u8, fixture, "static_overlay") or
+            std.mem.eql(u8, fixture, "static_overlay_2") or
+            std.mem.eql(u8, fixture, "multi_slot_overlay");
         const decl = std.fmt.allocPrint(b.allocator,
-            \\pub const {s}_rsp align(8) = @embedFile("zsp_test_{s}_rsp").*;
+            \\pub const {s}_rsp align(8) = {s};
             \\pub const {s} = UCode.fromBlob(&{s}_rsp);
             \\
             \\
-        , .{ fixture, fixture, fixture, fixture }) catch @panic("OOM");
+        , .{
+            fixture,
+            if (is_overlay)
+                b.fmt("overlay_assets.{s}", .{fixture})
+            else
+                b.fmt("@embedFile(\"zsp_test_{s}_rsp\").*", .{fixture}),
+            fixture,
+            fixture,
+        }) catch @panic("OOM");
         module_source_bytes.appendSlice(b.allocator, decl) catch @panic("OOM");
     }
 
@@ -156,10 +182,16 @@ fn addZspTestPrograms(
         .root_source_file = module_source,
         .target = sdk.target,
         .optimize = .ReleaseSmall,
-        .imports = &.{.{ .name = "n64", .module = sdk.n64_module }},
+        .imports = &.{
+            .{ .name = "n64", .module = sdk.n64_module },
+            .{ .name = "overlay_assets", .module = overlay_assets_module },
+        },
     });
 
     for (fixtures) |fixture| {
+        if (std.mem.eql(u8, fixture, "static_overlay") or
+            std.mem.eql(u8, fixture, "static_overlay_2") or
+            std.mem.eql(u8, fixture, "multi_slot_overlay")) continue;
         const name = b.fmt("zsp_test_{s}", .{fixture});
         const import_name = b.fmt("zsp_test_{s}_rsp", .{fixture});
         const source = b.fmt("src/tests/ucode/{s}.zsp", .{fixture});

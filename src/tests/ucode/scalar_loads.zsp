@@ -1,0 +1,20 @@
+export fn _start() noreturn {
+    reg unsigned_byte = load(u8, 0);
+    reg signed_byte = load(i8, 0);
+    reg unsigned_half = load(u16, 0);
+    reg signed_half = load(i16, 0);
+    reg unsigned_word = load(u32, 0);
+    reg signed_word = load(i32, 0);
+    rsp.nop();
+    unsigned_byte ^= 0;
+    signed_byte ^= 0;
+    unsigned_half ^= 0;
+    signed_half ^= 0;
+    store(u32, 4, unsigned_byte);
+    store(i32, 8, signed_byte);
+    store(u32, 12, unsigned_half);
+    store(i32, 16, signed_half);
+    store(u32, 20, unsigned_word);
+    store(i32, 24, signed_word);
+    rsp.halt();
+}

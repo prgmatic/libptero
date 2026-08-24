@@ -156,13 +156,11 @@ pub const Sdk = struct {
             "command_dispatcher",
             self.root.path(self.b, "src/n64/rsp/ucode/command_dispatcher.zsp"),
         );
-        inline for (.{ "static_overlay", "static_overlay_2", "multi_slot_overlay", "rdp_overlay" }) |name| {
-            assets.addZspOverlay(
-                name,
-                self.root.path(self.b, "src/n64/rsp/ucode/" ++ name ++ ".zsp"),
-                resident,
-            );
-        }
+        assets.addZspOverlay(
+            "rdp_overlay",
+            self.root.path(self.b, "src/n64/rsp/ucode/rdp_overlay.zsp"),
+            resident,
+        );
         self.n64_module.addImport("libptero_rsp_assets", assets.createModule());
     }
 };

@@ -1,6 +1,0 @@
-export fn _start() noreturn {
-    reg value = load(i32, 0);
-    rsp.nop();
-    store(i32, 4, value);
-    rsp.halt();
-}

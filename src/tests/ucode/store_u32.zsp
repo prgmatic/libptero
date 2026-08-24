@@ -1,4 +1,0 @@
-export fn _start() noreturn {
-    store(u32, 0, 0xABCDEF0);
-    rsp.halt();
-}
