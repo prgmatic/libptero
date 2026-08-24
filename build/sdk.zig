@@ -2,16 +2,11 @@ const std = @import("std");
 
 const rom_build = @import("rom.zig");
 const tools_build = @import("tools.zig");
+const assets_build = @import("assets.zig");
 
 pub const Options = struct {
     root: std.Build.LazyPath,
     target: ?std.Build.ResolvedTarget = null,
-    generated: GeneratedFeatures = .{},
-};
-
-pub const GeneratedFeatures = struct {
-    console_font: bool = false,
-    rsp_programs: bool = false,
 };
 
 pub const RomOptions = struct {
@@ -27,6 +22,8 @@ pub const RomOptions = struct {
     boot: BootOptions = .{},
     metadata: MetadataOptions = .{},
     imports: []const std.Build.Module.Import = &.{},
+    assets: ?*assets_build.AssetBundle = null,
+    builtin_rsp_programs: bool = true,
     install: ?InstallOptions = .{},
 };
 
@@ -36,6 +33,7 @@ pub const MemoryLayout = rom_build.MemoryLayout;
 pub const Rdram = rom_build.Rdram;
 pub const BootOptions = rom_build.BootOptions;
 pub const MetadataOptions = rom_build.MetadataOptions;
+pub const AssetBundle = assets_build.AssetBundle;
 
 pub const HandlerOverrides = struct {
     entry: []const u8 = "main",
@@ -51,6 +49,7 @@ pub const Sdk = struct {
     n64_module: *std.Build.Module,
     tools: tools_build.Tools,
     console_font_added: bool,
+    builtin_rsp_added: bool,
 
     pub fn init(b: *std.Build, options: Options) Sdk {
         const target = options.target orelse b.resolveTargetQuery(target_query);
@@ -58,16 +57,19 @@ pub const Sdk = struct {
             .root_source_file = options.root.path(b, "src/n64/n64.zig"),
         });
         const tools = tools_build.build(b, options.root);
-        addGeneratedN64Assets(b, options.root, n64_module, tools, options.generated);
-
         return .{
             .b = b,
             .root = options.root,
             .target = target,
             .n64_module = n64_module,
             .tools = tools,
-            .console_font_added = options.generated.console_font,
+            .console_font_added = false,
+            .builtin_rsp_added = false,
         };
+    }
+
+    pub fn createAssets(self: *Sdk, name: []const u8) AssetBundle {
+        return .{ .b = self.b, .root = self.root, .tools = self.tools, .target = self.target, .name = name };
     }
 
     pub fn addRom(self: *Sdk, options: RomOptions) rom_build.Rom {
@@ -75,9 +77,17 @@ pub const Sdk = struct {
         if (uses_default_entry == (options.root_source_file != null)) {
             std.debug.panic("ROM '{s}' must set exactly one of app_source_file or root_source_file", .{options.name});
         }
+        if (options.builtin_rsp_programs) self.addBuiltinRspPrograms();
+
+        const extra_import_count: usize = if (options.assets != null) 1 else 0;
+        const option_imports = self.b.allocator.alloc(std.Build.Module.Import, options.imports.len + extra_import_count) catch @panic("OOM");
+        @memcpy(option_imports[0..options.imports.len], options.imports);
+        if (options.assets) |assets| {
+            option_imports[options.imports.len] = .{ .name = assets.name, .module = assets.createModule() };
+        }
 
         var root_source_file = options.root_source_file;
-        var root_imports = options.imports;
+        var root_imports: []const std.Build.Module.Import = option_imports;
         if (options.app_source_file) |app_source_file| {
             if (!self.console_font_added and
                 (options.overrides.panic.len == 0 or options.overrides.exception.len == 0))
@@ -86,9 +96,9 @@ pub const Sdk = struct {
                 self.console_font_added = true;
             }
 
-            const app_imports = self.b.allocator.alloc(std.Build.Module.Import, options.imports.len + 1) catch @panic("OOM");
+            const app_imports = self.b.allocator.alloc(std.Build.Module.Import, option_imports.len + 1) catch @panic("OOM");
             app_imports[0] = .{ .name = "n64", .module = self.n64_module };
-            @memcpy(app_imports[1..], options.imports);
+            @memcpy(app_imports[1..], option_imports);
             const app_module = self.b.createModule(.{
                 .root_source_file = app_source_file,
                 .target = self.target,
@@ -134,15 +144,26 @@ pub const Sdk = struct {
     }
 
     pub fn addRspUcode(self: *const Sdk, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
-        return buildRspUcodeFromPath(
-            self.b,
-            self.root,
-            self.tools,
-            name,
-            source,
-            self.root.path(self.b, "src/n64/rsp/link.ld"),
-            null,
+        var assets: AssetBundle = .{ .b = self.b, .root = self.root, .tools = self.tools, .target = self.target, .name = "zsp_test" };
+        return assets.addZspProgram(name, source);
+    }
+
+    fn addBuiltinRspPrograms(self: *Sdk) void {
+        if (self.builtin_rsp_added) return;
+        self.builtin_rsp_added = true;
+        var assets = self.createAssets("libptero_rsp_assets");
+        const resident = assets.addZspResident(
+            "command_dispatcher",
+            self.root.path(self.b, "src/n64/rsp/ucode/command_dispatcher.zsp"),
         );
+        inline for (.{ "static_overlay", "static_overlay_2", "multi_slot_overlay", "rdp_overlay" }) |name| {
+            assets.addZspOverlay(
+                name,
+                self.root.path(self.b, "src/n64/rsp/ucode/" ++ name ++ ".zsp"),
+                resident,
+            );
+        }
+        self.n64_module.addImport("libptero_rsp_assets", assets.createModule());
     }
 };
 
@@ -194,51 +215,6 @@ fn makeLinkerScript(b: *std.Build, name: []const u8, layout: MemoryLayout) std.B
     return b.addWriteFiles().add(b.fmt("{s}.ld", .{name}), source);
 }
 
-fn addGeneratedN64Assets(
-    b: *std.Build,
-    root: std.Build.LazyPath,
-    n64_module: *std.Build.Module,
-    tools: tools_build.Tools,
-    features: GeneratedFeatures,
-) void {
-    if (features.console_font) {
-        addConsoleFont(b, root, n64_module, tools);
-    }
-
-    if (!features.rsp_programs) return;
-
-    n64_module.addAnonymousImport("fill_dmem_rsp", .{
-        .root_source_file = buildRspUcode(b, root, tools, "fill_dmem", "src/n64/rsp/ucode/fill_dmem.zsp"),
-    });
-    const resident = buildRspUcodeWithLinkerScript(
-        b,
-        root,
-        tools,
-        "command_dispatcher",
-        "src/n64/rsp/ucode/command_dispatcher.zsp",
-        "src/n64/rsp/resident.ld",
-    );
-    n64_module.addAnonymousImport("command_dispatcher_rsp", .{ .root_source_file = resident.rsp });
-
-    const overlay_link = b.addRunArtifact(tools.rsp_overlay_link);
-    overlay_link.addArtifactArg(resident.elf);
-    overlay_link.addFileArg(resident.interface);
-    const overlay_linker_script = overlay_link.addOutputFileArg("overlay.ld");
-    inline for (.{ "static_overlay", "static_overlay_2", "multi_slot_overlay", "rdp_overlay" }) |name| {
-        n64_module.addAnonymousImport(name ++ "_rsp", .{
-            .root_source_file = buildRspUcodeFromPath(
-                b,
-                root,
-                tools,
-                name,
-                root.path(b, "src/n64/rsp/ucode/" ++ name ++ ".zsp"),
-                overlay_linker_script,
-                resident.interface,
-            ),
-        });
-    }
-}
-
 fn addConsoleFont(
     b: *std.Build,
     root: std.Build.LazyPath,
@@ -250,116 +226,6 @@ fn addConsoleFont(
     n64_module.addAnonymousImport("console_font", .{
         .root_source_file = font_step.addOutputFileArg("console.font"),
     });
-}
-
-fn buildRspUcode(
-    b: *std.Build,
-    root: std.Build.LazyPath,
-    tools: tools_build.Tools,
-    name: []const u8,
-    source: []const u8,
-) std.Build.LazyPath {
-    return buildRspUcodeFromPath(
-        b,
-        root,
-        tools,
-        name,
-        root.path(b, source),
-        root.path(b, "src/n64/rsp/link.ld"),
-        null,
-    );
-}
-
-const RspUcodeBuild = struct {
-    rsp: std.Build.LazyPath,
-    elf: *std.Build.Step.Compile,
-    interface: std.Build.LazyPath,
-};
-
-fn buildRspUcodeWithLinkerScript(
-    b: *std.Build,
-    root: std.Build.LazyPath,
-    tools: tools_build.Tools,
-    name: []const u8,
-    source: []const u8,
-    linker_script: []const u8,
-) RspUcodeBuild {
-    return buildRspUcodeArtifactFromPath(
-        b,
-        root,
-        tools,
-        name,
-        root.path(b, source),
-        root.path(b, linker_script),
-        null,
-    );
-}
-
-fn buildRspUcodeFromPath(
-    b: *std.Build,
-    root: std.Build.LazyPath,
-    tools: tools_build.Tools,
-    name: []const u8,
-    source: std.Build.LazyPath,
-    linker_script: std.Build.LazyPath,
-    resident_interface: ?std.Build.LazyPath,
-) std.Build.LazyPath {
-    return buildRspUcodeArtifactFromPath(
-        b,
-        root,
-        tools,
-        name,
-        source,
-        linker_script,
-        resident_interface,
-    ).rsp;
-}
-
-fn buildRspUcodeArtifactFromPath(
-    b: *std.Build,
-    root: std.Build.LazyPath,
-    tools: tools_build.Tools,
-    name: []const u8,
-    source: std.Build.LazyPath,
-    linker_script: std.Build.LazyPath,
-    resident_interface: ?std.Build.LazyPath,
-) RspUcodeBuild {
-    const zsp = b.addRunArtifact(tools.zsp);
-    zsp.addFileArg(source);
-    zsp.addArg("--module-dir");
-    zsp.addDirectoryArg(root.path(b, "src/n64/rsp/ucode"));
-    zsp.addArg("--depfile");
-    _ = zsp.addDepFileOutputArg(b.fmt("{s}.d", .{name}));
-    if (resident_interface) |interface| {
-        zsp.addArg("--module-file");
-        zsp.addArg("resident_api.zsp");
-        zsp.addFileArg(interface);
-    }
-    zsp.addArg("--interface");
-    const interface = zsp.addOutputFileArg(b.fmt("{s}.zspi", .{name}));
-    const asm_file = zsp.addOutputFileArg(b.fmt("{s}.S", .{name}));
-
-    const elf = b.addExecutable(.{
-        .name = b.fmt("{s}_rsp.elf", .{name}),
-        .root_module = b.createModule(.{
-            .target = b.resolveTargetQuery(target_query),
-            .optimize = .ReleaseSmall,
-            .strip = false,
-        }),
-    });
-    elf.root_module.addAssemblyFile(asm_file);
-    elf.setLinkerScript(linker_script);
-    elf.entry = .{ .symbol_name = "_start" };
-    elf.bundle_compiler_rt = false;
-    elf.bundle_ubsan_rt = false;
-
-    const pack = b.addRunArtifact(tools.rsp_pack);
-    pack.addArtifactArg(elf);
-    return .{
-        .rsp = pack.addOutputFileArg(b.fmt("{s}.rsp", .{name})),
-        .elf = elf,
-        .interface = interface,
-    };
 }
 
 const target_query: std.Target.Query = .{

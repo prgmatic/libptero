@@ -7,7 +7,6 @@ const rsp = n64.rsp;
 pub const tests = [_]runner.Test{
     .{ .name = "RSP API: direct DMEM word access", .run = directDmemWordAccess },
     .{ .name = "RSP API: DMA data load", .run = dmaDataLoad },
-    .{ .name = "RSP: fill DMEM ucode", .run = fillDmemUcode },
 };
 
 fn directDmemWordAccess() !void {
@@ -40,17 +39,4 @@ fn dmaDataLoad() !void {
     try testing.expectEqual(@as(u32, 0x9abcdef0), rsp.io.readDmem(u32, 0x24).*);
     try testing.expectEqual(@as(u32, 0x0f1e2d3c), rsp.io.readDmem(u32, 0x28).*);
     try testing.expectEqual(@as(u32, 0x4b5a6978), rsp.io.readDmem(u32, 0x2c).*);
-}
-
-fn fillDmemUcode() !void {
-    rsp.runUCode(rsp.programs.fill_dmem);
-    rsp.waitBroke();
-
-    var offset: u32 = 0;
-    while (offset < rsp.io.dmem_len) : (offset += 2) {
-        try testing.expectEqual(
-            @as(u16, @truncate(offset)),
-            rsp.io.readDmem(u16, offset).*,
-        );
-    }
 }

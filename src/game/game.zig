@@ -43,7 +43,6 @@ pub fn main() !void {
     n64.debug.init();
     try n64.debug.initFmtBuffer(allocator);
     print("hello from n64\n", .{});
-    runRspFillDmem();
 
     try init();
 
@@ -52,30 +51,6 @@ pub fn main() !void {
         rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
         swapBuffer();
         update();
-    }
-}
-
-fn runRspFillDmem() void {
-    const prg = rsp.programs.fill_dmem;
-    print("loading fill_dmem RSP program ({} bytes)\n", .{prg.text.len});
-    rsp.runUCode(prg);
-    rsp.waitBroke();
-
-    var mismatch_count: u32 = 0;
-
-    var offset: u32 = 0;
-    while (offset < rsp.io.dmem_len) : (offset += 2) {
-        const expected: u16 = @truncate(offset);
-        const actual = rsp.io.readDmem(u16, offset).*;
-        if (actual != expected) {
-            mismatch_count += 1;
-        }
-    }
-
-    if (mismatch_count == 0) {
-        print("Success\n", .{});
-    } else {
-        print("Mismatches {d}\n", .{mismatch_count});
     }
 }
 

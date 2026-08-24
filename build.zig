@@ -5,7 +5,6 @@ pub const Sdk = sdk_build.Sdk;
 pub const InitOptions = struct {
     root: ?std.Build.LazyPath = null,
     target: ?std.Build.ResolvedTarget = null,
-    generated: sdk_build.GeneratedFeatures = .{},
 };
 
 pub fn init(b: *std.Build, options: InitOptions) Sdk {
@@ -13,7 +12,6 @@ pub fn init(b: *std.Build, options: InitOptions) Sdk {
     return Sdk.init(b, .{
         .root = root,
         .target = options.target,
-        .generated = options.generated,
     });
 }
 
@@ -22,21 +20,16 @@ pub fn build(b: *std.Build) void {
     // and tests should not become part of the consumer's build graph.
     if (b.pkg_hash.len != 0) return;
 
-    var sdk = init(b, .{
-        .root = b.path(""),
-        .generated = .{
-            .console_font = true,
-            .rsp_programs = true,
-        },
-    });
+    var sdk = init(b, .{ .root = b.path("") });
 
     addToolTests(b);
+    addConsumerFixtureTests(b);
     const zsp_test_programs = addZspTestPrograms(b, &sdk);
 
     _ = sdk.addRom(.{
         .name = "game",
         .title = "Libptero",
-        .root_source_file = b.path("src/game/entry.zig"),
+        .app_source_file = b.path("src/game/game.zig"),
         .linker_script = b.path("src/game/link.ld"),
         .install = .{
             .outputs = .{ .rom = true, .packed_elf = true, .debug_elf = true, .source_map = true },
@@ -60,6 +53,18 @@ pub fn build(b: *std.Build) void {
         },
     });
     b.step("tests", "Build the test ROM").dependOn(test_rom.install_step.?);
+}
+
+fn addConsumerFixtureTests(b: *std.Build) void {
+    const fixture_dir = b.path("tests/fixtures/consumer");
+
+    const full = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
+    full.setCwd(fixture_dir);
+    b.step("test-consumer", "Build the external consumer fixture").dependOn(&full.step);
+
+    const minimal = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "-Dno-assets" });
+    minimal.setCwd(fixture_dir);
+    b.step("test-consumer-minimal", "Build the consumer fixture without asset pipelines").dependOn(&minimal.step);
 }
 
 fn addToolTests(b: *std.Build) void {

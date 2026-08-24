@@ -3,14 +3,28 @@ const libptero = @import("libptero");
 
 pub fn build(b: *std.Build) void {
     var sdk = libptero.init(b, .{});
+    var assets = sdk.createAssets("assets");
+    assets.embedFile("raw_data", b.path("assets/raw.bin"));
+    const generated = b.addWriteFiles().add("generated.bin", "generated asset");
+    assets.embedGeneratedFile("generated_data", generated);
+    _ = assets.addZspProgram("custom_rsp", b.path("assets/custom.zsp"));
     const no_install = b.option(bool, "no-install", "Do not install ROM outputs") orelse false;
+    const no_assets = b.option(bool, "no-assets", "Exclude optional and built-in asset pipelines") orelse false;
     const override_handlers = b.option(bool, "override-handlers", "Use application-defined runtime handlers") orelse false;
     const custom_config = b.option(bool, "custom-config", "Use custom ROM layout and header metadata") orelse false;
-    const rom = if (custom_config)
+    const rom = if (no_assets)
+        sdk.addRom(.{
+            .name = "consumer",
+            .title = "Minimal Consumer",
+            .app_source_file = b.path("src/minimal.zig"),
+            .builtin_rsp_programs = false,
+        })
+    else if (custom_config)
         sdk.addRom(.{
             .name = "consumer",
             .title = "Configured Consumer",
             .app_source_file = b.path("src/main.zig"),
+            .assets = &assets,
             .optimize = .ReleaseFast,
             .layout = .{
                 .rdram = .expansion_pak,
@@ -28,6 +42,7 @@ pub fn build(b: *std.Build) void {
             .name = "consumer",
             .title = "Libptero Consumer",
             .app_source_file = b.path("src/main.zig"),
+            .assets = &assets,
             .install = null,
         })
     else if (override_handlers)
@@ -35,6 +50,7 @@ pub fn build(b: *std.Build) void {
             .name = "consumer",
             .title = "Libptero Consumer",
             .app_source_file = b.path("src/main.zig"),
+            .assets = &assets,
             .overrides = .{
                 .entry = "alternateMain",
                 .panic = "panicHandler",
@@ -52,6 +68,7 @@ pub fn build(b: *std.Build) void {
             .name = "consumer",
             .title = "Libptero Consumer",
             .app_source_file = b.path("src/main.zig"),
+            .assets = &assets,
         });
     _ = rom;
 }
