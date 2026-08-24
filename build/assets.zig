@@ -18,27 +18,29 @@ pub const AssetBundle = struct {
     tools: Tools,
     target: std.Build.ResolvedTarget,
     name: []const u8,
-    entries: std.ArrayList(Entry) = .empty,
-    finalized: bool = false,
-    module: ?*std.Build.Module = null,
+    asset_module: AssetModule,
 
     pub fn embedFile(self: *AssetBundle, name: []const u8, path: std.Build.LazyPath) void {
-        self.addEntry(name, path, 1);
+        self.asset_module.embedFile(name, path);
     }
 
     pub fn embedGeneratedFile(self: *AssetBundle, name: []const u8, path: std.Build.LazyPath) void {
-        self.embedFile(name, path);
+        self.asset_module.embedFile(name, path);
+    }
+
+    pub fn buildZspProgram(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
+        return buildZsp(self, name, source, self.root.path(self.b, "src/n64/rsp/link.ld"), null).rsp;
     }
 
     pub fn addZspProgram(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
-        const rsp = buildZsp(self, name, source, self.root.path(self.b, "src/n64/rsp/link.ld"), null).rsp;
-        self.addEntry(name, rsp, 8);
+        const rsp = self.buildZspProgram(name, source);
+        self.asset_module.addGeneratedFile(name, rsp, 8);
         return rsp;
     }
 
     pub fn addZspResident(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) Resident {
         const built = buildZsp(self, name, source, self.root.path(self.b, "src/n64/rsp/resident.ld"), null);
-        self.addEntry(name, built.rsp, 8);
+        self.asset_module.addGeneratedFile(name, built.rsp, 8);
         return .{ .elf = built.elf, .interface = built.interface };
     }
 
@@ -52,10 +54,31 @@ pub const AssetBundle = struct {
         overlay_link.addArtifactArg(resident.elf);
         overlay_link.addFileArg(resident.interface);
         const linker_script = overlay_link.addOutputFileArg(self.b.fmt("{s}.ld", .{name}));
-        self.addEntry(name, buildZsp(self, name, source, linker_script, resident.interface).rsp, 8);
+        self.asset_module.addGeneratedFile(name, buildZsp(self, name, source, linker_script, resident.interface).rsp, 8);
     }
 
     pub fn createModule(self: *AssetBundle) *std.Build.Module {
+        return self.asset_module.createModule();
+    }
+};
+
+pub const AssetModule = struct {
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    name: []const u8,
+    entries: std.ArrayList(Entry) = .empty,
+    finalized: bool = false,
+    module: ?*std.Build.Module = null,
+
+    pub fn embedFile(self: *AssetModule, name: []const u8, path: std.Build.LazyPath) void {
+        self.addEntry(name, path, 1);
+    }
+
+    pub fn addGeneratedFile(self: *AssetModule, name: []const u8, path: std.Build.LazyPath, alignment: u29) void {
+        self.addEntry(name, path, alignment);
+    }
+
+    pub fn createModule(self: *AssetModule) *std.Build.Module {
         if (self.module) |module| return module;
         self.finalized = true;
 
@@ -76,7 +99,7 @@ pub const AssetBundle = struct {
         return module;
     }
 
-    fn addEntry(self: *AssetBundle, name: []const u8, path: std.Build.LazyPath, alignment: u29) void {
+    fn addEntry(self: *AssetModule, name: []const u8, path: std.Build.LazyPath, alignment: u29) void {
         if (self.finalized) std.debug.panic("cannot add '{s}' after asset bundle '{s}' was finalized", .{ name, self.name });
         if (!std.zig.isValidId(name)) std.debug.panic("asset name '{s}' is not a valid Zig identifier", .{name});
         for (self.entries.items) |entry| {

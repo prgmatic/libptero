@@ -7,6 +7,8 @@ const assets_build = @import("assets.zig");
 pub const Options = struct {
     root: std.Build.LazyPath,
     target: ?std.Build.ResolvedTarget = null,
+    builtin_rsp_programs: bool = true,
+    console_font: bool = true,
 };
 
 pub const RomOptions = struct {
@@ -23,7 +25,6 @@ pub const RomOptions = struct {
     metadata: MetadataOptions = .{},
     imports: []const std.Build.Module.Import = &.{},
     assets: ?*assets_build.AssetBundle = null,
-    builtin_rsp_programs: bool = true,
     install: ?InstallOptions = .{},
 };
 
@@ -48,28 +49,36 @@ pub const Sdk = struct {
     target: std.Build.ResolvedTarget,
     n64_module: *std.Build.Module,
     tools: tools_build.Tools,
-    console_font_added: bool,
-    builtin_rsp_added: bool,
+    console_font: bool,
 
     pub fn init(b: *std.Build, options: Options) Sdk {
         const target = options.target orelse b.resolveTargetQuery(target_query);
+        const tools = tools_build.build(b, options.root);
         const n64_module = b.createModule(.{
             .root_source_file = options.root.path(b, "src/n64/n64.zig"),
         });
-        const tools = tools_build.build(b, options.root);
-        return .{
+        var sdk: Sdk = .{
             .b = b,
             .root = options.root,
             .target = target,
             .n64_module = n64_module,
             .tools = tools,
-            .console_font_added = false,
-            .builtin_rsp_added = false,
+            .console_font = options.console_font,
         };
+        if (options.console_font) addConsoleFont(b, options.root, n64_module, tools);
+        if (options.builtin_rsp_programs) sdk.addBuiltinRspPrograms();
+        return sdk;
     }
 
     pub fn createAssets(self: *Sdk, name: []const u8) AssetBundle {
-        return .{ .b = self.b, .root = self.root, .tools = self.tools, .target = self.target, .name = name };
+        return .{
+            .b = self.b,
+            .root = self.root,
+            .tools = self.tools,
+            .target = self.target,
+            .name = name,
+            .asset_module = .{ .b = self.b, .target = self.target, .name = name },
+        };
     }
 
     pub fn addRom(self: *Sdk, options: RomOptions) rom_build.Rom {
@@ -77,8 +86,6 @@ pub const Sdk = struct {
         if (uses_default_entry == (options.root_source_file != null)) {
             std.debug.panic("ROM '{s}' must set exactly one of app_source_file or root_source_file", .{options.name});
         }
-        if (options.builtin_rsp_programs) self.addBuiltinRspPrograms();
-
         const extra_import_count: usize = if (options.assets != null) 1 else 0;
         const option_imports = self.b.allocator.alloc(std.Build.Module.Import, options.imports.len + extra_import_count) catch @panic("OOM");
         @memcpy(option_imports[0..options.imports.len], options.imports);
@@ -89,11 +96,13 @@ pub const Sdk = struct {
         var root_source_file = options.root_source_file;
         var root_imports: []const std.Build.Module.Import = option_imports;
         if (options.app_source_file) |app_source_file| {
-            if (!self.console_font_added and
+            if (!self.console_font and
                 (options.overrides.panic.len == 0 or options.overrides.exception.len == 0))
             {
-                addConsoleFont(self.b, self.root, self.n64_module, self.tools);
-                self.console_font_added = true;
+                std.debug.panic(
+                    "ROM '{s}' uses default panic or exception handlers, which require SDK console_font support",
+                    .{options.name},
+                );
             }
 
             const app_imports = self.b.allocator.alloc(std.Build.Module.Import, option_imports.len + 1) catch @panic("OOM");
@@ -143,14 +152,7 @@ pub const Sdk = struct {
         return rom;
     }
 
-    pub fn addRspUcode(self: *const Sdk, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
-        var assets: AssetBundle = .{ .b = self.b, .root = self.root, .tools = self.tools, .target = self.target, .name = "zsp_test" };
-        return assets.addZspProgram(name, source);
-    }
-
     fn addBuiltinRspPrograms(self: *Sdk) void {
-        if (self.builtin_rsp_added) return;
-        self.builtin_rsp_added = true;
         var assets = self.createAssets("libptero_rsp_assets");
         const resident = assets.addZspResident(
             "command_dispatcher",
