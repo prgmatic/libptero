@@ -521,7 +521,13 @@ const FunctionClobberRegistry = struct {
                         if ((call.setup_scalar & registerBit(reg)) != 0) {
                             return error.PinnedRegisterOverwrittenByCallArgument;
                         }
-                        if (target_function.external and (target.scalar & registerBit(reg)) != 0) {
+                        if (target_function.external and (target.scalar & registerBit(reg)) != 0 and
+                            !externalFunctionWritesScalarParameter(target_function, reg))
+                        {
+                            if (diagnostic) |value| {
+                                value.function_name = function.source_name;
+                                value.symbol_name = lifetime.name;
+                            }
                             return error.PinnedRegisterClobberedByExternalCall;
                         }
                         target.forbidden_scalar |= registerBit(reg);
@@ -530,7 +536,13 @@ const FunctionClobberRegistry = struct {
                         if ((call.setup_vector & vectorRegisterBit(reg)) != 0) {
                             return error.PinnedRegisterOverwrittenByCallArgument;
                         }
-                        if (target_function.external and (target.vector & vectorRegisterBit(reg)) != 0) {
+                        if (target_function.external and (target.vector & vectorRegisterBit(reg)) != 0 and
+                            !externalFunctionWritesVectorParameter(target_function, reg))
+                        {
+                            if (diagnostic) |value| {
+                                value.function_name = function.source_name;
+                                value.symbol_name = lifetime.name;
+                            }
                             return error.PinnedRegisterClobberedByExternalCall;
                         }
                         target.forbidden_vector |= vectorRegisterBit(reg);
@@ -928,7 +940,7 @@ fn simulateExpressionTemporaries(
 
 fn isPureScalarExpression(value: ast.Value) bool {
     return switch (value) {
-        .ident, .number => true,
+        .ident, .number, .bit_cast => true,
         .scalar_expression => |expression| isPureScalarExpression(expression.lhs) and
             isPureScalarExpression(expression.rhs),
         else => false,
@@ -938,6 +950,10 @@ fn isPureScalarExpression(value: ast.Value) bool {
 fn valueReadsName(value: ast.Value, name: []const u8) bool {
     return switch (value) {
         .ident => |identifier| std.mem.eql(u8, identifier, name),
+        .bit_cast => |source| switch (source) {
+            .ident => |identifier| std.mem.eql(u8, identifier, name),
+            else => false,
+        },
         .scalar_expression => |expression| valueReadsName(expression.lhs, name) or
             valueReadsName(expression.rhs, name),
         else => false,
@@ -960,7 +976,7 @@ const Lifetime = struct {
     forbidden_vector: u32 = 0,
 };
 
-const LifetimeLabel = struct { name: []const u8, position: usize };
+const LifetimeLabel = struct { name: []const u8, position: usize, exported: bool = false };
 const LifetimeEdge = struct { target: []const u8, position: usize };
 const LifetimeCall = struct {
     target: []const u8,
@@ -1069,7 +1085,10 @@ const FunctionContext = struct {
         self.flow_loop_count = 0;
         self.statement_position = 0;
         self.lifetime_reuse = !statementsContainUnstructuredControlFlow(statements);
-        if (!self.lifetime_reuse) return;
+        if (!self.lifetime_reuse) {
+            collectStatementLabels(self, statements);
+            return;
+        }
         for (parameters) |parameter| {
             if (std.mem.eql(u8, parameter.name, "_")) continue;
             self.declareLifetime(
@@ -1139,13 +1158,24 @@ const FunctionContext = struct {
         }
     }
 
-    fn addLifetimeLabel(self: *FunctionContext, name: []const u8, position: usize) void {
+    fn addLifetimeLabel(self: *FunctionContext, name: []const u8, position: usize, exported: bool) void {
         if (self.lifetime_label_count >= self.lifetime_labels.len) {
             self.lifetime_reuse = false;
             return;
         }
-        self.lifetime_labels[self.lifetime_label_count] = .{ .name = name, .position = position };
+        self.lifetime_labels[self.lifetime_label_count] = .{
+            .name = name,
+            .position = position,
+            .exported = exported,
+        };
         self.lifetime_label_count += 1;
+    }
+
+    fn findLifetimeLabel(self: *const FunctionContext, name: []const u8) ?LifetimeLabel {
+        for (self.lifetime_labels[0..self.lifetime_label_count]) |label| {
+            if (std.mem.eql(u8, label.name, name)) return label;
+        }
+        return null;
     }
 
     fn addLifetimeEdge(self: *FunctionContext, target: []const u8, position: usize) void {
@@ -1397,6 +1427,7 @@ const FunctionContext = struct {
             i -= 1;
             if (std.mem.eql(u8, self.symbols[i].name, name)) return self.symbols[i];
         }
+        if (self.diagnostic) |diagnostic| diagnostic.symbol_name = name;
         return error.UnknownSymbol;
     }
 
@@ -1537,6 +1568,29 @@ const FunctionContext = struct {
     }
 };
 
+fn collectStatementLabels(context: *FunctionContext, statements: []const ast.Statement) void {
+    for (statements) |statement| switch (statement) {
+        .label => |name| context.addLifetimeLabel(name, 0, false),
+        .exported_label => |name| context.addLifetimeLabel(name, 0, true),
+        .ordered_block => |items| collectStatementLabels(context, items),
+        .while_loop => |loop| collectStatementLabels(context, loop.statements),
+        .do_while_loop => |loop| {
+            collectStatementLabels(context, loop.statements);
+            if (loop.delay_slot) |delay| collectStatementLabels(context, delay);
+        },
+        .labeled_block => |block| {
+            collectStatementLabels(context, block.statements);
+            if (block.exit_delay) |delay| collectStatementLabels(context, delay);
+        },
+        .if_statement => |branch| {
+            if (branch.delay_slot) |delay| collectStatementLabels(context, delay);
+            collectStatementLabels(context, branch.then_statements);
+            if (branch.else_statements) |items| collectStatementLabels(context, items);
+        },
+        else => {},
+    };
+}
+
 fn statementsContainUnstructuredControlFlow(statements: []const ast.Statement) bool {
     for (statements) |statement| switch (statement) {
         .asm_line => return true,
@@ -1612,7 +1666,8 @@ fn scanStatementLifetimes(context: *FunctionContext, statements: []const ast.Sta
                 context.addLifetimeCall(call.name, current, position.* + 1);
             },
             .builtin => |builtin| scanBuiltinLifetime(context, builtin, current, position),
-            .label => |name| context.addLifetimeLabel(name, current),
+            .label => |name| context.addLifetimeLabel(name, current, false),
+            .exported_label => |name| context.addLifetimeLabel(name, current, true),
             .conditional_goto => |branch| {
                 scanConditionLifetime(context, branch.condition, current);
                 context.addLifetimeEdge(branch.target, current);
@@ -1862,6 +1917,10 @@ fn buildStatementFlow(
                     addFlowSuccessor(context, current, current + 1);
                     buildStatementFlow(context, delay, position, 0);
                 },
+                .indirect_call => |call| {
+                    addFlowSuccessor(context, current, next);
+                    if (call.delay_slot) |delay| buildStatementFlow(context, delay, position, next);
+                },
                 .return_from_function => |delay| if (delay) |items| {
                     addFlowSuccessor(context, current, current + 1);
                     buildStatementFlow(context, items, position, 0);
@@ -1896,7 +1955,7 @@ fn scanConditionLifetime(context: *FunctionContext, condition: ast.Condition, po
 
 fn scanValueRefLifetime(context: *FunctionContext, value: ast.ValueRef, position: usize) void {
     switch (value) {
-        .ident => |name| context.touchLifetime(name, position),
+        .ident, .bit_cast => |name| context.touchLifetime(name, position),
         .vector_access => |access| context.touchLifetime(access.name, position),
         .number => {},
     }
@@ -1919,6 +1978,7 @@ fn scanValueLifetime(context: *FunctionContext, value: ast.Value, position: usiz
             scanValueRefLifetime(context, comparison.lhs, position);
             scanValueRefLifetime(context, comparison.rhs, position);
         },
+        .bit_cast => |source| scanValueRefLifetime(context, source, position),
         .load => |load| {
             scanValueRefLifetime(context, load.address, position);
             if (load.label_offset) |name| context.touchLifetime(name, position);
@@ -1950,7 +2010,7 @@ fn scanBuiltinLifetime(context: *FunctionContext, builtin: ast.Builtin, position
         .vector_memory => |item| {
             switch (item.operation) {
                 .load16, .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned => context.writeLifetime(item.vector.name, position),
-                .store16, .store32, .store64, .store128 => context.touchLifetime(item.vector.name, position),
+                .store16, .store32, .store64, .store128, .store_packed_signed, .store_packed_unsigned => context.touchLifetime(item.vector.name, position),
             }
             scanValueRefLifetime(context, item.address, position);
         },
@@ -1982,13 +2042,21 @@ fn applyCallRequirements(
                                             }
                                             var visited: [1024]ParameterWriteVisit = undefined;
                                             var visited_count: usize = 0;
-                                            if (functionParameterIsWritten(
+                                            const body_writes_parameter = functionParameterIsWritten(
                                                 functions,
                                                 function,
                                                 parameter_index,
                                                 &visited,
                                                 &visited_count,
-                                            )) context.writeOutputLifetime(name, current);
+                                            );
+                                            const contract_writes_parameter = function.external and
+                                                ((parameter.reg != null and
+                                                    std.mem.indexOfScalar(ast.Register, function.clobber_regs, parameter.reg.?) != null) or
+                                                    (parameter.vector_reg != null and
+                                                        std.mem.indexOfScalar(ast.VectorRegister, function.clobber_vector_regs, parameter.vector_reg.?) != null));
+                                            if (body_writes_parameter or contract_writes_parameter) {
+                                                context.writeOutputLifetime(name, current);
+                                            }
                                         } else {
                                             addParameterSetupClobber(context, current, parameter);
                                         }
@@ -2107,6 +2175,22 @@ fn addParameterSetupClobber(
 }
 
 const ParameterWriteVisit = struct { function: []const u8, parameter: usize };
+
+fn externalFunctionWritesScalarParameter(function: ast.Function, reg: ast.Register) bool {
+    if (std.mem.indexOfScalar(ast.Register, function.clobber_regs, reg) == null) return false;
+    for (function.parameters) |parameter| {
+        if (parameter.reg == reg) return true;
+    }
+    return false;
+}
+
+fn externalFunctionWritesVectorParameter(function: ast.Function, reg: ast.VectorRegister) bool {
+    if (std.mem.indexOfScalar(ast.VectorRegister, function.clobber_vector_regs, reg) == null) return false;
+    for (function.parameters) |parameter| {
+        if (parameter.vector_reg == reg) return true;
+    }
+    return false;
+}
 
 fn functionParameterIsWritten(
     functions: []const ast.Function,
@@ -2233,6 +2317,7 @@ fn writeStatements(
             .call => |call| try writeCall(writer, functions, context, call),
             .builtin => |builtin| try writeBuiltin(writer, functions, context, builtin),
             .label => |name| try writer.print("LABEL_{s}_{s}_0:\n", .{ context.label_prefix, name }),
+            .exported_label => |name| try writer.print(".globl {s}\n{s}:\n", .{ name, name }),
             .goto => |branch| {
                 try writer.print("  {s} LABEL_{s}_{s}_0\n", .{
                     if (branch.encoding == .jump) "j" else "b",
@@ -2242,6 +2327,36 @@ fn writeStatements(
                 try writeConditionalDirectDelaySlot(writer, functions, context, branch.delay_slot);
             },
             .conditional_goto => |branch| {
+                const target_label = context.findLifetimeLabel(branch.target);
+                if ((target_label == null or target_label.?.exported) and
+                    (branch.condition.op == .eq or branch.condition.op == .ne))
+                {
+                    const lhs = try context.lookup(branch.condition.lhs);
+                    const lhs_reg = lhs.reg orelse return error.ConditionLhsMustBeRegister;
+                    const rhs_reg: Register = switch (branch.condition.rhs) {
+                        .number => |number| if (number == 0)
+                            .zero
+                        else
+                            return error.ConditionRhsMustBeRegisterOrNumber,
+                        .ident => |name| blk: {
+                            const rhs = try context.lookup(name);
+                            try expectSameType(lhs, rhs);
+                            break :blk rhs.reg orelse return error.ConditionRhsMustBeRegisterOrNumber;
+                        },
+                        else => return error.ConditionRhsMustBeRegisterOrNumber,
+                    };
+                    try writer.print("  {s} {s}, {s}, {s}\n", .{
+                        if (branch.condition.op == .eq) "beq" else "bne",
+                        regName(lhs_reg),
+                        regName(rhs_reg),
+                        branch.target,
+                    });
+                    if (branch.delay_slot) |delay_slot| {
+                        try validateDelaySlot(delay_slot);
+                        try writeStatements(writer, functions, context, delay_slot);
+                    } else try writer.writeAll("  nop\n");
+                    continue;
+                }
                 var inverse = branch.condition;
                 inverse.op = switch (inverse.op) {
                     .eq => .ne,
@@ -2584,8 +2699,10 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
     if (decl.vector_reg != null) return error.InvalidScalarRegister;
     const reg = decl.reg orelse try context.allocRegister(decl.data_type, decl.name);
     if (!isScalarRegister(reg)) return error.InvalidScalarRegister;
-    if (decl.is_reserved and reg != compiler_scratch_2) return error.InvalidReservedRegister;
-    if ((!decl.is_reserved and reg == compiler_scratch_2) or reg == command_return) {
+    if (decl.is_reserved and reg != compiler_scratch_2 and reg != command_return) {
+        return error.InvalidReservedRegister;
+    }
+    if (!decl.is_reserved and (reg == compiler_scratch_2 or reg == command_return)) {
         return error.RegisterReservedForBackend;
     }
     if (context.scalarLifetimeConflicts(decl.name, reg)) return error.RegisterAlreadyInUse;
@@ -2607,7 +2724,7 @@ fn writeVarDecl(writer: *std.Io.Writer, context: *FunctionContext, decl: ast.Var
                 try loadImmediateInto(writer, reg, source.constant orelse return error.ExpectedConstant);
             }
         },
-        .vector_control_read, .hardware_read, .scalar_comparison, .signed_less_than, .function_address, .data_address => try writeSet(
+        .vector_control_read, .hardware_read, .scalar_comparison, .signed_less_than, .scalar_materialize, .bit_cast, .function_address, .code_address, .data_address => try writeSet(
             writer,
             context,
             .{
@@ -2733,6 +2850,7 @@ fn writeVectorInitialValue(
         .hardware_read => return error.RegisterTypeMismatch,
         .scalar_comparison => return error.RegisterTypeMismatch,
         .signed_less_than => return error.RegisterTypeMismatch,
+        .scalar_materialize => return error.RegisterTypeMismatch,
         .number => |number| {
             if (number != 0) return error.VectorImmediateUnsupported;
             try writeVectorOp(writer, .vxor, destination, destination, destination, 0);
@@ -2742,7 +2860,7 @@ fn writeVectorInitialValue(
             }
         },
         .scalar_expression => return error.UnsupportedScalarExpressionTree,
-        .function_address, .data_address => return error.RegisterTypeMismatch,
+        .bit_cast, .function_address, .code_address, .data_address => return error.RegisterTypeMismatch,
     }
 }
 
@@ -2948,8 +3066,9 @@ fn writeVectorAssignment(
         .hardware_read => return error.InvalidAssignment,
         .scalar_comparison => return error.InvalidAssignment,
         .signed_less_than => return error.InvalidAssignment,
+        .scalar_materialize => return error.InvalidAssignment,
         .scalar_expression => return error.UnsupportedVectorExpressionTree,
-        .function_address, .data_address => return error.RegisterTypeMismatch,
+        .bit_cast, .function_address, .code_address, .data_address => return error.RegisterTypeMismatch,
         .number => return error.VectorImmediateUnsupported,
         .load => |load| {
             if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
@@ -3304,6 +3423,31 @@ fn writeSet(
                 regName(destination_reg), regName(lhs), regName(rhs),
             });
         },
+        .scalar_materialize => |materialize| switch (materialize.encoding) {
+            .unsigned => {
+                if (materialize.value < 0 or materialize.value > std.math.maxInt(u16)) {
+                    return error.ImmediateOutOfRange;
+                }
+                try writer.print("  ori {s}, $zero, {d}\n", .{
+                    regName(destination_reg), materialize.value,
+                });
+            },
+            .zero => try writer.print("  or {s}, $zero, $zero\n", .{regName(destination_reg)}),
+        },
+        .bit_cast => |source_ref| {
+            const source_name = switch (source_ref) {
+                .ident => |name| name,
+                else => return error.RegisterTypeMismatch,
+            };
+            const source = try context.lookup(source_name);
+            if (source.vector_reg != null or source.reg == null) return error.RegisterTypeMismatch;
+            const source_reg = source.reg.?;
+            if (source_reg != destination_reg) {
+                try writer.print("  or {s}, $zero, {s}\n", .{
+                    regName(destination_reg), regName(source_reg),
+                });
+            }
+        },
         .load => |load| {
             if (!isCompatibleScalarLoad(destination.data_type, load.data_type)) return error.RegisterTypeMismatch;
             try writeLoadInto(writer, context, destination_reg, load);
@@ -3320,15 +3464,39 @@ fn writeSet(
                 regName(destination_reg), target.name,
             });
         },
+        .code_address => |address| {
+            const instruction = if (address.unsigned) "ori" else "addiu";
+            if (findFunction(context.functions, address.label)) |function| {
+                if (destination.function_type) |expected_type| {
+                    if (!functionMatchesType(function, expected_type)) return error.FunctionTypeMismatch;
+                }
+                try writer.print("  {s} {s}, $zero, %lo({s})\n", .{
+                    instruction, regName(destination_reg), address.label,
+                });
+            } else if (context.findLifetimeLabel(address.label)) |label| {
+                if (label.exported) {
+                    try writer.print("  {s} {s}, $zero, %lo({s})\n", .{
+                        instruction, regName(destination_reg), address.label,
+                    });
+                } else {
+                    try writer.print("  {s} {s}, $zero, %lo(LABEL_{s}_{s}_0)\n", .{
+                        instruction, regName(destination_reg), context.label_prefix, address.label,
+                    });
+                }
+            } else {
+                return error.UnknownFunction;
+            }
+        },
         .data_address => |address| {
             if (destination.data_type != .dmem) return error.ExpectedDmemAddress;
             const data = try context.lookup(address.label);
             const label = data.data_label orelse return error.ExpectedDataLabel;
+            const instruction = if (address.unsigned) "ori" else "addiu";
             if (address.offset == 0) {
-                try writer.print("  addiu {s}, $zero, %lo({s})\n", .{ regName(destination_reg), label });
+                try writer.print("  {s} {s}, $zero, %lo({s})\n", .{ instruction, regName(destination_reg), label });
             } else {
-                try writer.print("  addiu {s}, $zero, %lo({s} + {d})\n", .{
-                    regName(destination_reg), label, address.offset,
+                try writer.print("  {s} {s}, $zero, %lo({s} + {d})\n", .{
+                    instruction, regName(destination_reg), label, address.offset,
                 });
             }
         },
@@ -3496,6 +3664,11 @@ fn writeScalarComparison(
                 break :blk scratch;
             };
         },
+        .bit_cast => |name| {
+            const rhs = try context.lookup(name);
+            if (isVectorType(rhs.data_type)) return error.ExpectedScalarType;
+            rhs_reg = rhs.reg orelse return error.ComparisonRhsMustBeRegister;
+        },
         .number => |number| {
             if (number == 0) {
                 rhs_reg = .zero;
@@ -3560,10 +3733,11 @@ fn writeBitNot(
         .hardware_read => return error.BitNotRequiresRegister,
         .scalar_comparison => return error.BitNotRequiresRegister,
         .signed_less_than => return error.BitNotRequiresRegister,
+        .scalar_materialize => return error.BitNotRequiresRegister,
         .number => return error.BitNotRequiresRegister,
         .load => return error.BitNotRequiresRegister,
         .scalar_expression => return error.BitNotRequiresRegister,
-        .function_address, .data_address => return error.BitNotRequiresRegister,
+        .bit_cast, .function_address, .code_address, .data_address => return error.BitNotRequiresRegister,
     };
     try expectSameType(destination, source);
     const source_reg = source.reg orelse return error.BitNotRequiresRegister;
@@ -3610,8 +3784,13 @@ fn writeBinary(
     op: ast.AssignOp,
     rhs_value: ast.Value,
 ) !void {
+    const lhs_is_bit_cast = lhs_value == .bit_cast;
     const lhs = switch (lhs_value) {
         .ident => |name| try context.lookup(name),
+        .bit_cast => |source| switch (source) {
+            .ident => |name| try context.lookup(name),
+            else => return error.ArithmeticLhsMustBeRegister,
+        },
         .vector_access => return error.ArithmeticLhsMustBeRegister,
         .vector_operation => return error.ArithmeticLhsMustBeRegister,
         .vector_shift => return error.ArithmeticLhsMustBeRegister,
@@ -3620,12 +3799,13 @@ fn writeBinary(
         .hardware_read => return error.ArithmeticLhsMustBeRegister,
         .scalar_comparison => return error.ArithmeticLhsMustBeRegister,
         .signed_less_than => return error.ArithmeticLhsMustBeRegister,
+        .scalar_materialize => return error.ArithmeticLhsMustBeRegister,
         .number => return error.ArithmeticLhsMustBeRegister,
         .load => return error.ArithmeticLhsMustBeRegister,
         .scalar_expression => return error.ArithmeticLhsMustBeRegister,
-        .function_address, .data_address => return error.ArithmeticLhsMustBeRegister,
+        .function_address, .code_address, .data_address => return error.ArithmeticLhsMustBeRegister,
     };
-    try expectSameType(destination, lhs);
+    if (!lhs_is_bit_cast) try expectSameType(destination, lhs);
     const lhs_reg = lhs.reg orelse return error.ArithmeticLhsMustBeRegister;
 
     if (op == .mul or op == .div) {
@@ -3639,6 +3819,13 @@ fn writeBinary(
     switch (rhs_value) {
         .ident => |name| {
             const rhs = try context.lookup(name);
+            if (rhs.data_label) |label| {
+                if (op != .add and op != .add_wrap) return error.UnsupportedOperator;
+                try writer.print("  addiu {s}, {s}, %lo({s})\n", .{
+                    regName(destination_reg), regName(lhs_reg), label,
+                });
+                return;
+            }
             if (destination.data_type != rhs.data_type and
                 !isDmemScalarPair(destination.data_type, rhs.data_type))
             {
@@ -3664,6 +3851,19 @@ fn writeBinary(
             }
         },
         .number => |number| try writeBinaryImmediate(writer, context, destination_reg, lhs_reg, op, number),
+        .bit_cast => |source| {
+            const name = switch (source) {
+                .ident => |name| name,
+                else => return error.ArithmeticRhsMustBeRegisterOrNumber,
+            };
+            const rhs = try context.lookup(name);
+            if (isVectorType(rhs.data_type)) return error.ArithmeticRhsMustBeRegisterOrNumber;
+            const rhs_reg = rhs.reg orelse return error.ArithmeticRhsMustBeRegisterOrNumber;
+            const instruction = registerBinaryInstruction(op) orelse return error.UnsupportedOperator;
+            try writer.print("  {s} {s}, {s}, {s}\n", .{
+                instruction, regName(destination_reg), regName(lhs_reg), regName(rhs_reg),
+            });
+        },
         .vector_access => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .vector_operation => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .vector_shift => return error.ArithmeticRhsMustBeRegisterOrNumber,
@@ -3672,9 +3872,10 @@ fn writeBinary(
         .hardware_read => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .scalar_comparison => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .signed_less_than => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .scalar_materialize => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .load => return error.ArithmeticRhsMustBeRegisterOrNumber,
         .scalar_expression => return error.ArithmeticRhsMustBeRegisterOrNumber,
-        .function_address, .data_address => return error.ArithmeticRhsMustBeRegisterOrNumber,
+        .function_address, .code_address, .data_address => return error.ArithmeticRhsMustBeRegisterOrNumber,
     }
 }
 
@@ -3777,9 +3978,10 @@ fn writePowerOfTwoMath(
         .hardware_read => return error.PowerOfTwoConstantRequired,
         .scalar_comparison => return error.PowerOfTwoConstantRequired,
         .signed_less_than => return error.PowerOfTwoConstantRequired,
+        .scalar_materialize => return error.PowerOfTwoConstantRequired,
         .load => return error.PowerOfTwoConstantRequired,
         .scalar_expression => return error.PowerOfTwoConstantRequired,
-        .function_address, .data_address => return error.PowerOfTwoConstantRequired,
+        .bit_cast, .function_address, .code_address, .data_address => return error.PowerOfTwoConstantRequired,
     };
     if (value <= 0 or value > std.math.maxInt(u32)) return error.PowerOfTwoConstantRequired;
     const unsigned: u32 = @intCast(value);
@@ -3849,9 +4051,10 @@ fn writeShift(
         .hardware_read => return error.ShiftAmountMustBeRegisterOrNumber,
         .scalar_comparison => return error.ShiftAmountMustBeRegisterOrNumber,
         .signed_less_than => return error.ShiftAmountMustBeRegisterOrNumber,
+        .scalar_materialize => return error.ShiftAmountMustBeRegisterOrNumber,
         .load => return error.ShiftAmountMustBeRegisterOrNumber,
         .scalar_expression => return error.ShiftAmountMustBeRegisterOrNumber,
-        .function_address, .data_address => return error.ShiftAmountMustBeRegisterOrNumber,
+        .bit_cast, .function_address, .code_address, .data_address => return error.ShiftAmountMustBeRegisterOrNumber,
     }
 }
 
@@ -3903,6 +4106,7 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
         if (store.label_offset != null) return error.VectorMemorySymbolicOffsetUnsupported;
         const value_access: ast.VectorAccess = switch (store.value) {
             .ident => |name| .{ .name = name },
+            .bit_cast => return error.ExpectedVectorRegister,
             .vector_access => |access| access,
             .number => return error.ExpectedVectorRegister,
         };
@@ -3998,6 +4202,15 @@ fn writeStore(writer: *std.Io.Writer, context: *FunctionContext, store: anytype)
                 storeOp(store.data_type), regName(value_reg), label, store.offset,
             });
         }
+        return;
+    }
+    if (store.address == .number) {
+        const absolute_offset = try std.math.add(i64, store.address.number, store.offset);
+        if (absolute_offset < 0 or absolute_offset >= 4096) return error.DmemAddressOutOfRange;
+        try validateMemoryOffset(absolute_offset);
+        try writer.print("  {s} {s}, {d}($zero)\n", .{
+            storeOp(store.data_type), regName(value_reg), absolute_offset,
+        });
         return;
     }
     const address_reg = try valueAsDmemReg(writer, context, store.address);
@@ -4151,6 +4364,29 @@ fn writeVectorLoad(
     }
 }
 
+fn writePackedVectorStore(
+    writer: *std.Io.Writer,
+    unsigned: bool,
+    vector_reg: ast.VectorRegister,
+    lane: u3,
+    address_reg: Register,
+    offset: i64,
+) !void {
+    if (@mod(offset, 8) != 0) return error.VectorMemoryOffsetUnaligned;
+    const scaled_offset = @divExact(offset, 8);
+    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
+    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
+    const word: u32 = (0x3a << 26) |
+        (@as(u32, @intFromEnum(address_reg)) << 21) |
+        (@as(u32, @intFromEnum(vector_reg)) << 16) |
+        (@as(u32, if (unsigned) 0b00111 else 0b00110) << 11) |
+        (@as(u32, lane) << 7) |
+        encoded_offset;
+    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], {d}({s})\n", .{
+        word, if (unsigned) "suv" else "spv", vectorRegName(vector_reg), lane, offset, regName(address_reg),
+    });
+}
+
 fn writeVectorReverseLoad(
     writer: *std.Io.Writer,
     vector_reg: ast.VectorRegister,
@@ -4235,6 +4471,15 @@ fn writeLoadInto(writer: *std.Io.Writer, context: *FunctionContext, destination_
                 loadOp(load.data_type), regName(destination_reg), label, load.offset,
             });
         }
+        return;
+    }
+    if (load.address == .number) {
+        const absolute_offset = try std.math.add(i64, load.address.number, load.offset);
+        if (absolute_offset < 0 or absolute_offset >= 4096) return error.DmemAddressOutOfRange;
+        try validateMemoryOffset(absolute_offset);
+        try writer.print("  {s} {s}, {d}($zero)\n", .{
+            loadOp(load.data_type), regName(destination_reg), absolute_offset,
+        });
         return;
     }
     const address_reg = try valueAsDmemReg(writer, context, load.address);
@@ -4401,6 +4646,17 @@ fn writeFunctionArguments(
                     );
                 }
             },
+            .bit_cast => |name| {
+                const symbol = try context.lookup(name);
+                if (isVectorType(symbol.data_type) or isVectorType(parameter.data_type)) {
+                    return error.FunctionArgumentTypeMismatch;
+                }
+                const destination = parameter.reg orelse return error.InvalidScalarRegister;
+                const source = symbol.reg orelse return error.InvalidScalarRegister;
+                if (destination != source) {
+                    try writer.print("  or {s}, $zero, {s}\n", .{ regName(destination), regName(source) });
+                }
+            },
         }
     }
 }
@@ -4429,6 +4685,11 @@ fn writeBuiltin(
             const address_reg = try valueAsAddressReg(writer, context, jump.address);
             try writer.print("  jr {s}\n", .{regName(address_reg)});
             try writeDelaySlot(writer, functions, context, jump.delay_slot);
+        },
+        .indirect_call => |call| {
+            const address_reg = try valueAsAddressReg(writer, context, call.address);
+            try writer.print("  jal {s}\n", .{regName(address_reg)});
+            try writeDelaySlot(writer, functions, context, call.delay_slot);
         },
         .return_from_function => |delay_slot| {
             try writer.writeAll("  jr $ra\n");
@@ -4495,6 +4756,14 @@ fn writeBuiltin(
                     .packed_u8 = memory.operation == .load_packed_signed,
                     .packed_unsigned_u8 = memory.operation == .load_packed_unsigned,
                 }),
+                .store_packed_signed, .store_packed_unsigned => try writePackedVectorStore(
+                    writer,
+                    memory.operation == .store_packed_unsigned,
+                    vector_reg,
+                    memory.lane,
+                    address_reg,
+                    memory.offset,
+                ),
             }
         },
         .hardware_write => |hardware_write| {
@@ -4846,7 +5115,12 @@ fn writeStructuredDelaySlot(
 }
 
 fn validateDelaySlot(statements: []const ast.Statement) !void {
-    const instruction_index: usize = if (statements.len == 2 and statements[0] == .label) 1 else 0;
+    var instruction_index: usize = 0;
+    while (instruction_index < statements.len and
+        (statements[instruction_index] == .label or statements[instruction_index] == .exported_label))
+    {
+        instruction_index += 1;
+    }
     if (statements.len != instruction_index + 1) return error.InvalidSlot;
     switch (statements[instruction_index]) {
         .builtin => |builtin| switch (builtin) {
@@ -4879,6 +5153,7 @@ fn writeConditionBranchFalse(
         .hardware_read => return error.ConditionRhsMustBeRegisterOrNumber,
         .scalar_comparison => return error.ConditionRhsMustBeRegisterOrNumber,
         .signed_less_than => return error.ConditionRhsMustBeRegisterOrNumber,
+        .scalar_materialize => return error.ConditionRhsMustBeRegisterOrNumber,
         .ident => |name| blk: {
             const rhs = try context.lookup(name);
             try expectSameType(lhs, rhs);
@@ -4890,7 +5165,7 @@ fn writeConditionBranchFalse(
         },
         .load => return error.ConditionRhsMustBeRegisterOrNumber,
         .scalar_expression => return error.ConditionRhsMustBeRegisterOrNumber,
-        .function_address, .data_address => return error.ConditionRhsMustBeRegisterOrNumber,
+        .bit_cast, .function_address, .code_address, .data_address => return error.ConditionRhsMustBeRegisterOrNumber,
     }
 
     switch (condition.op) {
@@ -5025,9 +5300,10 @@ fn valueAsImmediate(context: *FunctionContext, value: ast.Value) !i64 {
         .hardware_read => error.ExpectedConstant,
         .scalar_comparison => error.ExpectedConstant,
         .signed_less_than => error.ExpectedConstant,
+        .scalar_materialize => error.ExpectedConstant,
         .load => error.ExpectedConstant,
         .scalar_expression => error.ExpectedConstant,
-        .function_address, .data_address => error.ExpectedConstant,
+        .bit_cast, .function_address, .code_address, .data_address => error.ExpectedConstant,
     };
 }
 
@@ -5044,6 +5320,11 @@ fn valueAsAddressReg(writer: *std.Io.Writer, context: *FunctionContext, value: a
             if (address == 0) return .zero;
             try loadImmediateInto(writer, compiler_scratch, address);
             return compiler_scratch;
+        },
+        .bit_cast => |name| {
+            const symbol = try context.lookup(name);
+            if (isVectorType(symbol.data_type)) return error.AddressMustBeRegister;
+            return symbol.reg orelse error.AddressMustBeRegister;
         },
         .number => |number| {
             if (number == 0) return .zero;
@@ -5070,6 +5351,11 @@ fn valueAsDmemReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.
             try loadImmediateInto(writer, compiler_scratch, address);
             return compiler_scratch;
         },
+        .bit_cast => |name| {
+            const symbol = try context.lookup(name);
+            if (isVectorType(symbol.data_type)) return error.ExpectedDmemAddress;
+            return symbol.reg orelse error.AddressMustBeRegister;
+        },
         .number => |number| {
             if (number < 0 or number >= 4096) return error.DmemAddressOutOfRange;
             if (number == 0) return .zero;
@@ -5090,6 +5376,11 @@ fn valueAsStoreReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast
             const symbol = try context.lookup(name);
             if (symbol.reg) |reg| return reg;
             return try loadImmediate(writer, context, symbol.constant orelse return error.StoreValueMustBeRegister);
+        },
+        .bit_cast => |name| {
+            const symbol = try context.lookup(name);
+            if (isVectorType(symbol.data_type)) return error.StoreValueMustBeRegister;
+            return symbol.reg orelse error.StoreValueMustBeRegister;
         },
         .number => |number| return try loadImmediate(writer, context, number),
         .vector_access => return error.StoreValueMustBeRegister,

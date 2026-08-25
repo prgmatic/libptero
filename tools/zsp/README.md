@@ -477,8 +477,15 @@ function(arguments);        // normal call; returns to the next statement
 tail function(arguments);   // tail call; does not return
 jump function(arguments);   // advanced raw direct jump
 jump(address);              // advanced raw indirect jump
+call(function_address);     // indirect call through a typed function pointer
+code.addressOf(label);           // materialize a function or local code label
+code.addressOfUnsigned(label);   // same address using an `ori` relocation
 dmem.addressOf(data, 8);         // materialize a data address plus an optional offset
 ```
+
+`dmem.addressOfUnsigned(data, offset)` is the encoding-preserving variant for
+microcode ABIs that materialize the same 12-bit DMEM address with `ori` instead
+of `addiu`. Both forms produce a typed `dmem` value.
 
 Use a normal call unless the callee must not return. Use `tail` for the normal
 non-returning case. `jump` is the advanced escape hatch when code requires an
@@ -490,6 +497,19 @@ jump may also be conditional, for example
 
 Function addresses are ordinary typed values. Pin a value to `$ra` when raw
 control flow needs an explicit continuation: `reg($ra) next: fn() = &finish;`.
+`code.addressOf` accepts a function or local label and may initialize either a
+typed function pointer or a raw scalar ABI register. Its unsigned variant
+preserves microcode that materializes the low IMEM address using `ori`.
+An interior entry point that must be visible to other functions or linked code
+uses `export entryName:`. It emits the label without function-local mangling.
+Conditional `goto` may target such an exported label in another function,
+including register-to-register equality tests.
+
+`bitCast(value)` reinterprets the bits of one scalar type as the destination
+scalar type. It emits only a register move when the registers differ and no
+instruction when source and destination share a fixed register.
+For encoding-sensitive ABI setup, `scalar.unsigned(value)` materializes a
+16-bit value with `ori`, while `scalar.zero()` uses a zero-register `or`.
 
 Use `tail` for a non-returning transfer with normal function argument checking:
 
@@ -649,7 +669,8 @@ The supported multiply families are:
 Operand widths, typed views, destination views, and swizzle placement are
 validated according to the selected instruction.
 
-The VCC-backed vector operations are `vlt`, `veq`, `vne`, `vge`, and `vmrg`:
+The VCC-backed vector operations are `vlt`, `veq`, `vne`, `vge`, `vch`,
+`vcl`, and `vmrg`:
 
 ```zig
 mask_result = vlt(left, right);
@@ -671,6 +692,8 @@ mask = vectorCompareLessThan(left, right);
 mask = vectorCompareEqual(left, right);
 mask = vectorCompareNotEqual(left, right);
 mask = vectorCompareGreaterOrEqual(left, right);
+clip = vectorClipHigh(value, boundary);
+clip = vectorClipLow(value, boundary);
 merged = vectorSelectByCompareCode(if_true, if_false);
 
 high = readVectorAccumulatorHigh();
@@ -717,11 +740,15 @@ rsp.vector.store64(vector, lane, address, offset);
 rsp.vector.store128(vector, address, offset);
 rsp.vector.loadPackedSigned(vector, address, offset);
 rsp.vector.loadPackedUnsigned(vector, address, offset);
+rsp.vector.storePackedSigned(vector, lane, address, offset);
+rsp.vector.storePackedUnsigned(vector, lane, address, offset);
 ```
 
 Use `reserved reg($v1) name: u32 = undefined;` to give an ABI-reserved scalar
 register a name while preventing the backend from silently using `$v1` as its
 temporary register.
+The same form may explicitly claim `$k1` in a non-returning command that uses
+the resident command-return register as application-defined state.
 
 The `cp0` hardware namespace exposes named, value-returning register reads and
 register-agnostic writes. The destination of a read is the register allocated
@@ -783,9 +810,8 @@ delay slots intact, and treats unknown raw assembly as a barrier. Use
 ## Current limitations
 
 Notable omissions include general scalar multiplication/division, casts,
-ternary expressions, general vector shifts, packed
-vector stores, unaligned vector operations, transposed vector operations,
-annotations, and macros.
+ternary expressions, general vector shifts, unaligned vector operations,
+transposed vector operations, annotations, and macros.
 
 See `tools/zsp/tests.zig` and the `.zsp` files under `src/n64/rsp/ucode/` and
 `src/tests/ucode/` for executable examples of the supported subset.

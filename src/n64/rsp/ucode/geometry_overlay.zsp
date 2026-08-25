@@ -1,6 +1,11 @@
 // Geometry's primary RSP overlay, ported from rsp_geometry.rspl.  Keep storage
 // declarations in generated-assembly order: the final verification compares
 // section bytes while allowing symbol addresses to differ.
+//
+// Shared interior entry points, resident queue ABI registers, and fixed IMEM
+// clipping branches are expressed directly in ZSP. Geometry and RDP work
+// belongs in typed ZSP below; the generated section remains byte-for-byte
+// comparable with Tiny3D's shipped overlay.
 const dma = import("resident_api.zsp");
 const queue = import("resident_api.zsp");
 
@@ -40,8 +45,22 @@ state {
 bss {
     clipping_buffer_temporary: [256]u8;
     clipping_buffer_result: [288]u8;
+    extern rdp_current: u32;
+    extern rdp_sentinel: u32;
+    extern rdp_buffers: [2]u32;
+    extern rdp_syncfull_ongoing: u8;
     extern rdp_mode: [8]u32;
 }
+
+// Shared entry points inside the triangle pipeline. They are declared as code
+// symbols so callers can use normal ZSP control transfers; their definitions
+// remain at the exact interior instruction required by the overlay ABI.
+extern fn geometry_RDPQ_Triangle_Send_Async() writes() noreturn;
+extern fn geometry_RDPQ_Triangle_Send_End() writes();
+extern fn geometryTriangleClip() writes() noreturn;
+extern fn geometry_rdpq_triangle_change_buffer_done() writes() noreturn;
+extern fn geometry_rdpq_triangle_dma_busy() writes() noreturn;
+extern fn geometry_rdpq_triangle_change_buffer() writes() noreturn;
 
 // Fixed-register matrix kernel.  The register assignment and instruction
 // order mirror Geometry's generated rsp_geometry.S so this routine can be compared
@@ -170,6 +189,7 @@ fn normalizeMatrixVector(
         inverse_f = vmudl(inverse_f, shift_constants.x);
         inverse_i = vmadm(inverse_i, shift_constants.x);
         inverse_f = vmadn(vector_zero, vector_zero);
+        export geometryTriangleClipNormalize:
         accumulator_scratch = vmudl(value_f, inverse_f.wwwwWWWW);
         accumulator_scratch = vmadm(value_i, inverse_f.wwwwWWWW);
         value_f = vmadn(value_f, inverse_i.wwwwWWWW);
@@ -182,317 +202,389 @@ fn normalizeMatrixVector(
     }
 }
 
-@rspq.command(0) fn drawTriangle(reg($a0) vertex0: dmem, reg($a1) packed_vertices: u32) noreturn {
+@rspq.command(0) fn drawTriangle(reg($a0) vertex0: dmem, reg($a1) packed_vertices: dmem) noreturn {
+    reg($a2) vertex2: dmem = undefined;
+    reg($a3) command: i32 = undefined;
+    reg($s3) output: dmem = undefined;
+    reg($s7) buffer_offset: dmem;
+    reg($t0) did_swap0: i32 = undefined;
+    reg($t1) did_swap1: i32 = undefined;
+    reg($t2) did_swap2: i32 = undefined;
+    reg($t3) clip1: dmem;
+    reg($t4) clip2: dmem;
+    reg($t5) clip3: dmem;
+    reg($t6) command_bits: dmem;
+    reg($at) scratch: dmem;
+    reg($v0) cull_mode: i32;
+    reg($v00) vector_zero: vec16 = undefined;
+    reg($v01) all1: vec16 = undefined;
+    reg($v02) all2: vec16 = undefined;
+    reg($v03) all3: vec16 = undefined;
+    reg($v04) all_tmp1: vec16 = undefined;
+    reg($v05) all_tmp2: vec16 = undefined;
+    reg($v06) y1: vec16 = undefined;
+    reg($v07) y2: vec16 = undefined;
+    reg($v08) y3: vec16 = undefined;
+    reg($v09) y_tmp1: vec16 = undefined;
+    reg($v10) y_tmp2: vec16 = undefined;
+    reg($v11) attribute3: vec16 = undefined;
+    reg($v12) vector_one: vec16 = undefined;
+    reg($v13) attribute_delta_high: vec16 = undefined;
+    reg($v14) inverse_w_i: vec16 = undefined;
+    reg($v15) inverse_w_f: vec16 = undefined;
+    reg($v16) edges_i: vec16 = undefined;
+    reg($v17) edges_f: vec16 = undefined;
+    reg($v18) normal_i: vec16 = undefined;
+    reg($v19) normal_f: vec16 = undefined;
+    reg($v20) slope_i: vec16 = undefined;
+    reg($v21) slope_f: vec16 = undefined;
+    reg($v22) x12_i: vec16 = undefined;
+    reg($v23) x12_f: vec16 = undefined;
+    reg($v24) hml: vec16 = undefined;
+    reg($v25) fy_i: vec16 = undefined;
+    reg($v26) fy_f: vec16 = undefined;
+    reg($v27) negative_powers: vec16 = undefined;
+    reg($v28) hml_upper: vec16 = undefined;
+    reg($v29) vector_temporary: vec16 = undefined;
+    reg($v30) shift_constants: vec16 = undefined;
+    reg($ra) return_address: i32 = undefined;
     exact {
-        asm("geometry__ovl_text_start:");
-        asm(".word 0x00053402");
-        asm(".word 0x900203f8");
-        asm("geometry_RDPQ_Triangle_Send_Async:");
-        asm(".word 0x48840b00");
-        asm(".word 0x48851300");
-        asm(".word 0xc8811000");
-        asm(".word 0xc8a21000");
-        asm(".word 0xc8c31000");
-        asm(".word 0x948b0006");
-        asm(".word 0x4a1e06d5");
-        asm(".word 0x4b2101aa");
-        asm(".word 0x340900ff");
-        asm(".word 0x4b2201ea");
-        asm(".word 0x94ac0006");
-        asm(".word 0x4b23022a");
-        asm(".word 0x48861b00");
-        asm(".word 0x4bfe0314");
-        asm(".word 0x94cd0006");
-        asm(".word 0x94170344");
-        asm(".word 0x4a073263");
-        asm(".word 0x016c5825");
-        asm(".word 0x4a020927");
-        asm(".word 0x016d5825");
-        asm(".word 0x4a0731a0");
-        asm(".word 0x48480800");
-        asm(".word 0x4a020867");
-        asm(".word 0x316100ff");
-        asm(".word 0x4a1ce72c");
-        asm(".word 0x1429ffdc");
-        asm(".word 0x4a0832a3");
-        asm(".word 0x000b0b42");
-        asm(".word 0x4a030967");
-        asm(".word 0x8c0703f0");
-        asm(".word 0x4a0831a0");
-        asm(".word 0x48490800");
-        asm(".word 0x4a030867");
-        asm(".word 0x316c1f00");
-        asm(".word 0x4a0a4a23");
-        asm(".word 0x26f30de0");
-        asm(".word 0x4a0520e7");
-        asm(".word 0xea660803");
-        asm(".word 0x4a0a49e0");
-        asm(".word 0x484a0800");
-        asm(".word 0x4a0520a7");
-        asm("bne $t4, $zero, geometryTriangleClip");
-        asm(".word 0x01094026");
-        asm(".word 0x4a011e15");
-        asm(".word 0x010a4026");
-        asm(".word 0x4a011155");
-        asm(".word 0x48040b00");
-        asm(".word 0x4a021915");
-        asm(".word 0x48051300");
-        asm(".word 0x4b0145f3");
-        asm(".word 0x31080001");
-        asm(".word 0x4b0255f3");
-        asm(".word 0x00484826");
-        asm(".word 0x4b250755");
-        asm(".word 0x48061b00");
-        asm(".word 0x4b3f3686");
-        asm(".word 0xea670802");
-        asm(".word 0x4b3f3645");
-        asm(".word 0x3af700b0");
-        asm(".word 0x4b382cc7");
-        asm(".word 0xea680801");
-        asm(".word 0x4a1dc4cf");
-        asm(".word 0xea651002");
-        asm(".word 0x4b00049d");
-        asm(".word 0xea641003");
-        asm(".word 0x4b2004dd");
-        asm(".word 0xca781a01");
-        asm(".word 0x4a1a0695");
-        asm(".word 0x266c0020");
-        asm(".word 0x4a19ce51");
-        asm(".word 0xc888080f");
-        asm(".word 0x4b127d32");
-        asm(".word 0x48089000");
-        asm(".word 0x4b137d71");
-        asm(".word 0xc8a80a0f");
-        asm(".word 0x4b007d32");
-        asm(".word 0xc8c80c0f");
-        asm(".word 0x4b384570");
-        asm(".word 0x0100402a");
-        asm(".word 0x4b384532");
-        asm(".word 0x1109ffa5");
-        asm(".word 0x4b255570");
-        asm(".word 0x4b255532");
-        asm(".word 0xc887080b");
-        asm(".word 0x4b246570");
-        asm(".word 0xc8a70a0b");
-        asm(".word 0x4b246532");
-        asm(".word 0xc8c70c0b");
-        asm(".word 0x4b137e33");
-        asm(".word 0x39080001");
-        asm(".word 0x4b127f33");
-        asm(".word 0x000841c0");
-        asm(".word 0x4bbba846");
-        asm(".word 0xc8cb3801");
-        asm(".word 0x4bbba08f");
-        asm(".word 0xc8893801");
-        asm(".word 0x4b484755");
-        asm(".word 0xc8aa3801");
-        asm(".word 0x4b4739e0");
-        asm(".word 0x00e83825");
-        asm(".word 0x4b484227");
-        asm(".word 0xc8cf0e11");
-        asm(".word 0x4a78a8c4");
-        asm(".word 0xc88f0c11");
-        asm(".word 0x4a78a0cd");
-        asm(".word 0xc8af0d11");
-        asm(".word 0x4a1ca8ce");
-        asm(".word 0x30ed0400");
-        asm(".word 0x4a1ca10f");
-        asm(".word 0x000d6902");
-        asm(".word 0x4bfb60ce");
-        asm(".word 0x4808c300");
-        asm(".word 0x4bfb610f");
-        asm(".word 0x4809c000");
-        asm(".word 0x4b884755");
-        asm(".word 0xc8ae0d10");
-        asm(".word 0x4b8739e0");
-        asm(".word 0xc8ce0e10");
-        asm(".word 0x4b884227");
-        asm(".word 0xc88e0c10");
-        asm(".word 0x4a011f44");
-        asm(".word 0x01ac6821");
-        asm(".word 0x4a01274d");
-        asm(".word 0x30ee0200");
-        asm(".word 0x4a021cce");
-        asm(".word 0x00e13825");
-        asm(".word 0x4a02248f");
-        asm(".word 0xa6670000");
-        asm(".word 0x4b087f44");
-        asm(".word 0xc8841403");
-        asm(".word 0x4b08774d");
-        asm(".word 0xc8a31403");
-        asm(".word 0x4b077bce");
-        asm(".word 0xc8c61403");
-        asm(".word 0x4a189f46");
-        asm(".word 0x00084022");
-        asm(".word 0x4a18974f");
-        asm(".word 0x00094822");
-        asm(".word 0x4b20055d");
-        asm(".word 0x4888c300");
-        asm(".word 0x4b00051d");
-        asm(".word 0x4889c000");
-        asm(".word 0x4bfe7bd5");
-        asm(".word 0x240800cf");
-        asm(".word 0x4bdf4a44");
-        asm(".word 0xc8890f02");
-        asm(".word 0x4bdf5284");
-        asm(".word 0x48c80800");
-        asm(".word 0x4bdf5ac4");
-        asm(".word 0xc8aa0f02");
-        asm(".word 0x4b1f7bc4");
-        asm(".word 0xc8cb0f02");
-        asm(".word 0x4b9aaf44");
-        asm(".word 0x000e70c2");
-        asm(".word 0x4b9aa74d");
-        asm(".word 0x30eb0100");
-        asm(".word 0x4b99ac4e");
-        asm(".word 0x40093000");
-        asm(".word 0x4b99a40f");
-        asm(".word 0xea6f1c02");
-        asm(".word 0x4a8f2100");
-        asm(".word 0xca690e08");
-        asm(".word 0x4aaf18c0");
-        asm(".word 0xca6a0e09");
-        asm(".word 0x4acf3180");
-        asm(".word 0xca6b0e0a");
-        asm(".word 0x4b3fbd85");
-        asm(".word 0x1520006c");
-        asm(".word 0x900801dd");
-        asm("geometry_rdpq_triangle_dma_idle:");
-        asm(".word 0x4b3fbdc6");
-        asm(".word 0x000b5902");
-        asm(".word 0x4a044a67");
-        asm(".word 0x01cd7021");
-        asm(".word 0x4a0352a7");
-        asm(".word 0xea740c06");
-        asm(".word 0x4a065ae7");
-        asm(".word 0x8c0401d0");
-        asm(".word 0x4b178c54");
-        asm(".word 0xea760a04");
-        asm(".word 0x4b168410");
-        asm(".word 0x15000002");
-        asm(".word 0xea750c07");
-        asm(".word 0x40844800");
-        asm(".word 0x4a000015");
-        asm(".word 0x4a095311");
-        asm(".word 0xea770a05");
-        asm(".word 0x4a095b51");
-        asm(".word 0x016e5821");
-        asm(".word 0x4bbe9cc6");
-        asm(".word 0xea740a0e");
-        asm(".word 0x4bbe948f");
-        asm(".word 0xea750a0f");
-        asm(".word 0x4b386107");
-        asm(".word 0xea700a0c");
-        asm(".word 0x4b78690f");
-        asm(".word 0xea710a0d");
-        asm(".word 0x4b20011d");
-        asm(".word 0xea700808");
-        asm(".word 0x4b0000dd");
-        asm(".word 0xea710809");
-        asm(".word 0x4b586a07");
-        asm(".word 0xea74080a");
-        asm(".word 0x4b18620f");
-        asm(".word 0xea75080b");
-        asm(".word 0x4b20021d");
-        asm(".word 0x40930000");
-        asm(".word 0x4b0001dd");
-        asm(".word 0x8c0601d4");
-        asm(".word 0x4bf32744");
-        asm(".word 0x01735822");
-        asm(".word 0x4bf31f4d");
-        asm(".word 0x026b9821");
-        asm(".word 0x4bf2210e");
-        asm(".word 0x40840800");
-        asm(".word 0x4bf218cf");
-        asm(".word 0xa4170344");
-        asm(".word 0x4bf34744");
-        asm(".word 0x008b2020");
-        asm(".word 0x4bf33f4d");
-        asm(".word 0x00c4402a");
-        asm(".word 0x4bf2420e");
-        asm(".word 0xe9841803");
-        asm(".word 0x4bf239cf");
-        asm(".word 0xe9a41c03");
-        asm(".word 0x4b15274c");
-        asm(".word 0xe9831801");
-        asm(".word 0x4b151f4d");
-        asm(".word 0xe9a31c01");
-        asm(".word 0x4b14218e");
-        asm(".word 0xe9881807");
-        asm(".word 0x4b14194f");
-        asm(".word 0x1500001d");
-        asm(".word 0xe9a81c07");
-        asm("geometry_rdpq_triangle_change_buffer_done:");
-        asm(".word 0x4bfe4f47");
-        asm(".word 0xe9871805");
-        asm(".word 0x4b9a374c");
-        asm(".word 0xe9a71c05");
-        asm(".word 0x4b9a2f4d");
-        asm(".word 0xe9861806");
-        asm(".word 0x4b99308e");
-        asm(".word 0xe9a61c06");
-        asm(".word 0x4b99284f");
-        asm(".word 0xe9851804");
-        asm(".word 0x4be77233");
-        asm(".word 0xe9a51c04");
-        asm(".word 0x4be571b3");
-        asm(".word 0xac0401d0");
-        asm(".word 0x4be24ab3");
-        asm(".word 0xe9821802");
-        asm(".word 0x4be142b3");
-        asm(".word 0xe9a21c02");
-        asm(".word 0x4be45ab3");
-        asm(".word 0xe9811800");
-        asm(".word 0x4be352b3");
-        asm(".word 0xe9a11c00");
-        asm(".word 0xe9c61602");
-        asm(".word 0xe9c81603");
-        asm(".word 0x256bffff");
-        asm(".word 0xe9ca1800");
-        asm(".word 0x03e00008");
-        asm(".word 0x408b1800");
-        asm("geometry_rdpq_triangle_change_buffer:");
-        asm(".word 0x03e03825");
-        asm(".word 0x8c0401cc");
-        asm(".word 0x8c0901c8");
-        asm(".word 0xac0401c8");
-        asm(".word 0xac0901cc");
-        asm(".word 0xa18b0000");
-        asm(".word 0x3c010001");
-        asm(".word 0x00813020");
-        asm("jal rdpSetBuffer");
-        asm(".word 0x00802825");
-        asm(".word 0x40840800");
-        asm(".word 0x918b0000");
-        asm(".word 0x008b2021");
-        asm("j geometry_rdpq_triangle_change_buffer_done");
-        asm(".word 0x00e0f825");
-        asm("geometry_rdpq_triangle_dma_busy:");
-        asm(".word 0x1520ffff");
-        asm(".word 0x40093000");
-        asm("j geometry_rdpq_triangle_dma_idle");
-        asm("geometry_RDPQ_Triangle_Send_End:");
-        asm(".word 0x40013000");
-        asm(".word 0xa4000344");
-        asm(".word 0x900801dd");
-        asm(".word 0x1420fffc");
-        asm(".word 0x8c0901d0");
-        asm(".word 0x1500fed9");
-        asm(".word 0xac0901d0");
-        asm(".word 0x03e00008");
-        asm(".word 0x40894800");
+        export geometry__ovl_text_start:
+        vertex2 = packed_vertices >> 16;
+        cull_mode = load(u8, face_culling);
+        export geometry_RDPQ_Triangle_Send_Async:
+        all1[3] = vertex0;
+        all2[3] = packed_vertices;
+        rsp.vector.load32(all1, 0, vertex0, 0);
+        rsp.vector.load32(all2, 0, packed_vertices, 0);
+        rsp.vector.load32(all3, 0, vertex2, 0);
+        clip1 = load(u16, vertex0, 6);
+        negative_powers = vectorSubtractCarry(vector_zero, shift_constants);
+        y1 = vector_zero | all1.y;
+        did_swap1 = scalar.unsigned(0xff);
+        y2 = vector_zero | all2.y;
+        clip2 = load(u16, packed_vertices, 6);
+        y3 = vector_zero | all3.y;
+        all3[3] = vertex2;
+        vector_one = vectorAddCarry(vector_zero, shift_constants.W);
+        clip3 = load(u16, vertex2, 6);
+        buffer_offset = load(u16, triangle_buffer_offset);
+        y_tmp1 = vectorCompareGreaterOrEqual(y1, y2);
+        clip1 |= clip2;
+        all_tmp1 = vectorSelectByCompareCode(all1, all2);
+        clip1 |= clip3;
+        y1 = vectorCompareLessThan(y1, y2);
+        did_swap0 = rsp.vector.getCompareCode();
+        all1 = vectorSelectByCompareCode(all1, all2);
+        scratch = clip1 & 0xff;
+        hml_upper = hml_upper ^ hml_upper;
+        if(scratch != did_swap1) goto geometryTriangleClipNormalize slot {
+            y_tmp2 = vectorCompareGreaterOrEqual(y1, y3);
+        }
+        scratch = clip1 >> 13;
+        all_tmp2 = vectorSelectByCompareCode(all1, all3);
+        command = load(i32, triangle_command);
+        y1 = vectorCompareLessThan(y1, y3);
+        did_swap1 = rsp.vector.getCompareCode();
+        all1 = vectorSelectByCompareCode(all1, all3);
+        clip2 = clip1 & 0x1f00;
+        y3 = vectorCompareGreaterOrEqual(y_tmp1, y_tmp2);
+        output = buffer_offset +% clipping_buffer_temporary;
+        all3 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
+        rsp.vector.store16(y1, 0, output, 6);
+        y2 = vectorCompareLessThan(y_tmp1, y_tmp2);
+        did_swap2 = rsp.vector.getCompareCode();
+        all2 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
+        if(clip2 != 0) jump geometryTriangleClip() slot {
+            did_swap0 ^= did_swap1;
+        }
+        hml = vectorSubtractCarry(all3, all1);
+        did_swap0 ^= did_swap2;
+        all_tmp2 = vectorSubtractCarry(all2, all1);
+        vertex0 = all1[3];
+        all_tmp1 = vectorSubtractCarry(all3, all2);
+        packed_vertices = all2[3];
+        x12_f[0] = vectorMove(all1[0]);
+        did_swap0 &= 1;
+        x12_f[2] = vectorMove(all2[0]);
+        did_swap1 = cull_mode ^ did_swap0;
+        vector_temporary = vectorSubtractCarry(vector_zero, all_tmp2.yyyyyyyy);
+        vertex2 = all3[3];
+        fy_f = vectorShiftLeft8(y1, 14);
+        rsp.vector.store16(y2, 0, output, 4);
+        fy_i = vectorShiftRightArithmetic(y1, 2);
+        buffer_offset ^= 176;
+        normal_f = vmudh(all_tmp2, hml.yyyyyyyy);
+        rsp.vector.store16(y3, 0, output, 2);
+        normal_f = vmadh(hml, vector_temporary);
+        rsp.vector.store32(all_tmp2, 0, output, 8);
+        normal_i = readVectorAccumulatorHigh();
+        rsp.vector.store32(all_tmp1, 0, output, 12);
+        normal_f = readVectorAccumulatorMiddle();
+        rsp.vector.load64(hml, 2, output, 8);
+        fy_f = vectorSubtractCarry(vector_zero, fy_f);
+        clip2 = output +% 0x20;
+        fy_i = vectorSubtract(fy_i, fy_i);
+        rsp.vector.load16(y3, 0, vertex0, 30);
+        slope_i[7] = vectorReciprocalHigh(normal_i[0]);
+        did_swap0 = normal_i[0];
+        slope_f[7] = vectorReciprocalLow(normal_f[0]);
+        rsp.vector.load16(y3, 2, packed_vertices, 30);
+        slope_i[7] = vectorReciprocalHigh(vector_zero[0]);
+        rsp.vector.load16(y3, 4, vertex2, 30);
+        slope_f[0] = vectorReciprocal(hml[1]);
+        did_swap0 = did_swap0 < 0;
+        slope_i[0] = vectorReciprocalHigh(hml[1]);
+        if(did_swap0 == did_swap1) goto geometryTriangleClipNormalize slot {
+            slope_f[2] = vectorReciprocal(all_tmp2[1]);
+        }
+        slope_i[2] = vectorReciprocalHigh(all_tmp2[1]);
+        rsp.vector.load16(y2, 0, vertex0, 22);
+        slope_f[4] = vectorReciprocal(all_tmp1[1]);
+        rsp.vector.load16(y2, 2, packed_vertices, 22);
+        slope_i[4] = vectorReciprocalHigh(all_tmp1[1]);
+        rsp.vector.load16(y2, 4, vertex2, 22);
+        hml[7] = vectorMove(normal_f[0]);
+        did_swap0 ^= 1;
+        hml_upper[7] = vectorMove(normal_i[0]);
+        did_swap0 <<= 7;
+        all1 = vmudn(slope_f, negative_powers.Y);
+        rsp.vector.loadPackedUnsigned(attribute3, vertex2, 8);
+        all2 = vmadh(slope_i, negative_powers.Y);
+        rsp.vector.loadPackedUnsigned(y_tmp1, vertex0, 8);
+        vector_temporary = vectorSubtractCarry(y3, y3.z);
+        rsp.vector.loadPackedUnsigned(y_tmp2, packed_vertices, 8);
+        y2 = vectorCompareLessThan(y2, y2.z);
+        command |= did_swap0;
+        y3 = vectorSelectByCompareCode(y3, y3.z);
+        rsp.vector.load16(inverse_w_f, 6, vertex2, 34);
+        all3 = vmudl(slope_f, hml.yywwYYWW);
+        rsp.vector.load16(inverse_w_f, 4, vertex0, 34);
+        all3 = vmadm(slope_i, hml.yywwYYWW);
+        rsp.vector.load16(inverse_w_f, 5, packed_vertices, 34);
+        all3 = vmadn(slope_f, hml_upper);
+        clip3 = command & 0x400;
+        all_tmp1 = vmadh(slope_i, hml_upper);
+        clip3 >>>= 4;
+        all3 = vmadn(vector_one, negative_powers.W);
+        did_swap0 = hml[3];
+        all_tmp1 = vmadh(vector_one, negative_powers.W);
+        did_swap1 = hml[0];
+        vector_temporary = vectorSubtractCarry(y3, y3.X);
+        rsp.vector.load16(inverse_w_i, 5, packed_vertices, 32);
+        y2 = vectorCompareLessThan(y2, y2.X);
+        rsp.vector.load16(inverse_w_i, 6, vertex2, 32);
+        y3 = vectorSelectByCompareCode(y3, y3.X);
+        rsp.vector.load16(inverse_w_i, 4, vertex0, 32);
+        vector_temporary = vmudl(all3, all1);
+        clip3 +%= clip2;
+        vector_temporary = vmadm(all_tmp1, all1);
+        command_bits = command & 0x200;
+        normal_f = vmadn(all3, all2);
+        command |= scratch;
+        normal_i = vmadh(all_tmp1, all2);
+        store(i16, output, command);
+        vector_temporary = vmudl(inverse_w_f, y3.x);
+        rsp.vector.load32(all_tmp1, 4, vertex0, 12);
+        vector_temporary = vmadm(inverse_w_i, y3.x);
+        rsp.vector.load32(all3, 4, packed_vertices, 12);
+        inverse_w_f = vmadn(inverse_w_f, y2.x);
+        rsp.vector.load32(y1, 4, vertex2, 12);
+        vector_temporary = vmudn(normal_f, hml);
+        did_swap0 = -did_swap0;
+        vector_temporary = vmadh(normal_i, hml);
+        did_swap1 = -did_swap1;
+        slope_f = readVectorAccumulatorMiddle();
+        hml[3] = did_swap0;
+        slope_i = readVectorAccumulatorHigh();
+        hml[0] = did_swap1;
+        inverse_w_f = vectorSubtractCarry(inverse_w_f, shift_constants.W);
+        did_swap0 = 0xcf;
+        y_tmp1 = vectorShiftRightLogical(y_tmp1, 7);
+        rsp.vector.load16(y_tmp1, 7, vertex0, 4);
+        y_tmp2 = vectorShiftRightLogical(y_tmp2, 7);
+        rsp.vector.setCompareCode(did_swap0);
+        attribute3 = vectorShiftRightLogical(attribute3, 7);
+        rsp.vector.load16(y_tmp2, 7, packed_vertices, 4);
+        inverse_w_f = vectorShiftRightLogical(inverse_w_f, 1);
+        rsp.vector.load16(attribute3, 7, vertex2, 4);
+        vector_temporary = vmudl(slope_f, fy_f.X);
+        command_bits >>>= 3;
+        vector_temporary = vmadm(slope_i, fy_f.X);
+        clip1 = command & 0x100;
+        edges_f = vmadn(slope_f, fy_i.X);
+        did_swap1 = rsp.cp0.dmaBusy();
+        edges_i = vmadh(slope_i, fy_i.X);
+        rsp.vector.store64(inverse_w_f, 4, output, 16);
+        all_tmp1 = vmulf(all_tmp1, inverse_w_f.xxxxXXXX);
+        rsp.vector.load16(y_tmp1, 6, output, 16);
+        all3 = vmulf(all3, inverse_w_f.yyyyYYYY);
+        rsp.vector.load16(y_tmp2, 6, output, 18);
+        y1 = vmulf(y1, inverse_w_f.zzzzZZZZ);
+        rsp.vector.load16(attribute3, 6, output, 20);
+        x12_i = vectorShiftRightArithmetic(x12_f, 2);
+        if(did_swap1 != 0) jump geometry_rdpq_triangle_dma_busy() slot {
+            did_swap0 = load(u8, rdp_syncfull_ongoing);
+        }
+    dma_idle:
+        export geometry_rdpq_triangle_dma_idle:
+        x12_f = vectorShiftLeft8(x12_f, 14);
+        clip1 >>>= 4;
+        y_tmp1 = vectorSelectByCompareCode(y_tmp1, all_tmp1);
+        command_bits +%= clip3;
+        y_tmp2 = vectorSelectByCompareCode(y_tmp2, all3);
+        rsp.vector.store16(slope_i, 4, output, 12);
+        attribute3 = vectorSelectByCompareCode(attribute3, y1);
+        // The fast path deliberately reuses the now-dead vertex0 argument
+        // register for the resident RDP cursor.
+        vertex0 = load(u32, rdp_current);
+        edges_f = vectorAddCarry(edges_f, x12_f.x);
+        rsp.vector.store16(x12_i, 2, output, 8);
+        edges_i = vectorAdd(edges_i, x12_i.x);
+        if(did_swap0 == 0) slot {
+            rsp.vector.store16(slope_f, 4, output, 14);
+        } {
+            rsp.cp0.writeRegister(9, $a0);
+        }
+        vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
+        vector_one = vectorSubtract(y_tmp2, y_tmp1);
+        rsp.vector.store16(x12_f, 2, output, 10);
+        attribute_delta_high = vectorSubtract(attribute3, y_tmp1);
+        clip1 +%= command_bits;
+        normal_f = vmudn(normal_f, shift_constants.Y);
+        rsp.vector.store16(slope_i, 2, output, 28);
+        normal_i = vmadh(normal_i, shift_constants.Y);
+        rsp.vector.store16(slope_f, 2, output, 30);
+        all_tmp1 = vmudh(vector_one, hml.y);
+        rsp.vector.store16(edges_i, 2, output, 24);
+        all_tmp1 = vmadh(attribute_delta_high, hml.w);
+        rsp.vector.store16(edges_f, 2, output, 26);
+        all_tmp1 = readVectorAccumulatorMiddle();
+        rsp.vector.store16(edges_i, 0, output, 16);
+        all3 = readVectorAccumulatorHigh();
+        rsp.vector.store16(edges_f, 0, output, 18);
+        y3 = vmudh(attribute_delta_high, hml.z);
+        rsp.vector.store16(slope_i, 0, output, 20);
+        y3 = vmadh(vector_one, hml.x);
+        rsp.vector.store16(slope_f, 0, output, 22);
+        y3 = readVectorAccumulatorMiddle();
+        rsp.cp0.setDmaMemoryAddress(output);
+        y2 = readVectorAccumulatorHigh();
+        vertex2 = load(i32, rdp_sentinel);
+        vector_temporary = vmudl(all_tmp1, normal_f.W);
+        clip1 = clip1 - output;
+        vector_temporary = vmadm(all3, normal_f.W);
+        output +%= clip1;
+        all_tmp1 = vmadn(all_tmp1, normal_i.W);
+        rsp.cp0.writeRegister(1, $a0);
+        all3 = vmadh(all3, normal_i.W);
+        store(u16, triangle_buffer_offset, buffer_offset);
+        vector_temporary = vmudl(y3, normal_f.W);
+        vertex0 += clip1;
+        vector_temporary = vmadm(y2, normal_f.W);
+        did_swap0 = signedLessThan(vertex2, vertex0);
+        y3 = vmadn(y3, normal_i.W);
+        rsp.vector.store64(all_tmp1, 0, clip2, 24);
+        y2 = vmadh(y2, normal_i.W);
+        rsp.vector.store64(all_tmp1, 4, clip3, 24);
+        vector_temporary = vmadl(all_tmp1, slope_f.x);
+        rsp.vector.store64(all3, 0, clip2, 8);
+        vector_temporary = vmadm(all3, slope_f.x);
+        rsp.vector.store64(all3, 4, clip3, 8);
+        y1 = vmadn(all_tmp1, slope_i.x);
+        rsp.vector.store64(y3, 0, clip2, 56);
+        all_tmp2 = vmadh(all3, slope_i.x);
+        if(did_swap0 != 0) jump geometry_rdpq_triangle_change_buffer() slot {
+            rsp.vector.store64(y3, 4, clip3, 56);
+        }
+        export geometry_rdpq_triangle_change_buffer_done:
+        vector_temporary = vmudh(y_tmp1, shift_constants.W);
+        rsp.vector.store64(y2, 0, clip2, 40);
+        vector_temporary = vmadl(y1, fy_f.X);
+        rsp.vector.store64(y2, 4, clip3, 40);
+        vector_temporary = vmadm(all_tmp2, fy_f.X);
+        rsp.vector.store64(y1, 0, clip2, 48);
+        all2 = vmadn(y1, fy_i.X);
+        rsp.vector.store64(y1, 4, clip3, 48);
+        all1 = vmadh(all_tmp2, fy_i.X);
+        rsp.vector.store64(all_tmp2, 0, clip2, 32);
+        y3[6] = vectorMove(y2[7]);
+        rsp.vector.store64(all_tmp2, 4, clip3, 32);
+        y1[6] = vectorMove(all_tmp2[7]);
+        store(u32, rdp_current, vertex0);
+        y_tmp2[1] = vectorMove(all2[7]);
+        rsp.vector.store64(all2, 0, clip2, 16);
+        y_tmp2[0] = vectorMove(all1[7]);
+        rsp.vector.store64(all2, 4, clip3, 16);
+        y_tmp2[3] = vectorMove(all_tmp1[7]);
+        rsp.vector.store64(all1, 0, clip2, 0);
+        y_tmp2[2] = vectorMove(all3[7]);
+        rsp.vector.store64(all1, 4, clip3, 0);
+        rsp.vector.store32(y1, 6, command_bits, 8);
+        rsp.vector.store32(y3, 6, command_bits, 12);
+        clip1 -%= 1;
+        rsp.vector.store64(y_tmp2, 0, command_bits, 0);
+        return slot {
+            rsp.cp0.startDmaWrite(clip1);
+        }
+        export geometry_rdpq_triangle_change_buffer:
+        command = return_address;
+        vertex0 = load(u32, rdp_buffers, 4);
+        did_swap1 = load(i32, rdp_buffers);
+        store(u32, rdp_buffers, vertex0);
+        store(u32, rdp_buffers, did_swap1, 4);
+        store(u8, clip2, clip1);
+        scratch = 0x10000;
+        vertex2 = vertex0 + scratch;
+        queue.rdpSetBuffer(vertex0, packed_vertices, vertex2) slot {
+            packed_vertices = vertex0;
+        }
+        rsp.cp0.writeRegister(1, $a0);
+        clip1 = load(u8, clip2);
+        vertex0 +%= clip1;
+        jump geometry_rdpq_triangle_change_buffer_done() slot {
+            return_address = command;
+        }
+    dma_busy:
+        export geometry_rdpq_triangle_dma_busy:
+        if(did_swap1 != 0) goto dma_busy slot {
+            did_swap1 = rsp.cp0.dmaBusy();
+        }
+        goto dma_idle slot {
+        send_end:
+            export geometry_RDPQ_Triangle_Send_End:
+            rsp.cp0.readRegister(6, $at);
+        }
+        store(u16, triangle_buffer_offset, 0);
+        did_swap0 = load(u8, rdp_syncfull_ongoing);
+        if(scratch != 0) goto geometry_RDPQ_Triangle_Send_End slot {
+            did_swap1 = load(i32, rdp_current);
+        }
+        if(did_swap0 != 0) goto geometryTriangleClipNormalize slot {
+            store(i32, rdp_current, did_swap1);
+        }
+        return slot {
+            rsp.cp0.setRdpCommandEnd(did_swap1);
+        }
     }
 }
 
 export fn _start() noreturn {
+    reg($s0) code_address: u32;
+    reg($t0) code_size: u32;
+    reg($t1) pitch: u32 = undefined;
+    reg($t2) flags: u32;
+    reg($s4) target: dmem = undefined;
+    reg($ra) return_address: fn() = undefined;
     exact {
-        asm("lw $s0, %lo(clipping_code_address)($zero)");
-        asm("lhu $t0, %lo(clipping_code_size)($zero)");
-        asm("addiu $t2, $zero, 12");
-        asm("ori $ra, $zero, %lo(_start)");
-        asm("sb $t0, %lo(clipping_code_address)($zero)");
-        asm("j exec");
-        asm("addiu $t0, $t0, -1");
+        code_address = load(u32, clipping_code_address);
+        code_size = load(u16, clipping_code_size);
+        flags = 12;
+        return_address = code.addressOfUnsigned(_start);
+        store(u8, clipping_code_address, code_size);
+    }
+    jump dma.exec(code_size, pitch, code_address, target, flags) slot {
+        code_size -%= 1;
     }
 }
 
@@ -501,331 +593,459 @@ export fn _start() noreturn {
     reg($a1) rdram_vertices: u32,
     reg($a2) input_output_addresses: u32,
 ) noreturn {
+    reg($s4) input: dmem;
+    reg($s6) segment: dmem;
+    reg($t0) copy_size: u32;
+    reg($t1) pitch: u32 = undefined;
+    reg($s7) input_end: dmem;
+    reg($t2) flags: u32 = undefined;
+    reg($s0) source: u32 = undefined;
     exact {
-        asm("srl $s4, $a2, 16");
-        asm("srl $s6, $a1, 24");
-        asm("andi $t0, $a0, 65535");
-        asm("lw $s6, %lo(segment_table)($s6)");
-        asm("addu $s7, $s4, $t0");
-        asm("addiu $t0, $t0, -1");
-        asm("or $t2, $zero, $zero");
-        asm("jal exec");
-        asm("addu $s0, $a1, $s6");
-        asm("ori $s6, $zero, %lo(matrix_normal)");
-        asm(".word 0xcad31801");
-        asm(".word 0xcad21802");
-        asm(".word 0xcad31c01");
-        asm(".word 0xcad41800");
-        asm(".word 0xcad41c00");
-        asm("jal loadCurrentMVPMat");
-        asm(".word 0xcad21c02");
-        asm("ori $at, $zero, %lo(normal_mask_shift)");
-        asm(".word 0xc8301801");
-        asm(".word 0xc8311800");
-        asm(".word 0xc8311c00");
-        asm(".word 0xc8301c01");
-        asm("ori $at, $zero, %lo(clipping_planes)");
-        asm(".word 0xc82f1000");
-        asm("ori $at, $zero, %lo(screen_scale_offset)");
-        asm(".word 0xc82c1801");
-        asm("andi $s6, $a2, 65535");
-        asm("addiu $s5, $s6, 65500");
-        asm("lbu $s2, %lo(active_light_size + 0)");
-        asm(".word 0xc82c1c01");
-        asm(".word 0xc82d1800");
-        asm(".word 0xc82d1c00");
-        asm("ori $at, $zero, %lo(fog_scale_offset)");
-        asm(".word 0x4b2f03ea");
-        asm(".word 0xc82b1800");
-        asm(".word 0x4bff0384");
-        asm("lbu $k0, %lo(triangle_command + 0)");
-        asm("lbu $s0, %lo(original_code_address + 0)");
-        asm(".word 0x4bff6b4d");
-        asm("ori $at, $zero, %lo(normalize_w_scale)");
-        asm(".word 0x4a00038e");
-        asm(".word 0xc82a1800");
-        asm(".word 0xc82a1c00");
-        asm("ori $at, $zero, %lo(uv_generation_parameters)");
-        asm(".word 0xc8291c00");
-        asm("addiu $s6, $s6, 65464");
-        asm(".word 0x4b4b72f3");
-        asm("ori $at, $zero, %lo(screen_uvgen_scale)");
-        asm("lbu $s1, %lo(fog_store_offset + 0)");
-        asm("addiu $s2, $s2, %lo(directional_light_color)");
-        asm(".word 0xc8290f00");
-        asm("ori $at, $zero, %lo(uv_generation_parameters)");
-        asm(".word 0xc8291000");
-        asm("jal waitIdle");
-        asm(".word 0xc8291200");
-        asm(".word 0xca882000");
-        asm(".word 0x4ae889e8");
-        asm(".word 0x4a1039c6");
-        asm("LOOP_START:");
-        asm(".word 0x4b4b00ea");
-        asm("lbu $a2, 19($s4)");
-        asm(".word 0x4a87a740");
-        asm("ori $s3, $zero, %lo(directional_light_color)");
-        asm(".word 0x4aa79f48");
-        asm("lbu $t8, 15($s3)");
-        asm(".word 0x4ac791c8");
-        asm(".word 0x4a88e186");
-        asm("addiu $s5, $s5, 72");
-        asm(".word 0x4a88d94f");
-        asm("and $a2, $a2, $s0");
-        asm(".word 0x4aa8d18e");
-        asm("lhu $k1, %lo(vertex_effect_function + 0)");
-        asm(".word 0x4aa8c94f");
-        asm(".word 0xca623001");
-        asm(".word 0x4ac8c18e");
-        asm("or $t9, $zero, $zero");
-        asm("addiu $s6, $s6, 72");
-        asm(".word 0x4ac8b94f");
-        asm(".word 0x4bfeb18e");
-        asm("bne $k0, $zero, LIGHT_LOOP_END");
-        asm(".word 0x4bfea94f");
-        asm("beq $s3, $s2, LIGHT_LOOP_END");
-        asm(".word 0xca63387f");
-        asm("LABEL_T3DCmd_VertLoad_0003:");
-        asm(".word 0x4a023840");
-        asm(".word 0xca643800");
-        asm("bne $t8, $zero, pointLight");
-        asm("ori $ra, $zero, %lo(LABEL_T3DCmd_VertLoad_0005)");
-        asm("LABEL_T3DCmd_VertLoad_0005:");
-        asm("addiu $s3, $s3, 16");
-        asm(".word 0x4a812741");
-        asm(".word 0x4aa12749");
-        asm("lbu $t8, 15($s3)");
-        asm(".word 0x4ac12749");
-        asm(".word 0xca623001");
-        asm("bne $s3, $s2, LABEL_T3DCmd_VertLoad_0003");
-        asm(".word 0x4a1d18d0");
-        asm("LIGHT_LOOP_END:");
-        asm(".word 0x4ae67885");
-        asm(".word 0xca843802");
-        asm("ori $ra, $zero, %lo(LABEL_T3DCmd_VertLoad_0006)");
-        asm(".word 0x4ae5784f");
-        asm(".word 0x4a00008e");
-        asm("bne $t9, $zero, loadCurrentMVPMat");
-        asm("addu $fp, $s6, $s1");
-        asm("LABEL_T3DCmd_VertLoad_0006:");
-        asm(".word 0x4ae52f65");
-        asm(".word 0x4ae63764");
-        asm(".word 0x484c0800");
-        asm(".word 0x4a012f65");
-        asm(".word 0x4a023764");
-        asm("addu $sp, $s5, $s1");
-        asm("TAG_LightMul:");
-        asm(".word 0x4a032100");
-        asm(".word 0xca882002");
-        asm(".word 0x4a0a3184");
-        asm(".word 0x484b0800");
-        asm(".word 0x4a0a294d");
-        asm("srl $t5, $t4, 4");
-        asm("andi $t5, $t5, 1799");
-        asm(".word 0x4a00018e");
-        asm("srl $t7, $t3, 4");
-        asm("andi $t6, $t4, 1799");
-        asm(".word 0x4bdf2105");
-        asm(".word 0xeac51802");
-        asm(".word 0x4b655b72");
-        asm(".word 0xeac61803");
-        asm(".word 0x4b665bb1");
-        asm(".word 0xeaa61c03");
-        asm(".word 0x4be55b72");
-        asm("andi $t8, $t3, 775");
-        asm(".word 0x4be67bb1");
-        asm(".word 0x4be07b72");
-        asm("srl $t2, $t8, 5");
-        asm(".word 0x4bc92107");
-        asm(".word 0xeaa51c02");
-        asm("or $t8, $t8, $t2");
-        asm(".word 0x4b2b30d4");
-        asm(".word 0x4b0b2890");
-        asm("andi $t7, $t7, 775");
-        asm("srl $t2, $t7, 5");
-        asm(".word 0x4aee3744");
-        asm(".word 0x4aee2f4d");
-        asm("or $t8, $t8, $a2");
-        asm(".word 0xeac43801");
-        asm(".word 0x4aed318e");
-        asm(".word 0xeace0b11");
-        asm(".word 0x4aed294f");
-        asm(".word 0x4b6b1087");
-        asm(".word 0xeaae0f11");
-        asm(".word 0xeacd0b10");
-        asm("or $t7, $t7, $t2");
-        asm(".word 0x4a0e3744");
-        asm("srl $t2, $t6, 5");
-        asm(".word 0x4a0e2f4d");
-        asm(".word 0xeaa43a01");
-        asm(".word 0x4a0d318e");
-        asm(".word 0x4a0d294f");
-        asm("or $t7, $t7, $a2");
-        asm(".word 0x4ac25f51");
-        asm(".word 0xeaad0f10");
-        asm("nor $t6, $t6, $t2");
-        asm("srl $t2, $t5, 5");
-        asm(".word 0x4bfe614f");
-        asm(".word 0xca831803");
-        asm("addiu $s4, $s4, 32");
-        asm("nor $t5, $t5, $t2");
-        asm(".word 0x4bdeef46");
-        asm(".word 0xeac51800");
-        asm(".word 0x4a0700aa");
-        asm(".word 0x4ae889e8");
-        asm(".word 0xeaa51c00");
-        asm("sb $t8, 6($s6)");
-        asm("sb $t6, 7($s6)");
-        asm("sb $t7, 6($s5)");
-        asm(".word 0xebdd0a00");
-        asm(".word 0x4a1039c6");
-        asm("sb $t5, 7($s5)");
-        asm(".word 0x4a0918d4");
-        asm("jal $k1");
-        asm(".word 0xebbd0e00");
-        asm("VertexFX_None:");
-        asm(".word 0xeac31003");
-        asm("bne $s4, $s7, LOOP_START");
-        asm(".word 0xeaa31203");
-        asm("j commandLoop");
-        asm("VertexFX_Spherical:");
-        asm(".word 0x4b002963");
-        asm(".word 0x4a0c2915");
-        asm(".word 0x4a0c2120");
-        asm(".word 0x4a0910c0");
-        asm(".word 0x4be92106");
-        asm(".word 0x4b0918d4");
-        asm(".word 0x4ac22100");
-        asm(".word 0x4b092100");
-        asm(".word 0x4a0418d4");
-        asm(".word 0xeac31003");
-        asm("bne $s4, $s7, LOOP_START");
-        asm(".word 0xeaa31403");
-        asm("j commandLoop");
-        asm("VertexFX_CelShadeColor:");
-        asm(".word 0x4a042123");
-        asm(".word 0x4a042123");
-        asm(".word 0x4b0440f3");
-        asm(".word 0x4b8450f3");
-        asm(".word 0xeaa31203");
-        asm("bne $s4, $s7, LOOP_START");
-        asm(".word 0xeac31003");
-        asm("j commandLoop");
-        asm("VertexFX_CelShadeAlpha:");
-        asm(".word 0x4b6440f3");
-        asm(".word 0x4be450f3");
-        asm(".word 0xeaa31203");
-        asm("bne $s4, $s7, LOOP_START");
-        asm(".word 0xeac31003");
-        asm("j commandLoop");
-        asm("VertexFX_Outline:");
-        asm(".word 0x4a091740");
-        asm(".word 0x4bfe294f");
-        asm(".word 0xeaa51400");
-        asm("bne $s4, $s7, LOOP_START");
-        asm(".word 0xeac51000");
-        asm("j commandLoop");
-        asm("nop");
-        asm("pointLight:");
-        asm("bne $t9, $zero, LABEL_pointLight_000C");
-        asm("lhu $t7, 14($s3)");
-        asm("ori $at, $zero, %lo(matrix_mv)");
-        asm(".word 0xc83a1803");
-        asm(".word 0xc83a1c03");
-        asm(".word 0xc83b1800");
-        asm(".word 0xc83c1801");
-        asm(".word 0xc8371804");
-        asm(".word 0xc8381805");
-        asm(".word 0xc83c1c01");
-        asm(".word 0xc83b1c00");
-        asm(".word 0xc8351806");
-        asm(".word 0xc8381c05");
-        asm(".word 0xc8391802");
-        asm(".word 0x4a88e706");
-        asm(".word 0xc8391c02");
-        asm(".word 0xc8371c04");
-        asm(".word 0xc8361807");
-        asm(".word 0x4a88decf");
-        asm(".word 0xc8361c07");
-        asm(".word 0x4aa8d70e");
-        asm(".word 0xc8351c06");
-        asm(".word 0x4aa8cecf");
-        asm(".word 0x4ac8c70e");
-        asm(".word 0x4ac8becf");
-        asm(".word 0x4bfeb70e");
-        asm(".word 0x4bfeaecf");
-        asm(".word 0x4b7fe704");
-        asm(".word 0x4b7fdecd");
-        asm("addiu $t9, $zero, 1");
-        asm(".word 0x4a00070e");
-        asm("LABEL_pointLight_000C:");
-        asm(".word 0xca771801");
-        asm(".word 0xca771c01");
-        asm("andi $t7, $t7, 32767");
-        asm(".word 0x4bbfbdc5");
-        asm(".word 0x4a00060e");
-        asm("sll $t7, $t7, 16");
-        asm(".word 0x4a1cc615");
-        asm(".word 0x4a1bbdd1");
-        asm(".word 0x4a18c744");
-        asm(".word 0x4a18bf4d");
-        asm(".word 0x4a17c58e");
-        asm(".word 0x4a17bd4f");
-        asm(".word 0x4ab6b694");
-        asm(".word 0x4ab5ae50");
-        asm(".word 0x4adab594");
-        asm(".word 0x488fd300");
-        asm(".word 0x4ad9ad50");
-        asm("srl $at, $t7, 16");
-        asm(".word 0x4b154576");
-        asm("lbu $t7, 14($s3)");
-        asm(".word 0x4b1645b5");
-        asm(".word 0x4881cb00");
-        asm("sra $t7, $t7, 7");
-        asm(".word 0x4b954576");
-        asm(".word 0x4b9665b5");
-        asm(".word 0x4b006576");
-        asm(".word 0x4b7ab744");
-        asm(".word 0x4b7aaf4d");
-        asm(".word 0x4b79b74e");
-        asm("bne $t7, $zero, LABEL_pointLight_000D");
-        asm(".word 0x4b79a84f");
-        asm(".word 0x4bffb586");
-        asm(".word 0x4bffad4f");
-        asm(".word 0x4a010840");
-        asm(".word 0x4a96c744");
-        asm(".word 0x4a96bf4d");
-        asm(".word 0x4a95c74e");
-        asm(".word 0x4a95ba0f");
-        asm(".word 0x4a814200");
-        asm("jr $ra");
-        asm(".word 0x4a074040");
-        asm("LABEL_pointLight_000D:");
-        asm(".word 0x4a010840");
-        asm(".word 0x4b006873");
-        asm(".word 0x4b007073");
-        asm(".word 0x4b005073");
-        asm("jr $ra");
-        asm(".word 0x4b004873");
-        asm("loadCurrentMVPMat:");
-        asm("ori $at, $zero, %lo(matrix_mvp)");
-        asm(".word 0xc83c1c01");
-        asm(".word 0xc8361c07");
-        asm(".word 0xc83c1801");
-        asm(".word 0xc8391c02");
-        asm(".word 0xc8361807");
-        asm(".word 0xc8351806");
-        asm(".word 0xc8371804");
-        asm(".word 0xc8381c05");
-        asm(".word 0xc8371c04");
-        asm(".word 0xc83a1c03");
-        asm(".word 0xc83b1800");
-        asm(".word 0xc8381805");
-        asm(".word 0xc83b1c00");
-        asm(".word 0xc83a1803");
-        asm(".word 0xc8391802");
-        asm("jr $ra");
-        asm(".word 0xc8351c06");
+        input = input_output_addresses >> 16;
+        segment = rdram_vertices >> 24;
+        copy_size = buffer_size & 0xffff;
+        segment = load(u32, segment, segment_table);
+        input_end = input +% copy_size;
+        copy_size -%= 1;
+        flags = scalar.zero();
+    }
+    dma.exec(copy_size, pitch, source, input, flags) slot {
+        source = rdram_vertices +% segment;
+    }
+    reg($v18) normal_row2: vec16 = undefined;
+    reg($v19) normal_row1: vec16 = undefined;
+    reg($v20) normal_row0: vec16 = undefined;
+    reg($v21) mvp_row3_i: vec16 = undefined;
+    reg($v22) mvp_row3_f: vec16 = undefined;
+    reg($v23) mvp_row2_i: vec16 = undefined;
+    reg($v24) mvp_row2_f: vec16 = undefined;
+    reg($v25) mvp_row1_i: vec16 = undefined;
+    reg($v26) mvp_row1_f: vec16 = undefined;
+    reg($v27) mvp_row0_i: vec16 = undefined;
+    reg($v28) mvp_row0_f: vec16 = undefined;
+    reg($at) data_pointer: dmem = undefined;
+    reg($v16) normal_shift: vec16 = undefined;
+    reg($v17) normal_mask: vec16 = undefined;
+    reg($v15) guard_band_scale: vec16 = undefined;
+    reg($v12) screen_offset: vec16 = undefined;
+    reg($v13) screen_size_i: vec16 = undefined;
+    reg($s5) output_b: dmem;
+    reg($s2) light_end: dmem;
+    reg($v00) vector_zero: vec16 = undefined;
+    reg($v31) shift_constants: vec16 = undefined;
+    reg($v14) screen_size_f: vec16 = undefined;
+    reg($v11) fog_scale: vec16 = undefined;
+    reg($v10) normalize_scale: vec16 = undefined;
+    reg($v09) uv_arguments: vec16 = undefined;
+    reg($v08) position: vec16 = undefined;
+    reg($v07) normal: vec16 = undefined;
+    reg($v06) clip_position_f: vec16 = undefined;
+    reg($v05) clip_position_i: vec16 = undefined;
+    reg($v03) light_color: vec16 = undefined;
+    reg($v02) light_direction: vec16 = undefined;
+    reg($v01) light_scale: vec16 = undefined;
+    reg($v04) color: vec16 = undefined;
+    reg($v29) vector_temporary: vec16 = undefined;
+    reg($v30) vector_one: vec16 = undefined;
+    reg($k0) unlit: u32;
+    reg($s1) fog_offset: u32;
+    reg($s3) light_pointer: dmem = undefined;
+    reg($t8) is_point_light: u32;
+    reg($t9) mv_matrix_loaded: u32 = undefined;
+    reg($fp) fog_a: dmem;
+    reg($sp) fog_b: dmem;
+    reg($t3) clip_codes: u32 = undefined;
+    reg($t4) reject_codes: u32 = undefined;
+    reg($t5) reject_b: u32;
+    reg($t6) reject_a: u32;
+    reg($t7) clip_b: u32;
+    reserved reg($k1) vertex_effect: u32 = undefined;
+    reg($ra) return_address: u32 = undefined;
+    exact {
+        segment = dmem.addressOfUnsigned(matrix_normal);
+        rsp.vector.load64(normal_row1, 0, segment, 8);
+        rsp.vector.load64(normal_row2, 0, segment, 16);
+        rsp.vector.load64(normal_row1, 4, segment, 8);
+        rsp.vector.load64(normal_row0, 0, segment, 0);
+        rsp.vector.load64(normal_row0, 4, segment, 0);
+    }
+    loadCurrentMVPMat(mvp_row0_i, mvp_row0_f, mvp_row1_i, mvp_row1_f, mvp_row2_i, mvp_row2_f, mvp_row3_i, mvp_row3_f) slot {
+        rsp.vector.load64(normal_row2, 4, segment, 16);
+    }
+    exact {
+        data_pointer = dmem.addressOfUnsigned(normal_mask_shift);
+        rsp.vector.load64(normal_shift, 0, data_pointer, 8);
+        rsp.vector.load64(normal_mask, 0, data_pointer, 0);
+        rsp.vector.load64(normal_mask, 4, data_pointer, 0);
+        rsp.vector.load64(normal_shift, 4, data_pointer, 8);
+        data_pointer = dmem.addressOfUnsigned(clipping_planes);
+        rsp.vector.load32(guard_band_scale, 0, data_pointer, 0);
+        data_pointer = dmem.addressOfUnsigned(screen_scale_offset);
+        rsp.vector.load64(screen_offset, 0, data_pointer, 8);
+        segment = input_output_addresses & 0xffff;
+        output_b = segment -% triangle_size;
+        light_end = load(u8, active_light_size);
+        rsp.vector.load64(screen_offset, 4, data_pointer, 8);
+        rsp.vector.load64(screen_size_i, 0, data_pointer, 0);
+        rsp.vector.load64(screen_size_i, 4, data_pointer, 0);
+        data_pointer = dmem.addressOfUnsigned(fog_scale_offset);
+        guard_band_scale = vector_zero | guard_band_scale.y;
+        rsp.vector.load64(fog_scale, 0, data_pointer, 0);
+        screen_size_f = vmudl(vector_zero, shift_constants.WWWWWWWW);
+        unlit = load(u8, triangle_command);
+        source = load(u8, original_code_address);
+        screen_size_i = vmadm(screen_size_i, shift_constants.WWWWWWWW);
+        data_pointer = dmem.addressOfUnsigned(normalize_w_scale);
+        screen_size_f = vmadn(vector_zero, vector_zero);
+        rsp.vector.load64(normalize_scale, 0, data_pointer, 0);
+        rsp.vector.load64(normalize_scale, 4, data_pointer, 0);
+        data_pointer = dmem.addressOfUnsigned(uv_generation_parameters);
+        rsp.vector.load64(uv_arguments, 4, data_pointer, 0);
+        segment -%= 72;
+        fog_scale[6] = vectorMove(fog_scale[2]);
+        data_pointer = dmem.addressOfUnsigned(screen_uvgen_scale);
+        fog_offset = load(u8, fog_store_offset);
+        light_end +%= directional_light_color;
+        rsp.vector.load16(uv_arguments, 7, data_pointer, 0);
+        data_pointer = dmem.addressOfUnsigned(uv_generation_parameters);
+        rsp.vector.load32(uv_arguments, 0, data_pointer, 0);
+    }
+    dma.waitIdle() slot {
+        rsp.vector.load32(uv_arguments, 2, data_pointer, 0);
+    }
+    exact {
+        rsp.vector.load128(position, input, 0);
+        normal = normal_mask & position.wwwwWWWW;
+        normal = vmudn(normal, normal_shift);
+    }
+    vertex_loop:
+    exact {
+        light_color = vector_zero | fog_scale.z;
+        input_output_addresses = load(u8, input, 19);
+        vector_temporary = vmulf(normal_row0, normal.xxxxXXXX);
+        light_pointer = dmem.addressOfUnsigned(directional_light_color);
+        vector_temporary = vmacf(normal_row1, normal.yyyyYYYY);
+        is_point_light = load(u8, light_pointer, 15);
+        normal = vmacf(normal_row2, normal.zzzzZZZZ);
+        clip_position_f = vmudn(mvp_row0_f, position.xxxxXXXX);
+        output_b +%= 72;
+        clip_position_i = vmadh(mvp_row0_i, position.xxxxXXXX);
+        input_output_addresses &= source;
+        clip_position_f = vmadn(mvp_row1_f, position.yyyyYYYY);
+        vertex_effect = load(u16, vertex_effect_function);
+        clip_position_i = vmadh(mvp_row1_i, position.yyyyYYYY);
+        rsp.vector.loadPackedSigned(light_direction, light_pointer, 8);
+        clip_position_f = vmadn(mvp_row2_f, position.zzzzZZZZ);
+        mv_matrix_loaded = scalar.zero();
+        segment +%= 72;
+        clip_position_i = vmadh(mvp_row2_i, position.zzzzZZZZ);
+        clip_position_f = vmadn(mvp_row3_f, vector_one.W);
+        if(unlit != 0) goto light_loop_end slot {
+            clip_position_i = vmadh(mvp_row3_i, vector_one.W);
+        }
+        if(light_pointer == light_end) goto light_loop_end slot {
+            rsp.vector.loadPackedUnsigned(light_color, light_pointer, -8);
+        }
+    light_loop:
+        light_scale = vmulf(normal, light_direction);
+        rsp.vector.loadPackedUnsigned(color, light_pointer, 0);
+        if(is_point_light != 0) goto pointLight slot {
+            return_address = code.addressOfUnsigned(LABEL_T3DCmd_VertLoad_0005);
+        }
+        export LABEL_T3DCmd_VertLoad_0005:
+        light_pointer +%= 16;
+        vector_temporary = vmulu(color, light_scale.xxxxXXXX);
+        vector_temporary = vmacu(color, light_scale.yyyyYYYY);
+        is_point_light = load(u8, light_pointer, 15);
+        vector_temporary = vmacu(color, light_scale.zzzzZZZZ);
+        rsp.vector.loadPackedSigned(light_direction, light_pointer, 8);
+        if(light_pointer != light_end) goto light_loop slot {
+            light_color = vectorAdd(light_color, vector_temporary);
+        }
+    light_loop_end:
+        light_direction = vmudm(guard_band_scale, clip_position_f.wwwwWWWW);
+        rsp.vector.loadPackedUnsigned(color, input, 16);
+        return_address = code.addressOfUnsigned(LABEL_T3DCmd_VertLoad_0006);
+        light_scale = vmadh(guard_band_scale, clip_position_i.wwwwWWWW);
+        light_direction = vmadn(vector_zero, vector_zero);
+        if(mv_matrix_loaded != 0) goto loadCurrentMVPMat slot {
+            fog_a = segment +% fog_offset;
+        }
+        export LABEL_T3DCmd_VertLoad_0006:
+        vector_temporary = vectorClipHigh(clip_position_i, clip_position_i.wwwwWWWW);
+        vector_temporary = vectorClipLow(clip_position_f, clip_position_f.wwwwWWWW);
+        reject_codes = rsp.vector.getCompareCode();
+        vector_temporary = vectorClipHigh(clip_position_i, light_scale);
+        vector_temporary = vectorClipLow(clip_position_f, light_direction);
+        fog_b = output_b +% fog_offset;
+        export TAG_LightMul:
+        color = vmulf(color, light_color);
+        rsp.vector.load128(position, input, 32);
+        clip_position_f = vmudl(clip_position_f, normalize_scale);
+        clip_codes = rsp.vector.getCompareCode();
+        clip_position_i = vmadm(clip_position_i, normalize_scale);
+        reject_b = reject_codes >> 4;
+        reject_b &= 0x0707;
+        clip_position_f = vmadn(vector_zero, vector_zero);
+        clip_b = clip_codes >> 4;
+        reject_a = reject_codes & 0x0707;
+        color = vmudm(color, shift_constants.Z);
+        rsp.vector.store64(clip_position_i, 0, segment, 16);
+        screen_size_i[3] = vectorReciprocalHigh(clip_position_i[3]);
+        rsp.vector.store64(clip_position_f, 0, segment, 24);
+        screen_size_f[3] = vectorReciprocalLow(clip_position_f[3]);
+        rsp.vector.store64(clip_position_f, 4, output_b, 24);
+        screen_size_i[3] = vectorReciprocalHigh(clip_position_i[7]);
+        is_point_light = clip_codes & 0x0307;
+        screen_size_f[7] = vectorReciprocalLow(clip_position_f[7]);
+        screen_size_i[7] = vectorReciprocalHigh(vector_zero[7]);
+        flags = is_point_light >> 5;
+        color = vmudh(color, uv_arguments.Z);
+        rsp.vector.store64(clip_position_i, 4, output_b, 16);
+        is_point_light |= flags;
+        light_color = vectorAddCarry(clip_position_f, fog_scale.y);
+        light_direction = vectorAdd(clip_position_i, fog_scale.x);
+        clip_b &= 0x0307;
+        flags = clip_b >> 5;
+        vector_temporary = vmudl(clip_position_f, screen_size_f.wwwwWWWW);
+        vector_temporary = vmadm(clip_position_i, screen_size_f.wwwwWWWW);
+        is_point_light |= input_output_addresses;
+        rsp.vector.storePackedUnsigned(color, 0, segment, 8);
+        clip_position_f = vmadn(clip_position_f, screen_size_i.wwwwWWWW);
+        rsp.vector.store16(screen_size_f, 3, segment, 34);
+        clip_position_i = vmadh(clip_position_i, screen_size_i.wwwwWWWW);
+        light_direction = vmudh(light_direction, fog_scale.w);
+        rsp.vector.store16(screen_size_f, 7, output_b, 34);
+        rsp.vector.store16(screen_size_i, 3, segment, 32);
+        clip_b |= flags;
+        vector_temporary = vmudl(clip_position_f, screen_size_f);
+        flags = reject_a >> 5;
+        vector_temporary = vmadm(clip_position_i, screen_size_f);
+        rsp.vector.storePackedUnsigned(color, 4, output_b, 8);
+        clip_position_f = vmadn(clip_position_f, screen_size_i);
+        clip_position_i = vmadh(clip_position_i, screen_size_i);
+        clip_b |= input_output_addresses;
+        vector_temporary = vectorSubtract(fog_scale, light_direction.zzzzZZZZ);
+        rsp.vector.store16(screen_size_i, 7, output_b, 32);
+        reject_a = reject_a ~| flags;
+        flags = reject_b >> 5;
+        clip_position_i = vmadh(screen_offset, vector_one.W);
+        rsp.vector.load64(light_color, 0, input, 24);
+        input +%= 32;
+        reject_b = reject_b ~| flags;
+        vector_temporary = vmudn(vector_temporary, vector_one.Z);
+        rsp.vector.store64(clip_position_i, 0, segment, 0);
+        light_direction = vector_zero | normal;
+        normal = normal_mask & position.wwwwWWWW;
+        rsp.vector.store64(clip_position_i, 4, output_b, 0);
+        store(u8, segment, is_point_light, 6);
+        store(u8, segment, reject_a, 7);
+        store(u8, output_b, clip_b, 6);
+        rsp.vector.store16(vector_temporary, 2, fog_a, 0);
+        normal = vmudn(normal, normal_shift);
+        store(u8, output_b, reject_b, 7);
+        light_color = vectorAddCarry(light_color, uv_arguments);
+        call(vertex_effect) slot {
+            rsp.vector.store16(vector_temporary, 6, fog_b, 0);
+        }
+        export VertexFX_None:
+        rsp.vector.store32(light_color, 0, segment, 12);
+        if(input != input_end) goto vertex_loop slot {
+            rsp.vector.store32(light_color, 2, output_b, 12);
+        }
+        jump queue.commandLoop() slot {
+            export VertexFX_Spherical:
+            clip_position_i = vectorCompareGreaterOrEqual(clip_position_i, vector_zero.x);
+        }
+        color = vectorSubtractCarry(clip_position_i, screen_offset);
+        color = vectorCompareLessThan(color, screen_offset);
+        light_color = vmulf(light_direction, uv_arguments);
+        color = vmudn(color, uv_arguments.W);
+        light_color = vectorAddCarry(light_color, uv_arguments.x);
+        color = vmulf(color, light_direction.zzzzZZZZ);
+        color = vmulf(color, uv_arguments.x);
+        light_color = vectorAddCarry(light_color, color);
+        rsp.vector.store32(light_color, 0, segment, 12);
+        if(input != input_end) goto vertex_loop slot {
+            rsp.vector.store32(light_color, 4, output_b, 12);
+        }
+        jump queue.commandLoop() slot {
+            export VertexFX_CelShadeColor:
+            color = vectorCompareGreaterOrEqual(color, color);
+        }
+        color = vectorCompareGreaterOrEqual(color, color);
+        light_color[0] = vectorMove(color[0]);
+        light_color[2] = vectorMove(color[4]);
+        rsp.vector.store32(light_color, 2, output_b, 12);
+        if(input != input_end) goto vertex_loop slot {
+            rsp.vector.store32(light_color, 0, segment, 12);
+        }
+        jump queue.commandLoop() slot {
+            export VertexFX_CelShadeAlpha:
+            light_color[0] = vectorMove(color[3]);
+        }
+        light_color[2] = vectorMove(color[7]);
+        rsp.vector.store32(light_color, 2, output_b, 12);
+        if(input != input_end) goto vertex_loop slot {
+            rsp.vector.store32(light_color, 0, segment, 12);
+        }
+        jump queue.commandLoop() slot {
+            export VertexFX_Outline:
+            vector_temporary = vmulf(light_direction, uv_arguments);
+        }
+        clip_position_i = vmadh(clip_position_i, vector_one.W);
+        rsp.vector.store32(clip_position_i, 4, output_b, 0);
+        if(input != input_end) goto vertex_loop slot {
+            rsp.vector.store32(clip_position_i, 0, segment, 0);
+        }
+        jump queue.commandLoop();
+    }
+}
+
+fn pointLight(
+    reg($s3) light_pointer: dmem,
+    reg($v27) vertex_position_i: vec16,
+    reg($v28) vertex_position_f: vec16,
+    reg($v25) matrix_row_i: vec16,
+    reg($v26) matrix_row_f: vec16,
+    reg($v23) point_position_i: vec16,
+    reg($v24) point_position_f: vec16,
+    reg($v21) light_dot_i: vec16,
+    reg($v22) light_dot_f: vec16,
+    reg($v08) position: vec16,
+    reg($v07) normal: vec16,
+    reg($v01) light_result: vec16,
+    reg($t9) mv_matrix_loaded: u32,
+) {
+    reg($t7) light_size: i32;
+    reg($at) scratch: dmem = undefined;
+    reg($v29) vector_temporary: vec16 = undefined;
+    reg($v31) shift_constants: vec16 = undefined;
+    reg($v30) vector_one: vec16 = undefined;
+    reg($v00) vector_zero: vec16 = undefined;
+
+    exact {
+        if(mv_matrix_loaded != 0) goto point_position_ready slot {
+            light_size = load(u16, light_pointer, 14);
+        }
+        scratch = dmem.addressOfUnsigned(matrix_mv);
+        rsp.vector.load64(matrix_row_f, 0, scratch, 24);
+        rsp.vector.load64(matrix_row_f, 4, scratch, 24);
+        rsp.vector.load64(vertex_position_i, 0, scratch, 0);
+        rsp.vector.load64(vertex_position_f, 0, scratch, 8);
+        rsp.vector.load64(point_position_i, 0, scratch, 32);
+        rsp.vector.load64(point_position_f, 0, scratch, 40);
+        rsp.vector.load64(vertex_position_f, 4, scratch, 8);
+        rsp.vector.load64(vertex_position_i, 4, scratch, 0);
+        rsp.vector.load64(light_dot_i, 0, scratch, 48);
+        rsp.vector.load64(point_position_f, 4, scratch, 40);
+        rsp.vector.load64(matrix_row_i, 0, scratch, 16);
+        vertex_position_f = vmudn(vertex_position_f, position.xxxxXXXX);
+        rsp.vector.load64(matrix_row_i, 4, scratch, 16);
+        rsp.vector.load64(point_position_i, 4, scratch, 32);
+        rsp.vector.load64(light_dot_f, 0, scratch, 56);
+        vertex_position_i = vmadh(vertex_position_i, position.xxxxXXXX);
+        rsp.vector.load64(light_dot_f, 4, scratch, 56);
+        vertex_position_f = vmadn(matrix_row_f, position.yyyyYYYY);
+        rsp.vector.load64(light_dot_i, 4, scratch, 48);
+        vertex_position_i = vmadh(matrix_row_i, position.yyyyYYYY);
+        vertex_position_f = vmadn(point_position_f, position.zzzzZZZZ);
+        vertex_position_i = vmadh(point_position_i, position.zzzzZZZZ);
+        vertex_position_f = vmadn(light_dot_f, vector_one.W);
+        vertex_position_i = vmadh(light_dot_i, vector_one.W);
+        vertex_position_f = vmudl(vertex_position_f, shift_constants.w);
+        vertex_position_i = vmadm(vertex_position_i, shift_constants.w);
+        mv_matrix_loaded = 1;
+        vertex_position_f = vmadn(vector_zero, vector_zero);
+    point_position_ready:
+        rsp.vector.load64(point_position_i, 0, light_pointer, 8);
+        rsp.vector.load64(point_position_i, 4, light_pointer, 8);
+        light_size &= 0x7fff;
+        point_position_i = vmudm(point_position_i, shift_constants.Y);
+        point_position_f = vmadn(vector_zero, vector_zero);
+        light_size <<= 16;
+        point_position_f = vectorSubtractCarry(point_position_f, vertex_position_f);
+        point_position_i = vectorSubtract(point_position_i, vertex_position_i);
+        vector_temporary = vmudl(point_position_f, point_position_f);
+        vector_temporary = vmadm(point_position_i, point_position_f);
+        light_dot_f = vmadn(point_position_f, point_position_i);
+        light_dot_i = vmadh(point_position_i, point_position_i);
+        matrix_row_f = vectorAddCarry(light_dot_f, light_dot_f.yyyyYYYY);
+        matrix_row_i = vectorAdd(light_dot_i, light_dot_i.yyyyYYYY);
+        light_dot_f = vectorAddCarry(light_dot_f, matrix_row_f.zzzzZZZZ);
+        matrix_row_f[3] = light_size;
+        light_dot_i = vectorAdd(light_dot_i, matrix_row_i.zzzzZZZZ);
+        scratch = light_size >> 16;
+        light_dot_i[0] = vectorReciprocalSquareRootHigh(light_dot_i[0]);
+        light_size = load(u8, light_pointer, 14);
+        light_dot_f[0] = vectorReciprocalSquareRootLow(light_dot_f[0]);
+        matrix_row_i[3] = scratch;
+        light_size >>= 7;
+        light_dot_i[0] = vectorReciprocalSquareRootHigh(light_dot_i[4]);
+        light_dot_f[4] = vectorReciprocalSquareRootLow(light_dot_f[4]);
+        light_dot_i[4] = vectorReciprocalSquareRootHigh(vector_zero[0]);
+        vector_temporary = vmudl(light_dot_f, matrix_row_f.w);
+        vector_temporary = vmadm(light_dot_i, matrix_row_f.w);
+        vector_temporary = vmadn(light_dot_f, matrix_row_i.w);
+        if(light_size != 0) goto radius_only slot {
+            light_result = vmadh(light_dot_i, matrix_row_i.w);
+        }
+        light_dot_f = vmudn(light_dot_f, shift_constants.W);
+        light_dot_i = vmadh(light_dot_i, shift_constants.W);
+        light_result = vmulf(light_result, light_result);
+        vector_temporary = vmudl(point_position_f, light_dot_f.xxxxXXXX);
+        vector_temporary = vmadm(point_position_i, light_dot_f.xxxxXXXX);
+        vector_temporary = vmadn(point_position_f, light_dot_i.xxxxXXXX);
+        position = vmadh(point_position_i, light_dot_i.xxxxXXXX);
+        position = vmulf(position, light_result.xxxxXXXX);
+        return slot {
+            light_result = vmulf(position, normal);
+        }
+    radius_only:
+        light_result = vmulf(light_result, light_result);
+        light_result[5] = vectorMove(vector_zero[0]);
+        light_result[6] = vectorMove(vector_zero[0]);
+        light_result[2] = vectorMove(vector_zero[0]);
+    }
+    return slot {
+        light_result[1] = vectorMove(vector_zero[0]);
+    }
+}
+
+// Load the current MVP matrix duplicated across both vector halves. Keeping
+// the fixed vector assignment makes this usable by the hand-scheduled vertex
+// loop without hiding the operation behind raw opcodes.
+fn loadCurrentMVPMat(
+    reg($v27) row0_i: vec16,
+    reg($v28) row0_f: vec16,
+    reg($v25) row1_i: vec16,
+    reg($v26) row1_f: vec16,
+    reg($v23) row2_i: vec16,
+    reg($v24) row2_f: vec16,
+    reg($v21) row3_i: vec16,
+    reg($v22) row3_f: vec16,
+) {
+    reg($at) matrix: dmem = undefined;
+    exact {
+        matrix = dmem.addressOfUnsigned(matrix_mvp);
+        rsp.vector.load64(row0_f, 4, matrix, 8);
+        rsp.vector.load64(row3_f, 4, matrix, 56);
+        rsp.vector.load64(row0_f, 0, matrix, 8);
+        rsp.vector.load64(row1_i, 4, matrix, 16);
+        rsp.vector.load64(row3_f, 0, matrix, 56);
+        rsp.vector.load64(row3_i, 0, matrix, 48);
+        rsp.vector.load64(row2_i, 0, matrix, 32);
+        rsp.vector.load64(row2_f, 4, matrix, 40);
+        rsp.vector.load64(row2_i, 4, matrix, 32);
+        rsp.vector.load64(row1_f, 4, matrix, 24);
+        rsp.vector.load64(row0_i, 0, matrix, 0);
+        rsp.vector.load64(row2_f, 0, matrix, 40);
+        rsp.vector.load64(row0_i, 4, matrix, 0);
+        rsp.vector.load64(row1_f, 0, matrix, 24);
+        rsp.vector.load64(row1_i, 0, matrix, 16);
+    }
+    return slot {
+        rsp.vector.load64(row3_i, 4, matrix, 48);
     }
 }
 
@@ -835,20 +1055,23 @@ export fn _start() noreturn {
     reg($a2) screen_scale_xy: u32,
     reg($a3) depth_and_w_scale: u32,
 ) noreturn {
+    reg($s7) uvgen_scale: u32;
+    reg($s6) negative_guard_band: u32;
     exact {
-        asm(".word 0x0004ba02");
-        asm(".word 0xa407034e");
-        asm(".word 0x3084000f");
-        asm(".word 0x0004b023");
-        asm(".word 0xa0160343");
-        asm(".word 0xa4170346");
-        asm(".word 0xa0040337");
-        asm(".word 0xa0040333");
-        asm(".word 0xa016033f");
-        asm(".word 0xac070314");
-        asm(".word 0xac060310");
-        asm("j commandLoop");
-        asm(".word 0xac050318");
+        uvgen_scale = guard_band_factor >> 8;
+        store(u16, normalize_w_scale, depth_and_w_scale, 6);
+        guard_band_factor &= 0x0f;
+        negative_guard_band = -guard_band_factor;
+        store(u8, clipping_planes, negative_guard_band, 19);
+        store(u16, screen_uvgen_scale, uvgen_scale);
+        store(u8, clipping_planes, guard_band_factor, 7);
+        store(u8, clipping_planes, guard_band_factor, 3);
+        store(u8, clipping_planes, negative_guard_band, 15);
+        store(u32, screen_scale_offset, depth_and_w_scale, 4);
+        store(u32, screen_scale_offset, screen_scale_xy);
+    }
+    jump queue.commandLoop() slot {
+        store(u32, screen_scale_offset, screen_offset_xy, 8);
     }
 }
 
@@ -865,14 +1088,13 @@ export fn _start() noreturn {
     reg($a2) direction0: u32,
     reg($a3) direction1: u32,
 ) noreturn {
-    exact {
-        asm("beq $a2, $zero, geometry_set_light_end");
-        asm("sw $a1, 0($a0)");
-        asm("sw $a3, 12($a0)");
-        asm("sw $a2, 8($a0)");
-        asm("geometry_set_light_end:");
-        asm("j commandLoop");
-        asm("sw $a1, 4($a0)");
+    store(u32, address, rgba);
+    if(direction0 != 0) {
+        store(u32, address, direction1, 12);
+        store(u32, address, direction0, 8);
+    }
+    tail queue.commandLoop() slot {
+        store(u32, address, rgba, 4);
     }
 }
 
@@ -880,76 +1102,111 @@ export fn _start() noreturn {
     reg($a0) culling: u8,
     reg($a1) command: u32,
 ) noreturn {
-    exact {
-        asm("lbu $s7, %lo(rdp_mode + 28)($zero)");
-        asm("sb $a0, %lo(face_culling)($zero)");
-        asm("andi $s7, $s7, 0x38");
-        asm("or $a1, $a1, $s7");
-        asm("j commandLoop");
-        asm("sw $a1, %lo(triangle_command)($zero)");
+    reg($s7) mipmap: u32 = load(u8, rdp_mode, 28);
+    store(u8, face_culling, culling);
+    mipmap &= 0x38;
+    command |= mipmap;
+    jump queue.commandLoop() slot {
+        store(u32, triangle_command, command);
     }
 }
 
 @rspq.command(7) fn setProjectionMatrix(reg($a0) rdram: u32) noreturn {
+    reg($t2) flags: u32;
+    reg($t0) size: u32 = undefined;
+    reg($t1) pitch: u32 = undefined;
+    reg($s0) source: u32;
+    reg($s4) destination: dmem = undefined;
     exact {
-        asm("addiu $t2, $zero, 12");
-        asm("ori $t0, $zero, 63");
-        asm("or $s0, $zero, $a0");
-        asm("j exec");
-        asm("ori $s4, $zero, %lo(matrix_projection)");
+        flags = 12;
+        size = scalar.unsigned(63);
+        source = bitCast(rdram);
+    }
+    jump dma.exec(size, pitch, source, destination, flags) slot {
+        destination = dmem.addressOfUnsigned(matrix_projection);
     }
 }
 
 @rspq.command(2) fn updateMatrixStack(
     reg($a0) stack_control: i32,
-    reg($a1) matrix_address: i32,
+    reg($a1) matrix_address: u32,
 ) noreturn {
+    reg($s7) multiply: i32;
+    reg($s6) only_move: i32;
+    reg($gp) command_end: dmem = undefined;
+    reg($s5) stack_pointer: i32;
+    reg($s3) segment_base: dmem;
+    reg($s4) dma_destination: dmem = undefined;
+    reg($s0) rdram: u32 = undefined;
+    reg($t0) dma_size: u32 = undefined;
+    reg($t1) dma_pitch: dmem = undefined;
+    reg($t2) dma_flags: u32 = undefined;
+    reg($s2) matrix_destination: dmem = undefined;
+    reg($at) address_mask: u32 = undefined;
+    reg($ra) return_address: fn() = undefined;
     exact {
-        asm("andi $s7, $a0, 1");
-        asm("andi $s6, $a0, 2");
-        asm(".word 0x87840099");
-        asm("lw $s5, %lo(matrix_stack_pointer)($zero)");
-        asm("addu $s5, $s5, $a0");
-        asm("bne $s6, $zero, commandLoop");
-        asm("sw $s5, %lo(matrix_stack_pointer)($zero)");
-        asm("srl $s3, $a1, 24");
-        asm("lw $s3, %lo(segment_table)($s3)");
-        asm("addu $a1, $a1, $s3");
-        asm("bgez $a0, geometry_matrix_loaded_address");
-        asm("ori $s4, $zero, %lo(matrix_mv)");
-        asm("or $a1, $zero, $s5");
-        asm("geometry_matrix_loaded_address:");
-        asm("lui $at, 0xff");
-        asm("ori $at, $at, 0xffff");
-        asm("ori $t0, $zero, 63");
-        asm("addiu $t2, $zero, 12");
-        asm("jal exec");
-        asm("and $s0, $a1, $at");
-        asm("beq $s7, $zero, geometry_matrix_ready");
-        asm("ori $t1, $zero, %lo(matrix_normal)");
-        asm("addiu $s0, $s5, -64");
-        asm("ori $t0, $zero, 63");
-        asm("addiu $t2, $zero, 12");
-        asm("jal exec");
-        asm("ori $s4, $zero, %lo(clipping_buffer_result)");
-        asm("ori $s3, $zero, %lo(clipping_buffer_result)");
-        asm("ori $s4, $zero, %lo(matrix_mv)");
-        asm("jal multiplyMatrices");
-        asm("ori $s2, $zero, %lo(matrix_mv)");
-        asm("geometry_matrix_ready:");
-        asm("ori $t0, $zero, 63");
-        asm("addiu $t2, $zero, -32756");
-        asm("jal exec");
-        asm("or $s0, $zero, $s5");
-        asm("jal normalizeMatrixVector");
-        asm("ori $s2, $zero, %lo(matrix_mvp)");
-        asm("jal normalizeMatrixVector");
-        asm("ori $s3, $zero, %lo(matrix_projection)");
-        asm("jal normalizeMatrixVector");
-        asm("nop");
-        asm("ori $ra, $zero, %lo(commandLoop)");
-        asm("j multiplyMatrices");
-        asm("ori $s4, $zero, %lo(matrix_mv)");
+        multiply = stack_control & 1;
+        only_move = stack_control & 2;
+        stack_control = load(i16, command_end, 0x99);
+        stack_pointer = load(i32, matrix_stack_pointer);
+        stack_pointer +%= stack_control;
+    }
+    if(only_move != 0) tail queue.commandLoop() slot {
+        store(i32, matrix_stack_pointer, stack_pointer);
+    }
+    exact {
+        segment_base = matrix_address >> 24;
+        segment_base = load(u32, segment_base, segment_table);
+        matrix_address +%= segment_base;
+    }
+    if(stack_control < 0) slot {
+        dma_destination = dmem.addressOfUnsigned(matrix_mv);
+    } {
+        // Signed stack pointers and segmented addresses intentionally share
+        // this register, so reinterpret the bits without emitting a move.
+        matrix_address = bitCast(stack_pointer);
+    }
+    exact {
+        address_mask = 0xffffff;
+        dma_size = scalar.unsigned(63);
+        dma_flags = 12;
+    }
+    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags) slot {
+        rdram = matrix_address & address_mask;
+    }
+    if(multiply != 0) slot {
+        dma_pitch = dmem.addressOfUnsigned(matrix_normal);
+    } {
+        rdram = bitCast(stack_pointer) -% 64;
+        dma_size = scalar.unsigned(63);
+        dma_flags = 12;
+        dma_destination = dmem.addressOfUnsigned(clipping_buffer_result);
+        dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+        segment_base = dmem.addressOfUnsigned(clipping_buffer_result);
+        dma_destination = dmem.addressOfUnsigned(matrix_mv);
+        multiplyMatrices(matrix_destination, segment_base, dma_destination) slot {
+            matrix_destination = dmem.addressOfUnsigned(matrix_mv);
+        }
+    }
+    exact {
+        dma_size = scalar.unsigned(63);
+        dma_flags = -32756;
+    }
+    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags) slot {
+        rdram = bitCast(stack_pointer);
+    }
+    normalizeMatrixVector(dma_destination, dma_pitch) slot {
+        matrix_destination = dmem.addressOfUnsigned(matrix_mvp);
+    }
+    normalizeMatrixVector(dma_destination, dma_pitch) slot {
+        segment_base = dmem.addressOfUnsigned(matrix_projection);
+    }
+    normalizeMatrixVector(dma_destination, dma_pitch);
+    exact {
+        return_address = code.addressOfUnsigned(commandLoop);
+        jump multiplyMatrices(matrix_destination, segment_base, dma_destination) slot {
+            dma_destination = dmem.addressOfUnsigned(matrix_mv);
+        }
     }
 }
 
@@ -968,88 +1225,137 @@ export fn _start() noreturn {
 }
 
 fn triangleClip() noreturn {
+    reg($s4) scratch: dmem = undefined;
+    reg($ra) return_address: u32 = undefined;
     exact {
-        asm("geometryTriangleClip:");
-        asm("sh $ra, %lo(clipping_return_address)($zero)");
-        asm("jal geometry_RDPQ_Triangle_Send_End");
-        asm("sh $s4, 0x92($zero)");
-        asm("j _start");
-        asm("ori $s4, $zero, %lo(_start)");
+        export geometryTriangleClip:
+        store(u16, clipping_return_address, return_address);
+        geometry_RDPQ_Triangle_Send_End() slot {
+            store(u16, 0x92, scratch);
+        }
+        jump _start() slot {
+            scratch = code.addressOfUnsigned(_start);
+        }
     }
 }
 
 @rspq.command(10) extern fn syncTriangles() @rspq.commandSize(4) writes() noreturn;
 @rspq.command(12) extern fn drawTriangleSequence() @rspq.commandSize(8) writes() noreturn;
 
-@rspq.command(11) fn drawTriangleStrip(reg($a0) rdram: u32, reg($a1) count_and_dmem: u32) noreturn {
+@rspq.command(11) fn drawTriangleStrip(reg($a0) rdram: u32, reg($a1) count_and_dmem: i32) noreturn {
+    reg($ra) dma_busy: u32;
+    reg($t0) copy_size: i32;
+    reg($s4) dmem_pointer: i32;
+    reg($s2) dmem_end: i32;
+    reg($v0) face_culling_flag: u32;
+    reserved reg($v1) vertex_address: u32;
+    reg($a2) vertex2: u32 = undefined;
+    wait_for_previous_dma:
     exact {
-        asm(".word 0x401f3000");
-        asm(".word 0x30a8ffff");
-        asm(".word 0x0005a403");
-        asm(".word 0x17e0fffc");
-        asm(".word 0x02889021");
-        asm("geometry_LABEL_T3DCmd_TriDraw_Strip_0015:");
-        asm(".word 0x40940000");
-        asm(".word 0x40840800");
-        asm(".word 0x40881000");
-        asm("geometry_T3DCmd_TriDraw_Strip_PostDMA:");
-        asm(".word 0x2652fffd");
-        asm(".word 0x2694fffe");
-        asm("geometry_LABEL_T3DCmd_TriDraw_Strip_0016:");
-        asm(".word 0x40033000");
-        asm(".word 0x1460fffe");
-        asm(".word 0x00000000");
-        asm("geometry_STRIP_LOOP_NEW:");
-        asm(".word 0x900203f8");
-        asm(".word 0x26940002");
-        asm("geometry_STRIP_LOOP_NEXT:");
-        asm(".word 0x12920008");
-        asm(".word 0x38420001");
-        asm(".word 0x86850004");
-        asm(".word 0x96840002");
-        asm(".word 0x96860000");
-        asm(".word 0x04a0fff8");
-        asm(".word 0x26940002");
-        asm("j geometry_RDPQ_Triangle_Send_Async");
-        asm("ori $ra, $zero, %lo(geometry_STRIP_LOOP_NEXT)");
-        asm("geometry_STRIP_LOOP_END:");
-        asm("bgez $s2, commandLoop");
-        asm("ori $ra, $zero, %lo(commandLoop)");
-        asm("syncTriangles:");
-        asm(".word 0x90170400");
-        asm("beq $s7, $zero, geometry_RDPQ_Triangle_Send_End");
-        asm("ori $s4, $zero, %lo(_start)");
-        asm(".word 0x940803fe");
-        asm(".word 0x00005025");
-        asm(".word 0x8c100404");
-        asm("jal exec");
-        asm(".word 0x2508ffff");
-        asm(".word 0xa0000400");
-        asm("j geometry_RDPQ_Triangle_Send_End");
-        asm("ori $ra, $zero, %lo(commandLoop)");
-        asm("drawTriangleSequence:");
-        asm(".word 0x00058c02");
-        asm(".word 0x30b4ffff");
-        asm(".word 0x900203f8");
-        asm(".word 0x3092ffff");
-        asm(".word 0x2623006c");
-        asm("geometry_SEQ_LOOP_NEXT:");
-        asm(".word 0x12540006");
-        asm(".word 0x26440048");
-        asm(".word 0x00123025");
-        asm(".word 0x26450024");
-        asm("ori $ra, $zero, %lo(geometry_SEQ_LOOP_NEXT)");
-        asm("j geometry_RDPQ_Triangle_Send_Async");
-        asm(".word 0x02439021");
-        asm("geometry_SEQ_LOOP_END:");
-        asm(".word 0x1220ffe8");
-        asm("ori $ra, $zero, %lo(commandLoop)");
-        asm(".word 0x9792009a");
-        asm(".word 0x38420001");
-        asm(".word 0x26940024");
-        asm(".word 0x26520024");
-        asm("j geometry_SEQ_LOOP_NEXT");
-        asm(".word 0x00008825");
+        dma_busy = rsp.cp0.dmaBusy();
+        copy_size = count_and_dmem & 0xffff;
+        dmem_pointer = count_and_dmem >> 16;
+        if(dma_busy != 0) goto wait_for_previous_dma slot {
+            dmem_end = dmem_pointer +% copy_size;
+        }
+        rsp.cp0.write(0, dmem_pointer);
+        rsp.cp0.setDmaRdramAddress(rdram);
+        rsp.cp0.startDmaRead(copy_size);
+        dmem_end -%= 3;
+        dmem_pointer -%= 2;
+        do {
+            vertex_address = rsp.cp0.dmaBusy();
+        } while(vertex_address != 0);
+    strip_new:
+        face_culling_flag = load(u8, face_culling);
+        dmem_pointer +%= 2;
+    strip_next:
+        if(dmem_pointer == dmem_end) goto strip_end slot {
+            face_culling_flag ^= 1;
+        }
+        count_and_dmem = load(i16, bitCast(dmem_pointer), 4);
+        rdram = load(u16, bitCast(dmem_pointer), 2);
+        vertex2 = load(u16, bitCast(dmem_pointer));
+        if(count_and_dmem < 0) goto strip_new slot {
+            dmem_pointer +%= 2;
+        }
+        jump geometry_RDPQ_Triangle_Send_Async() slot {
+            dma_busy = code.addressOfUnsigned(strip_next);
+        }
+    strip_end:
+        if(dmem_end >= 0) jump queue.commandLoop() slot {
+            dma_busy = code.addressOfUnsigned(commandLoop);
+        }
+    }
+}
+
+fn syncTrianglesImpl() noreturn {
+    reg($s7) clip_loaded: u32;
+    reg($s4) target: dmem = undefined;
+    reg($t0) code_size: i32;
+    reg($t1) pitch: u32 = undefined;
+    reg($t2) dma_flags: u32 = undefined;
+    reg($s0) code_address: u32;
+    reg($ra) return_address: fn() = undefined;
+    exact {
+        export syncTriangles:
+        clip_loaded = load(u8, clipping_code_address);
+        if(clip_loaded == 0) jump geometry_RDPQ_Triangle_Send_End() slot {
+            target = code.addressOfUnsigned(_start);
+        }
+        code_size = load(u16, clipping_code_size);
+        dma_flags = scalar.zero();
+        code_address = load(u32, original_code_address);
+        dma.exec(code_size, pitch, code_address, target, dma_flags) slot {
+            code_size -%= 1;
+        }
+        store(u8, clipping_code_address, 0);
+        jump geometry_RDPQ_Triangle_Send_End() slot {
+            return_address = code.addressOfUnsigned(commandLoop);
+        }
+    }
+}
+
+fn drawTriangleSequenceImpl(
+    reg($a0) size_and_index: u32,
+    reg($a1) end_index: u32,
+) noreturn {
+    reg($s1) is_quad: u32;
+    reg($s4) base_vertex_end: u32;
+    reg($s2) base_vertex: u32;
+    reg($v0) face_culling_flag: u32;
+    reserved reg($v1) vertex_increment: u32;
+    reg($a2) vertex2: u32 = undefined;
+    reg($gp) command_end: dmem = undefined;
+    reg($ra) return_address: fn() = undefined;
+    exact {
+        export drawTriangleSequence:
+        is_quad = end_index >> 16;
+        base_vertex_end = end_index & 0xffff;
+        face_culling_flag = load(u8, face_culling);
+        base_vertex = size_and_index & 0xffff;
+        vertex_increment = is_quad +% 108;
+    sequence_next:
+        if(base_vertex == base_vertex_end) goto sequence_end slot {
+            size_and_index = base_vertex +% 72;
+        }
+        vertex2 = bitCast(base_vertex);
+        end_index = base_vertex +% 36;
+        return_address = code.addressOfUnsigned(sequence_next);
+        jump geometry_RDPQ_Triangle_Send_Async() slot {
+            base_vertex +%= vertex_increment;
+        }
+    sequence_end:
+        if(is_quad == 0) jump syncTriangles() slot {
+            return_address = code.addressOfUnsigned(commandLoop);
+        }
+        base_vertex = load(u16, command_end, 0x9a);
+        face_culling_flag ^= 1;
+        base_vertex_end +%= 36;
+        base_vertex +%= 36;
+        goto sequence_next slot {
+            is_quad = scalar.zero();
+        }
     }
 }
 
@@ -1063,8 +1369,8 @@ fn triangleClip() noreturn {
     reg($s0) rdram: u32 = undefined;
     reg($s4) scratch: dmem = undefined;
     exact {
-        asm("or $s0, $zero, $a0");
-        asm("ori $s4, $zero, 0x80");
+        rdram = bitCast(patch_address);
+        scratch = scalar.unsigned(0x80);
         store(u32, scratch, opcode_0);
         store(u32, scratch, opcode_1, 4);
     }

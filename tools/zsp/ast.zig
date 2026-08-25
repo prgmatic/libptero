@@ -59,12 +59,22 @@ pub const Value = union(enum) {
     scalar_comparison: ScalarComparison,
     signed_less_than: struct { lhs: ValueRef, rhs: ValueRef },
     number: i64,
+    scalar_materialize: struct {
+        value: i64,
+        encoding: enum { unsigned, zero },
+    },
     load: Load,
     scalar_expression: *ScalarExpression,
+    bit_cast: ValueRef,
     function_address: FunctionRef,
+    code_address: struct {
+        label: []const u8,
+        unsigned: bool = false,
+    },
     data_address: struct {
         label: []const u8,
         offset: i64 = 0,
+        unsigned: bool = false,
     },
 };
 
@@ -107,6 +117,8 @@ pub const VectorOp = enum(u6) {
     veq = 0b100001,
     vne = 0b100010,
     vge = 0b100011,
+    vch = 0b100101,
+    vcl = 0b100100,
     vmrg = 0b100111,
     vrcp = 0b110000,
     vrcpl = 0b110001,
@@ -137,6 +149,7 @@ pub const Load = struct {
 
 pub const ValueRef = union(enum) {
     ident: []const u8,
+    bit_cast: []const u8,
     vector_access: VectorAccess,
     number: i64,
 };
@@ -205,6 +218,8 @@ pub const VectorMemoryOperation = enum {
     store128,
     load_packed_signed,
     load_packed_unsigned,
+    store_packed_signed,
+    store_packed_unsigned,
 };
 
 pub const HardwareWriteOperation = union(enum) {
@@ -327,6 +342,10 @@ pub const Builtin = union(enum) {
         delay_slot: ?[]Statement,
         typed: bool = false,
     },
+    indirect_call: struct {
+        address: ValueRef,
+        delay_slot: ?[]Statement,
+    },
     return_from_function: ?[]Statement,
     direct_goto: struct {
         target: FunctionRef,
@@ -442,6 +461,7 @@ pub const Statement = union(enum) {
     call: Call,
     builtin: Builtin,
     label: []const u8,
+    exported_label: []const u8,
     goto: struct {
         target: []const u8,
         encoding: DirectGotoEncoding = .jump,
@@ -531,6 +551,7 @@ fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
                     if (tail.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
                 },
                 .jump => |jump| if (jump.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
+                .indirect_call => |call| if (call.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
                 .direct_goto => |branch| {
                     if (branch.arguments.len != 0) allocator.free(branch.arguments);
                     if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);

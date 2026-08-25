@@ -159,7 +159,9 @@ fn fetchCommandBufferWithPointer(
     reg masked_status: u32;
     reg dp_status: u32;
     reg wait_mask: u32;
-    reg saved_return: u32;
+    // The triangle overlay relies on this command preserving $t4-$t6. The
+    // resident ABI uses $sp as its secondary return-address register.
+    reg($sp) saved_return: u32;
     reg($ra) return_address: u32 = undefined;
     store(u32, rdp_sentinel, sentinel);
     if(sentinel == 0) tail dma.returnToCaller() slot {

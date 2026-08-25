@@ -453,6 +453,12 @@ pub const Parser = struct {
             return .{ .ordered_block = try self.parseBlockStatements() };
         }
 
+        if (std.mem.eql(u8, first.text, "export")) {
+            const label = try self.expect(.ident);
+            _ = try self.expect(.colon);
+            return .{ .exported_label = label.text };
+        }
+
         if (std.mem.eql(u8, first.text, "tail")) {
             const target_first = try self.expect(.ident);
             var target = ast.FunctionRef{ .name = target_first.text };
@@ -491,6 +497,16 @@ pub const Parser = struct {
                 .address = address,
                 .delay_slot = try self.parseOptionalDelaySlot(),
                 .typed = false,
+            } } };
+        }
+
+        if (std.mem.eql(u8, first.text, "call")) {
+            _ = try self.expect(.l_paren);
+            const address = try self.parseValueRef();
+            _ = try self.expect(.r_paren);
+            return .{ .builtin = .{ .indirect_call = .{
+                .address = address,
+                .delay_slot = try self.parseOptionalDelaySlot(),
             } } };
         }
 
@@ -1289,6 +1305,22 @@ pub const Parser = struct {
         }
         var value_lookahead = self.lexer;
         const value_next = try value_lookahead.next();
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "scalar") and value_next.tag == .dot) {
+            _ = try self.expect(.ident);
+            _ = try self.expect(.dot);
+            const operation = try self.expect(.ident);
+            _ = try self.expect(.l_paren);
+            if (std.mem.eql(u8, operation.text, "unsigned")) {
+                const value = try self.parseNumberValue(try self.expect(.number));
+                _ = try self.expect(.r_paren);
+                return .{ .scalar_materialize = .{ .value = value, .encoding = .unsigned } };
+            }
+            if (std.mem.eql(u8, operation.text, "zero")) {
+                _ = try self.expect(.r_paren);
+                return .{ .scalar_materialize = .{ .value = 0, .encoding = .zero } };
+            }
+            return self.fail(operation, .unsupported_builtin);
+        }
         if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "rsp") and value_next.tag == .dot) {
             _ = try self.expect(.ident);
             _ = try self.expect(.dot);
@@ -1323,13 +1355,27 @@ pub const Parser = struct {
             _ = try self.expect(.ident);
             _ = try self.expect(.dot);
             const operation = try self.expect(.ident);
-            if (!std.mem.eql(u8, operation.text, "addressOf")) return self.fail(operation, .unsupported_builtin);
+            const unsigned = std.mem.eql(u8, operation.text, "addressOfUnsigned");
+            if (!unsigned and !std.mem.eql(u8, operation.text, "addressOf"))
+                return self.fail(operation, .unsupported_builtin);
             _ = try self.expect(.l_paren);
             const label = try self.expect(.ident);
             var offset: i64 = 0;
             if (try self.eat(.comma)) offset = try self.parseNumberValue(try self.expect(.number));
             _ = try self.expect(.r_paren);
-            return .{ .data_address = .{ .label = label.text, .offset = offset } };
+            return .{ .data_address = .{ .label = label.text, .offset = offset, .unsigned = unsigned } };
+        }
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "code") and value_next.tag == .dot) {
+            _ = try self.expect(.ident);
+            _ = try self.expect(.dot);
+            const operation = try self.expect(.ident);
+            const unsigned = std.mem.eql(u8, operation.text, "addressOfUnsigned");
+            if (!unsigned and !std.mem.eql(u8, operation.text, "addressOf"))
+                return self.fail(operation, .unsupported_builtin);
+            _ = try self.expect(.l_paren);
+            const label = try self.expect(.ident);
+            _ = try self.expect(.r_paren);
+            return .{ .code_address = .{ .label = label.text, .unsigned = unsigned } };
         }
         if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "signedLessThan")) {
             _ = try self.expect(.ident);
@@ -1339,6 +1385,13 @@ pub const Parser = struct {
             const rhs = try self.parseValueRef();
             _ = try self.expect(.r_paren);
             return .{ .signed_less_than = .{ .lhs = lhs, .rhs = rhs } };
+        }
+        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "bitCast")) {
+            _ = try self.expect(.ident);
+            _ = try self.expect(.l_paren);
+            const source = try self.parseValueRef();
+            _ = try self.expect(.r_paren);
+            return .{ .bit_cast = source };
         }
 
         if (self.current.tag == .ident and
@@ -1477,6 +1530,7 @@ pub const Parser = struct {
         const value_ref = try self.parseValueRef();
         return switch (value_ref) {
             .ident => |name| .{ .ident = name },
+            .bit_cast => |name| .{ .bit_cast = .{ .ident = name } },
             .vector_access => |access| .{ .vector_access = access },
             .number => |number| .{ .number = number },
         };
@@ -1521,6 +1575,12 @@ pub const Parser = struct {
         switch (self.current.tag) {
             .ident => {
                 const tok = try self.expect(.ident);
+                if (std.mem.eql(u8, tok.text, "bitCast") and self.current.tag == .l_paren) {
+                    _ = try self.expect(.l_paren);
+                    const source = try self.expect(.ident);
+                    _ = try self.expect(.r_paren);
+                    return .{ .bit_cast = source.text };
+                }
                 if (self.current.tag == .dot) {
                     var lookahead = self.lexer;
                     const member_token = try lookahead.next();
@@ -1607,7 +1667,7 @@ pub const Parser = struct {
         const tok = self.current;
         return switch (try self.parseValueRef()) {
             .number => |number| number,
-            .ident, .vector_access => self.fail(tok, .expected_literal_offset),
+            .ident, .bit_cast, .vector_access => self.fail(tok, .expected_literal_offset),
         };
     }
 
@@ -1802,6 +1862,7 @@ pub const Parser = struct {
 fn valueFromRef(value_ref: ast.ValueRef) ast.Value {
     return switch (value_ref) {
         .ident => |name| .{ .ident = name },
+        .bit_cast => |name| .{ .bit_cast = .{ .ident = name } },
         .vector_access => |access| .{ .vector_access = access },
         .number => |number| .{ .number = number },
     };
@@ -1992,6 +2053,8 @@ fn parseVectorOp(text: []const u8) ?ast.VectorOp {
         .{ "vectorCompareEqual", ast.VectorOp.veq },
         .{ "vectorCompareNotEqual", ast.VectorOp.vne },
         .{ "vectorCompareGreaterOrEqual", ast.VectorOp.vge },
+        .{ "vectorClipHigh", ast.VectorOp.vch },
+        .{ "vectorClipLow", ast.VectorOp.vcl },
         .{ "vectorSelectByCompareCode", ast.VectorOp.vmrg },
         .{ "vectorReciprocal", ast.VectorOp.vrcp },
         .{ "vectorReciprocalLow", ast.VectorOp.vrcpl },
@@ -2046,6 +2109,8 @@ fn vectorMemoryOperationForBuiltin(name: []const u8) ?ast.VectorMemoryOperation 
         .{ "store128", ast.VectorMemoryOperation.store128 },
         .{ "loadPackedSigned", ast.VectorMemoryOperation.load_packed_signed },
         .{ "loadPackedUnsigned", ast.VectorMemoryOperation.load_packed_unsigned },
+        .{ "storePackedSigned", ast.VectorMemoryOperation.store_packed_signed },
+        .{ "storePackedUnsigned", ast.VectorMemoryOperation.store_packed_unsigned },
     };
     inline for (names) |entry| if (std.mem.eql(u8, name, entry[0])) return entry[1];
     return null;
@@ -2053,7 +2118,7 @@ fn vectorMemoryOperationForBuiltin(name: []const u8) ?ast.VectorMemoryOperation 
 
 fn vectorMemoryOperationHasLane(operation: ast.VectorMemoryOperation) bool {
     return switch (operation) {
-        .load16, .store16, .load32, .store32, .load64, .store64 => true,
+        .load16, .store16, .load32, .store32, .load64, .store64, .store_packed_signed, .store_packed_unsigned => true,
         .load128, .store128, .load_packed_signed, .load_packed_unsigned => false,
     };
 }
@@ -2090,6 +2155,7 @@ fn cp0NamedWriteRegister(name: []const u8) ?u4 {
 fn vectorAccessFromRef(value: ast.ValueRef) !?ast.VectorAccess {
     return switch (value) {
         .ident => |name| .{ .name = name },
+        .bit_cast => null,
         .vector_access => |access| access,
         .number => null,
     };

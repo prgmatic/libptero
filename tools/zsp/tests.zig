@@ -660,6 +660,25 @@ test "scalar label loads and stores fold literal offsets into the instruction" {
     );
 }
 
+test "scalar memory operations use zero-based absolute DMEM offsets" {
+    try expectAsm(
+        \\fn test(reg($t0) value: u32) noreturn {
+        \\  store(u16, 0x92, value);
+        \\  value = load(u16, 0x94);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  sh $t0, 146($zero)
+        \\  lhu $t0, 148($zero)
+        \\
+        \\
+    );
+}
+
 test "initialized data arrays require every element" {
     try expectParseError(
         \\data {
@@ -1342,6 +1361,8 @@ test "explicit vector memory builtins emit each transfer width" {
         \\  rsp.vector.store128(value, ptr, 16);
         \\  rsp.vector.loadPackedSigned(value, ptr, 8);
         \\  rsp.vector.loadPackedUnsigned(value, ptr, 8);
+        \\  rsp.vector.storePackedSigned(value, 0, ptr, 8);
+        \\  rsp.vector.storePackedUnsigned(value, 4, ptr, 8);
         \\  rsp.halt();
         \\}
     ,
@@ -1361,6 +1382,8 @@ test "explicit vector memory builtins emit each transfer width" {
         \\  .word 0xe9012001 # sqv $v01, 16($t0)
         \\  .word 0xc9013001 # lpv $v01, 8($t0)
         \\  .word 0xc9013801 # luv $v01, 8($t0)
+        \\  .word 0xe9013001 # spv $v01[0], 8($t0)
+        \\  .word 0xe9013a01 # suv $v01[4], 8($t0)
         \\  break
         \\
         \\
@@ -1454,6 +1477,8 @@ test "explicit vector operation names preserve RSP encodings" {
         \\  result = vectorCompareEqual(left, right);
         \\  result = vectorCompareNotEqual(left, right);
         \\  result = vectorCompareGreaterOrEqual(left, right);
+        \\  result = vectorClipHigh(left, right);
+        \\  result = vectorClipLow(left, right);
         \\  result = vectorSelectByCompareCode(left, right);
         \\  rsp.halt();
         \\}
@@ -1471,6 +1496,8 @@ test "explicit vector operation names preserve RSP encodings" {
         \\  .word 0x4a0208e1 # veq $v03, $v01, $v02
         \\  .word 0x4a0208e2 # vne $v03, $v01, $v02
         \\  .word 0x4a0208e3 # vge $v03, $v01, $v02
+        \\  .word 0x4a0208e5 # vch $v03, $v01, $v02
+        \\  .word 0x4a0208e4 # vcl $v03, $v01, $v02
         \\  .word 0x4a0208e7 # vmrg $v03, $v01, $v02
         \\  break
         \\
@@ -2580,6 +2607,28 @@ test "typed function pointers validate addresses and support indirect jumps" {
     );
 }
 
+test "scalar code addresses support indirect calls with a delay slot" {
+    try expectAsm(
+        \\fn dispatch(reg($t9) handler: u32, reg($t0) value: u32) noreturn {
+        \\  call(handler) slot {
+        \\    value = 7;
+        \\  }
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\dispatch:
+        \\  jal $t9
+        \\  addiu $t0, $zero, 7
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "typed function pointer assignments reject incompatible structural signatures" {
     try expectAsmError(
         \\fn target(reg($t0) value: u32) noreturn { rsp.halt(); }
@@ -2819,11 +2868,154 @@ test "function address initialization materializes a typed function label" {
     );
 }
 
+test "code addresses materialize local continuations with selectable signedness" {
+    try expectAsm(
+        \\fn dispatch(reg($t0) handler: u32) noreturn {
+        \\  reg($ra) continuation: fn() = code.addressOfUnsigned(done);
+        \\  jump(handler);
+        \\done:
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\dispatch:
+        \\  ori $ra, $zero, %lo(LABEL_dispatch_done_0)
+        \\  jr $t0
+        \\  nop
+        \\LABEL_dispatch_done_0:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "functions may expose interior entry labels" {
+    try expectAsm(
+        \\fn dispatch() noreturn {
+        \\  export sharedEntry:
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\dispatch:
+        \\.globl sharedEntry
+        \\sharedEntry:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "conditional gotos may branch to exported labels with register comparisons" {
+    try expectAsm(
+        \\fn target() noreturn {
+        \\  export sharedEntry:
+        \\  rsp.halt();
+        \\}
+        \\fn dispatch(reg($t0) actual: u32, reg($t1) expected: u32) noreturn {
+        \\  if(actual != expected) goto sharedEntry slot {
+        \\    actual = 7;
+        \\  }
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\target:
+        \\.globl sharedEntry
+        \\sharedEntry:
+        \\  break
+        \\
+        \\dispatch:
+        \\  bne $t0, $t1, sharedEntry
+        \\  addiu $t0, $zero, 7
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "conditional gotos use public names for same-function exported labels" {
+    try expectAsm(
+        \\fn dispatch(reg($t0) condition: u32) noreturn {
+        \\  if(condition != 0) goto sharedEntry;
+        \\  rsp.halt();
+        \\  export sharedEntry:
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\dispatch:
+        \\  bne $t0, $zero, sharedEntry
+        \\  nop
+        \\  break
+        \\.globl sharedEntry
+        \\sharedEntry:
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "bitCast reinterprets scalar register values without conversion" {
+    try expectAsm(
+        \\fn test(reg($s5) signed: i32) noreturn {
+        \\  reg($a1) address: u32 = bitCast(signed);
+        \\  reg($a0) same_bits: dmem = bitCast(address);
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  or $a1, $zero, $s5
+        \\  or $a0, $zero, $a1
+        \\  break
+        \\
+        \\
+    );
+}
+
+test "scalar materialization preserves unsigned and zero-register encodings" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) size: u32 = scalar.unsigned(63);
+        \\  reg($t1) flags: u32 = scalar.zero();
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  ori $t0, $zero, 63
+        \\  or $t1, $zero, $zero
+        \\  break
+        \\
+        \\
+    );
+}
+
 test "dmem address values materialize a data label with an offset" {
     try expectAsm(
         \\bss { cached: [2]u32; }
         \\fn send() noreturn {
         \\  reg($s3) end: dmem = dmem.addressOf(cached, 8);
+        \\  reg($s4) unsigned_end: dmem = dmem.addressOfUnsigned(cached, 8);
         \\  rsp.halt();
         \\}
     ,
@@ -2839,6 +3031,7 @@ test "dmem address values materialize a data label with an offset" {
         \\
         \\send:
         \\  addiu $s3, $zero, %lo(cached + 8)
+        \\  ori $s4, $zero, %lo(cached + 8)
         \\  break
         \\
         \\
