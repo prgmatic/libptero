@@ -131,6 +131,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: Geometry triangle submission", .run = geometryTriangleSubmission },
     .{ .name = "ZSP: Geometry clipped triangle", .run = geometryClippedTriangle },
     .{ .name = "ZSP: Geometry patch DMA", .run = geometryPatchDma },
+    .{ .name = "ZSP: Geometry context initialization", .run = geometryContextInitialization },
 };
 
 fn geometryLightingApi() !void {
@@ -157,6 +158,26 @@ fn geometryLightingApi() !void {
     try expectDmemWord(u32, 0x38c, 0x81000000);
     try expectDmemWord(u16, 0x3fa, 0x1000);
     rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
+}
+
+fn geometryContextInitialization() !void {
+    geometry_api_context = undefined;
+    geometry_api_context.init();
+
+    const vertex_handler = blk: {
+        for (0..geometry_api_context.geometry_overlay.program.commandCount()) |metadata_index| {
+            const command = geometry_api_context.geometry_overlay.program.commandAt(metadata_index);
+            if (command.index == 4) break :blk command.handler_offset;
+        }
+        return error.MissingGeometryVertexCommand;
+    };
+    try testing.expectEqual(
+        vertex_handler + 0x2bc,
+        rsp.io.readDmem(u16, 0x3fc).*,
+    );
+
+    rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
+    rsp.unregisterOverlay(&geometry_api_context.rdp_overlay);
 }
 
 fn arithmetic() !void {
@@ -1824,6 +1845,9 @@ fn geometryVertexTransform() !void {
     };
     @memset(&geometry_vertex_input, 0);
     @memset(geometry_vertex_input[16..24], 0xff);
+    geometry_vertex_input[33] = 7;
+    geometry_vertex_input[41] = 13;
+    @memset(geometry_vertex_input[48..56], 0xff);
     n64.cache.writebackData(&geometry_vertex_input);
 
     const vertex_address: u32 = @truncate(@intFromPtr(&geometry_vertex_input) & 0x00ffffff);
@@ -1839,9 +1863,12 @@ fn geometryVertexTransform() !void {
     std.mem.writeInt(u32, state[0x1c0..0x1c4], 0x01000000, .big);
     std.mem.writeInt(u16, state[0x1cc..0x1ce], vertex_handler + 0x2bc, .big);
     rsp.writebackOverlayState(&geometry_overlay);
+    for (0..4 * 36 / 4) |index| {
+        rsp.io.readDmem(u32, 0x408 + @as(u32, @intCast(index * 4))).* = 0xdeadbeef;
+    }
 
     continuous_queue.init(.low);
-    continuous_queue.writeOverlayCommand(&geometry_overlay, 4, 32, &.{ vertex_address, 0x0f100408 });
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 4, 64, &.{ vertex_address, 0x0f000408 });
     rsp.flush(&continuous_queue);
     if (!rsp.waitTimeout(&continuous_queue, 100)) {
         n64.debug.print("\n      Geometry vertex timeout: pc={x:0>3} status={x:0>8}\n", .{
@@ -1857,6 +1884,24 @@ fn geometryVertexTransform() !void {
     try testing.expectEqual(@as(u8, 0xff), rsp.io.readDmem(u8, 0x433).*);
     try testing.expect(rsp.io.readDmem(u32, 0x410).* != 0);
     try testing.expect(rsp.io.readDmem(u32, 0x434).* != 0);
+
+    var batch_output: [4 * 36 / 4]u32 = undefined;
+    for (&batch_output, 0..) |*word, index| {
+        word.* = rsp.io.readDmem(u32, 0x408 + @as(u32, @intCast(index * 4))).*;
+    }
+
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 4, 32, &.{ vertex_address, 0x0f200408 });
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 4, 32, &.{ vertex_address + 32, 0x0f200450 });
+    rsp.flush(&continuous_queue);
+    if (!rsp.waitTimeout(&continuous_queue, 200)) return error.RspSignalTimeout;
+
+    for (batch_output, 0..) |expected, index| {
+        try testing.expectEqual(
+            expected,
+            rsp.io.readDmem(u32, 0x408 + @as(u32, @intCast(index * 4))).*,
+        );
+    }
     rsp.unregisterOverlay(&geometry_overlay);
 }
 

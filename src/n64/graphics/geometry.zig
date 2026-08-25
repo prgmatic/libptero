@@ -103,8 +103,15 @@ pub const Context = struct {
         cache.writebackData(&self.matrix_stack);
         var state = rsp.overlayState(&self.geometry_overlay);
         std.mem.writeInt(u32, state[matrix_stack_pointer_offset..][0..4], physical(&self.matrix_stack), .big);
-        const vertex_command = self.geometry_overlay.program.commandAt(4);
-        std.mem.writeInt(u16, state[vertex_effect_function_offset..][0..2], vertex_command.handler_offset + 0x2bc, .big);
+        const vertex_handler = blk: {
+            for (0..self.geometry_overlay.program.commandCount()) |metadata_index| {
+                const command = self.geometry_overlay.program.commandAt(metadata_index);
+                if (command.index == 4) break :blk command.handler_offset;
+            }
+            @panic("geometry vertex command is missing");
+        };
+        const vertex_effect_none = vertex_handler + 0x2bc;
+        std.mem.writeInt(u16, state[vertex_effect_function_offset..][0..2], vertex_effect_none, .big);
         rsp.writebackOverlayState(&self.geometry_overlay);
 
         // Enter the main overlay once while its lazy-code pointer is zero.
@@ -127,6 +134,7 @@ pub const Context = struct {
         rsp.io.readDmem(u16, state_start + clipping_code_size_offset).* = clipping_size;
         rsp.io.readDmem(u32, state_start + clipping_code_address_offset).* = clipping_address;
         rsp.io.readDmem(u32, state_start + original_code_address_offset).* = original_address;
+        rsp.io.readDmem(u16, state_start + vertex_effect_function_offset).* = vertex_effect_none;
     }
 
     pub fn attachViewport(self: *Context, viewport: *Viewport) void {
