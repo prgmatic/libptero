@@ -6,6 +6,7 @@ const zsp_programs = @import("zsp_test_programs");
 
 const rsp = n64.rsp;
 const rdp = n64.graphics.rdp;
+const geometry = n64.graphics.geometry;
 const rsp_timeout_attempts: u32 = 1_000_000;
 
 var dma_in_batch align(8) = [_]u32{
@@ -66,6 +67,7 @@ var geometry_matrix_stack: [32]u32 align(16) = undefined;
 var geometry_patch_target: [2]u32 align(8) = undefined;
 var geometry_vertex_input: [64]u8 align(16) = undefined;
 var geometry_triangle_output: [32]u64 align(16) = undefined;
+var geometry_api_context: geometry.Context = undefined;
 
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
@@ -122,6 +124,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: command dispatcher invalid command", .run = commandDispatcherInvalid },
     .{ .name = "ZSP: Geometry projection DMA", .run = geometryProjectionDma },
     .{ .name = "ZSP: Geometry state commands", .run = geometryStateCommands },
+    .{ .name = "ZSP: Geometry lighting API", .run = geometryLightingApi },
     .{ .name = "ZSP: Geometry matrix overlay", .run = geometryMatrixOverlay },
     .{ .name = "ZSP: Geometry clipping swap", .run = geometryClippingSwap },
     .{ .name = "ZSP: Geometry vertex transform", .run = geometryVertexTransform },
@@ -129,6 +132,32 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: Geometry clipped triangle", .run = geometryClippedTriangle },
     .{ .name = "ZSP: Geometry patch DMA", .run = geometryPatchDma },
 };
+
+fn geometryLightingApi() !void {
+    loadCommandDispatcher();
+    geometry_api_context.geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_api_context.geometry_overlay));
+    geometry_api_context.queue.init(.low);
+
+    geometry_api_context.view_matrix = n64.math.Mat4.lookAt(
+        .init(10, 0, 0),
+        .zero,
+        .init(0, 1, 0),
+    );
+    geometry_api_context.setAmbientLight(.fromBytes(0x11, 0x22, 0x33, 0x44));
+    geometry_api_context.setDirectionalLight(.fromBytes(0x55, 0x66, 0x77, 0x88), .init(0, 0, 1));
+    rsp.flush(&geometry_api_context.queue);
+    try waitQueueTimeout(&geometry_api_context.queue);
+
+    try expectDmemWord(u32, 0x378, 0x11223344);
+    try expectDmemWord(u32, 0x37c, 0x11223344);
+    try expectDmemWord(u32, 0x380, 0x55667788);
+    try expectDmemWord(u32, 0x384, 0x55667788);
+    try expectDmemWord(u32, 0x388, 0x81000000);
+    try expectDmemWord(u32, 0x38c, 0x81000000);
+    try expectDmemWord(u16, 0x3fa, 0x1000);
+    rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
+}
 
 fn arithmetic() !void {
     try run(zsp_programs.arithmetic);
@@ -1528,7 +1557,6 @@ fn nativeOverlayTexturedTriangle() !void {
     try testing.expectEqual(@as(u32, 0xee5baec0), overlay_checksum);
     try testing.expectEqual(n64.graphics.color.Rgba16.green, native_triangle_overlay_target[8 * 16 + 8]);
 
-    rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
     @memset(&native_triangle_overlay_target, black);
     n64.cache.writebackData(&native_triangle_overlay_target);
     var next_overlay_render = rdp.OverlayRenderQueue.init(rdp.OverlayQueue.init(
@@ -1563,7 +1591,6 @@ fn nativeOverlayTexturedTriangle() !void {
     try testing.expectEqual(@as(usize, 63), overlay_changed);
     try testing.expectEqual(@as(u32, 0xee5baec0), overlay_checksum);
 
-    rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
     rsp.releaseRdpToDirect();
     rsp.unregisterOverlay(&rdp_overlay);
 }
@@ -1903,6 +1930,7 @@ fn geometryTriangleSubmission() !void {
     rsp.io.readDmem(u32, 0x1d0).* = output_address;
     rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
     rsp.writeDmemByte(rsp.rdp_publication_held_dmem, 1);
+    rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 1);
 
     continuous_queue.init(.low);
     continuous_queue.writeOverlayCommand(&geometry_overlay, 0, 0x408, &.{0x042c0450});
@@ -1956,6 +1984,7 @@ fn geometryClippedTriangle() !void {
     rsp.io.readDmem(u32, 0x1d0).* = output_address;
     rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
     rsp.writeDmemByte(rsp.rdp_publication_held_dmem, 1);
+    rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 1);
 
     continuous_queue.init(.low);
     continuous_queue.writeOverlayCommand(&geometry_overlay, 0, 0x408, &.{0x042c0450});

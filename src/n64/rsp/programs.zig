@@ -6,3 +6,8 @@ pub const command_dispatcher = UCode.fromBlob(&command_dispatcher_rsp);
 
 pub const rdp_overlay_rsp align(8) = assets.rdp_overlay;
 pub const rdp_overlay = UCode.fromBlob(&rdp_overlay_rsp);
+
+pub const geometry_overlay_rsp align(8) = assets.geometry_overlay;
+pub const geometry_overlay = UCode.fromBlob(&geometry_overlay_rsp);
+pub const geometry_clipping_rsp align(8) = assets.geometry_clipping;
+pub const geometry_clipping = UCode.fromBlob(&geometry_clipping_rsp);

@@ -1,5 +1,6 @@
 const mi = @import("interfaces/mips.zig");
 const vi = @import("interfaces/video.zig");
+const rsp_io = @import("rsp/io.zig");
 const print = @import("debug.zig").print;
 
 var lock: u8 = 0;
@@ -55,6 +56,12 @@ fn pollRdpInterrupt() void {
 
 fn serviceRdpInterrupt() void {
     mi.clearRdpInterrupt();
+    // The RDP overlay raises signal 1 before emitting SYNC_FULL. Acknowledge
+    // it after servicing the DP interrupt so the resident queue can schedule
+    // the following full sync, matching libdragon's RDPQ interrupt handler.
+    if (rsp_io.status_register_read.signal1) {
+        rsp_io.status_register_write.* = rsp_io.status_clear_signal1;
+    }
     const scheduled = @atomicLoad(u32, &rdp_fences_scheduled, .acquire);
     const completed = @atomicLoad(u32, &rdp_fences_completed, .acquire);
     if (scheduled != completed) {

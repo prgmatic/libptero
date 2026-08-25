@@ -356,7 +356,7 @@ fn normalizeMatrixVector(
         asm(".word 0xca6b0e0a");
         asm(".word 0x4b3fbd85");
         asm(".word 0x1520006c");
-        asm(".word 0x900801e1");
+        asm(".word 0x900801dd");
         asm("geometry_rdpq_triangle_dma_idle:");
         asm(".word 0x4b3fbdc6");
         asm(".word 0x000b5902");
@@ -474,7 +474,7 @@ fn normalizeMatrixVector(
         asm("geometry_RDPQ_Triangle_Send_End:");
         asm(".word 0x40013000");
         asm(".word 0xa4000344");
-        asm(".word 0x900801e1");
+        asm(".word 0x900801dd");
         asm(".word 0x1420fffc");
         asm(".word 0x8c0901d0");
         asm(".word 0x1500fed9");

@@ -163,6 +163,18 @@ pub const Sdk = struct {
             self.root.path(self.b, "src/n64/rsp/ucode/rdp_overlay.zsp"),
             resident,
         );
+        assets.addZspOverlayWithStateStart(
+            "geometry_overlay",
+            self.root.path(self.b, "src/n64/rsp/ucode/geometry_overlay.zsp"),
+            resident,
+            0x0230,
+        );
+        assets.addZspOverlayWithStateStart(
+            "geometry_clipping",
+            self.root.path(self.b, "src/n64/rsp/ucode/geometry_clipping.zsp"),
+            resident,
+            0x0230,
+        );
         self.n64_module.addImport("libptero_rsp_assets", assets.createModule());
     }
 };

@@ -145,9 +145,8 @@ pub const Queue = struct {
         self.writeDmem(rdp_buffers_dmem + @sizeOf(u32), second_address);
         // Match the resident state above before the queued SET_BUFFER command
         // attempts to terminate this initial empty dynamic buffer.
-        // Abort any prior direct-DP stream, then select RDRAM DMA and release
-        // freeze/flush before seeding the resident queue's empty buffer.
-        rdp_io.status_write.* = (1 << 5) | (1 << 3);
+        // Match libdragon's rspq initialization: select RDRAM DMA and clear
+        // stale freeze/flush state before installing the initial empty range.
         rdp_io.status_write.* = 0x15;
         var reset_wait: u16 = 500;
         while (reset_wait != 0 and

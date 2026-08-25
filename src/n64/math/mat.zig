@@ -38,6 +38,17 @@ pub const Mat4 = extern struct {
         result.m[3][2] = -2.0 * far * near / (far - near);
         return result;
     }
+    pub fn lookAt(eye: Vec3, target: Vec3, up: Vec3) Mat4 {
+        const forward = target.sub(eye).normalized();
+        const side = forward.cross(up).normalized();
+        const actual_up = side.cross(forward);
+        return .{ .m = .{
+            .{ side.x, actual_up.x, -forward.x, 0 },
+            .{ side.y, actual_up.y, -forward.y, 0 },
+            .{ side.z, actual_up.z, -forward.z, 0 },
+            .{ -side.dot(eye), -actual_up.dot(eye), forward.dot(eye), 1 },
+        } };
+    }
     pub fn mul(a: *const Mat4, b: *const Mat4) Mat4 {
         var result: Mat4 = undefined;
         for (0..4) |column| for (0..4) |row| {
@@ -52,6 +63,13 @@ pub const Mat4 = extern struct {
             self.m[0][1] * point.x + self.m[1][1] * point.y + self.m[2][1] * point.z + self.m[3][1],
             self.m[0][2] * point.x + self.m[1][2] * point.y + self.m[2][2] * point.z + self.m[3][2],
             self.m[0][3] * point.x + self.m[1][3] * point.y + self.m[2][3] * point.z + self.m[3][3],
+        );
+    }
+    pub fn transformDirection(self: *const Mat4, direction: Vec3) Vec3 {
+        return .init(
+            self.m[0][0] * direction.x + self.m[1][0] * direction.y + self.m[2][0] * direction.z,
+            self.m[0][1] * direction.x + self.m[1][1] * direction.y + self.m[2][1] * direction.z,
+            self.m[0][2] * direction.x + self.m[1][2] * direction.y + self.m[2][2] * direction.z,
         );
     }
     pub fn toFixed(self: *const Mat4) FixedMat4 {

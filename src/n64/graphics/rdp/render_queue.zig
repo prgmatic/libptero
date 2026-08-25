@@ -66,7 +66,11 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.cmd_queue.fullSync();
         }
 
-        fn flushModes(rq: *Self) void {
+        pub fn flushModes(rq: *Self) void {
+            rq.flushPendingModes();
+        }
+
+        fn flushPendingModes(rq: *Self) void {
             if (!rq.mode_dirty and !rq.combine_dirty) return;
             rq.cmd_queue.pipeSync();
             if (rq.mode_dirty) {
@@ -209,17 +213,17 @@ pub fn RenderQueue(comptime QueueType: type) type {
             const tile = rq.ensureTexture(image);
 
             if (opts.rotation == 0.0) {
-                rq.flushModes();
+                rq.flushPendingModes();
                 texture.drawNonRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, src_width, src_height, flip_x, flip_y, scale_x, scale_y, cx, cy);
             } else {
-                rq.flushModes();
+                rq.flushPendingModes();
                 tri.drawRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, src_width, src_height, flip_x, flip_y, opts.rotation, scale_x, scale_y, cx, cy);
             }
         }
 
         pub fn drawTexturedTriangle(rq: *Self, image: anytype, v1: TexVertex, v2: TexVertex, v3: TexVertex) void {
             const tile = rq.ensureTexture(image);
-            rq.flushModes();
+            rq.flushPendingModes();
             tri.emitTexturedTriangle(&rq.cmd_queue, tile, v1, v2, v3);
         }
     };

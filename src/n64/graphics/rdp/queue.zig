@@ -165,6 +165,14 @@ pub const OverlayQueue = struct {
         if (self.packet_len != 0) @panic("cannot clear an incomplete RDP command packet");
     }
 
+    pub fn rotateBuffers(self: *OverlayQueue) void {
+        self.ensureConfigured();
+        // Rotate at the frame boundary, while the previous full-sync fence is
+        // complete. This keeps native geometry from hitting its fragile
+        // mid-primitive dynamic-buffer rollover path.
+        self.rsp_queue.setRdpBuffer(0, 0, 0);
+    }
+
     // Submit compact vertices to the overlay's native triangle generator.
     // This follows libdragon's RDPQ_CMD_TRIANGLE_DATA / RDPQ_CMD_TRIANGLE ABI
     // instead of asking the CPU to construct and then repack a 96-byte TRI_TEX
@@ -428,6 +436,11 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.push((@as(u64, 0xEE) << 56) | (@as(u64, z) << 16) | @as(u64, dz));
         }
 
+        // 0xFE
+        pub fn setDepthImage(cq: *Self, image: anytype) void {
+            cq.queue.push((@as(u64, 0xFE) << 56) | lowBits(@intFromPtr(image.texel_data.ptr), 24));
+        }
+
         // 0xED
         pub fn setScissor(cq: *Self, upper_left_x: u16, upper_left_y: u16, lower_right_x: u16, lower_right_y: u16) void {
             const cmd: u64 =
@@ -592,6 +605,10 @@ fn packetWordCount(opcode: u8) usize {
 }
 
 fn overlayCommandIndex(opcode: u8) u8 {
+    // SET_SCISSOR must update the resident scissor shadow. SET_OTHER_MODES
+    // (slot 47 / opcode EF) re-emits that shadow, so routing ED through its
+    // raw slot would append an all-zero, invalid RDP command afterward.
+    if (opcode == 0xed) return 18;
     // Raw RDP packets use the direct command slots. The overlay's lower-numbered
     // stateful helpers have different argument ABIs and are only for callers
     // that deliberately construct those higher-level commands.
@@ -599,7 +616,7 @@ fn overlayCommandIndex(opcode: u8) u8 {
 }
 
 test "overlay routes raw opcodes to direct command slots" {
-    try std.testing.expectEqual(@as(u8, 45), overlayCommandIndex(0xed));
+    try std.testing.expectEqual(@as(u8, 18), overlayCommandIndex(0xed));
     try std.testing.expectEqual(@as(u8, 55), overlayCommandIndex(0xf7));
     try std.testing.expectEqual(@as(u8, 63), overlayCommandIndex(0xff));
     try std.testing.expectEqual(@as(u8, 39), overlayCommandIndex(0xe7));
