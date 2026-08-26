@@ -128,7 +128,7 @@ pub const OverlayQueue = struct {
         };
     }
 
-    pub fn push(self: *OverlayQueue, value: u64) void {
+    pub inline fn push(self: *OverlayQueue, value: u64) void {
         self.ensureConfigured();
         if (self.packet_len == 0) {
             const opcode: u8 = @truncate(value >> 56);
@@ -275,7 +275,7 @@ pub const OverlayQueue = struct {
         rsp.writebackOverlayState(self.overlay);
     }
 
-    fn ensureConfigured(self: *OverlayQueue) void {
+    inline fn ensureConfigured(self: *OverlayQueue) void {
         if (!self.configured) {
             self.configureOverlayState();
             self.rsp_queue.configureRdpBuffers(self.dynamic_buffers[0], self.dynamic_buffers[1]);
