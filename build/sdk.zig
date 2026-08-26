@@ -37,6 +37,7 @@ pub const MetadataOptions = rom_build.MetadataOptions;
 pub const AssetBundle = assets_build.AssetBundle;
 pub const TextureFormat = assets_build.TextureFormat;
 pub const TextureOptions = assets_build.TextureOptions;
+pub const FontOptions = assets_build.FontOptions;
 
 pub const HandlerOverrides = struct {
     entry: []const u8 = "main",

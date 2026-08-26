@@ -55,6 +55,8 @@ var overlay_rdp_render_target: [4 * 4]n64.graphics.color.Rgba32 align(64) = unde
 var overlay_rdp_render_target_16: [4 * 4]n64.graphics.color.Rgba16 align(64) = undefined;
 var native_triangle_overlay_target: [16 * 16]n64.graphics.color.Rgba16 align(64) = undefined;
 var native_triangle_texture: [4 * 4]n64.graphics.color.Rgba32 align(16) = undefined;
+var font_render_target: [8 * 8]n64.graphics.color.Rgba16 align(64) = undefined;
+var font_atlas_texels: [1]n64.graphics.color.Rgba16 align(8) = .{.white};
 var queue_dma_source: [4]u32 align(8) = .{ 0x12345678, 0x89abcdef, 0x0badcafe, 0xfeedface };
 var queue_dma_destination: [4]u32 align(8) = undefined;
 var overlay_1: rsp.Overlay = undefined;
@@ -98,6 +100,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "RDP: RSP-submitted raw queue", .run = rspBackedRdpQueue },
     .{ .name = "RDP: completion fence", .run = rdpCompletionFence },
     .{ .name = "RDP: native overlay textured triangle", .run = nativeOverlayTexturedTriangle },
+    .{ .name = "RDP: RSP text renderer", .run = rspTextRenderer },
     .{ .name = "RDP: overlay-backed renderer", .run = overlayBackedRdpRenderer },
     .{ .name = "ZSP: RDP buffer commands", .run = rdpBufferCommands },
     .{ .name = "ZSP: RDP triangle sort and normal", .run = rdpTriangleSortAndNormal },
@@ -133,6 +136,57 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: Geometry patch DMA", .run = geometryPatchDma },
     .{ .name = "ZSP: Geometry context initialization", .run = geometryContextInitialization },
 };
+
+fn rspTextRenderer() !void {
+    loadCommandDispatcher();
+    rsp.releaseRdpToDirect();
+    rdp_overlay.init(rsp.programs.rdp_overlay);
+    rsp.registerOverlayStatic(&rdp_overlay, 12);
+    rdp_queue.init(.low);
+    @memset(&font_render_target, .black);
+    n64.cache.writebackData(&font_render_target);
+    n64.cache.writebackData(&font_atlas_texels);
+
+    const target = n64.graphics.image.ImgRgba16{ .width = 8, .height = 8, .texel_data = font_render_target[0..] };
+    const atlas = n64.graphics.image.ImgRgba16{ .width = 1, .height = 1, .texel_data = font_atlas_texels[0..] };
+    const test_font: n64.graphics.font.Font = .{
+        .point_size = 2,
+        .ascent = 1,
+        .descent = -1,
+        .line_height = 2,
+        .ranges = &.{.{ .first_codepoint = 'A', .glyph_count = 2, .first_glyph = 0 }},
+        .glyphs = &.{
+            .{ .x_advance = 2, .x_offset = 0, .y_offset = -1, .width = 1, .height = 1, .s = 0, .t = 0, .atlas = 0 },
+            .{ .x_advance = 2, .x_offset = 0, .y_offset = -1, .width = 1, .height = 1, .s = 0, .t = 0, .atlas = 0 },
+        },
+        .atlases = &.{atlas},
+        .kernings = &.{.{ .first = 0, .second = 1, .amount = -1 }},
+    };
+    var render = rdp.OverlayRenderQueue.init(rdp.OverlayQueue.init(
+        &rdp_queue,
+        &rdp_overlay,
+        .{ rsp_rdp_dynamic_buffers[0][0..], rsp_rdp_dynamic_buffers[1][0..] },
+    ));
+    render.setFrameBuffer(target);
+    render.clearScreen(n64.graphics.color.Rgba16.black);
+    const metrics = try test_font.draw(&render, 2, 4, "AB", .{ .color = .green });
+    try testing.expectEqual(@as(f32, 3), metrics.width);
+    const fence = rdp.syncFull(&render);
+    try waitQueueTimeout(&rdp_queue);
+    if (!fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
+
+    n64.cache.invalidateData(&font_render_target);
+    var changed: usize = 0;
+    for (font_render_target) |pixel| if (!std.meta.eql(pixel, n64.graphics.color.Rgba16.black)) {
+        changed += 1;
+        try testing.expectEqual(n64.graphics.color.Rgba16.green, pixel);
+    };
+    try testing.expectEqual(@as(usize, 2), changed);
+    try testing.expectEqual(n64.graphics.color.Rgba16.green, font_render_target[3 * 8 + 2]);
+    try testing.expectEqual(n64.graphics.color.Rgba16.green, font_render_target[3 * 8 + 3]);
+    rsp.releaseRdpToDirect();
+    rsp.unregisterOverlay(&rdp_overlay);
+}
 
 fn geometryLightingApi() !void {
     loadCommandDispatcher();

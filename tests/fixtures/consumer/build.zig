@@ -14,6 +14,7 @@ pub fn build(b: *std.Build) void {
     assets.embedFile("raw_data", b.path("assets/raw.bin"));
     const generated = b.addWriteFiles().add("generated.bin", "generated asset");
     assets.embedGeneratedFile("generated_data", generated);
+    assets.addFont("fixture_font", b.path("assets/font.fnt"), .{});
     _ = assets.addZspProgram("custom_rsp", b.path("assets/custom.zsp"));
     const rom = if (no_assets)
         sdk.addRom(.{

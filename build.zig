@@ -25,9 +25,12 @@ pub fn build(b: *std.Build) void {
     // and tests should not become part of the consumer's build graph.
     if (b.pkg_hash.len != 0) return;
 
+    const coverage = b.option(bool, "coverage", "Enable zcov instrumentation") orelse false;
+    const coverage_runtime = b.option([]const u8, "coverage-rt", "Path to zcov runtime object");
     var sdk = init(b, .{ .root = b.path("") });
+    b.installArtifact(sdk.tools.font_compiler);
 
-    tests_build.addToolTests(b);
+    tests_build.addToolTests(b, coverage, coverage_runtime);
     tests_build.addConsumerFixtureTests(b);
     const zsp_test_programs = tests_build.addZspPrograms(b, &sdk);
 

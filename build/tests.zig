@@ -15,21 +15,61 @@ pub fn addConsumerFixtureTests(b: *std.Build) void {
     b.step("test-consumer-minimal", "Build the consumer fixture without asset pipelines").dependOn(&minimal.step);
 }
 
-pub fn addToolTests(b: *std.Build) void {
+pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8) void {
     const test_step = b.step("test", "Run host tool tests");
     const png = b.createModule(.{
         .root_source_file = b.path("tools/imgparse/png.zig"),
         .target = b.graph.host,
     });
+    const texture_compiler_module = b.createModule(.{
+        .root_source_file = b.path("tools/texture_compiler/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "png", .module = png }},
+    });
     const texture_compiler_tests = b.addTest(.{
         .name = "texture-compiler-tests",
-        .root_module = b.createModule(.{
+        .root_module = texture_compiler_module,
+    });
+    instrumentTests(texture_compiler_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(texture_compiler_tests).step);
+    const font_texture_compiler_module = b.createModule(.{
+        .root_source_file = b.path("tools/texture_compiler/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "png", .module = png }},
+    });
+    const font_compiler_module = b.createModule(.{
+        .root_source_file = b.path("tools/font_compiler/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "texture_compiler", .module = font_texture_compiler_module }},
+    });
+    const font_compiler_root_test_module = b.createModule(.{
+        .root_source_file = b.path("tools/font_compiler/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "texture_compiler", .module = b.createModule(.{
             .root_source_file = b.path("tools/texture_compiler/root.zig"),
             .target = b.graph.host,
             .imports = &.{.{ .name = "png", .module = png }},
+        }) }},
+    });
+    const font_compiler_root_tests = b.addTest(.{
+        .name = "font-compiler-root-tests",
+        .root_module = font_compiler_root_test_module,
+    });
+    instrumentTests(font_compiler_root_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(font_compiler_root_tests).step);
+    const font_compiler_tests = b.addTest(.{
+        .name = "font-compiler-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/font_compiler/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{
+                .{ .name = "font_compiler", .module = font_compiler_module },
+                .{ .name = "png", .module = png },
+            },
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(texture_compiler_tests).step);
+    instrumentTests(font_compiler_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(font_compiler_tests).step);
     inline for (.{
         .{ "zsp-tests", "tools/zsp/tests.zig" },
         .{ "ucode-tests", "src/n64/rsp/ucode_tests.zig" },
@@ -38,6 +78,7 @@ pub fn addToolTests(b: *std.Build) void {
         .{ "rsp-pack-tests", "tools/build/rsp_pack.zig" },
         .{ "test-protocol-tests", "tools/test_protocol.zig" },
         .{ "math-tests", "src/n64/math_tests.zig" },
+        .{ "font-tests", "src/n64/graphics/font.zig" },
     }) |test_config| {
         const test_artifact = b.addTest(.{
             .name = test_config[0],
@@ -46,8 +87,18 @@ pub fn addToolTests(b: *std.Build) void {
                 .target = b.graph.host,
             }),
         });
+        instrumentTests(test_artifact, coverage, coverage_runtime);
         test_step.dependOn(&b.addRunArtifact(test_artifact).step);
     }
+}
+
+fn instrumentTests(tests: *std.Build.Step.Compile, enabled: bool, runtime_path: ?[]const u8) void {
+    if (!enabled) return;
+    tests.root_module.link_libc = true;
+    tests.use_llvm = true;
+    tests.sanitize_coverage_trace_pc_guard = true;
+    tests.forceUndefinedSymbol("__sanitizer_cov_trace_pc_guard_init");
+    if (runtime_path) |path| tests.root_module.addObjectFile(.{ .cwd_relative = path });
 }
 
 pub fn addZspPrograms(b: *std.Build, sdk: *Sdk) *std.Build.Module {

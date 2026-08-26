@@ -9,6 +9,7 @@ pub const Tools = struct {
     console_font_conv: *std.Build.Step.Compile,
     zsp: *std.Build.Step.Compile,
     texture_compiler: *std.Build.Step.Compile,
+    font_compiler: *std.Build.Step.Compile,
 };
 
 pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
@@ -25,6 +26,11 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
         .target = b.graph.host,
         .imports = &.{.{ .name = "png", .module = png }},
     });
+    const font_compiler = b.createModule(.{
+        .root_source_file = root.path(b, "tools/font_compiler/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "texture_compiler", .module = texture_compiler }},
+    });
     return .{
         .srcmap = addTool(b, root, "srcmap", "tools/n64srcmap/main.zig", &.{
             .{ .name = "srcmap_format", .module = srcmap_format },
@@ -37,6 +43,10 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
         .zsp = addTool(b, root, "zsp", "tools/zsp/zsp.zig", &.{}),
         .texture_compiler = addTool(b, root, "texture-compiler", "tools/texture_compiler/main.zig", &.{
             .{ .name = "texture_compiler", .module = texture_compiler },
+        }),
+        .font_compiler = addTool(b, root, "font-compiler", "tools/font_compiler/main.zig", &.{
+            .{ .name = "font_compiler", .module = font_compiler },
+            .{ .name = "png", .module = png },
         }),
     };
 }

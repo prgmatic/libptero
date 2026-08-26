@@ -13,6 +13,12 @@ const TextureEntry = struct {
     texels: std.Build.LazyPath,
 };
 
+const FontEntry = struct {
+    name: []const u8,
+    source: std.Build.LazyPath,
+    texels: std.Build.LazyPath,
+};
+
 pub const TextureFormat = enum {
     rgba16,
     rgba32,
@@ -26,6 +32,12 @@ pub const TextureFormat = enum {
 
 pub const TextureOptions = struct {
     format: TextureFormat = .rgba16,
+};
+
+pub const FontOptions = struct {
+    kerning: bool = true,
+    ellipsis_codepoint: u32 = '.',
+    ellipsis_repetitions: u16 = 3,
 };
 
 pub const Resident = struct {
@@ -64,6 +76,27 @@ pub const AssetBundle = struct {
         convert.addArg(name);
         convert.addArg(@tagName(options.format));
         self.asset_module.addTextureEntry(name, generated_source, texels);
+    }
+
+    /// Convert a text BMFont and its PNG pages into a typed native Font asset.
+    pub fn addFont(
+        self: *AssetBundle,
+        name: []const u8,
+        source: std.Build.LazyPath,
+        options: FontOptions,
+    ) void {
+        self.asset_module.validateName(name);
+        const compile = self.b.addRunArtifact(self.tools.font_compiler);
+        compile.addFileArg(source);
+        const texels = compile.addOutputFileArg(self.b.fmt("{s}.font.texels", .{name}));
+        const generated_source = compile.addOutputFileArg(self.b.fmt("{s}.font.zig", .{name}));
+        compile.addArg(name);
+        if (!options.kerning) compile.addArg("--no-kerning");
+        if (options.ellipsis_repetitions != 3 or options.ellipsis_codepoint != '.') {
+            compile.addArg("--ellipsis");
+            compile.addArg(self.b.fmt("{X},{d}", .{ options.ellipsis_codepoint, options.ellipsis_repetitions }));
+        }
+        self.asset_module.addFontEntry(name, generated_source, texels);
     }
 
     pub fn buildZspProgram(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
@@ -118,6 +151,7 @@ pub const AssetModule = struct {
     name: []const u8,
     entries: std.ArrayList(Entry) = .empty,
     textures: std.ArrayList(TextureEntry) = .empty,
+    fonts: std.ArrayList(FontEntry) = .empty,
     finalized: bool = false,
     module: ?*std.Build.Module = null,
 
@@ -147,6 +181,12 @@ pub const AssetModule = struct {
                 .{ entry.name, entry.name, entry.name },
             )) catch @panic("OOM");
         }
+        for (self.fonts.items) |entry| {
+            source.appendSlice(self.b.allocator, self.b.fmt(
+                "pub const {s} = @import(\"font_{s}\").{s};\n",
+                .{ entry.name, entry.name, entry.name },
+            )) catch @panic("OOM");
+        }
         const root_source = self.b.addWriteFiles().add(self.b.fmt("{s}.zig", .{self.name}), source.items);
         const module = self.b.createModule(.{ .root_source_file = root_source, .target = self.target });
         for (self.entries.items) |entry| {
@@ -160,6 +200,15 @@ pub const AssetModule = struct {
             });
             texture_module.addAnonymousImport("texture_data", .{ .root_source_file = entry.texels });
             module.addImport(self.b.fmt("texture_{s}", .{entry.name}), texture_module);
+        }
+        for (self.fonts.items) |entry| {
+            const font_module = self.b.createModule(.{
+                .root_source_file = entry.source,
+                .target = self.target,
+                .imports = &.{.{ .name = "n64", .module = self.n64_module }},
+            });
+            font_module.addAnonymousImport("font_texels", .{ .root_source_file = entry.texels });
+            module.addImport(self.b.fmt("font_{s}", .{entry.name}), font_module);
         }
         self.module = module;
         return module;
@@ -178,12 +227,18 @@ pub const AssetModule = struct {
         }) catch @panic("OOM");
     }
 
+    fn addFontEntry(self: *AssetModule, name: []const u8, source: std.Build.LazyPath, texels: std.Build.LazyPath) void {
+        self.fonts.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = source, .texels = texels }) catch @panic("OOM");
+    }
+
     fn validateName(self: *AssetModule, name: []const u8) void {
         if (self.finalized) std.debug.panic("cannot add '{s}' after asset bundle '{s}' was finalized", .{ name, self.name });
         if (!std.zig.isValidId(name)) std.debug.panic("asset name '{s}' is not a valid Zig identifier", .{name});
         for (self.entries.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
         for (self.textures.items) |entry|
+            if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
+        for (self.fonts.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
     }
 };
