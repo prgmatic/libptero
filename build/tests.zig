@@ -17,6 +17,23 @@ pub fn addConsumerFixtureTests(b: *std.Build) void {
 
 pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8) void {
     const test_step = b.step("test", "Run host tool tests");
+    const gltf_compiler_tests = b.addTest(.{
+        .name = "gltf-compiler-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gltf_compiler/root.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "texture_compiler", .module = b.createModule(.{
+                .root_source_file = b.path("tools/texture_compiler/root.zig"),
+                .target = b.graph.host,
+                .imports = &.{.{ .name = "png", .module = b.createModule(.{
+                    .root_source_file = b.path("tools/imgparse/png.zig"),
+                    .target = b.graph.host,
+                }) }},
+            }) }},
+        }),
+    });
+    instrumentTests(gltf_compiler_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(gltf_compiler_tests).step);
     const png = b.createModule(.{
         .root_source_file = b.path("tools/imgparse/png.zig"),
         .target = b.graph.host,
@@ -79,6 +96,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
         .{ "test-protocol-tests", "tools/test_protocol.zig" },
         .{ "math-tests", "src/n64/math_tests.zig" },
         .{ "font-tests", "src/n64/graphics/font.zig" },
+        .{ "model-tests", "src/n64/n64.zig" },
     }) |test_config| {
         const test_artifact = b.addTest(.{
             .name = test_config[0],

@@ -28,6 +28,23 @@ pub const Mat4 = extern struct {
             .{ translation.x, translation.y, translation.z, 1 },
         } };
     }
+
+    /// Build the same Euler SRT matrix as Tiny3D's
+    /// `t3d_mat4_from_srt_euler` for angles `(x, y, z)`.
+    pub fn fromSrtEuler(scale: Vec3, rotation: Vec3, translation: Vec3) Mat4 {
+        const cx = @cos(rotation.x);
+        const cy = @cos(rotation.y);
+        const cz = @cos(rotation.z);
+        const sx = @sin(rotation.x);
+        const sy = @sin(rotation.y);
+        const sz = @sin(rotation.z);
+        return .{ .m = .{
+            .{ scale.x * cz * cy, scale.x * (cz * sy * sx - sz * cx), scale.x * (cz * sy * cx + sz * sx), 0 },
+            .{ scale.y * sz * cy, scale.y * (sz * sy * sx + cz * cx), scale.y * (sz * sy * cx - cz * sx), 0 },
+            .{ -scale.z * sy, scale.z * cy * sx, scale.z * cy * cx, 0 },
+            .{ translation.x, translation.y, translation.z, 1 },
+        } };
+    }
     pub fn perspective(fov: f32, aspect: f32, near: f32, far: f32) Mat4 {
         const tan_half = @tan(fov * 0.5);
         var result: Mat4 = .{ .m = @splat(@splat(0)) };

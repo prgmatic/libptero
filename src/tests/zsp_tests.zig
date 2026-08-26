@@ -70,6 +70,7 @@ var geometry_patch_target: [2]u32 align(8) = undefined;
 var geometry_vertex_input: [64]u8 align(16) = undefined;
 var geometry_triangle_output: [32]u64 align(16) = undefined;
 var geometry_api_context: geometry.Context = undefined;
+var geometry_strip_indices: [4]i16 align(8) = .{ 0x0408, 0x042c, 0x4450, 0 };
 
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
@@ -135,6 +136,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: Geometry clipped triangle", .run = geometryClippedTriangle },
     .{ .name = "ZSP: Geometry patch DMA", .run = geometryPatchDma },
     .{ .name = "ZSP: Geometry context initialization", .run = geometryContextInitialization },
+    .{ .name = "ZSP: Geometry encoded triangle strip", .run = geometryTriangleStrip },
 };
 
 fn rspTextRenderer() !void {
@@ -2034,6 +2036,46 @@ fn geometryTriangleSubmission() !void {
     continuous_queue.init(.low);
     continuous_queue.writeOverlayCommand(&geometry_overlay, 0, 0x408, &.{0x042c0450});
     continuous_queue.writeOverlayCommand(&geometry_overlay, 10, 0, &.{});
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+
+    n64.cache.invalidateData(&geometry_triangle_output);
+    try testing.expect(geometry_triangle_output[0] != std.math.maxInt(u64));
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryTriangleStrip() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    var state = rsp.overlayState(&geometry_overlay);
+    std.mem.writeInt(u32, state[0x1c0..][0..4], 0x01000000, .big);
+    state[0x1c8] = 2;
+    const vertex_offsets = [_]usize{ 0x1d8, 0x1fc, 0x220 };
+    const screen_xy = [_]u32{ 0x000a001e, 0x0014000a, 0x001e0014 };
+    for (vertex_offsets, screen_xy) |offset, xy| {
+        @memset(state[offset..][0..36], 0);
+        std.mem.writeInt(u32, state[offset..][0..4], xy, .big);
+        std.mem.writeInt(u32, state[offset + 8 ..][0..4], 0x11223344, .big);
+        std.mem.writeInt(u32, state[offset + 16 ..][0..4], 0x00010000, .big);
+        std.mem.writeInt(u32, state[offset + 20 ..][0..4], 0x00010000, .big);
+    }
+    rsp.writebackOverlayState(&geometry_overlay);
+
+    @memset(&geometry_triangle_output, 0xff);
+    n64.cache.writebackData(&geometry_triangle_output);
+    n64.cache.writebackData(&geometry_strip_indices);
+    const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
+    rsp.io.readDmem(u32, 0x1d0).* = output_address;
+    rsp.io.readDmem(u32, 0x1d4).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
+    rsp.writeDmemByte(rsp.rdp_publication_held_dmem, 1);
+    rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 1);
+
+    const index_address: u32 = @truncate(@intFromPtr(&geometry_strip_indices) & 0x00ffffff);
+    const dmem_address: u32 = (0x8000 | ((0x0dd0 - 6) & ~@as(u32, 7))) << 16;
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 11, index_address, &.{dmem_address | 5});
     rsp.flush(&continuous_queue);
     try waitQueueTimeout(&continuous_queue);
 

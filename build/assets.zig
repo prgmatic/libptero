@@ -19,6 +19,12 @@ const FontEntry = struct {
     texels: std.Build.LazyPath,
 };
 
+const ModelEntry = struct {
+    name: []const u8,
+    source: std.Build.LazyPath,
+    data: std.Build.LazyPath,
+};
+
 pub const TextureFormat = enum {
     rgba16,
     rgba32,
@@ -38,6 +44,10 @@ pub const FontOptions = struct {
     kerning: bool = true,
     ellipsis_codepoint: u32 = '.',
     ellipsis_repetitions: u16 = 3,
+};
+
+pub const ModelOptions = struct {
+    scale: f32 = 64,
 };
 
 pub const Resident = struct {
@@ -99,6 +109,18 @@ pub const AssetBundle = struct {
         self.asset_module.addFontEntry(name, generated_source, texels);
     }
 
+    /// Convert a binary glTF into packed RSP vertex batches and expose a typed native Model.
+    pub fn addModel(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath, options: ModelOptions) void {
+        self.asset_module.validateName(name);
+        const convert = self.b.addRunArtifact(self.tools.gltf_compiler);
+        convert.addFileArg(source);
+        const data = convert.addOutputFileArg(self.b.fmt("{s}.model.bin", .{name}));
+        const generated_source = convert.addOutputFileArg(self.b.fmt("{s}.model.zig", .{name}));
+        convert.addArg(name);
+        convert.addArg(self.b.fmt("{d}", .{options.scale}));
+        self.asset_module.addModelEntry(name, generated_source, data);
+    }
+
     pub fn buildZspProgram(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
         return buildZsp(self, name, source, self.root.path(self.b, "src/n64/rsp/link.ld"), null).rsp;
     }
@@ -152,6 +174,7 @@ pub const AssetModule = struct {
     entries: std.ArrayList(Entry) = .empty,
     textures: std.ArrayList(TextureEntry) = .empty,
     fonts: std.ArrayList(FontEntry) = .empty,
+    models: std.ArrayList(ModelEntry) = .empty,
     finalized: bool = false,
     module: ?*std.Build.Module = null,
 
@@ -187,6 +210,12 @@ pub const AssetModule = struct {
                 .{ entry.name, entry.name, entry.name },
             )) catch @panic("OOM");
         }
+        for (self.models.items) |entry| {
+            source.appendSlice(self.b.allocator, self.b.fmt(
+                "pub const {s} = @import(\"model_{s}\").{s};\n",
+                .{ entry.name, entry.name, entry.name },
+            )) catch @panic("OOM");
+        }
         const root_source = self.b.addWriteFiles().add(self.b.fmt("{s}.zig", .{self.name}), source.items);
         const module = self.b.createModule(.{ .root_source_file = root_source, .target = self.target });
         for (self.entries.items) |entry| {
@@ -210,6 +239,15 @@ pub const AssetModule = struct {
             font_module.addAnonymousImport("font_texels", .{ .root_source_file = entry.texels });
             module.addImport(self.b.fmt("font_{s}", .{entry.name}), font_module);
         }
+        for (self.models.items) |entry| {
+            const model_module = self.b.createModule(.{
+                .root_source_file = entry.source,
+                .target = self.target,
+                .imports = &.{.{ .name = "n64", .module = self.n64_module }},
+            });
+            model_module.addAnonymousImport("model_data", .{ .root_source_file = entry.data });
+            module.addImport(self.b.fmt("model_{s}", .{entry.name}), model_module);
+        }
         self.module = module;
         return module;
     }
@@ -231,6 +269,10 @@ pub const AssetModule = struct {
         self.fonts.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = source, .texels = texels }) catch @panic("OOM");
     }
 
+    fn addModelEntry(self: *AssetModule, name: []const u8, source: std.Build.LazyPath, data: std.Build.LazyPath) void {
+        self.models.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = source, .data = data }) catch @panic("OOM");
+    }
+
     fn validateName(self: *AssetModule, name: []const u8) void {
         if (self.finalized) std.debug.panic("cannot add '{s}' after asset bundle '{s}' was finalized", .{ name, self.name });
         if (!std.zig.isValidId(name)) std.debug.panic("asset name '{s}' is not a valid Zig identifier", .{name});
@@ -239,6 +281,8 @@ pub const AssetModule = struct {
         for (self.textures.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
         for (self.fonts.items) |entry|
+            if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
+        for (self.models.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
     }
 };

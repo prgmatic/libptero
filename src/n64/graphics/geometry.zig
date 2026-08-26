@@ -8,6 +8,7 @@ const Rgba32 = @import("color.zig").Rgba32;
 const state_start = 0x0230;
 const vertex_buffer = state_start + 0x01d8;
 const vertex_output_size = 36;
+const strip_buffer_end = vertex_buffer + 2520;
 const matrix_stack_pointer_offset = 0x01c4;
 const vertex_effect_function_offset = 0x01cc;
 const clipping_code_size_offset = 0x01ce;
@@ -202,8 +203,34 @@ pub const Context = struct {
         const vc = vertex_buffer + @as(u32, c) * vertex_output_size;
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 0, va, &.{vb << 16 | vc});
     }
+    pub fn drawTriangleStrip(self: *Context, indices: []const i16, sync: bool) void {
+        if (indices.len < 3 or indices.len * @sizeOf(i16) > strip_buffer_end - vertex_buffer) @panic("invalid geometry strip");
+        cache.writebackData(indices);
+        const byte_count: u32 = @intCast(indices.len * @sizeOf(i16));
+        var dmem_address = (strip_buffer_end - byte_count) & ~@as(u32, 7);
+        if (sync) dmem_address |= 0x8000;
+        self.queue.writeOverlayCommandKnown(
+            &self.geometry_overlay,
+            11,
+            physical(indices.ptr),
+            &.{dmem_address << 16 | (byte_count - 1)},
+        );
+    }
     pub fn syncTriangles(self: *Context) void {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 10, 0, &.{});
+    }
+    /// Finish one model cache load. Current model parts use an RDP full-sync
+    /// before the next load because the native triangle generator cannot yet
+    /// safely share an in-flight dynamic command stream across vertex reloads.
+    pub fn finishModelPart(self: *Context, intermediate: bool) void {
+        if (!intermediate) return;
+        const fence = rdp.syncFull(&self.render);
+        if (!rsp.waitTimeout(&self.queue, 100_000_000)) @panic("model part RSP queue timed out");
+        if (!fence.waitTimeout(100_000_000)) @panic("model batch RDP fence timed out");
+        self.beginFrame();
+    }
+    pub fn beginModelMaterial(self: *Context) void {
+        self.render.flushModes();
     }
 };
 

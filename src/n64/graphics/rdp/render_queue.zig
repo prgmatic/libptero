@@ -45,7 +45,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
         tex_cache: [8]TexCacheEntry = [_]TexCacheEntry{.{}} ** 8,
         tex_cache_len: usize = 0,
-        tmem_next: u9 = 0, // next free TMEM word offset (8-byte words, max 512)
+        tmem_next: u10 = 0, // next free TMEM word offset (8-byte words, max 512)
         next_tile: u3 = 0, // next render tile; load tile = next_tile +% 1
 
         pub fn init(queue: QueueType) Self {
@@ -108,6 +108,22 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.combine_dirty = true;
         }
 
+        /// Make a texture resident with explicit sampler state and return its render tile.
+        pub fn useTextureSampler(rq: *Self, image: anytype, sampler: texture.Sampler) u3 {
+            return rq.ensureTexture(image, sampler);
+        }
+
+        pub fn setDepthState(rq: *Self, compare: bool, update: bool) void {
+            rq.mode.z_compare_en = compare;
+            rq.mode.z_update_en = update;
+            rq.mode_dirty = true;
+        }
+
+        pub fn setPerspectiveTexture(rq: *Self, enabled: bool) void {
+            rq.mode.persp_tex_en = enabled;
+            rq.mode_dirty = true;
+        }
+
         pub fn setFrameBuffer(rq: *Self, image: anytype) void {
             rq.fb_width = @intCast(image.width);
             rq.fb_height = @intCast(image.height);
@@ -141,16 +157,16 @@ pub fn RenderQueue(comptime QueueType: type) type {
         }
 
         // Explicit texture load into TMEM (bypasses cache).
-        fn loadTexture(rq: *Self, image: anytype, tile: u3, tmem_addr: u9) void {
-            texture.loadTexture(&rq.cmd_queue, image, tile, tmem_addr);
+        fn loadTexture(rq: *Self, image: anytype, tile: u3, tmem_addr: u9, sampler: texture.Sampler) void {
+            texture.loadTexture(&rq.cmd_queue, image, tile, tmem_addr, sampler);
         }
 
         // Returns the render tile for `image`, loading it into TMEM if not cached.
         // Emits a tileSync when a load occurs. TMEM cache is evicted when full.
-        fn ensureTexture(rq: *Self, image: anytype) u3 {
+        fn ensureTexture(rq: *Self, image: anytype, sampler: texture.Sampler) u3 {
             const ptr = @intFromPtr(image.texel_data.ptr);
             for (rq.tex_cache[0..rq.tex_cache_len]) |entry| {
-                if (entry.ptr == ptr) return entry.tile;
+                if (entry.ptr == ptr and entry.sampler.eql(sampler)) return entry.tile;
             }
             // Compute TMEM size: (w * h * bpp) bits rounded up to 64-bit words.
             const T = @TypeOf(image);
@@ -160,18 +176,20 @@ pub fn RenderQueue(comptime QueueType: type) type {
                 .@"16" => 16,
                 .@"32" => 32,
             };
-            const tmem_words: u9 = @truncate((image.width * image.height * bpp + 63) / 64);
+            const required_words = (@as(u32, image.width) * image.height * bpp + 63) / 64;
+            if (required_words > 512) @panic("texture exceeds TMEM capacity");
+            const tmem_words: u10 = @intCast(required_words);
             // Evict entire cache when TMEM is full or all 4 render slots are used.
-            if (rq.tex_cache_len >= 4 or rq.tmem_next + tmem_words > 512) {
+            if (rq.tex_cache_len >= 4 or @as(u32, rq.tmem_next) + required_words > 512) {
                 rq.tex_cache_len = 0;
                 rq.tmem_next = 0;
                 rq.next_tile = 0;
             }
             const tile = rq.next_tile;
-            const tmem_addr = rq.tmem_next;
-            rq.loadTexture(image, tile, tmem_addr);
+            const tmem_addr: u9 = @intCast(rq.tmem_next);
+            rq.loadTexture(image, tile, tmem_addr, sampler);
             rq.cmd_queue.tileSync();
-            rq.tex_cache[rq.tex_cache_len] = .{ .ptr = ptr, .tile = tile, .tmem_addr = tmem_addr };
+            rq.tex_cache[rq.tex_cache_len] = .{ .ptr = ptr, .tile = tile, .tmem_addr = tmem_addr, .sampler = sampler };
             rq.tex_cache_len += 1;
             rq.tmem_next += tmem_words;
             rq.next_tile +%= 2;
@@ -210,7 +228,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
                 .custom => |p| @floatFromInt(p.y),
             };
 
-            const tile = rq.ensureTexture(image);
+            const tile = rq.ensureTexture(image, .{});
 
             if (opts.rotation == 0.0) {
                 rq.flushPendingModes();
@@ -222,7 +240,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
         }
 
         pub fn drawTexturedTriangle(rq: *Self, image: anytype, v1: TexVertex, v2: TexVertex, v3: TexVertex) void {
-            const tile = rq.ensureTexture(image);
+            const tile = rq.ensureTexture(image, .{});
             rq.flushPendingModes();
             tri.emitTexturedTriangle(&rq.cmd_queue, tile, v1, v2, v3);
         }
@@ -233,4 +251,5 @@ const TexCacheEntry = struct {
     ptr: usize = 0,
     tile: u3 = 0,
     tmem_addr: usize = 0,
+    sampler: texture.Sampler = .{},
 };

@@ -10,6 +10,7 @@ pub const Tools = struct {
     zsp: *std.Build.Step.Compile,
     texture_compiler: *std.Build.Step.Compile,
     font_compiler: *std.Build.Step.Compile,
+    gltf_compiler: *std.Build.Step.Compile,
 };
 
 pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
@@ -47,6 +48,13 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
         .font_compiler = addTool(b, root, "font-compiler", "tools/font_compiler/main.zig", &.{
             .{ .name = "font_compiler", .module = font_compiler },
             .{ .name = "png", .module = png },
+        }),
+        .gltf_compiler = addTool(b, root, "gltf-compiler", "tools/gltf_compiler/main.zig", &.{
+            .{ .name = "gltf_compiler", .module = b.createModule(.{
+                .root_source_file = root.path(b, "tools/gltf_compiler/root.zig"),
+                .target = b.graph.host,
+                .imports = &.{.{ .name = "texture_compiler", .module = texture_compiler }},
+            }) },
         }),
     };
 }

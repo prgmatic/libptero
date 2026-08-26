@@ -4,6 +4,10 @@ pub const interfaces = @import("interfaces.zig");
 pub const cpu = @import("cpu.zig");
 pub const cache = @import("cpu/cache.zig");
 pub const graphics = @import("graphics.zig");
+
+test {
+    _ = graphics.model;
+}
 pub const rsp = @import("rsp/rsp.zig");
 pub const interrupt = @import("interrupt.zig");
 pub const math = @import("math.zig");

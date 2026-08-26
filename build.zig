@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
     const coverage_runtime = b.option([]const u8, "coverage-rt", "Path to zcov runtime object");
     var sdk = init(b, .{ .root = b.path("") });
     b.installArtifact(sdk.tools.font_compiler);
+    b.installArtifact(sdk.tools.gltf_compiler);
 
     tests_build.addToolTests(b, coverage, coverage_runtime);
     tests_build.addConsumerFixtureTests(b);
