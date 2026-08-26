@@ -8,12 +8,22 @@ pub const Tools = struct {
     ipl3_cat: *std.Build.Step.Compile,
     console_font_conv: *std.Build.Step.Compile,
     zsp: *std.Build.Step.Compile,
+    texture_compiler: *std.Build.Step.Compile,
 };
 
 pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
     const srcmap_format = b.createModule(.{
         .root_source_file = root.path(b, "src/n64/debug/srcmap_format.zig"),
         .target = b.graph.host,
+    });
+    const png = b.createModule(.{
+        .root_source_file = root.path(b, "tools/imgparse/png.zig"),
+        .target = b.graph.host,
+    });
+    const texture_compiler = b.createModule(.{
+        .root_source_file = root.path(b, "tools/texture_compiler/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "png", .module = png }},
     });
     return .{
         .srcmap = addTool(b, root, "srcmap", "tools/n64srcmap/main.zig", &.{
@@ -25,6 +35,9 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
         .ipl3_cat = addTool(b, root, "ipl3_cat", "tools/build/ipl3_cat.zig", &.{}),
         .console_font_conv = addTool(b, root, "console_font_conv", "tools/console_font_conv.zig", &.{}),
         .zsp = addTool(b, root, "zsp", "tools/zsp/zsp.zig", &.{}),
+        .texture_compiler = addTool(b, root, "texture-compiler", "tools/texture_compiler/main.zig", &.{
+            .{ .name = "texture_compiler", .module = texture_compiler },
+        }),
     };
 }
 

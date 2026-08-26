@@ -7,6 +7,8 @@ const BitDepth = colors.BitDepth;
 pub const ImgRgba32 = Image(colors.Rgba32);
 /// 16-bit RGBA image.
 pub const ImgRgba16 = Image(colors.Rgba16);
+/// 16-bit YUV image.
+pub const ImgYuv16 = Image(colors.Yuv16);
 /// 16-bit intensity+alpha image.
 pub const ImgIa16 = Image(colors.Ia16);
 /// 8-bit intensity+alpha image.
@@ -25,6 +27,7 @@ pub const ImgCi4 = Image(colors.Ci4Pair);
 pub fn Image(comptime PixelFormat: type) type {
     return struct {
         const Self = @This();
+        pub const Pixel = PixelFormat;
 
         width: u16,
         height: u16,

@@ -72,6 +72,14 @@ pub const Rgba16 = packed struct(u16) {
 
 // Intensity Alpha
 
+/// One packed YUV16 texel word. Adjacent texels are encoded in UYVY order.
+pub const Yuv16 = packed struct(u16) {
+    value: u16,
+
+    pub const format: Format = .yuv;
+    pub const bit_depth: BitDepth = .@"16";
+};
+
 /// 16-bit intensity+alpha with 8 bits per channel.
 pub const Ia16 = packed struct(u16) {
     alpha: u8,

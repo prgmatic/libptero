@@ -17,6 +17,19 @@ pub fn addConsumerFixtureTests(b: *std.Build) void {
 
 pub fn addToolTests(b: *std.Build) void {
     const test_step = b.step("test", "Run host tool tests");
+    const png = b.createModule(.{
+        .root_source_file = b.path("tools/imgparse/png.zig"),
+        .target = b.graph.host,
+    });
+    const texture_compiler_tests = b.addTest(.{
+        .name = "texture-compiler-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/texture_compiler/root.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "png", .module = png }},
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(texture_compiler_tests).step);
     inline for (.{
         .{ "zsp-tests", "tools/zsp/tests.zig" },
         .{ "ucode-tests", "src/n64/rsp/ucode_tests.zig" },

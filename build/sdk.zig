@@ -35,6 +35,8 @@ pub const Rdram = rom_build.Rdram;
 pub const BootOptions = rom_build.BootOptions;
 pub const MetadataOptions = rom_build.MetadataOptions;
 pub const AssetBundle = assets_build.AssetBundle;
+pub const TextureFormat = assets_build.TextureFormat;
+pub const TextureOptions = assets_build.TextureOptions;
 
 pub const HandlerOverrides = struct {
     entry: []const u8 = "main",
@@ -77,7 +79,12 @@ pub const Sdk = struct {
             .tools = self.tools,
             .target = self.target,
             .name = name,
-            .asset_module = .{ .b = self.b, .target = self.target, .name = name },
+            .asset_module = .{
+                .b = self.b,
+                .target = self.target,
+                .n64_module = self.n64_module,
+                .name = name,
+            },
         };
     }
 

@@ -7,6 +7,27 @@ const Entry = struct {
     alignment: u29,
 };
 
+const TextureEntry = struct {
+    name: []const u8,
+    source: std.Build.LazyPath,
+    texels: std.Build.LazyPath,
+};
+
+pub const TextureFormat = enum {
+    rgba16,
+    rgba32,
+    yuv16,
+    ia4,
+    ia8,
+    ia16,
+    i4,
+    i8,
+};
+
+pub const TextureOptions = struct {
+    format: TextureFormat = .rgba16,
+};
+
 pub const Resident = struct {
     elf: *std.Build.Step.Compile,
     interface: std.Build.LazyPath,
@@ -26,6 +47,23 @@ pub const AssetBundle = struct {
 
     pub fn embedGeneratedFile(self: *AssetBundle, name: []const u8, path: std.Build.LazyPath) void {
         self.asset_module.embedFile(name, path);
+    }
+
+    /// Convert a PNG into RDP-ready texels and expose it as a typed Image in this asset module.
+    pub fn addTexture(
+        self: *AssetBundle,
+        name: []const u8,
+        source: std.Build.LazyPath,
+        options: TextureOptions,
+    ) void {
+        self.asset_module.validateName(name);
+        const convert = self.b.addRunArtifact(self.tools.texture_compiler);
+        convert.addFileArg(source);
+        const texels = convert.addOutputFileArg(self.b.fmt("{s}.texels", .{name}));
+        const generated_source = convert.addOutputFileArg(self.b.fmt("{s}.zig", .{name}));
+        convert.addArg(name);
+        convert.addArg(@tagName(options.format));
+        self.asset_module.addTextureEntry(name, generated_source, texels);
     }
 
     pub fn buildZspProgram(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
@@ -76,8 +114,10 @@ pub const AssetBundle = struct {
 pub const AssetModule = struct {
     b: *std.Build,
     target: std.Build.ResolvedTarget,
+    n64_module: *std.Build.Module,
     name: []const u8,
     entries: std.ArrayList(Entry) = .empty,
+    textures: std.ArrayList(TextureEntry) = .empty,
     finalized: bool = false,
     module: ?*std.Build.Module = null,
 
@@ -101,22 +141,50 @@ pub const AssetModule = struct {
             );
             source.appendSlice(self.b.allocator, declaration) catch @panic("OOM");
         }
+        for (self.textures.items) |entry| {
+            source.appendSlice(self.b.allocator, self.b.fmt(
+                "pub const {s} = @import(\"texture_{s}\").{s};\n",
+                .{ entry.name, entry.name, entry.name },
+            )) catch @panic("OOM");
+        }
         const root_source = self.b.addWriteFiles().add(self.b.fmt("{s}.zig", .{self.name}), source.items);
         const module = self.b.createModule(.{ .root_source_file = root_source, .target = self.target });
         for (self.entries.items) |entry| {
             module.addAnonymousImport(self.b.fmt("asset_{s}", .{entry.name}), .{ .root_source_file = entry.path });
+        }
+        for (self.textures.items) |entry| {
+            const texture_module = self.b.createModule(.{
+                .root_source_file = entry.source,
+                .target = self.target,
+                .imports = &.{.{ .name = "n64", .module = self.n64_module }},
+            });
+            texture_module.addAnonymousImport("texture_data", .{ .root_source_file = entry.texels });
+            module.addImport(self.b.fmt("texture_{s}", .{entry.name}), texture_module);
         }
         self.module = module;
         return module;
     }
 
     fn addEntry(self: *AssetModule, name: []const u8, path: std.Build.LazyPath, alignment: u29) void {
+        self.validateName(name);
+        self.entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = path, .alignment = alignment }) catch @panic("OOM");
+    }
+
+    fn addTextureEntry(self: *AssetModule, name: []const u8, source: std.Build.LazyPath, texels: std.Build.LazyPath) void {
+        self.textures.append(self.b.allocator, .{
+            .name = self.b.dupe(name),
+            .source = source,
+            .texels = texels,
+        }) catch @panic("OOM");
+    }
+
+    fn validateName(self: *AssetModule, name: []const u8) void {
         if (self.finalized) std.debug.panic("cannot add '{s}' after asset bundle '{s}' was finalized", .{ name, self.name });
         if (!std.zig.isValidId(name)) std.debug.panic("asset name '{s}' is not a valid Zig identifier", .{name});
-        for (self.entries.items) |entry| {
+        for (self.entries.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
-        }
-        self.entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = path, .alignment = alignment }) catch @panic("OOM");
+        for (self.textures.items) |entry|
+            if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
     }
 };
 
