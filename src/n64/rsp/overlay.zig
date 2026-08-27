@@ -30,7 +30,7 @@ pub const Overlay = struct {
         @memcpy(self.state[program.state_offset..][0..program.state_init.len], program.state_init);
     }
 
-    pub fn commandId(self: *const Overlay, command_index: u8) u8 {
+    pub inline fn commandId(self: *const Overlay, command_index: u8) u8 {
         if (self.id == 0) {
             @panic("RSP overlay must be registered before commands are queued");
         }

@@ -235,7 +235,6 @@ inline fn prepareSyncFull(
     reg($a1) word1: u32,
 ) {
     prepareSyncFull(word0, word1);
-    store(u8, rdp_publication_held, 0);
     rdp.write8(word0, word1);
     reg staging: dmem;
     reg staging_end: dmem;

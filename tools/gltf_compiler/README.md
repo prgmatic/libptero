@@ -13,14 +13,20 @@ assets.addModel("scene", b.path("assets/scene.glb"), .{ .scale = 64 });
 The resulting value owns a native `n64.graphics.model.Model` and exposes
 `draw(&geometry_context)`. Mesh primitives are remapped into batches that fit
 the shared RSP vertex/index workspace, preserving as much vertex reuse as that
-workspace allows. Positions, 5.6.5 normals, gamma-adjusted vertex colors, UVs,
-restart-encoded triangle indices, material flags, embedded PNG images, and the
-Fast64-style intensity format suffix used by Tiny3D's `01_model` are supported.
+workspace allows. It reorders triangles for vertex-cache locality and emits
+winding-preserving strips. Positions, 5.6.5 normals, gamma-adjusted vertex
+colors, UVs, restart-encoded triangle indices, nested Fast64 front/back culling
+flags, embedded PNG images, and the Fast64-style intensity format suffix used
+by Tiny3D's `01_model` are supported. Opaque geometry is reordered for cache
+locality. glTF `BLEND` materials preserve source triangle order and use alpha
+blending without depth writes. Fast64-wrapped materials instead use their N64
+render-mode preset to distinguish opaque and translucent surfaces.
 
-The current renderer places a synchronous RDP fence between model parts that
-reload the vertex cache. Asynchronous multi-part submission and recorded model
-display lists remain future performance work; this does not change generated
-asset data or the public `draw` API.
+The renderer streams model parts asynchronously through the RSP command queue.
+The queue rolls over according to its actual word capacity, so model code does
+not guess a safe batch size from triangle counts. Generated parts declare their
+data immutable; handwritten dynamic parts can select `.data_usage = .dynamic`
+to request cache writeback on every draw.
 
 The standalone CLI is:
 
@@ -36,8 +42,8 @@ Implementation layout:
 
 Current initial-port limitations are explicit: only embedded-buffer GLB files,
 triangle primitives, static meshes, one base-color texture per material, and
-PNG images are supported. Node transforms, skins, animations, morph targets,
-sparse accessors, external buffers/images, texture palettes, multiple texture
-units, and the full Fast64 combiner/render-mode extension are not implemented.
-Generated materials are currently double-sided because independent restart-
-encoded triangles do not yet preserve Tiny3D's back-face culling convention.
+PNG images are supported. `JOINTS_0` and `WEIGHTS_0` are parsed and rejected as
+`UnsupportedSkinning` instead of being silently discarded. Node transforms,
+skins, animations, morph targets, sparse accessors, external buffers/images,
+texture palettes, multiple texture units, alpha-mask cutoff, and the full
+Fast64 combiner/render-mode extension are not implemented.

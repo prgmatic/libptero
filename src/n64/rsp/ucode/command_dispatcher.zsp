@@ -11,9 +11,9 @@ data {
     overlay_data_rdram: [16]u32;
     overlay_idmap: [16]u8;
     pointer_stack: [10]u32;
-    queue_rdram_address: u32;
-    resident_scratch: [27]u8;
-    pub rdp_publication_held: u8;
+    // Shared overlay scratch must remain at 0x80. Tiny3D's clipping overlay
+    // addresses this region through the resident RSPQ ABI.
+    resident_scratch: [32]u8;
     command_buffer_storage: [256]u8;
     pub rdp_mode: [8]u32;
     pub rdp_scissor_rect: [2]u32;
@@ -21,6 +21,7 @@ data {
     pub rdp_current: u32;
     pub rdp_sentinel: u32;
     pub rdp_fill_color: u32;
+    queue_rdram_address: u32;
     pub rdp_target_bitdepth: i8;
     pub rdp_syncfull_ongoing: u8;
 }
@@ -85,6 +86,8 @@ fn fetchCommandBufferWithPointer(
 @rspq.command(2) fn jump(command: dmem) noreturn {
     reg($s0) rdram: u32 = undefined;
     rdram = command;
+    rdram <<= 8;
+    rdram >>>= 8;
     jump fetchCommandBufferWithPointer(rdram);
 }
 
@@ -200,29 +203,11 @@ fn fetchCommandBufferWithPointer(
 @rspq.command(10) pub export fn rdpAppendBuffer(current: u32) noreturn {
     reg($ra) return_address: u32 = undefined;
     reg syncfull_ongoing: u32 = load(u8, rdp_syncfull_ongoing);
-    reg publication_held: u32 = load(u8, rdp_publication_held);
-    syncfull_ongoing |= publication_held;
     if(syncfull_ongoing != 0) tail dma.returnToCaller() slot {
         store(u32, rdp_current, current);
     }
     rsp.cp0.setRdpCommandEnd(current);
     jump(return_address);
-}
-
-@rspq.command(11) fn rdpReleaseBuffer() noreturn {
-    reg current: u32 = load(u32, rdp_current);
-    store(u8, rdp_publication_held, 0);
-    rsp.cp0.setRdpCommandEnd(current);
-    jump commandLoop();
-}
-
-@rspq.command(12) fn rdpBeginBatch(reg($a0) _: u32, reg($a1) _: u32) noreturn {
-    reg wait_mask: u32 = 0x00000300;
-    dma.waitStatus(wait_mask);
-    reg held: u32 = 1;
-    store(u8, rdp_syncfull_ongoing, 0);
-    store(u8, rdp_publication_held, held);
-    jump commandLoop();
 }
 
 // Resident command queue dispatcher.

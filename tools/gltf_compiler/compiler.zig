@@ -49,11 +49,48 @@ pub const Attributes = struct {
     NORMAL: ?u32 = null,
     TEXCOORD_0: ?u32 = null,
     COLOR_0: ?u32 = null,
+    JOINTS_0: ?u32 = null,
+    WEIGHTS_0: ?u32 = null,
 };
 
 pub const Material = struct {
     name: []const u8 = "",
     pbrMetallicRoughness: ?Pbr = null,
+    extensions: ?MaterialExtensions = null,
+    alphaMode: AlphaMode = .OPAQUE,
+};
+
+pub const AlphaMode = enum { OPAQUE, MASK, BLEND };
+
+pub const MaterialExtensions = struct {
+    FAST64_materials_f3d: ?Fast64Material = null,
+    FAST64_materials_n64: ?Fast64N64Material = null,
+};
+
+pub const Fast64N64Material = struct {
+    otherModes: ?Fast64OtherModes = null,
+    extensions: ?Fast64NestedExtensions = null,
+};
+
+pub const Fast64OtherModes = struct {
+    renderMode: ?Fast64RenderMode = null,
+};
+
+pub const Fast64RenderMode = struct {
+    presets: []const []const u8 = &.{},
+};
+
+pub const Fast64NestedExtensions = struct {
+    FAST64_materials_f3d: ?Fast64Material = null,
+};
+
+pub const Fast64Material = struct {
+    geometryMode: Fast64GeometryMode = .{},
+};
+
+pub const Fast64GeometryMode = struct {
+    cullFront: bool = false,
+    cullBack: bool = false,
 };
 
 pub const Pbr = struct {
@@ -185,6 +222,7 @@ pub const Batch = struct {
     vertices: []Vertex,
     triangles: []Triangle,
     material_index: u16,
+    preserve_order: bool = false,
 
     fn deinit(self: Batch, allocator: std.mem.Allocator) void {
         allocator.free(self.vertices);
@@ -243,7 +281,7 @@ fn emitBatch(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *st
     const vertices_end = data.items.len;
     try alignData(allocator, data);
     const indices_offset = data.items.len;
-    try emitIndices(allocator, data, batch.triangles);
+    try emitIndices(allocator, data, batch.triangles, batch.preserve_order);
     try appendFormat(
         allocator,
         source,
@@ -264,17 +302,116 @@ fn emitVertices(allocator: std.mem.Allocator, data: *std.ArrayList(u8), vertices
     }
 }
 
-fn emitIndices(allocator: std.mem.Allocator, data: *std.ArrayList(u8), triangles: []const Triangle) !void {
-    for (triangles, 0..) |triangle, triangle_index| for (triangle, 0..) |index, corner| {
-        try writeU16(allocator, data, encodedIndex(index, triangle_index, corner, triangles.len));
-    };
+fn emitIndices(allocator: std.mem.Allocator, data: *std.ArrayList(u8), triangles: []const Triangle, preserve_order: bool) !void {
+    if (triangles.len == 0) return;
+    const indices = if (preserve_order)
+        try encodeTriangleList(allocator, triangles)
+    else
+        try stripifyTriangles(allocator, triangles);
+    defer allocator.free(indices);
+    for (indices) |index| try writeU16(allocator, data, index);
 }
 
-fn encodedIndex(index: u8, triangle_index: usize, corner: usize, triangle_count: usize) u16 {
-    var encoded = @as(u16, index) * 36;
-    if (triangle_index != 0 and corner == 0) encoded |= 0x8000;
-    if (triangle_index + 1 == triangle_count and corner == 2) encoded |= 0x4000;
+fn encodeTriangleList(allocator: std.mem.Allocator, triangles: []const Triangle) ![]u16 {
+    const indices = try allocator.alloc(u16, triangles.len * 3);
+    for (triangles, 0..) |triangle, triangle_index| for (triangle, 0..) |vertex, corner| {
+        indices[triangle_index * 3 + corner] = encodedTriangleIndex(
+            vertex,
+            triangle_index != 0 and corner == 0,
+            triangle_index + 1 == triangles.len and corner == 2,
+        );
+    };
+    return indices;
+}
+
+fn encodedTriangleIndex(vertex: u8, restart: bool, end: bool) u16 {
+    var encoded = @as(u16, vertex) * 36;
+    if (restart) encoded |= 0x8000;
+    if (end) encoded |= 0x4000;
     return encoded;
+}
+
+fn stripifyTriangles(allocator: std.mem.Allocator, triangles: []const Triangle) ![]u16 {
+    var used = try allocator.alloc(bool, triangles.len);
+    defer allocator.free(used);
+    @memset(used, false);
+    var indices: std.ArrayList(u16) = .empty;
+    const candidate_used = try allocator.alloc(bool, triangles.len);
+    defer allocator.free(candidate_used);
+    var candidate_vertices: std.ArrayList(u8) = .empty;
+    defer candidate_vertices.deinit(allocator);
+    var candidate_triangles: std.ArrayList(usize) = .empty;
+    defer candidate_triangles.deinit(allocator);
+    var best_vertices: std.ArrayList(u8) = .empty;
+    defer best_vertices.deinit(allocator);
+    var best_triangles: std.ArrayList(usize) = .empty;
+    defer best_triangles.deinit(allocator);
+    var remaining = triangles.len;
+    while (remaining != 0) {
+        try findBestStrip(allocator, triangles, used, candidate_used, &candidate_vertices, &candidate_triangles, &best_vertices, &best_triangles);
+        for (best_triangles.items) |index| used[index] = true;
+        remaining -= best_triangles.items.len;
+        try appendEncodedStrip(allocator, &indices, best_vertices.items);
+    }
+    indices.items[indices.items.len - 1] |= 0x4000;
+    return indices.toOwnedSlice(allocator);
+}
+
+fn findBestStrip(allocator: std.mem.Allocator, triangles: []const Triangle, used: []const bool, candidate_used: []bool, candidate_vertices: *std.ArrayList(u8), candidate_triangles: *std.ArrayList(usize), best_vertices: *std.ArrayList(u8), best_triangles: *std.ArrayList(usize)) !void {
+    best_vertices.clearRetainingCapacity();
+    best_triangles.clearRetainingCapacity();
+    for (triangles, used, 0..) |triangle, is_used, start| {
+        if (is_used) continue;
+        inline for (0..3) |rotation| {
+            try buildStripCandidate(allocator, triangles, used, candidate_used, triangle, start, rotation, candidate_vertices, candidate_triangles);
+            if (candidate_triangles.items.len > best_triangles.items.len) {
+                best_vertices.clearRetainingCapacity();
+                best_triangles.clearRetainingCapacity();
+                try best_vertices.appendSlice(allocator, candidate_vertices.items);
+                try best_triangles.appendSlice(allocator, candidate_triangles.items);
+            }
+        }
+    }
+}
+
+fn buildStripCandidate(allocator: std.mem.Allocator, triangles: []const Triangle, used: []const bool, candidate_used: []bool, triangle: Triangle, start: usize, comptime rotation: usize, vertices: *std.ArrayList(u8), strip_triangles: *std.ArrayList(usize)) !void {
+    @memcpy(candidate_used, used);
+    vertices.clearRetainingCapacity();
+    strip_triangles.clearRetainingCapacity();
+    try vertices.appendSlice(allocator, &.{ triangle[rotation], triangle[(rotation + 1) % 3], triangle[(rotation + 2) % 3] });
+    try strip_triangles.append(allocator, start);
+    candidate_used[start] = true;
+    while (findStripContinuation(triangles, candidate_used, vertices.items[vertices.items.len - 2], vertices.items[vertices.items.len - 1], strip_triangles.items.len)) |next| {
+        candidate_used[next.triangle] = true;
+        try vertices.append(allocator, next.vertex);
+        try strip_triangles.append(allocator, next.triangle);
+    }
+}
+
+fn appendEncodedStrip(allocator: std.mem.Allocator, indices: *std.ArrayList(u16), vertices: []const u8) !void {
+    for (vertices, 0..) |vertex, index| {
+        const restart: u16 = if (indices.items.len != 0 and index == 0) 0x8000 else 0;
+        try indices.append(allocator, @as(u16, vertex) * 36 | restart);
+    }
+}
+
+const StripContinuation = struct { triangle: usize, vertex: u8 };
+
+fn findStripContinuation(triangles: []const Triangle, used: []const bool, a: u8, b: u8, triangle_count: usize) ?StripContinuation {
+    const edge = if (triangle_count & 1 == 0) [2]u8{ a, b } else [2]u8{ b, a };
+    for (triangles, used, 0..) |triangle, is_used, index| {
+        if (is_used) continue;
+        const vertex = continuationVertex(triangle, edge) orelse continue;
+        return .{ .triangle = index, .vertex = vertex };
+    }
+    return null;
+}
+
+fn continuationVertex(triangle: Triangle, edge: [2]u8) ?u8 {
+    inline for (0..3) |corner| {
+        if (triangle[corner] == edge[0] and triangle[(corner + 1) % 3] == edge[1]) return triangle[(corner + 2) % 3];
+    }
+    return null;
 }
 
 fn emitImages(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *std.ArrayList(u8), document: Document, binary: []const u8) !void {
@@ -323,20 +460,24 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
 fn emitMaterials(allocator: std.mem.Allocator, source: *std.ArrayList(u8), document: Document, binary: []const u8) !void {
     for (document.materials, 0..) |material, material_index| {
         const texture_index = materialImageIndex(document, material);
+        const culling = materialCulling(material);
+        const is_blended = materialIsBlended(material);
+        const depth_write = !is_blended;
+        const blend_mode = if (is_blended) "alpha" else "opaque_surface";
         if (texture_index) |image_index| {
             const sampler = materialSampler(document, binary, material, image_index);
             try appendFormat(
                 allocator,
                 source,
-                "            {d} => {{ context.setDrawFlags(.{{ .depth = true, .textured = true, .shaded = true }}); context.render.setDepthState(true, true); context.render.setPerspectiveTexture(true); context.render.setBlendMode(.opaque_surface); context.render.setCombineMode(.single(.{{ .rgb_a = .tex0, .rgb_c = .shade, .alpha_d = .one }})); _ = context.render.useTextureSampler(texture_{d}, .{{ .clamp_s = {}, .clamp_t = {}, .mirror_s = {}, .mirror_t = {}, .mask_s = {d}, .mask_t = {d} }}); }},\n",
-                .{ material_index, image_index, sampler.clamp_s, sampler.clamp_t, sampler.mirror_s, sampler.mirror_t, sampler.mask_s, sampler.mask_t },
+                "            {d} => {{ context.setDrawFlags(.{{ .depth = true, .textured = true, .shaded = true, .cull_front = {}, .cull_back = {} }}); context.render.setDepthState(true, {}); context.render.setPerspectiveTexture(true); context.render.setBlendMode(.{s}); context.render.setCombineMode(.single(.{{ .rgb_a = .tex0, .rgb_c = .shade, .alpha_d = .{s} }})); _ = context.render.useTextureSampler(texture_{d}, .{{ .clamp_s = {}, .clamp_t = {}, .mirror_s = {}, .mirror_t = {}, .mask_s = {d}, .mask_t = {d} }}); }},\n",
+                .{ material_index, culling.front, culling.back, depth_write, blend_mode, if (is_blended) "tex0" else "one", image_index, sampler.clamp_s, sampler.clamp_t, sampler.mirror_s, sampler.mirror_t, sampler.mask_s, sampler.mask_t },
             );
         } else {
             try appendFormat(
                 allocator,
                 source,
-                "            {d} => {{ context.setDrawFlags(.{{ .depth = true, .shaded = true }}); context.render.setDepthState(true, true); context.render.setBlendMode(.opaque_surface); context.render.setCombineMode(.single(.{{ .rgb_a = .shade, .rgb_c = .primitive, .alpha_d = .one }})); }},\n",
-                .{material_index},
+                "            {d} => {{ context.setDrawFlags(.{{ .depth = true, .shaded = true, .cull_front = {}, .cull_back = {} }}); context.render.setDepthState(true, {}); context.render.setBlendMode(.{s}); context.render.setCombineMode(.single(.{{ .rgb_a = .shade, .rgb_c = .primitive, .alpha_d = .{s} }})); }},\n",
+                .{ material_index, culling.front, culling.back, depth_write, blend_mode, if (is_blended) "shade" else "one" },
             );
         }
     }
@@ -351,6 +492,32 @@ fn emitMaterials(allocator: std.mem.Allocator, source: *std.ArrayList(u8), docum
         \\};
         \\
     );
+}
+
+fn materialCulling(material: Material) struct { front: bool, back: bool } {
+    const extension = material.extensions orelse return .{ .front = false, .back = false };
+    const fast64 = extension.FAST64_materials_f3d orelse nested: {
+        const n64 = extension.FAST64_materials_n64 orelse return .{ .front = false, .back = false };
+        const nested_extensions = n64.extensions orelse return .{ .front = false, .back = false };
+        break :nested nested_extensions.FAST64_materials_f3d orelse return .{ .front = false, .back = false };
+    };
+    return .{ .front = fast64.geometryMode.cullFront, .back = fast64.geometryMode.cullBack };
+}
+
+fn materialIsBlended(material: Material) bool {
+    if (material.alphaMode != .BLEND) return false;
+    const extension = material.extensions orelse return true;
+    const fast64 = extension.FAST64_materials_n64 orelse return true;
+    const other_modes = fast64.otherModes orelse return false;
+    const render_mode = other_modes.renderMode orelse return false;
+    for (render_mode.presets) |preset| {
+        if (std.mem.indexOf(u8, preset, "XLU") != null or
+            std.mem.indexOf(u8, preset, "TRANSPARENT") != null)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 const GeneratedSampler = struct { clamp_s: bool, clamp_t: bool, mirror_s: bool, mirror_t: bool, mask_s: u4, mask_t: u4 };
@@ -483,12 +650,55 @@ fn convertPrimitive(
     output: *std.ArrayList(Batch),
 ) !void {
     const views = try PrimitiveViews.init(document, binary, primitive);
-    var builder: BatchBuilder = .{ .allocator = allocator, .views = views, .options = options, .material = primitive.material, .output = output };
+    var builder: BatchBuilder = .{
+        .allocator = allocator,
+        .views = views,
+        .options = options,
+        .material = primitive.material,
+        .preserve_order = materialPreservesOrder(document, primitive.material),
+        .output = output,
+    };
     defer builder.deinit();
-    var triangle_index: usize = 0;
-    while (triangle_index < views.indices.count) : (triangle_index += 3)
-        try builder.addTriangle(triangle_index);
+    const triangle_count = views.indices.count / 3;
+    const used = try allocator.alloc(bool, triangle_count);
+    defer allocator.free(used);
+    @memset(used, false);
+    try convertPrimitiveTriangles(&builder, used);
     try builder.finish();
+}
+
+fn convertPrimitiveTriangles(builder: *BatchBuilder, used: []bool) !void {
+    if (builder.preserve_order) {
+        for (used, 0..) |_, index| try builder.addTriangle(index * 3);
+        return;
+    }
+    var remaining = used.len;
+    while (remaining != 0) {
+        const best = try selectBestTriangle(builder, used);
+        if (best == null) {
+            try builder.finish();
+            builder.remap.clearRetainingCapacity();
+            continue;
+        }
+        try builder.addTriangle(best.? * 3);
+        used[best.?] = true;
+        remaining -= 1;
+    }
+}
+
+fn selectBestTriangle(builder: *const BatchBuilder, used: []const bool) !?usize {
+    var best: ?usize = null;
+    var best_new_vertices: usize = 4;
+    for (used, 0..) |is_used, index| {
+        if (is_used) continue;
+        const source = try builder.sourceTriangle(index * 3);
+        const new_vertices = builder.newVertexCount(source);
+        if (!builder.fitsAdditional(new_vertices) or new_vertices >= best_new_vertices) continue;
+        best = index;
+        best_new_vertices = new_vertices;
+        if (new_vertices == 0) break;
+    }
+    return best;
 }
 
 const PrimitiveViews = struct {
@@ -500,6 +710,11 @@ const PrimitiveViews = struct {
     texture_size: [2]u32,
 
     fn init(document: Document, binary: []const u8, primitive: Primitive) !PrimitiveViews {
+        // Parse skinning attributes now so they cannot be silently discarded
+        // by the otherwise permissive glTF JSON decoder. The packed runtime
+        // vertex ABI does not support them yet.
+        if (primitive.attributes.JOINTS_0 != null or primitive.attributes.WEIGHTS_0 != null)
+            return error.UnsupportedSkinning;
         const positions = try accessorView(document, binary, primitive.attributes.POSITION);
         if (positions.component_count != 3 or positions.component_type != 5126) return error.InvalidPositionAccessor;
         const indices = try accessorView(document, binary, primitive.indices);
@@ -524,6 +739,7 @@ const BatchBuilder = struct {
     views: PrimitiveViews,
     options: ConvertOptions,
     material: ?u32,
+    preserve_order: bool,
     output: *std.ArrayList(Batch),
     remap: std.ArrayList(Remap) = .empty,
     vertices: std.ArrayList(Vertex) = .empty,
@@ -543,7 +759,7 @@ const BatchBuilder = struct {
         try self.triangles.append(self.allocator, triangle);
     }
 
-    fn sourceTriangle(self: *BatchBuilder, triangle_index: usize) ![3]u32 {
+    fn sourceTriangle(self: *const BatchBuilder, triangle_index: usize) ![3]u32 {
         return .{
             try self.views.indices.index(triangle_index),
             try self.views.indices.index(triangle_index + 1),
@@ -553,13 +769,22 @@ const BatchBuilder = struct {
 
     fn flushIfFull(self: *BatchBuilder, source: [3]u32) !void {
         if (self.vertices.items.len == 0) return;
-        var new_count: usize = 0;
-        for (source) |index| if (findRemap(self.remap.items, index) == null) {
-            new_count += 1;
-        };
+        const new_count = self.newVertexCount(source);
         if (batchFits(self.vertices.items.len + new_count, self.triangles.items.len + 1, self.options.max_vertices_per_batch)) return;
         try self.finish();
         self.remap.clearRetainingCapacity();
+    }
+
+    fn newVertexCount(self: *const BatchBuilder, source: [3]u32) usize {
+        var count: usize = 0;
+        for (source) |index| if (findRemap(self.remap.items, index) == null) {
+            count += 1;
+        };
+        return count;
+    }
+
+    fn fitsAdditional(self: *const BatchBuilder, new_vertices: usize) bool {
+        return batchFits(self.vertices.items.len + new_vertices, self.triangles.items.len + 1, self.options.max_vertices_per_batch);
     }
 
     fn localIndex(self: *BatchBuilder, index: u32) !u8 {
@@ -572,7 +797,7 @@ const BatchBuilder = struct {
     }
 
     fn finish(self: *BatchBuilder) !void {
-        try finishBatch(self.allocator, self.output, &self.vertices, &self.triangles, self.material);
+        try finishBatch(self.allocator, self.output, &self.vertices, &self.triangles, self.material, self.preserve_order);
     }
 };
 
@@ -588,14 +813,21 @@ fn batchFits(unique_vertices: usize, triangle_count: usize, max_vertices: usize)
     return vertex_end <= index_start;
 }
 
-fn finishBatch(allocator: std.mem.Allocator, output: *std.ArrayList(Batch), vertices: *std.ArrayList(Vertex), triangles: *std.ArrayList(Triangle), material: ?u32) !void {
+fn finishBatch(allocator: std.mem.Allocator, output: *std.ArrayList(Batch), vertices: *std.ArrayList(Vertex), triangles: *std.ArrayList(Triangle), material: ?u32, preserve_order: bool) !void {
     if (triangles.items.len == 0) return;
     if (vertices.items.len % 2 != 0) try vertices.append(allocator, vertices.items[vertices.items.len - 1]);
     try output.append(allocator, .{
         .vertices = try vertices.toOwnedSlice(allocator),
         .triangles = try triangles.toOwnedSlice(allocator),
         .material_index = if (material) |index| @intCast(index) else std.math.maxInt(u16),
+        .preserve_order = preserve_order,
     });
+}
+
+fn materialPreservesOrder(document: Document, material: ?u32) bool {
+    const index = material orelse return false;
+    if (index >= document.materials.len) return false;
+    return materialIsBlended(document.materials[index]);
 }
 
 fn findRemap(remap: []const Remap, source: u32) ?u8 {
@@ -803,6 +1035,91 @@ test "generated model uses packed big-endian vertex data" {
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x00, 0x24, 0x40, 0x00 }, generated.data[32..38]);
     try std.testing.expect(std.mem.indexOf(u8, generated.source, "pub const fixture_model") != null);
     try std.testing.expect(std.mem.indexOf(u8, generated.source, ".material_index = 3") != null);
+}
+
+test "stripifier preserves winding and marks disconnected strips" {
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(std.testing.allocator);
+    try emitIndices(std.testing.allocator, &data, &.{ .{ 0, 1, 2 }, .{ 2, 1, 3 } }, false);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 36, 0, 72, 0x40, 108 }, data.items);
+
+    data.clearRetainingCapacity();
+    try emitIndices(std.testing.allocator, &data, &.{ .{ 0, 1, 2 }, .{ 3, 4, 5 } }, false);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 0, 36, 0, 72, 0x80, 108, 0, 144, 0x40, 180 }, data.items);
+}
+
+test "ordered triangle encoding preserves translucent draw order" {
+    var data: std.ArrayList(u8) = .empty;
+    defer data.deinit(std.testing.allocator);
+    try emitIndices(std.testing.allocator, &data, &.{ .{ 3, 4, 5 }, .{ 0, 1, 2 } }, true);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0, 108, 0, 144, 0, 180, 0x80, 0, 0, 36, 0x40, 72 },
+        data.items,
+    );
+}
+
+test "blend materials preserve order and skinning is explicit" {
+    const blend_document: Document = .{
+        .accessors = &.{},
+        .bufferViews = &.{},
+        .meshes = &.{},
+        .materials = &.{.{ .alphaMode = .BLEND }},
+    };
+    try std.testing.expect(materialPreservesOrder(blend_document, 0));
+    try std.testing.expect(!materialPreservesOrder(blend_document, null));
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try emitMaterials(std.testing.allocator, &source, blend_document, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "setDepthState(true, false)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "setBlendMode(.alpha)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, ".alpha_d = .shade") != null);
+
+    const primitive: Primitive = .{
+        .attributes = .{ .POSITION = 0, .JOINTS_0 = 1, .WEIGHTS_0 = 2 },
+        .indices = 3,
+    };
+    try std.testing.expectError(error.UnsupportedSkinning, PrimitiveViews.init(blend_document, &.{}, primitive));
+}
+
+test "Fast64 blend wrapper uses its N64 render mode" {
+    const document: Document = .{
+        .accessors = &.{},
+        .bufferViews = &.{},
+        .meshes = &.{},
+        .materials = &.{.{
+            .alphaMode = .BLEND,
+            .extensions = .{ .FAST64_materials_n64 = .{} },
+        }},
+    };
+    try std.testing.expect(!materialPreservesOrder(document, 0));
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try emitMaterials(std.testing.allocator, &source, document, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "setDepthState(true, true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "setBlendMode(.opaque_surface)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, ".alpha_d = .one") != null);
+
+    const translucent = Material{
+        .alphaMode = .BLEND,
+        .extensions = .{ .FAST64_materials_n64 = .{
+            .otherModes = .{ .renderMode = .{ .presets = &.{"AA_ZB_XLU_SURF"} } },
+        } },
+    };
+    try std.testing.expect(materialIsBlended(translucent));
+}
+
+test "Fast64 nested material extension enables backface culling" {
+    const json =
+        \\{"accessors":[],"bufferViews":[],"meshes":[],"materials":[{"extensions":{"FAST64_materials_n64":{"extensions":{"FAST64_materials_f3d":{"geometryMode":{"cullBack":true}}}}}}]}
+    ;
+    var parsed = try parseDocument(std.testing.allocator, json);
+    defer parsed.deinit();
+    const culling = materialCulling(parsed.value.materials[0]);
+    try std.testing.expect(!culling.front);
+    try std.testing.expect(culling.back);
 }
 
 test "batch layout keeps strip indices separate from transformed vertices" {

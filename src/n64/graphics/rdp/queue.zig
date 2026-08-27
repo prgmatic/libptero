@@ -107,8 +107,6 @@ pub const OverlayQueue = struct {
     packet: [22]u64 = undefined,
     packet_len: usize = 0,
     packet_expected: usize = 0,
-    full_sync_pending: bool = false,
-    needs_publication_hold: bool = false,
     configured: bool = false,
 
     pub fn init(
@@ -132,7 +130,6 @@ pub const OverlayQueue = struct {
         self.ensureConfigured();
         if (self.packet_len == 0) {
             const opcode: u8 = @truncate(value >> 56);
-            if (opcode == 0xe9) self.full_sync_pending = true;
             self.packet_expected = packetWordCount(opcode);
             if (self.packet_expected == 1) {
                 self.rsp_queue.writeOverlayCommandKnown(
@@ -151,10 +148,7 @@ pub const OverlayQueue = struct {
 
     pub fn execute(self: *OverlayQueue) void {
         if (self.packet_len != 0) @panic("incomplete RDP command packet");
-        if (!self.full_sync_pending) self.rsp_queue.releaseRdpPublication();
         rsp.flush(self.rsp_queue);
-        self.full_sync_pending = false;
-        self.needs_publication_hold = true;
     }
 
     pub fn clear(self: *OverlayQueue) void {
@@ -163,14 +157,6 @@ pub const OverlayQueue = struct {
         // boundary there must only be complete packets; rsp.flush handles the
         // resident queue's double-buffered reuse on the next execute().
         if (self.packet_len != 0) @panic("cannot clear an incomplete RDP command packet");
-    }
-
-    pub fn rotateBuffers(self: *OverlayQueue) void {
-        self.ensureConfigured();
-        // Rotate at the frame boundary, while the previous full-sync fence is
-        // complete. This keeps native geometry from hitting its fragile
-        // mid-primitive dynamic-buffer rollover path.
-        self.rsp_queue.setRdpBuffer(0, 0, 0);
     }
 
     // Submit compact vertices to the overlay's native triangle generator.
@@ -279,11 +265,7 @@ pub const OverlayQueue = struct {
         if (!self.configured) {
             self.configureOverlayState();
             self.rsp_queue.configureRdpBuffers(self.dynamic_buffers[0], self.dynamic_buffers[1]);
-            self.rsp_queue.holdRdpPublication();
             self.configured = true;
-        } else if (self.needs_publication_hold) {
-            self.rsp_queue.holdRdpPublication();
-            self.needs_publication_hold = false;
         }
     }
 };

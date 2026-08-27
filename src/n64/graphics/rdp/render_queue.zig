@@ -143,6 +143,20 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.mode_dirty = true;
         }
 
+        /// Clear a 16-bit depth image through the RDP and restore the active
+        /// color image. The depth buffer uses the same packed all-ones value
+        /// as an RGBA16 white fill.
+        pub fn clearDepth(rq: *Self, depth_image: anytype, color_image: anytype) void {
+            rq.cmd_queue.pipeSync();
+            rq.cmd_queue.setOtherModes(.{ .cycle_type = .fill });
+            rq.cmd_queue.setColorFrame(depth_image);
+            rq.cmd_queue.setFillColor(@import("../color.zig").Rgba16.white);
+            rq.cmd_queue.fillRect(0, 0, (rq.fb_width - 1) * 4, (rq.fb_height - 1) * 4);
+            rq.cmd_queue.pipeSync();
+            rq.cmd_queue.setColorFrame(color_image);
+            rq.mode_dirty = true;
+        }
+
         pub fn drawRect(rq: *Self, x: u16, y: u16, w: u16, h: u16, color: anytype) void {
             rq.cmd_queue.pipeSync();
             rq.cmd_queue.setOtherModes(.{ .cycle_type = .fill });

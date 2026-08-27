@@ -149,9 +149,9 @@ pub const Context = struct {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, 0, &.{physical(&viewport.camera)});
     }
 
-    pub fn beginFrame(self: *Context) void {
-        self.render.cmd_queue.queue.rotateBuffers();
-    }
+    /// Compatibility hook. RDPQ buffers remain attached across frames and
+    /// advance through their sentinels, matching libdragon/Tiny3D.
+    pub fn beginFrame(_: *Context) void {}
 
     pub fn setAmbientLight(self: *Context, color: Rgba32) void {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, rsp.programs.geometry_overlay_symbols.ambient_color, &.{ @as(u32, @bitCast(color)), 0, 0 });
@@ -167,6 +167,8 @@ pub const Context = struct {
     }
     pub fn setDrawFlags(self: *Context, flags: DrawFlags) void {
         if (flags.cull_front and flags.cull_back) @panic("cannot cull both triangle faces");
+        // Match Tiny3D's host-side ABI (the triangle include's historical
+        // comment describes these two selector values in reverse).
         const culling: u32 = if (flags.cull_front) 1 else if (flags.cull_back) 0 else 2;
         var bits: u32 = @as(u17, @bitCast(flags));
         bits &= ~@as(u32, (1 << 3) | (1 << 4));
@@ -181,8 +183,12 @@ pub const Context = struct {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, stack_advance, &.{0});
     }
     pub fn loadVertices(self: *Context, vertices: []const VertexPair, offset: u8, count: u8) void {
-        if (count == 0 or count > vertices.len * 2) @panic("invalid geometry vertex count");
         cache.writebackData(vertices);
+        self.loadStaticVertices(vertices, offset, count);
+    }
+    /// Load immutable asset vertices which are already coherent in RDRAM.
+    pub fn loadStaticVertices(self: *Context, vertices: []const VertexPair, offset: u8, count: u8) void {
+        if (count == 0 or count > vertices.len * 2) @panic("invalid geometry vertex count");
         const symbols = rsp.programs.geometry_overlay_symbols;
         const vertex_buffer = symbols.vertex_buffer;
         const vertex_input_end = symbols.clipping_buffer_result + 6 * 16;
@@ -199,11 +205,15 @@ pub const Context = struct {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 0, va, &.{vb << 16 | vc});
     }
     pub fn drawTriangleStrip(self: *Context, indices: []const i16, sync: bool) void {
+        cache.writebackData(indices);
+        self.drawStaticTriangleStrip(indices, sync);
+    }
+    /// Draw an immutable asset index strip which is already coherent in RDRAM.
+    pub fn drawStaticTriangleStrip(self: *Context, indices: []const i16, sync: bool) void {
         const symbols = rsp.programs.geometry_overlay_symbols;
         const vertex_buffer = symbols.vertex_buffer;
         const strip_buffer_end = symbols.clipping_buffer_temporary;
         if (indices.len < 3 or indices.len * @sizeOf(i16) > strip_buffer_end - vertex_buffer) @panic("invalid geometry strip");
-        cache.writebackData(indices);
         const byte_count: u32 = @intCast(indices.len * @sizeOf(i16));
         var dmem_address = (strip_buffer_end - byte_count) & ~@as(u32, 7);
         if (sync) dmem_address |= 0x8000;
@@ -216,16 +226,6 @@ pub const Context = struct {
     }
     pub fn syncTriangles(self: *Context) void {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 10, 0, &.{});
-    }
-    /// Finish one model cache load. Current model parts use an RDP full-sync
-    /// before the next load because the native triangle generator cannot yet
-    /// safely share an in-flight dynamic command stream across vertex reloads.
-    pub fn finishModelPart(self: *Context, intermediate: bool) void {
-        if (!intermediate) return;
-        const fence = rdp.syncFull(&self.render);
-        if (!rsp.waitTimeout(&self.queue, 100_000_000)) @panic("model part RSP queue timed out");
-        if (!fence.waitTimeout(100_000_000)) @panic("model batch RDP fence timed out");
-        self.beginFrame();
     }
     pub fn beginModelMaterial(self: *Context) void {
         self.render.flushModes();

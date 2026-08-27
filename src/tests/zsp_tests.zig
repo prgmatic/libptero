@@ -56,6 +56,8 @@ var direct_rdp_render_target: [4 * 4]n64.graphics.color.Rgba32 align(64) = undef
 var overlay_rdp_render_target: [4 * 4]n64.graphics.color.Rgba32 align(64) = undefined;
 var overlay_rdp_render_target_16: [4 * 4]n64.graphics.color.Rgba16 align(64) = undefined;
 var native_triangle_overlay_target: [16 * 16]n64.graphics.color.Rgba16 align(64) = undefined;
+var geometry_rollover_color_target: [64 * 64]n64.graphics.color.Rgba16 align(64) = undefined;
+var geometry_rollover_depth_target: [64 * 64]n64.graphics.color.Rgba16 align(64) = undefined;
 var native_triangle_texture: [4 * 4]n64.graphics.color.Rgba32 align(16) = undefined;
 var font_render_target: [8 * 8]n64.graphics.color.Rgba16 align(64) = undefined;
 var font_atlas_texels: [1]n64.graphics.color.Rgba16 align(8) = .{.white};
@@ -90,6 +92,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: vector operations", .run = vectorOperations },
     .{ .name = "ZSP: data blocks", .run = dataBlocks },
     .{ .name = "ZSP: DMA in", .run = dmaIn },
+    .{ .name = "ZSP: Geometry productive RDP rollover", .run = geometryProductiveRdpRollover },
     .{ .name = "ZSP: command dispatcher", .run = commandDispatcher },
     .{ .name = "ZSP: chained command buffers", .run = chainedCommandBuffers },
     .{ .name = "ZSP: called command block", .run = calledCommandBlock },
@@ -135,6 +138,8 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: Geometry clipping swap", .run = geometryClippingSwap },
     .{ .name = "ZSP: Geometry vertex transform", .run = geometryVertexTransform },
     .{ .name = "ZSP: Geometry triangle submission", .run = geometryTriangleSubmission },
+    .{ .name = "ZSP: Geometry triangle trivial reject", .run = geometryTriangleTrivialReject },
+    .{ .name = "ZSP: Geometry sustained culled queue turnover", .run = geometrySustainedCulledQueueTurnover },
     .{ .name = "ZSP: Geometry clipped triangle", .run = geometryClippedTriangle },
     .{ .name = "ZSP: Geometry patch DMA", .run = geometryPatchDma },
     .{ .name = "ZSP: Geometry context initialization", .run = geometryContextInitialization },
@@ -410,6 +415,12 @@ fn dmaIn() !void {
 }
 
 fn commandDispatcher() !void {
+    // Keep the resident ABI aligned with libdragon/Tiny3D. Geometry clipping
+    // uses 0x80..0x9f as shared scratch and must never overlap the queue cursor.
+    try testing.expectEqual(@as(u16, 0x0080), resident_symbols.resident_scratch);
+    try testing.expectEqual(@as(u16, 0x01dc), resident_symbols.queue_rdram_address);
+    try testing.expectEqual(@as(u16, 0x01e0), resident_symbols.rdp_target_bitdepth);
+    try testing.expectEqual(@as(u16, 0x01e1), resident_symbols.rdp_syncfull_ongoing);
     loadCommandDispatcher();
     var queue = rsp.CommandQueue.init(command_queue_buffer[0..]);
     queue.writeDmem(0x100, 0x12345678);
@@ -520,7 +531,7 @@ fn commandFetchBoundary() !void {
 
     rsp.halt();
     rsp.waitHalted();
-    rsp.io.readDmem(u32, 0x80).* = @truncate(@intFromPtr(&boundary_queue_buffer) & 0x1fffffff);
+    rsp.io.readDmem(u32, resident_symbols.queue_rdram_address).* = @truncate(@intFromPtr(&boundary_queue_buffer) & 0x1fffffff);
     rsp.io.status_register_write.* = rsp.io.status_set_signal7;
     try runLoadedCommandDispatcher();
 
@@ -747,9 +758,8 @@ fn rdpFullSyncState() !void {
     dp_end_write.* = output_address;
 
     rdp_queue.init(.low);
-    // A held batch must preserve command order and become visible when the
-    // full-sync handler publishes its completed DMA range.
-    rdp_queue.holdRdpPublication();
+    // A full-sync command preserves command order and publishes its completed
+    // DMA range through the resident sync handler.
     rdp_queue.writeOverlayCommand(&rdp_overlay, 41, 0x00abcdef, &.{0x89abcdef});
     rsp.flush(&rdp_queue);
     if (!rsp.waitTimeout(&rdp_queue, rsp_timeout_attempts)) {
@@ -784,7 +794,6 @@ fn rdpFullSyncState() !void {
     try testing.expectEqual(@as(u32, 0x2468ace0), rdp_sync_state_output[3]);
     try testing.expect(rsp.io.status_register_read.signal1);
     try expectDmemWord(u8, rsp.rdp_syncfull_ongoing_dmem, 0x40);
-    try expectDmemWord(u8, rsp.rdp_publication_held_dmem, 0);
     try testing.expectEqual(output_address + 8, n64.interfaces.rdp.dma_end_addr.* & 0x00ffffff);
 
     rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
@@ -2045,6 +2054,7 @@ fn geometryTriangleSubmission() !void {
     for (vertex_offsets, screen_xy) |offset, xy| {
         @memset(state[offset..][0..36], 0);
         std.mem.writeInt(u32, state[offset..][0..4], xy, .big);
+        std.mem.writeInt(u16, state[offset + 6 ..][0..2], 0x00ff, .big);
         std.mem.writeInt(u16, state[offset + 4 ..][0..2], 0x1234, .big);
         std.mem.writeInt(u32, state[offset + 8 ..][0..4], 0x11223344, .big);
         std.mem.writeInt(u32, state[offset + 16 ..][0..4], 0x00010000, .big);
@@ -2057,7 +2067,6 @@ fn geometryTriangleSubmission() !void {
     const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
     rsp.io.readDmem(u32, resident_symbols.rdp_current).* = output_address;
     rsp.io.readDmem(u32, resident_symbols.rdp_sentinel).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
-    rsp.writeDmemByte(rsp.rdp_publication_held_dmem, 1);
     rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 1);
 
     continuous_queue.init(.low);
@@ -2069,6 +2078,199 @@ fn geometryTriangleSubmission() !void {
     n64.cache.invalidateData(&geometry_triangle_output);
     try testing.expect(geometry_triangle_output[0] != std.math.maxInt(u64));
     rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryTriangleTrivialReject() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    const symbols = rsp.programs.geometry_overlay_symbols;
+    const state_start = zsp_programs.geometry_overlay.state_offset;
+    var state = rsp.overlayState(&geometry_overlay);
+    state[symbols.face_culling - state_start] = 2;
+    const vertex_base = symbols.vertex_buffer - state_start;
+    for (0..3) |index| {
+        const offset = vertex_base + index * 36;
+        @memset(state[offset..][0..36], 0);
+        // A common nonzero clip bit makes the triangle trivially reject.
+        std.mem.writeInt(u16, state[offset + 6 ..][0..2], 1, .big);
+    }
+    rsp.writebackOverlayState(&geometry_overlay);
+
+    @memset(&geometry_triangle_output, 0xa5a5a5a5a5a5a5a5);
+    n64.cache.writebackData(&geometry_triangle_output);
+    const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
+    rsp.io.readDmem(u32, resident_symbols.rdp_current).* = output_address;
+    rsp.io.readDmem(u32, resident_symbols.rdp_sentinel).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
+
+    continuous_queue.init(.low);
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 0, symbols.vertex_buffer, &.{@as(u32, symbols.vertex_buffer + 36) << 16 | symbols.vertex_buffer + 72});
+    continuous_queue.writeOverlayCommand(&geometry_overlay, 10, 0, &.{});
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+
+    n64.cache.invalidateData(&geometry_triangle_output);
+    try testing.expectEqual(@as(u64, 0xa5a5a5a5a5a5a5a5), geometry_triangle_output[0]);
+    try testing.expectEqual(output_address, rsp.io.readDmem(u32, resident_symbols.rdp_current).*);
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometrySustainedCulledQueueTurnover() !void {
+    loadCommandDispatcher();
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_overlay));
+
+    const symbols = rsp.programs.geometry_overlay_symbols;
+    const state_start = zsp_programs.geometry_overlay.state_offset;
+    var state = rsp.overlayState(&geometry_overlay);
+    state[symbols.face_culling - state_start] = 2;
+    const vertex_base = symbols.vertex_buffer - state_start;
+    for (0..3) |index| {
+        const offset = vertex_base + index * 36;
+        @memset(state[offset..][0..36], 0);
+        std.mem.writeInt(u16, state[offset + 6 ..][0..2], 1, .big);
+    }
+    rsp.writebackOverlayState(&geometry_overlay);
+
+    @memset(&geometry_triangle_output, 0xa5a5a5a5a5a5a5a5);
+    n64.cache.writebackData(&geometry_triangle_output);
+    const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
+    rsp.io.readDmem(u32, resident_symbols.rdp_current).* = output_address;
+    rsp.io.readDmem(u32, resident_symbols.rdp_sentinel).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
+
+    continuous_queue.init(.low);
+    // Each triangle command is two words. Four buffer capacities guarantee
+    // several producer/consumer turnovers while exercising the exact culled
+    // return path that stalled the 16-instance model workload.
+    for (0..rsp.command_queue.rdram_buffer_word_count * 2) |_| {
+        continuous_queue.writeOverlayCommand(
+            &geometry_overlay,
+            0,
+            symbols.vertex_buffer,
+            &.{@as(u32, symbols.vertex_buffer + 36) << 16 | symbols.vertex_buffer + 72},
+        );
+    }
+    continuous_queue.writeDmem(0x344, 0x16c011ed);
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+
+    // Reuse both buffers after the first completion. This catches an advanced
+    // wait-command resume pointer, which only failed on the following frame in
+    // the original 1/4/16-instance benchmark sequence.
+    for (0..rsp.command_queue.rdram_buffer_word_count * 2) |_| {
+        continuous_queue.writeOverlayCommand(
+            &geometry_overlay,
+            0,
+            symbols.vertex_buffer,
+            &.{@as(u32, symbols.vertex_buffer + 36) << 16 | symbols.vertex_buffer + 72},
+        );
+    }
+    continuous_queue.writeDmem(0x348, 0x16c0affe);
+    rsp.flush(&continuous_queue);
+    try waitQueueTimeout(&continuous_queue);
+
+    n64.cache.invalidateData(&geometry_triangle_output);
+    try testing.expectEqual(@as(u64, 0xa5a5a5a5a5a5a5a5), geometry_triangle_output[0]);
+    try testing.expectEqual(output_address, rsp.io.readDmem(u32, resident_symbols.rdp_current).*);
+    try expectDmemWord(u32, 0x344, 0x16c011ed);
+    try expectDmemWord(u32, 0x348, 0x16c0affe);
+    rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn geometryProductiveRdpRollover() !void {
+    loadCommandDispatcher();
+    rsp.releaseRdpToDirect();
+    rdp_overlay.init(rsp.programs.rdp_overlay);
+    rsp.registerOverlayStatic(&rdp_overlay, 12);
+    geometry_overlay.init(zsp_programs.geometry_overlay);
+    rsp.registerOverlayStatic(&geometry_overlay, 1);
+    rdp_queue.init(.low);
+    @memset(&rsp_rdp_dynamic_buffers[0], 0);
+    @memset(&rsp_rdp_dynamic_buffers[1], 0);
+    n64.cache.writebackData(&rsp_rdp_dynamic_buffers);
+    var render_queue = rdp.OverlayRenderQueue.init(rdp.OverlayQueue.init(
+        &rdp_queue,
+        &rdp_overlay,
+        .{ rsp_rdp_dynamic_buffers[0][0..], rsp_rdp_dynamic_buffers[1][0..] },
+    ));
+
+    @memset(&geometry_rollover_color_target, n64.graphics.color.Rgba16.black);
+    @memset(&geometry_rollover_depth_target, n64.graphics.color.Rgba16.white);
+    n64.cache.writebackData(&geometry_rollover_color_target);
+    n64.cache.writebackData(&geometry_rollover_depth_target);
+    const target = n64.graphics.image.ImgRgba16{
+        .width = 64,
+        .height = 64,
+        .texel_data = geometry_rollover_color_target[0..],
+    };
+    render_queue.setFrameBuffer(target);
+    const depth_target = n64.graphics.image.ImgRgba16{
+        .width = 64,
+        .height = 64,
+        .texel_data = geometry_rollover_depth_target[0..],
+    };
+    render_queue.setDepthState(true, true);
+    render_queue.cmd_queue.setDepthImage(depth_target);
+    render_queue.clearScreen(n64.graphics.color.Rgba16.black);
+    render_queue.setCombineMode(.primitive);
+    render_queue.setPrimColor(n64.graphics.color.Rgba32.green);
+    render_queue.flushModes();
+    render_queue.execute();
+    try waitQueueTimeout(&rdp_queue);
+
+    const symbols = rsp.programs.geometry_overlay_symbols;
+    const state_start = geometry_overlay.program.state_offset;
+    var state = rsp.overlayState(&geometry_overlay);
+    const vertex_base = symbols.vertex_buffer - state_start;
+    const screen_xy = [_]u32{ 0x00000000, 0x01000000, 0x00000100 };
+    for (screen_xy, 0..) |xy, index| {
+        const offset = vertex_base + index * 36;
+        @memset(state[offset..][0..36], 0);
+        std.mem.writeInt(u32, state[offset..][0..4], xy, .big);
+        std.mem.writeInt(u16, state[offset + 6 ..][0..2], 0x00ff, .big);
+        std.mem.writeInt(u16, state[offset + 4 ..][0..2], 0x1234, .big);
+        std.mem.writeInt(u32, state[offset + 8 ..][0..4], 0x11223344, .big);
+        std.mem.writeInt(u32, state[offset + 16 ..][0..4], 0x00010000, .big);
+        std.mem.writeInt(u32, state[offset + 20 ..][0..4], 0x00010000, .big);
+    }
+    rsp.writebackOverlayState(&geometry_overlay);
+    rdp_queue.writeOverlayCommand(&geometry_overlay, 6, 2, &.{0x0100cf00});
+
+    // A depth-writing shaded, textured triangle emits 176 bytes. Each phase
+    // crosses the two dynamic buffers several times before its fence; repeated
+    // phases also prove continuation after SYNC_FULL.
+    for (0..4) |_| {
+        for (0..4000) |_| {
+            rdp_queue.writeOverlayCommand(
+                &geometry_overlay,
+                0,
+                symbols.vertex_buffer,
+                &.{@as(u32, symbols.vertex_buffer + 36) << 16 | symbols.vertex_buffer + 72},
+            );
+        }
+        rdp_queue.writeOverlayCommand(&geometry_overlay, 10, 0, &.{});
+        const fence = rdp.syncFull(&render_queue);
+        if (!rsp.waitTimeout(&rdp_queue, 100_000_000)) return error.RspSignalTimeout;
+        if (!fence.waitTimeout(100_000_000)) return error.RdpFenceTimeout;
+    }
+
+    const first_buffer: u32 = @truncate(@intFromPtr(&rsp_rdp_dynamic_buffers[0]) & 0x00ffffff);
+    const second_buffer: u32 = @truncate(@intFromPtr(&rsp_rdp_dynamic_buffers[1]) & 0x00ffffff);
+    const current = rsp.io.readDmem(u32, resident_symbols.rdp_current).*;
+    const in_first = current >= first_buffer and current < first_buffer + rsp.rdp_dynamic_buffer_len;
+    const in_second = current >= second_buffer and current < second_buffer + rsp.rdp_dynamic_buffer_len;
+    try testing.expect(in_first or in_second);
+    const listed_first = rsp.io.readDmem(u32, resident_symbols.rdp_buffers).*;
+    const listed_second = rsp.io.readDmem(u32, resident_symbols.rdp_buffers + 4).*;
+    try testing.expect(
+        (listed_first == first_buffer and listed_second == second_buffer) or
+            (listed_first == second_buffer and listed_second == first_buffer),
+    );
+
+    rsp.releaseRdpToDirect();
+    rsp.unregisterOverlay(&geometry_overlay);
+    rsp.unregisterOverlay(&rdp_overlay);
 }
 
 fn geometryTriangleStrip() !void {
@@ -2099,7 +2301,6 @@ fn geometryTriangleStrip() !void {
     const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
     rsp.io.readDmem(u32, resident_symbols.rdp_current).* = output_address;
     rsp.io.readDmem(u32, resident_symbols.rdp_sentinel).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
-    rsp.writeDmemByte(rsp.rdp_publication_held_dmem, 1);
     rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 1);
 
     const index_address: u32 = @truncate(@intFromPtr(&geometry_strip_indices) & 0x00ffffff);
@@ -2160,7 +2361,6 @@ fn geometryClippedTriangle() !void {
     const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
     rsp.io.readDmem(u32, resident_symbols.rdp_current).* = output_address;
     rsp.io.readDmem(u32, resident_symbols.rdp_sentinel).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
-    rsp.writeDmemByte(rsp.rdp_publication_held_dmem, 1);
     rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 1);
 
     continuous_queue.init(.low);

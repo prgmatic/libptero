@@ -14,7 +14,6 @@ bss {
     extern rdp_current: u32;
     extern rdp_sentinel: u32;
     extern rdp_buffers: [2]u32;
-    extern rdp_publication_held: u8;
 }
 
 // Canonical libdragon append/finalize interface. Complex handlers can append

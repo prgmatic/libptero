@@ -1,5 +1,6 @@
 const std = @import("std");
 const cache = @import("../cpu/cache.zig");
+const cpu = @import("../cpu.zig");
 const rdp_io = @import("../graphics/rdp/io.zig");
 
 pub const io = @import("io.zig");
@@ -108,16 +109,6 @@ pub const Queue = struct {
         self.current().appendRdpBuffer(end);
     }
 
-    pub fn holdRdpPublication(self: *Queue) void {
-        self.ensureCapacity(2);
-        self.current().beginRdpBatch();
-    }
-
-    pub fn releaseRdpPublication(self: *Queue) void {
-        self.ensureCapacity(1);
-        self.current().releaseRdpBuffer();
-    }
-
     pub fn configureRdpBuffers(
         self: *Queue,
         first: []align(16) u8,
@@ -186,11 +177,11 @@ pub const Queue = struct {
         return true;
     }
 
-    fn current(self: *Queue) *CommandQueue {
+    inline fn current(self: *Queue) *CommandQueue {
         return &self.storage.queues[self.storage.write_index];
     }
 
-    fn ensureCapacity(self: *Queue, command_words: usize) void {
+    inline fn ensureCapacity(self: *Queue, command_words: usize) void {
         const epilogue_words: usize = if (self.priority == .low) 3 else 6;
         if (self.current().index + command_words + epilogue_words <= self.current().buffer.len) return;
         if (self.priority == .high) @panic("high-priority RSP command queue is full");
@@ -211,7 +202,6 @@ fn validateQueueDma(rdram: anytype, dmem_address: u32) void {
 
 pub const rdp_syncfull_ongoing_dmem = programs.command_dispatcher_symbols.rdp_syncfull_ongoing;
 pub const rdp_target_bitdepth_dmem = programs.command_dispatcher_symbols.rdp_target_bitdepth;
-pub const rdp_publication_held_dmem = programs.command_dispatcher_symbols.rdp_publication_held;
 pub const rdp_mode_dmem = programs.command_dispatcher_symbols.rdp_mode;
 
 const overlay_table_dmem = programs.command_dispatcher_symbols.overlay_data_rdram;
@@ -301,7 +291,6 @@ pub fn releaseRdpToDirect() void {
     io.readDmem(u32, rdp_current_dmem).* = 0;
     io.readDmem(u32, rdp_sentinel_dmem).* = 0;
     writeDmemByte(rdp_syncfull_ongoing_dmem, 0);
-    writeDmemByte(rdp_publication_held_dmem, 0);
 }
 
 fn writebackCommandGraph(queue: *const CommandQueue, depth: usize) void {
@@ -322,7 +311,10 @@ pub fn flush(queue: *Queue) void {
     const next = &storage.queues[next_index];
 
     if (storage.submitted) {
-        while (!io.status_register_read.signal6) {}
+        // Space uncached SP_STATUS reads while the RDP owns the shared RCP bus.
+        // Libdragon gets equivalent pacing from its timed RSP_WAIT_LOOP.
+        const poll_interval_cycles = 64;
+        while (!io.status_register_read.signal6) cpu.waitCycles(poll_interval_cycles);
         io.status_register_write.* = io.status_clear_signal6;
         next.clearStreaming();
     }

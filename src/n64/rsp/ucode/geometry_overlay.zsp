@@ -278,7 +278,7 @@ fn normalizeMatrixVector(
         all1 = vectorSelectByCompareCode(all1, all2);
         scratch = clip1 & 0xff;
         hml_upper = hml_upper ^ hml_upper;
-        if(scratch != did_swap1) goto geometryTriangleClipNormalize slot {
+        if(scratch != did_swap1) tail dma.returnToCaller() slot {
             y_tmp2 = vectorCompareGreaterOrEqual(y1, y3);
         }
         scratch = clip1 >> 13;
@@ -335,7 +335,7 @@ fn normalizeMatrixVector(
         slope_f[0] = vectorReciprocal(hml[1]);
         did_swap0 = did_swap0 < 0;
         slope_i[0] = vectorReciprocalHigh(hml[1]);
-        if(did_swap0 == did_swap1) goto geometryTriangleClipNormalize slot {
+        if(did_swap0 == did_swap1) tail dma.returnToCaller() slot {
             slope_f[2] = vectorReciprocal(all_tmp2[1]);
         }
         slope_i[2] = vectorReciprocalHigh(all_tmp2[1]);
@@ -560,7 +560,7 @@ fn normalizeMatrixVector(
         if(scratch != 0) goto geometry_RDPQ_Triangle_Send_End slot {
             did_swap1 = load(i32, rdp_current);
         }
-        if(did_swap0 != 0) goto geometryTriangleClipNormalize slot {
+        if(did_swap0 != 0) tail dma.returnToCaller() slot {
             store(i32, rdp_current, did_swap1);
         }
         return slot {
