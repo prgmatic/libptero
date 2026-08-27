@@ -6,6 +6,7 @@ const Entry = struct {
     path: std.Build.LazyPath,
     alignment: u29,
 };
+const SourceEntry = struct { name: []const u8, path: std.Build.LazyPath };
 
 const TextureEntry = struct {
     name: []const u8,
@@ -62,6 +63,11 @@ pub const AssetBundle = struct {
     target: std.Build.ResolvedTarget,
     name: []const u8,
     asset_module: AssetModule,
+    include_zsp_symbols: bool = true,
+
+    pub fn omitZspSymbols(self: *AssetBundle) void {
+        self.include_zsp_symbols = false;
+    }
 
     pub fn embedFile(self: *AssetBundle, name: []const u8, path: std.Build.LazyPath) void {
         self.asset_module.embedFile(name, path);
@@ -126,14 +132,16 @@ pub const AssetBundle = struct {
     }
 
     pub fn addZspProgram(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
-        const rsp = self.buildZspProgram(name, source);
-        self.asset_module.addGeneratedFile(name, rsp, 8);
-        return rsp;
+        const built = buildZsp(self, name, source, self.root.path(self.b, "src/n64/rsp/link.ld"), null);
+        self.asset_module.addGeneratedFile(name, built.rsp, 8);
+        if (self.include_zsp_symbols) self.asset_module.addSource(self.b.fmt("{s}_symbols", .{name}), built.symbols);
+        return built.rsp;
     }
 
     pub fn addZspResident(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) Resident {
         const built = buildZsp(self, name, source, self.root.path(self.b, "src/n64/rsp/resident.ld"), null);
         self.asset_module.addGeneratedFile(name, built.rsp, 8);
+        if (self.include_zsp_symbols) self.asset_module.addSource(self.b.fmt("{s}_symbols", .{name}), built.symbols);
         return .{ .elf = built.elf, .interface = built.interface };
     }
 
@@ -158,7 +166,9 @@ pub const AssetBundle = struct {
         overlay_link.addFileArg(resident.interface);
         overlay_link.addArg(self.b.fmt("0x{x}", .{state_start}));
         const linker_script = overlay_link.addOutputFileArg(self.b.fmt("{s}.ld", .{name}));
-        self.asset_module.addGeneratedFile(name, buildZsp(self, name, source, linker_script, resident.interface).rsp, 8);
+        const built = buildZsp(self, name, source, linker_script, resident.interface);
+        self.asset_module.addGeneratedFile(name, built.rsp, 8);
+        if (self.include_zsp_symbols) self.asset_module.addSource(self.b.fmt("{s}_symbols", .{name}), built.symbols);
     }
 
     pub fn createModule(self: *AssetBundle) *std.Build.Module {
@@ -172,6 +182,7 @@ pub const AssetModule = struct {
     n64_module: *std.Build.Module,
     name: []const u8,
     entries: std.ArrayList(Entry) = .empty,
+    sources: std.ArrayList(SourceEntry) = .empty,
     textures: std.ArrayList(TextureEntry) = .empty,
     fonts: std.ArrayList(FontEntry) = .empty,
     models: std.ArrayList(ModelEntry) = .empty,
@@ -198,6 +209,10 @@ pub const AssetModule = struct {
             );
             source.appendSlice(self.b.allocator, declaration) catch @panic("OOM");
         }
+        for (self.sources.items) |entry| source.appendSlice(self.b.allocator, self.b.fmt(
+            "pub const {s} = @import(\"source_{s}\");\n",
+            .{ entry.name, entry.name },
+        )) catch @panic("OOM");
         for (self.textures.items) |entry| {
             source.appendSlice(self.b.allocator, self.b.fmt(
                 "pub const {s} = @import(\"texture_{s}\").{s};\n",
@@ -221,6 +236,10 @@ pub const AssetModule = struct {
         for (self.entries.items) |entry| {
             module.addAnonymousImport(self.b.fmt("asset_{s}", .{entry.name}), .{ .root_source_file = entry.path });
         }
+        for (self.sources.items) |entry| module.addImport(self.b.fmt("source_{s}", .{entry.name}), self.b.createModule(.{
+            .root_source_file = entry.path,
+            .target = self.target,
+        }));
         for (self.textures.items) |entry| {
             const texture_module = self.b.createModule(.{
                 .root_source_file = entry.source,
@@ -257,6 +276,11 @@ pub const AssetModule = struct {
         self.entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = path, .alignment = alignment }) catch @panic("OOM");
     }
 
+    fn addSource(self: *AssetModule, name: []const u8, path: std.Build.LazyPath) void {
+        self.validateName(name);
+        self.sources.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = path }) catch @panic("OOM");
+    }
+
     fn addTextureEntry(self: *AssetModule, name: []const u8, source: std.Build.LazyPath, texels: std.Build.LazyPath) void {
         self.textures.append(self.b.allocator, .{
             .name = self.b.dupe(name),
@@ -278,6 +302,8 @@ pub const AssetModule = struct {
         if (!std.zig.isValidId(name)) std.debug.panic("asset name '{s}' is not a valid Zig identifier", .{name});
         for (self.entries.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
+        for (self.sources.items) |entry|
+            if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
         for (self.textures.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
         for (self.fonts.items) |entry|
@@ -291,6 +317,7 @@ const ZspBuild = struct {
     rsp: std.Build.LazyPath,
     elf: *std.Build.Step.Compile,
     interface: std.Build.LazyPath,
+    symbols: std.Build.LazyPath,
 };
 
 fn buildZsp(
@@ -328,10 +355,13 @@ fn buildZsp(
 
     const pack = b.addRunArtifact(assets.tools.rsp_pack);
     pack.addArtifactArg(elf);
+    pack.addArg("--symbols");
+    const symbols = pack.addOutputFileArg(b.fmt("{s}_symbols.zig", .{name}));
     return .{
         .rsp = pack.addOutputFileArg(b.fmt("{s}.rsp", .{name})),
         .elf = elf,
         .interface = interface,
+        .symbols = symbols,
     };
 }
 

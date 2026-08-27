@@ -5,20 +5,7 @@ const rsp = @import("../rsp/rsp.zig");
 const rdp = @import("rdp.zig");
 const Rgba32 = @import("color.zig").Rgba32;
 
-const state_start = 0x0230;
-const vertex_buffer = state_start + 0x01d8;
 const vertex_output_size = 36;
-const strip_buffer_end = vertex_buffer + 2520;
-const matrix_stack_pointer_offset = 0x01c4;
-const vertex_effect_function_offset = 0x01cc;
-const clipping_code_size_offset = 0x01ce;
-const clipping_code_address_offset = 0x01d0;
-const original_code_address_offset = 0x01d4;
-const clipping_imem_start = 0x08b0;
-const vertex_input_end = 0x0f40;
-const ambient_color = state_start + 0x0148;
-const directional_light_color = state_start + 0x0150;
-const active_light_size = state_start + 0x01ca;
 
 pub const DrawFlags = packed struct(u17) {
     depth: bool = false,
@@ -102,32 +89,36 @@ pub const Context = struct {
         @memset(&self.matrix_stack, math.FixedMat4.identity);
         self.view_matrix = .identity;
         cache.writebackData(&self.matrix_stack);
+        const program = self.geometry_overlay.program;
+        const symbols = rsp.programs.geometry_overlay_symbols;
+        const state_start = program.state_offset;
         var state = rsp.overlayState(&self.geometry_overlay);
+        const matrix_stack_pointer_offset = symbols.matrix_stack_pointer - state_start;
         std.mem.writeInt(u32, state[matrix_stack_pointer_offset..][0..4], physical(&self.matrix_stack), .big);
-        const vertex_handler = blk: {
-            for (0..self.geometry_overlay.program.commandCount()) |metadata_index| {
-                const command = self.geometry_overlay.program.commandAt(metadata_index);
-                if (command.index == 4) break :blk command.handler_offset;
-            }
-            @panic("geometry vertex command is missing");
-        };
-        const vertex_effect_none = vertex_handler + 0x2bc;
+        const vertex_effect_none = symbols.VertexFX_None;
+        const vertex_effect_function_offset = symbols.vertex_effect_function - state_start;
         std.mem.writeInt(u16, state[vertex_effect_function_offset..][0..2], vertex_effect_none, .big);
         rsp.writebackOverlayState(&self.geometry_overlay);
 
         // Enter the main overlay once while its lazy-code pointer is zero.
         // Its entry stub uses that pointer during the initial load.
-        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, 0x8000 | state_start + 0x01ca, &.{0});
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, 0x8000 | symbols.active_light_size, &.{0});
         rsp.flush(&self.queue);
         rsp.wait(&self.queue);
 
         const clipping = rsp.programs.geometry_clipping;
+        const clipping_imem_start = symbols._start;
+        if (rsp.programs.geometry_clipping_symbols.geometry_clipping_code_start != clipping_imem_start)
+            @panic("geometry clipping overlays disagree on their linked IMEM target");
         const clipping_payload_offset = clipping_imem_start - clipping.text_offset;
         const geometry_restore_offset = clipping_imem_start - self.geometry_overlay.program.text_offset;
         const clipping_size: u16 = @intCast(clipping.text.len - clipping_payload_offset);
         const clipping_address = physical(clipping.text.ptr + clipping_payload_offset);
         const original_address = physical(self.geometry_overlay.program.text.ptr + geometry_restore_offset);
         state = rsp.overlayState(&self.geometry_overlay);
+        const clipping_code_size_offset = symbols.clipping_code_size - state_start;
+        const clipping_code_address_offset = symbols.clipping_code_address - state_start;
+        const original_code_address_offset = symbols.original_code_address - state_start;
         std.mem.writeInt(u16, state[clipping_code_size_offset..][0..2], clipping_size, .big);
         std.mem.writeInt(u32, state[clipping_code_address_offset..][0..4], clipping_address, .big);
         std.mem.writeInt(u32, state[original_code_address_offset..][0..4], original_address, .big);
@@ -163,7 +154,7 @@ pub const Context = struct {
     }
 
     pub fn setAmbientLight(self: *Context, color: Rgba32) void {
-        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, ambient_color, &.{ @as(u32, @bitCast(color)), 0, 0 });
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, rsp.programs.geometry_overlay_symbols.ambient_color, &.{ @as(u32, @bitCast(color)), 0, 0 });
     }
     pub fn setDirectionalLight(self: *Context, color: Rgba32, direction: math.Vec3) void {
         const n = self.view_matrix.transformDirection(direction).normalized();
@@ -171,8 +162,8 @@ pub const Context = struct {
         const y: u8 = @bitCast(@as(i8, @intFromFloat(n.y * 127.0)));
         const z: u8 = @bitCast(@as(i8, @intFromFloat(n.z * 127.0)));
         const packed_direction = @as(u32, x) << 24 | @as(u32, y) << 16 | @as(u32, z) << 8;
-        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, directional_light_color, &.{ @as(u32, @bitCast(color)), packed_direction, packed_direction });
-        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, active_light_size | 0x8000, &.{0x1000});
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, rsp.programs.geometry_overlay_symbols.directional_light_color, &.{ @as(u32, @bitCast(color)), packed_direction, packed_direction });
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, rsp.programs.geometry_overlay_symbols.active_light_size | 0x8000, &.{0x1000});
     }
     pub fn setDrawFlags(self: *Context, flags: DrawFlags) void {
         if (flags.cull_front and flags.cull_back) @panic("cannot cull both triangle faces");
@@ -192,18 +183,25 @@ pub const Context = struct {
     pub fn loadVertices(self: *Context, vertices: []const VertexPair, offset: u8, count: u8) void {
         if (count == 0 or count > vertices.len * 2) @panic("invalid geometry vertex count");
         cache.writebackData(vertices);
+        const symbols = rsp.programs.geometry_overlay_symbols;
+        const vertex_buffer = symbols.vertex_buffer;
+        const vertex_input_end = symbols.clipping_buffer_result + 6 * 16;
         const input_size: u32 = ((@as(u32, count) + 1) & ~@as(u32, 1)) * 16;
         const temp_address = (vertex_input_end - input_size) & ~@as(u32, 0xf);
         const output_address = vertex_buffer + @as(u32, offset) * vertex_output_size;
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 4, input_size, &.{ physical(vertices.ptr), temp_address << 16 | output_address });
     }
     pub fn drawTriangle(self: *Context, a: u8, b: u8, c: u8) void {
+        const vertex_buffer = rsp.programs.geometry_overlay_symbols.vertex_buffer;
         const va = vertex_buffer + @as(u32, a) * vertex_output_size;
         const vb = vertex_buffer + @as(u32, b) * vertex_output_size;
         const vc = vertex_buffer + @as(u32, c) * vertex_output_size;
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 0, va, &.{vb << 16 | vc});
     }
     pub fn drawTriangleStrip(self: *Context, indices: []const i16, sync: bool) void {
+        const symbols = rsp.programs.geometry_overlay_symbols;
+        const vertex_buffer = symbols.vertex_buffer;
+        const strip_buffer_end = symbols.clipping_buffer_temporary;
         if (indices.len < 3 or indices.len * @sizeOf(i16) > strip_buffer_end - vertex_buffer) @panic("invalid geometry strip");
         cache.writebackData(indices);
         const byte_count: u32 = @intCast(indices.len * @sizeOf(i16));

@@ -123,6 +123,7 @@ pub fn addZspPrograms(b: *std.Build, sdk: *Sdk) *std.Build.Module {
     const fixtures = findZspFixtures(b, "src/tests/ucode");
 
     var assets = sdk.createAssets("zsp_test_assets");
+    assets.omitZspSymbols();
     const resident = assets.addZspResident(
         "command_dispatcher",
         sdk.root.path(b, "src/n64/rsp/ucode/command_dispatcher.zsp"),

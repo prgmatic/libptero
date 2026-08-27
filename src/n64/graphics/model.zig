@@ -1,8 +1,9 @@
 const geometry = @import("geometry.zig");
 
-/// A model is stored as already-packed, hardware-ready vertex batches.  The
-/// asset compiler is responsible for splitting a glTF primitive so every part
-/// fits in the RSP vertex cache.
+/// A model is stored as already-packed vertex batches. Strip entries contain
+/// vertex-buffer-relative byte offsets plus the RSP strip control flags; the
+/// linked geometry overlay relocates them to its actual DMEM vertex buffer.
+/// The asset compiler splits primitives so every part fits in that workspace.
 pub const Model = struct {
     parts: []const Part,
 
@@ -66,7 +67,7 @@ test "model applies changed materials and submits packed batches" {
         .color_a = .fromBytes(255, 255, 255, 255),
         .color_b = .fromBytes(255, 255, 255, 255),
     }};
-    const strip_indices = [_]i16{ 0x0408, 0x042c, 0x4408 };
+    const strip_indices = [_]i16{ 0, 0x0024, 0x4000 };
     const parts = [_]Part{
         .{ .vertices = &vertices, .strip_indices = &strip_indices, .material_index = 2, .vertex_count = 2 },
         .{ .vertices = &vertices, .strip_indices = &strip_indices, .material_index = 2, .vertex_count = 2 },

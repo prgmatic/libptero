@@ -271,7 +271,7 @@ fn emitIndices(allocator: std.mem.Allocator, data: *std.ArrayList(u8), triangles
 }
 
 fn encodedIndex(index: u8, triangle_index: usize, corner: usize, triangle_count: usize) u16 {
-    var encoded = @as(u16, index) * 36 + 0x0408;
+    var encoded = @as(u16, index) * 36;
     if (triangle_index != 0 and corner == 0) encoded |= 0x8000;
     if (triangle_index + 1 == triangle_count and corner == 2) encoded |= 0x4000;
     return encoded;
@@ -577,12 +577,14 @@ const BatchBuilder = struct {
 };
 
 fn batchFits(unique_vertices: usize, triangle_count: usize, max_vertices: usize) bool {
+    const vertex_workspace_size = 2520;
+    const strip_end_padding = 16;
     const loaded_vertices = (unique_vertices + 1) & ~@as(usize, 1);
     if (loaded_vertices > max_vertices) return false;
-    const vertex_end = 0x0408 + loaded_vertices * 36;
+    const vertex_end = loaded_vertices * 36;
     const index_bytes = triangle_count * 3 * @sizeOf(i16);
-    if (index_bytes > 0x0dd0) return false;
-    const index_start = (0x0dd0 - index_bytes) & ~@as(usize, 7);
+    if (index_bytes > vertex_workspace_size - strip_end_padding) return false;
+    const index_start = (vertex_workspace_size - strip_end_padding - index_bytes) & ~@as(usize, 7);
     return vertex_end <= index_start;
 }
 
@@ -798,7 +800,7 @@ test "generated model uses packed big-endian vertex data" {
     try std.testing.expectEqual(@as(usize, 38), generated.data.len);
     try std.testing.expectEqualSlices(u8, &.{ 0, 1, 0xff, 0xfe, 0, 3, 0x45, 0x67 }, generated.data[0..8]);
     try std.testing.expectEqualSlices(u8, &.{ 8, 9, 10, 11, 19, 20, 21, 22 }, generated.data[16..24]);
-    try std.testing.expectEqualSlices(u8, &.{ 0x04, 0x08, 0x04, 0x2c, 0x44, 0x08 }, generated.data[32..38]);
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x00, 0x24, 0x40, 0x00 }, generated.data[32..38]);
     try std.testing.expect(std.mem.indexOf(u8, generated.source, "pub const fixture_model") != null);
     try std.testing.expect(std.mem.indexOf(u8, generated.source, ".material_index = 3") != null);
 }

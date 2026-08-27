@@ -1276,6 +1276,9 @@ fn triangleClip() noreturn {
         count_and_dmem = load(i16, bitCast(dmem_pointer), 4);
         rdram = load(u16, bitCast(dmem_pointer), 2);
         vertex2 = load(u16, bitCast(dmem_pointer));
+        count_and_dmem +%= vertex_buffer;
+        rdram +%= vertex_buffer;
+        vertex2 +%= vertex_buffer;
         if(count_and_dmem < 0) goto strip_new slot {
             dmem_pointer +%= 2;
         }

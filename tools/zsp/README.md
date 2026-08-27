@@ -356,6 +356,30 @@ use the accompanying `@zsp-symbol` metadata to bind those names to symbols in a
 separately linked resident program, including implementations from imported
 modules whose assembly labels are internally mangled.
 
+The final RSP pack step can emit linked DMEM and IMEM symbols as a generated Zig
+module with `--symbols <output.zig>`. Asset bundles do this automatically, so
+CPU code can use compile-time constants such as
+`programs.geometry_overlay_symbols.vertex_buffer` instead of duplicating linker
+addresses or deriving an interior function from a command handler. IMEM values
+are offsets from IMEM base; DMEM values are DMEM offsets. Symbol names and tables
+remain host-side build metadata and are not included in the packed program or
+final ROM.
+
+For a post-link memory report, run:
+
+```sh
+rsp_pack program.elf --map program.map program.rsp
+```
+
+The report lists the linked data, persistent state, temporary BSS, and text
+ranges followed by every packed symbol. This is the authoritative view when
+checking overlay workspace or comparing a layout with another microcode.
+
+Generated symbol modules are deliberately separate from `.rsp` blobs: the
+packed format remains header, text, data, command metadata, and initialized
+state only. Referencing a generated address is therefore a compile-time CPU
+relocation and adds no symbol table or symbol strings to a production ROM.
+
 Modules use relative imports and qualified calls:
 
 ```zig

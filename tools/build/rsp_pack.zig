@@ -15,8 +15,8 @@ pub fn main(init: std.process.Init) !void {
     const stderr = &err_writer.interface;
 
     const args = try init.minimal.args.toSlice(alloc);
-    if (args.len != 3) {
-        try stderr.print("Usage: rsp_pack <input.elf> <output.rsp>\n", .{});
+    if (args.len != 3 and args.len != 5) {
+        try stderr.print("Usage: rsp_pack <input.elf> [--map <output.map> | --symbols <output.zig>] <output.rsp>\n", .{});
         try stderr.flush();
         std.process.exit(1);
     }
@@ -24,16 +24,74 @@ pub fn main(init: std.process.Init) !void {
     const elf_bytes = try readAll(io, alloc, args[1]);
     defer alloc.free(elf_bytes);
 
+    const output_path = if (args.len == 3) args[2] else args[4];
+    if (args.len == 5 and !std.mem.eql(u8, args[2], "--map") and !std.mem.eql(u8, args[2], "--symbols"))
+        return error.InvalidArguments;
     const rsp = try pack(alloc, elf_bytes);
     defer alloc.free(rsp);
 
-    const out = try std.Io.Dir.cwd().createFile(io, args[2], .{});
+    if (args.len == 5) {
+        if (std.mem.eql(u8, args[2], "--map")) try writeMap(io, alloc, elf_bytes, args[3]) else try writeSymbols(io, alloc, elf_bytes, args[3]);
+    }
+
+    const out = try std.Io.Dir.cwd().createFile(io, output_path, .{});
     defer out.close(io);
 
     var write_buf: [4096]u8 = undefined;
     var writer = out.writer(io, &write_buf);
     try writer.interface.writeAll(rsp);
     try writer.interface.flush();
+}
+
+fn writeSymbols(io: std.Io, alloc: std.mem.Allocator, bytes: []const u8, path: []const u8) !void {
+    var reader = std.Io.Reader.fixed(bytes);
+    const header = try elf.Header.read(&reader);
+    const text = (try findSection(bytes, header, ".text")) orelse return error.MissingTextSection;
+    const symbols = try collectSymbols(alloc, bytes, header, text, try findSection(bytes, header, ".data"), try findSection(bytes, header, ".state"), try findSection(bytes, header, ".bss"));
+    defer alloc.free(symbols);
+    const out = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer out.close(io);
+    var buffer: [4096]u8 = undefined;
+    var file_writer = out.writer(io, &buffer);
+    for (symbols) |symbol| try file_writer.interface.print("pub const @\"{s}\": u16 = 0x{x:0>4}; // {s}\n", .{ symbol.name, symbol.value, @tagName(symbol.kind) });
+    try file_writer.interface.flush();
+}
+
+fn writeMap(io: std.Io, alloc: std.mem.Allocator, bytes: []const u8, path: []const u8) !void {
+    var reader = std.Io.Reader.fixed(bytes);
+    const header = try elf.Header.read(&reader);
+    const text = (try findSection(bytes, header, ".text")) orelse return error.MissingTextSection;
+    const data = try findSection(bytes, header, ".data");
+    const state = try findSection(bytes, header, ".state");
+    const bss = try findSection(bytes, header, ".bss");
+    const symbols = try collectSymbols(alloc, bytes, header, text, data, state, bss);
+    defer alloc.free(symbols);
+    std.mem.sort(PackedSymbol, symbols, {}, struct {
+        fn lessThan(_: void, lhs: PackedSymbol, rhs: PackedSymbol) bool {
+            if (lhs.kind != rhs.kind) return @intFromEnum(lhs.kind) < @intFromEnum(rhs.kind);
+            if (lhs.value != rhs.value) return lhs.value < rhs.value;
+            return std.mem.lessThan(u8, lhs.name, rhs.name);
+        }
+    }.lessThan);
+
+    const out = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer out.close(io);
+    var buffer: [4096]u8 = undefined;
+    var file_writer = out.writer(io, &buffer);
+    const writer = &file_writer.interface;
+    try writer.writeAll("RSP linked memory map\n\nSections:\n");
+    for ([_]struct { name: []const u8, section: ?elf.Elf64_Shdr }{
+        .{ .name = "data", .section = data }, .{ .name = "state", .section = state },
+        .{ .name = "bss", .section = bss },   .{ .name = "text", .section = text },
+    }) |item| if (item.section) |section| {
+        const base: u64 = if (std.mem.eql(u8, item.name, "text")) imem_base else 0;
+        try writer.print("  {s: <5} 0x{x:0>4}..0x{x:0>4} ({d} bytes)\n", .{
+            item.name, section.sh_addr - base, section.sh_addr - base + section.sh_size, section.sh_size,
+        });
+    };
+    try writer.writeAll("\nSymbols:\n");
+    for (symbols) |symbol| try writer.print("  {s} 0x{x:0>4} {s}\n", .{ @tagName(symbol.kind), symbol.value, symbol.name });
+    try writer.flush();
 }
 
 fn readAll(io: std.Io, alloc: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -55,7 +113,6 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const command_table = try findSection(bytes, header, ".zsp_command_table");
     const state = try findSection(bytes, header, ".state");
     const bss = try findSection(bytes, header, ".bss");
-
     if (header.entry < text.sh_addr or header.entry >= text.sh_addr + text.sh_size) return error.EntryOutsideText;
     const pc_start = header.entry - imem_base;
     if (text.sh_addr < imem_base) return error.TextOutsideImem;
@@ -143,8 +200,67 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
             return err;
         };
     }
-
     return out;
+}
+
+const SymbolKind = enum(u8) { dmem, imem };
+const PackedSymbol = struct { name: []const u8, value: u16, kind: SymbolKind };
+
+fn collectSymbols(
+    alloc: std.mem.Allocator,
+    bytes: []const u8,
+    header: elf.Header,
+    text: elf.Elf64_Shdr,
+    data: ?elf.Elf64_Shdr,
+    state: ?elf.Elf64_Shdr,
+    bss: ?elf.Elf64_Shdr,
+) ![]PackedSymbol {
+    const symtab = (try findSection(bytes, header, ".symtab")) orelse return &.{};
+    const strings_section = try sectionAt(bytes, header, symtab.sh_link);
+    const strings = try sectionBytes(bytes, strings_section);
+    const entries = try sectionBytes(bytes, symtab);
+    if (symtab.sh_entsize != 16 or entries.len % 16 != 0) return error.InvalidSymbolTable;
+
+    var result: std.ArrayList(PackedSymbol) = .empty;
+    errdefer result.deinit(alloc);
+    var offset: usize = 0;
+    while (offset < entries.len) : (offset += 16) {
+        const entry = entries[offset..][0..16];
+        const name_offset = std.mem.readInt(u32, entry[0..4], .big);
+        const value = std.mem.readInt(u32, entry[4..8], .big);
+        const section_index = std.mem.readInt(u16, entry[14..16], .big);
+        if (section_index == 0 or name_offset >= strings.len) continue;
+        const name = std.mem.sliceTo(strings[name_offset..], 0);
+        if (name.len == 0 or name.len > std.math.maxInt(u8) or name[0] == '.') continue;
+        const kind: SymbolKind = if (section_index == elf.SHN_ABS) blk: {
+            if (value >= imem_base and value < imem_base + 0x1000) break :blk .imem;
+            if (value < 0x1000) break :blk .dmem;
+            continue;
+        } else if (section_index >= header.shnum) continue else blk: {
+            const section = try sectionAt(bytes, header, section_index);
+            if (sameSection(section, text)) break :blk .imem;
+            if ((data != null and sameSection(section, data.?)) or
+                (state != null and sameSection(section, state.?)) or
+                (bss != null and sameSection(section, bss.?))) break :blk .dmem;
+            continue;
+        };
+        const packed_value: u32 = if (kind == .imem) value - imem_base else value;
+        if (packed_value > std.math.maxInt(u16)) return error.SymbolOutsideRspMemory;
+        for (result.items) |existing| {
+            if (std.mem.eql(u8, existing.name, name)) return error.DuplicateSymbol;
+        }
+        try result.append(alloc, .{ .name = name, .value = @intCast(packed_value), .kind = kind });
+    }
+    std.mem.sort(PackedSymbol, result.items, {}, struct {
+        fn lessThan(_: void, lhs: PackedSymbol, rhs: PackedSymbol) bool {
+            return std.mem.lessThan(u8, lhs.name, rhs.name);
+        }
+    }.lessThan);
+    return result.toOwnedSlice(alloc);
+}
+
+fn sameSection(a: elf.Elf64_Shdr, b: elf.Elf64_Shdr) bool {
+    return a.sh_offset == b.sh_offset and a.sh_addr == b.sh_addr and a.sh_size == b.sh_size;
 }
 
 fn patchCommandTable(
@@ -316,6 +432,16 @@ fn sectionBytes(bytes: []const u8, section: elf.Elf64_Shdr) ![]const u8 {
     const size: usize = @intCast(section.sh_size);
     if (offset + size > bytes.len) return error.BadElf;
     return bytes[offset..][0..size];
+}
+
+fn sectionAt(bytes: []const u8, header: elf.Header, wanted: usize) !elf.Elf64_Shdr {
+    if (wanted >= header.shnum) return error.BadElf;
+    var sections = header.iterateSectionHeadersBuffer(bytes);
+    var index: usize = 0;
+    while (try sections.next()) |section| : (index += 1) {
+        if (index == wanted) return section;
+    }
+    return error.BadElf;
 }
 
 fn findSection(bytes: []const u8, header: elf.Header, name: []const u8) !?elf.Elf64_Shdr {

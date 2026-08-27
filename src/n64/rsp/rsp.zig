@@ -209,19 +209,19 @@ fn validateQueueDma(rdram: anytype, dmem_address: u32) void {
     }
 }
 
-pub const rdp_syncfull_ongoing_dmem = 0x1dd;
-pub const rdp_target_bitdepth_dmem = 0x1dc;
-pub const rdp_publication_held_dmem = 0x9f;
-pub const rdp_mode_dmem = 0x1a0;
+pub const rdp_syncfull_ongoing_dmem = programs.command_dispatcher_symbols.rdp_syncfull_ongoing;
+pub const rdp_target_bitdepth_dmem = programs.command_dispatcher_symbols.rdp_target_bitdepth;
+pub const rdp_publication_held_dmem = programs.command_dispatcher_symbols.rdp_publication_held;
+pub const rdp_mode_dmem = programs.command_dispatcher_symbols.rdp_mode;
 
-const overlay_table_dmem = 0x08;
-const overlay_idmap_dmem = 0x48;
-const pointer_stack_dmem = 0x58;
-const queue_address_dmem = 0x80;
+const overlay_table_dmem = programs.command_dispatcher_symbols.overlay_data_rdram;
+const overlay_idmap_dmem = programs.command_dispatcher_symbols.overlay_idmap;
+const pointer_stack_dmem = programs.command_dispatcher_symbols.pointer_stack;
+const queue_address_dmem = programs.command_dispatcher_symbols.queue_rdram_address;
 const current_overlay_id_dmem = overlay_dmem_offset + 10;
-const rdp_current_dmem = 0x1d0;
-const rdp_sentinel_dmem = 0x1d4;
-const rdp_buffers_dmem = 0x1c8;
+const rdp_current_dmem = programs.command_dispatcher_symbols.rdp_current;
+const rdp_sentinel_dmem = programs.command_dispatcher_symbols.rdp_sentinel;
+const rdp_buffers_dmem = programs.command_dispatcher_symbols.rdp_buffers;
 const overlay_dmem_offset = overlay.dmem_offset;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
