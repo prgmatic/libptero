@@ -449,6 +449,7 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
         \\pub const ModelAsset = struct {{
         \\    model: n64.graphics.model.Model,
         \\    pub fn draw(self: @This(), context: anytype) void {{ self.model.draw(context, Materials{{}}); }}
+        \\    pub fn applyMaterial(_: @This(), context: anytype, index: u16) void {{ (Materials{{}}).apply(context, index); }}
         \\}};
         \\pub const Materials = struct {{
         \\    pub fn apply(_: @This(), context: anytype, index: u16) void {{

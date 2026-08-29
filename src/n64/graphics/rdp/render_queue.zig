@@ -1,4 +1,5 @@
 const q = @import("queue.zig");
+const std = @import("std");
 const blender = @import("blender.zig");
 const modes = @import("modes.zig");
 const cc = @import("combiner.zig");
@@ -90,6 +91,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
         }
 
         pub fn setBlendMode(rq: *Self, blend: BlendMode) void {
+            const previous: u64 = @bitCast(rq.mode);
             rq.mode.force_blend = blend.force_blend;
             rq.mode.image_read_en = blend.image_read_en;
             rq.mode.blend_p0 = blend.pass1.p;
@@ -100,10 +102,11 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.mode.blend_a1 = blend.pass2.a;
             rq.mode.blend_m1 = blend.pass2.m;
             rq.mode.blend_b1 = blend.pass2.b;
-            rq.mode_dirty = true;
+            if (@as(u64, @bitCast(rq.mode)) != previous) rq.mode_dirty = true;
         }
 
         pub fn setCombineMode(rq: *Self, mode: CombineMode) void {
+            if (std.meta.eql(rq.combine_mode, mode)) return;
             rq.combine_mode = mode;
             rq.combine_dirty = true;
         }
@@ -114,12 +117,14 @@ pub fn RenderQueue(comptime QueueType: type) type {
         }
 
         pub fn setDepthState(rq: *Self, compare: bool, update: bool) void {
+            if (rq.mode.z_compare_en == compare and rq.mode.z_update_en == update) return;
             rq.mode.z_compare_en = compare;
             rq.mode.z_update_en = update;
             rq.mode_dirty = true;
         }
 
         pub fn setPerspectiveTexture(rq: *Self, enabled: bool) void {
+            if (rq.mode.persp_tex_en == enabled) return;
             rq.mode.persp_tex_en = enabled;
             rq.mode_dirty = true;
         }

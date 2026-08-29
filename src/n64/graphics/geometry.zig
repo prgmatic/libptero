@@ -6,6 +6,7 @@ const rdp = @import("rdp.zig");
 const Rgba32 = @import("color.zig").Rgba32;
 
 const vertex_output_size = 36;
+pub const max_lights = 7;
 
 pub const DrawFlags = packed struct(u17) {
     depth: bool = false,
@@ -156,14 +157,31 @@ pub const Context = struct {
     pub fn setAmbientLight(self: *Context, color: Rgba32) void {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, rsp.programs.geometry_overlay_symbols.ambient_color, &.{ @as(u32, @bitCast(color)), 0, 0 });
     }
+    pub fn setLightCount(self: *Context, count: u8) void {
+        if (count > max_lights) @panic("too many lights");
+        self.queue.writeOverlayCommandKnown(
+            &self.geometry_overlay,
+            3,
+            rsp.programs.geometry_overlay_symbols.active_light_size | 0x8000,
+            &.{@as(u32, count) << 12},
+        );
+    }
+    /// Set the first directional light and make it active.
     pub fn setDirectionalLight(self: *Context, color: Rgba32, direction: math.Vec3) void {
+        self.setDirectionalLightAt(0, color, direction);
+        self.setLightCount(1);
+    }
+    /// Configure a directional-light slot. Call `setLightCount` to select how
+    /// many consecutively numbered slots participate in lighting.
+    pub fn setDirectionalLightAt(self: *Context, index: u8, color: Rgba32, direction: math.Vec3) void {
+        if (index >= max_lights) @panic("invalid light index");
         const n = self.view_matrix.transformDirection(direction).normalized();
         const x: u8 = @bitCast(@as(i8, @intFromFloat(n.x * 127.0)));
         const y: u8 = @bitCast(@as(i8, @intFromFloat(n.y * 127.0)));
         const z: u8 = @bitCast(@as(i8, @intFromFloat(n.z * 127.0)));
         const packed_direction = @as(u32, x) << 24 | @as(u32, y) << 16 | @as(u32, z) << 8;
-        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, rsp.programs.geometry_overlay_symbols.directional_light_color, &.{ @as(u32, @bitCast(color)), packed_direction, packed_direction });
-        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, rsp.programs.geometry_overlay_symbols.active_light_size | 0x8000, &.{0x1000});
+        const light_address = rsp.programs.geometry_overlay_symbols.directional_light_color + @as(u32, index) * 16;
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, light_address, &.{ @as(u32, @bitCast(color)), packed_direction, packed_direction });
     }
     pub fn setDrawFlags(self: *Context, flags: DrawFlags) void {
         if (flags.cull_front and flags.cull_back) @panic("cannot cull both triangle faces");

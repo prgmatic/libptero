@@ -225,17 +225,18 @@ fn geometryLightingApi() !void {
         .init(0, 1, 0),
     );
     geometry_api_context.setAmbientLight(.fromBytes(0x11, 0x22, 0x33, 0x44));
-    geometry_api_context.setDirectionalLight(.fromBytes(0x55, 0x66, 0x77, 0x88), .init(0, 0, 1));
+    geometry_api_context.setDirectionalLightAt(1, .fromBytes(0x55, 0x66, 0x77, 0x88), .init(0, 0, 1));
+    geometry_api_context.setLightCount(2);
     rsp.flush(&geometry_api_context.queue);
     try waitQueueTimeout(&geometry_api_context.queue);
 
     try expectDmemWord(u32, geometry_symbols.ambient_color, 0x11223344);
     try expectDmemWord(u32, 0x37c, 0x11223344);
-    try expectDmemWord(u32, 0x380, 0x55667788);
-    try expectDmemWord(u32, 0x384, 0x55667788);
-    try expectDmemWord(u32, 0x388, 0x81000000);
-    try expectDmemWord(u32, 0x38c, 0x81000000);
-    try expectDmemWord(u16, 0x3fa, 0x1000);
+    try expectDmemWord(u32, 0x390, 0x55667788);
+    try expectDmemWord(u32, 0x394, 0x55667788);
+    try expectDmemWord(u32, 0x398, 0x81000000);
+    try expectDmemWord(u32, 0x39c, 0x81000000);
+    try expectDmemWord(u16, 0x3fa, 0x2000);
     rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
 }
 
