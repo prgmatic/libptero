@@ -639,11 +639,11 @@ fn highPriorityQueue() !void {
 }
 
 fn rdpBufferCommands() !void {
+    loadCommandDispatcher();
     const dp_status_write: *volatile u32 = @ptrFromInt(0xa410000c);
     dp_status_write.* = 1 << 5;
     dp_status_write.* = (1 << 4) | (1 << 2) | (1 << 0);
     n64.interfaces.mips.clearRdpInterrupt();
-    loadCommandDispatcher();
     rdp_overlay.init(rsp.programs.rdp_overlay);
     rsp.registerOverlayStatic(&rdp_overlay, 12);
     rdp_buffer = .{ 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff };
@@ -2183,6 +2183,9 @@ fn geometryTriangleTrivialReject() !void {
     const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
     rsp.io.readDmem(u32, resident_symbols.rdp_current).* = output_address;
     rsp.io.readDmem(u32, resident_symbols.rdp_sentinel).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
+    // Inspect emitted bytes only. Do not publish this synthetic range to DP
+    // without a matching START register, even when the triangle is rejected.
+    rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 1);
 
     continuous_queue.init(.low);
     continuous_queue.writeOverlayCommand(&geometry_overlay, 0, symbols.vertex_buffer, &.{@as(u32, symbols.vertex_buffer + 36) << 16 | symbols.vertex_buffer + 72});
@@ -2218,12 +2221,14 @@ fn geometrySustainedCulledQueueTurnover() !void {
     const output_address: u32 = @truncate(@intFromPtr(&geometry_triangle_output) & 0x00ffffff);
     rsp.io.readDmem(u32, resident_symbols.rdp_current).* = output_address;
     rsp.io.readDmem(u32, resident_symbols.rdp_sentinel).* = output_address + @sizeOf(@TypeOf(geometry_triangle_output));
+    rsp.writeDmemByte(rsp.rdp_syncfull_ongoing_dmem, 1);
 
     continuous_queue.init(.low);
     // Each triangle command is two words. Four buffer capacities guarantee
     // several producer/consumer turnovers while exercising the exact culled
     // return path that stalled the 16-instance model workload.
     for (0..rsp.command_queue.rdram_buffer_word_count * 2) |_| {
+        try checkCulledProducerTurnover();
         continuous_queue.writeOverlayCommand(
             &geometry_overlay,
             0,
@@ -2239,6 +2244,7 @@ fn geometrySustainedCulledQueueTurnover() !void {
     // wait-command resume pointer, which only failed on the following frame in
     // the original 1/4/16-instance benchmark sequence.
     for (0..rsp.command_queue.rdram_buffer_word_count * 2) |_| {
+        try checkCulledProducerTurnover();
         continuous_queue.writeOverlayCommand(
             &geometry_overlay,
             0,
@@ -2256,6 +2262,19 @@ fn geometrySustainedCulledQueueTurnover() !void {
     try expectDmemWord(u32, 0x344, 0x16c011ed);
     try expectDmemWord(u32, 0x348, 0x16c0affe);
     rsp.unregisterOverlay(&geometry_overlay);
+}
+
+fn checkCulledProducerTurnover() !void {
+    const storage = &continuous_queue.storage;
+    const current = &storage.queues[storage.write_index];
+    if (current.index + 5 <= current.buffer.len or !storage.submitted) return;
+    if (!rsp.waitTimeout(&continuous_queue, rsp_timeout_attempts)) {
+        n64.debug.diagnostics.reportRenderTimeout("culled producer turnover", &continuous_queue);
+        n64.debug.print("trap={x} triangle_offset={x}\n", .{ rsp.io.readDmem(u32, 0x80).*, rsp.io.readDmem(u16, geometry_symbols.triangle_buffer_offset).* });
+        rsp.halt();
+        rsp.waitHalted();
+        return error.CulledProducerTimeout;
+    }
 }
 
 fn geometryProductiveRdpRollover() !void {
@@ -2318,10 +2337,11 @@ fn geometryProductiveRdpRollover() !void {
     rdp_queue.writeOverlayCommand(&geometry_overlay, 6, 2, &.{0x0100cf00});
 
     // A depth-writing shaded, textured triangle emits 176 bytes. Each phase
-    // crosses the two dynamic buffers several times before its fence; repeated
-    // phases also prove continuation after SYNC_FULL.
+    // emits 70,400 bytes, forcing a rollover of the 65,536-byte dynamic buffer.
+    // Four phases exercise reuse of both buffers and continuation after
+    // SYNC_FULL while keeping this regression workload around 100 ms.
     for (0..4) |_| {
-        for (0..4000) |_| {
+        for (0..400) |_| {
             rdp_queue.writeOverlayCommand(
                 &geometry_overlay,
                 0,
@@ -2617,6 +2637,22 @@ fn rdpAutoTmemTileEmission() !void {
 fn loadCommandDispatcher() void {
     rsp.halt();
     rsp.waitHalted();
+    // Command-encoding tests intentionally use synthetic RDP words/ranges.
+    // Discard them before the next test: a stale END behind CURRENT can make
+    // the DP walk unrelated RDRAM and leave later SP DMA waits stuck.
+    const dp_io = n64.interfaces.rdp;
+    dp_io.status_write.* = (1 << 5) | (1 << 3);
+    dp_io.dma_start_addr.* = 0;
+    dp_io.dma_end_addr.* = 0;
+    // Accept the empty range while flushing. Do not resume synthetic words
+    // between clearing FREEZE and installing the new START/END registers.
+    dp_io.status_write.* = (1 << 2) | (1 << 0);
+    var attempts: u32 = rsp_timeout_attempts;
+    while (attempts != 0 and (@as(u32, @bitCast(dp_io.status.*)) & 0x600) != 0) : (attempts -= 1) {}
+    if (attempts == 0) @panic("test RDP range reset timed out");
+    // Command-encoding fixtures are not rendering workloads. Keep the DP
+    // frozen unless a test explicitly attaches a real render buffer/handoff.
+    dp_io.status_write.* = (1 << 4) | (1 << 3);
     rsp.loadResident(rsp.programs.command_dispatcher);
 }
 
