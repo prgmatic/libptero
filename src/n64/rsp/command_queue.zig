@@ -165,6 +165,16 @@ pub const CommandQueue = struct {
         self.call_target = block;
     }
 
+    /// Call an immutable command block whose cache coherency is managed by
+    /// its owner. Unlike `call`, this does not attach the block to the queue's
+    /// one-target command graph and is suitable for resident streaming queues
+    /// which may invoke many independently recorded blocks.
+    pub fn callStatic(self: *CommandQueue, block: *const CommandQueue) void {
+        if (!block.sealed) @panic("RSP command block must end with returnFromCall()");
+        const target: u32 = @truncate((@intFromPtr(block.buffer.ptr) & 0x1fffffff) & 0x00ffffff);
+        self.writeRawCommand(@intFromEnum(InternalCommand.call), target, &.{0});
+    }
+
     pub fn callIndirect(self: *CommandQueue, block: *const CommandQueue, dmem_address: u32) void {
         if (!block.sealed) @panic("RSP command block must end with returnFromCall()");
         if (block.call_target != null) @panic("nested RSP command blocks are not supported yet");

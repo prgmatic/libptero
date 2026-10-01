@@ -227,6 +227,28 @@ test "call and return encode a minimal command block" {
     try testing.expect(block.sealed);
 }
 
+test "static calls allow independent recorded blocks" {
+    var first_buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var first = CommandQueue.init(first_buffer[0..]);
+    first.returnFromCall();
+    var second_buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var second = CommandQueue.init(second_buffer[0..]);
+    second.returnFromCall();
+
+    var queue_buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var queue = CommandQueue.init(queue_buffer[0..]);
+    queue.callStatic(&first);
+    queue.callStatic(&second);
+
+    const first_target: u32 = @truncate(@intFromPtr(&first_buffer) & 0x00ffffff);
+    const second_target: u32 = @truncate(@intFromPtr(&second_buffer) & 0x00ffffff);
+    try testing.expectEqual(@as(u32, 0x03000000) | first_target, queue_buffer[0]);
+    try testing.expectEqual(@as(u32, 0), queue_buffer[1]);
+    try testing.expectEqual(@as(u32, 0x03000000) | second_target, queue_buffer[2]);
+    try testing.expectEqual(@as(u32, 0), queue_buffer[3]);
+    try testing.expectEqual(@as(?*const CommandQueue, null), queue.call_target);
+}
+
 test "indirect call matches the libdragon placeholder layout" {
     var block_buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
     var block = CommandQueue.init(block_buffer[0..]);

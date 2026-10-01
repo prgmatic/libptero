@@ -20,10 +20,12 @@ pub const rdp_dynamic_buffer_len = 64 * 1024;
 pub const Queue = struct {
     storage: command_queue.QueueStorage,
     priority: Priority,
+    recording: ?*CommandQueue,
 
     pub fn init(self: *Queue, priority: Priority) void {
         self.storage.init();
         self.priority = priority;
+        self.recording = null;
     }
 
     pub fn writeDmem(self: *Queue, offset: u32, value: u32) void {
@@ -58,6 +60,26 @@ pub const Queue = struct {
     pub inline fn reserveLowPriorityWords(self: *Queue, command_words: usize) void {
         if (self.priority != .low) @panic("low-priority queue reservation requires a low-priority queue");
         self.ensureCapacity(command_words);
+    }
+
+    pub fn beginBlock(self: *Queue, block: *CommandQueue) void {
+        if (self.priority != .low) @panic("command blocks require a low-priority queue");
+        if (self.recording != null) @panic("an RSP command block is already being recorded");
+        block.clear();
+        self.recording = block;
+    }
+
+    pub fn endBlock(self: *Queue, block: *CommandQueue) void {
+        if (self.recording != block) @panic("RSP command block recording mismatch");
+        block.returnFromCall();
+        cache.writebackData(block.buffer);
+        self.recording = null;
+    }
+
+    pub fn runBlock(self: *Queue, block: *const CommandQueue) void {
+        if (self.recording != null) @panic("recorded command blocks cannot call another block");
+        self.ensureCapacity(2);
+        self.current().callStatic(block);
     }
 
     pub fn dmaToDmem(
@@ -178,10 +200,15 @@ pub const Queue = struct {
     }
 
     inline fn current(self: *Queue) *CommandQueue {
+        if (self.recording) |block| return block;
         return &self.storage.queues[self.storage.write_index];
     }
 
     inline fn ensureCapacity(self: *Queue, command_words: usize) void {
+        if (self.recording) |block| {
+            if (block.index + command_words + 1 <= block.buffer.len) return;
+            @panic("recorded RSP command block is full");
+        }
         const epilogue_words: usize = if (self.priority == .low) 3 else 6;
         if (self.current().index + command_words + epilogue_words <= self.current().buffer.len) return;
         if (self.priority == .high) @panic("high-priority RSP command queue is full");
@@ -304,6 +331,7 @@ fn writebackCommandGraph(queue: *const CommandQueue, depth: usize) void {
 
 pub fn flush(queue: *Queue) void {
     if (queue.priority != .low) @panic("use submitHighPriority for a high-priority RSP queue");
+    if (queue.recording != null) @panic("cannot flush while recording an RSP command block");
     const storage = &queue.storage;
     const current = &storage.queues[storage.write_index];
     if (current.index == 0) return;
