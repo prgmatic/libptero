@@ -7,6 +7,10 @@ pub const Mat4 = @import("math/mat.zig").Mat4;
 pub const FixedVec4 = @import("math/mat.zig").FixedVec4;
 pub const FixedMat4 = @import("math/mat.zig").FixedMat4;
 pub const Frustum = @import("math/frustum.zig").Frustum;
+pub const fast = @import("math/fast.zig");
+pub const fastMod = fast.mod;
+pub const fastSin = fast.sin;
+pub const fastCos = fast.cos;
 
 pub fn lerp(a: f32, b: f32, t: f32) f32 {
     return a + (b - a) * t;

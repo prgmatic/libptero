@@ -1,6 +1,8 @@
 const Vec3 = @import("vec.zig").Vec3;
 const Vec4 = @import("vec.zig").Vec4;
 const Quat = @import("quat.zig").Quat;
+const fast = @import("fast.zig");
+const std = @import("std");
 
 pub const Mat4 = extern struct {
     /// Column-major matrix coefficients, matching Tiny3D.
@@ -32,12 +34,12 @@ pub const Mat4 = extern struct {
     /// Build the same Euler SRT matrix as Tiny3D's
     /// `t3d_mat4_from_srt_euler` for angles `(x, y, z)`.
     pub fn fromSrtEuler(scale: Vec3, rotation: Vec3, translation: Vec3) Mat4 {
-        const cx = @cos(rotation.x);
-        const cy = @cos(rotation.y);
-        const cz = @cos(rotation.z);
-        const sx = @sin(rotation.x);
-        const sy = @sin(rotation.y);
-        const sz = @sin(rotation.z);
+        const cx = fast.cos(rotation.x);
+        const cy = fast.cos(rotation.y);
+        const cz = fast.cos(rotation.z);
+        const sx = fast.sin(rotation.x);
+        const sy = fast.sin(rotation.y);
+        const sz = fast.sin(rotation.z);
         return .{ .m = .{
             .{ scale.x * cz * cy, scale.x * (cz * sy * sx - sz * cx), scale.x * (cz * sy * cx + sz * sx), 0 },
             .{ scale.y * sz * cy, scale.y * (sz * sy * sx + cz * cx), scale.y * (sz * sy * cx - cz * sx), 0 },
@@ -94,6 +96,31 @@ pub const Mat4 = extern struct {
         for (0..4) |column| for (0..4) |row| result.set(column, row, self.m[column][row]);
         return result;
     }
+    /// Convert an affine matrix whose final row is `(0, 0, 0, 1)`. Packing
+    /// three coefficients at a time matches Tiny3D's optimized SRT path.
+    pub fn toFixed3x4(self: *const Mat4) FixedMat4 {
+        var result: FixedMat4 = undefined;
+        for (0..4) |column| {
+            const fixed0: i32 = @intFromFloat(self.m[column][0] * 65536.0);
+            const fixed1: i32 = @intFromFloat(self.m[column][1] * 65536.0);
+            const fixed2: i32 = @intFromFloat(self.m[column][2] * 65536.0);
+            result.columns[column] = .{
+                .integer = .{
+                    @truncate(fixed0 >> 16),
+                    @truncate(fixed1 >> 16),
+                    @truncate(fixed2 >> 16),
+                    @intFromBool(column == 3),
+                },
+                .fraction = .{
+                    @truncate(@as(u32, @bitCast(fixed0))),
+                    @truncate(@as(u32, @bitCast(fixed1))),
+                    @truncate(@as(u32, @bitCast(fixed2))),
+                    0,
+                },
+            };
+        }
+        return result;
+    }
 };
 
 pub const FixedVec4 = extern struct { integer: [4]i16, fraction: [4]u16 };
@@ -117,3 +144,10 @@ pub const FixedMat4 = extern struct {
             @as(f32, @floatFromInt(self.columns[column].fraction[row])) / 65536.0;
     }
 };
+
+test "optimized affine conversion matches the generic fixed matrix" {
+    const matrix = Mat4.fromSrtEuler(.init(0.25, 0.5, 0.75), .init(0.1, 0.2, 0.3), .init(4, 5, 6));
+    const generic = matrix.toFixed();
+    const optimized = matrix.toFixed3x4();
+    try std.testing.expectEqualDeep(generic, optimized);
+}
