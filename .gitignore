@@ -1,6 +1,7 @@
 # Zig build output
 zig-out/
 .zig-cache/
+zig-pkg/
 
 # Libdragon benchmark build output
 benchmarks/libdragon-rdp-stars/build/
