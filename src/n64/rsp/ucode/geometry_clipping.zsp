@@ -578,10 +578,13 @@
         asm(".word 0x26d60048");
         asm(".word 0x00162825");
         asm(".word 0x34040ee0");
-        asm(".word 0x0d00050c");
+        // jal geometry_RDPQ_Triangle_Send_Async (IMEM 0x1400)
+        asm(".word 0x0d000500");
         asm(".word 0x26c60024");
-        asm(".word 0x09000623");
-        asm(".word 0x341f1bc8");
+        // j geometry_RDPQ_Triangle_Send_End (IMEM 0x185c)
+        asm(".word 0x09000617");
+        // ori $ra, $zero, clipping continuation (IMEM 0x1b98)
+        asm(".word 0x341f1b98");
         asm(".word 0x16d5fff7");
         asm(".word 0x94010350");
         asm(".word 0x00200008");

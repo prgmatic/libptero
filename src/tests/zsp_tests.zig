@@ -255,6 +255,11 @@ fn geometryContextInitialization() !void {
         vertex_handler + 0x2bc,
         rsp.io.readDmem(u16, 0x3fc).*,
     );
+    const clipping = rsp.programs.geometry_clipping;
+    const clipping_start = rsp.programs.geometry_clipping_symbols.geometry_clipping_code_start;
+    const clipping_size: u16 = @intCast(clipping.text.len - (clipping_start - clipping.text_offset));
+    try testing.expectEqual(clipping_size, rsp.io.readDmem(u16, geometry_symbols.clipping_code_size).*);
+    try testing.expect(clipping_size != 0);
 
     rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
     rsp.unregisterOverlay(&geometry_api_context.rdp_overlay);

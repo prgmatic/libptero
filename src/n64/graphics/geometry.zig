@@ -109,6 +109,12 @@ pub const Context = struct {
 
         const clipping = rsp.programs.geometry_clipping;
         const clipping_imem_start = symbols._start;
+        if (symbols.geometry_RDPQ_Triangle_Send_Async != 0x400 or
+            symbols.geometry_RDPQ_Triangle_Send_End != 0x85c or
+            clipping_imem_start != 0x880)
+        {
+            @panic("geometry clipping payload jump targets need relocation");
+        }
         if (rsp.programs.geometry_clipping_symbols.geometry_clipping_code_start != clipping_imem_start)
             @panic("geometry clipping overlays disagree on their linked IMEM target");
         const clipping_payload_offset = clipping_imem_start - clipping.text_offset;
@@ -124,10 +130,16 @@ pub const Context = struct {
         std.mem.writeInt(u32, state[clipping_code_address_offset..][0..4], clipping_address, .big);
         std.mem.writeInt(u32, state[original_code_address_offset..][0..4], original_address, .big);
         rsp.writebackOverlayState(&self.geometry_overlay);
-        rsp.io.readDmem(u16, state_start + clipping_code_size_offset).* = clipping_size;
         rsp.io.readDmem(u32, state_start + clipping_code_address_offset).* = clipping_address;
         rsp.io.readDmem(u32, state_start + original_code_address_offset).* = original_address;
-        rsp.io.readDmem(u16, state_start + vertex_effect_function_offset).* = vertex_effect_none;
+        if (symbols.clipping_code_size != symbols.vertex_effect_function + @sizeOf(u16)) {
+            @panic("geometry clipping metadata layout changed");
+        }
+        // Publish the adjacent halfwords with one aligned DMEM write. A lone
+        // CPU halfword write to clipping_code_size was lost on N64 hardware,
+        // leaving the restore DMA length at zero when clipping first ran.
+        rsp.io.readDmem(u32, symbols.vertex_effect_function).* =
+            @as(u32, vertex_effect_none) << 16 | clipping_size;
     }
 
     pub fn attachViewport(self: *Context, viewport: *Viewport) void {
