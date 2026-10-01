@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const completion_prefix = "@@LIBPTERO_TEST_END@@";
+pub const test_start_prefix = "[Run] ";
 
 pub const Completion = struct {
     passed: usize,
@@ -10,6 +11,7 @@ pub const Completion = struct {
 pub const LineParser = struct {
     buffer: [2048]u8 = undefined,
     len: usize = 0,
+    test_starts: usize = 0,
 
     pub fn feed(self: *LineParser, bytes: []const u8) !?Completion {
         for (bytes) |byte| {
@@ -22,6 +24,13 @@ pub const LineParser = struct {
             if (self.len == self.buffer.len) return error.DebugLineTooLong;
             self.buffer[self.len] = byte;
             self.len += 1;
+            // The runner prints test starts without a newline so a hung test
+            // can still be identified before its result arrives.
+            if (self.len == test_start_prefix.len and
+                std.mem.eql(u8, self.buffer[0..self.len], test_start_prefix))
+            {
+                self.test_starts += 1;
+            }
         }
         return null;
     }
@@ -83,4 +92,26 @@ test "rejects malformed completion marker" {
         error.MalformedCompletionMarker,
         parseCompletionLine("@@LIBPTERO_TEST_END@@ nope"),
     );
+}
+
+test "detects test starts across reads before a newline" {
+    var parser: LineParser = .{};
+    _ = try parser.feed("[Ru");
+    try std.testing.expectEqual(@as(usize, 0), parser.test_starts);
+    _ = try parser.feed("n] first test");
+    try std.testing.expectEqual(@as(usize, 1), parser.test_starts);
+    _ = try parser.feed(" [Pass ✅]\n[Run] second test");
+    try std.testing.expectEqual(@as(usize, 2), parser.test_starts);
+    const result = (try parser.feed(
+        " [Pass ✅]\n@@LIBPTERO_TEST_END@@ {\"passed\":2,\"failed\":0}\n",
+    )).?;
+    try std.testing.expectEqual(@as(usize, 2), result.passed);
+}
+
+test "ordinary output does not count as a test start" {
+    var parser: LineParser = .{};
+    _ = try parser.feed("diagnostic: [Run] example\n[Run]");
+    try std.testing.expectEqual(@as(usize, 0), parser.test_starts);
+    _ = try parser.feed("ning diagnostic\n");
+    try std.testing.expectEqual(@as(usize, 0), parser.test_starts);
 }
