@@ -92,8 +92,8 @@ pub const TlutFormat = enum(u1) {
 /// Texel sampling pattern. Combines sample_type (bit 45) and mid_texel (bit 44).
 pub const TextureSample = enum(u2) {
     point    = 0,
-    bilinear = 1,
-    median   = 2,
+    bilinear = 2,
+    median   = 3,
 };
 
 /// Texture filter mode per pipeline cycle (bi_lerp).
@@ -120,4 +120,12 @@ test "standard other modes match the reference renderer defaults" {
     try @import("std").testing.expectEqual(CoverageDest.full, standard.cvg_dest);
     try @import("std").testing.expectEqual(RgbDither.disabled, standard.rgb_dither);
     try @import("std").testing.expectEqual(AlphaDither.disabled, standard.alpha_dither);
+}
+
+test "texture sampling encodes sample type and mid-texel in their hardware bits" {
+    const std = @import("std");
+    const bilinear: u64 = @bitCast(OtherModes{ .texture_sample = .bilinear });
+    const median: u64 = @bitCast(OtherModes{ .texture_sample = .median });
+    try std.testing.expectEqual(@as(u64, 2), (bilinear >> 44) & 3);
+    try std.testing.expectEqual(@as(u64, 3), (median >> 44) & 3);
 }

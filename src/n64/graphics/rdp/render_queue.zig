@@ -18,6 +18,7 @@ pub const TexVertex = tri.TexVertex;
 const CombineMode = cc.CombineMode;
 const BlendMode = blender.BlendMode;
 const CycleType = modes.CycleType;
+const AlphaCompare = modes.AlphaCompare;
 const OtherModes = modes.OtherModes;
 const Rgba32 = @import("../color.zig").Rgba32;
 
@@ -48,6 +49,8 @@ pub fn RenderQueue(comptime QueueType: type) type {
         tex_cache_len: usize = 0,
         tmem_next: u10 = 0, // next free TMEM word offset (8-byte words, max 512)
         next_tile: u3 = 0, // next render tile; load tile = next_tile +% 1
+        /// Most recently bound material texture, consumed by geometry draws.
+        material_tile: u3 = 0,
 
         pub fn init(queue: QueueType) Self {
             var result: Self = .{ .cmd_queue = TCmdQueue.init(queue) };
@@ -61,6 +64,18 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
         pub fn execute(rq: *Self) void {
             rq.cmd_queue.execute();
+        }
+
+        pub fn prepare(rq: *Self) void {
+            if (@hasDecl(QueueType, "prepare")) rq.cmd_queue.queue.prepare();
+        }
+
+        pub fn invalidateState(rq: *Self) void {
+            rq.mode_dirty = true;
+            rq.combine_dirty = true;
+            rq.tex_cache_len = 0;
+            rq.tmem_next = 0;
+            rq.next_tile = 0;
         }
 
         pub fn fullSync(rq: *Self) void {
@@ -113,7 +128,32 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
         /// Make a texture resident with explicit sampler state and return its render tile.
         pub fn useTextureSampler(rq: *Self, image: anytype, sampler: texture.Sampler) u3 {
-            return rq.ensureTexture(image, sampler);
+            rq.material_tile = rq.ensureTexture(image, sampler);
+            return rq.material_tile;
+        }
+
+        /// Bind two textures to adjacent tiles 0/1 for a two-cycle combiner.
+        /// Replaces TMEM residency and selects tile 0 for geometry draws.
+        /// The pair must fit in TMEM; 32-bit formats are not supported here.
+        pub fn useTexturePair(rq: *Self, first: anytype, second: anytype, first_sampler: texture.Sampler, second_sampler: texture.Sampler) void {
+            // RGBA32 occupies both TMEM banks and needs a different allocator.
+            if (@TypeOf(first).bit_depth == .@"32" or @TypeOf(second).bit_depth == .@"32")
+                @panic("32-bit texture pairs are not supported");
+            const first_words = textureWords(first);
+            const second_words = textureWords(second);
+            if (first_words + second_words > 512) @panic("texture pair exceeds TMEM");
+            rq.tex_cache_len = 0;
+            rq.loadTexture(first, 0, 0, first_sampler);
+            rq.loadTexture(second, 1, @intCast(first_words), second_sampler);
+            rq.cmd_queue.tileSync();
+            rq.tmem_next = @intCast(first_words + second_words);
+            rq.next_tile = 2;
+            rq.material_tile = 0;
+        }
+
+        fn textureWords(image: anytype) u32 {
+            const bits = @as(u32, 4) << @intFromEnum(@TypeOf(image).bit_depth);
+            return ((@as(u32, image.width) * bits + 63) / 64) * image.height;
         }
 
         pub fn setDepthState(rq: *Self, compare: bool, update: bool) void {
@@ -123,10 +163,39 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.mode_dirty = true;
         }
 
+        pub fn setAlphaCompare(rq: *Self, alpha_compare: AlphaCompare) void {
+            if (rq.mode.alpha_compare == alpha_compare) return;
+            rq.mode.alpha_compare = alpha_compare;
+            rq.mode_dirty = true;
+        }
+
+        pub fn setBlendColor(rq: *Self, color: Rgba32) void {
+            rq.cmd_queue.setBlendColor(color);
+        }
+
         pub fn setPerspectiveTexture(rq: *Self, enabled: bool) void {
             if (rq.mode.persp_tex_en == enabled) return;
             rq.mode.persp_tex_en = enabled;
             rq.mode_dirty = true;
+        }
+
+        pub fn setTextureFilter(rq: *Self, filter: modes.TextureSample) void {
+            if (rq.mode.texture_sample == filter) return;
+            rq.mode.texture_sample = filter;
+            rq.mode_dirty = true;
+        }
+
+        /// Reset the surface state as well as setting it, avoiding leakage
+        /// when switching from a translucent material back to opaque geometry.
+        pub fn setSurfaceType(rq: *Self, translucent: bool) void {
+            rq.mode.z_mode = if (translucent) .transparent else .opaque_surface;
+            rq.mode.cvg_dest = if (translucent) .wrap else .full;
+            rq.mode.write_on_cvg_overflow = translucent;
+            rq.mode_dirty = true;
+        }
+
+        pub fn setEnvironmentColor(rq: *Self, color: Rgba32) void {
+            rq.cmd_queue.setEnvironmentColor(color);
         }
 
         pub fn setFrameBuffer(rq: *Self, image: anytype) void {
@@ -138,6 +207,10 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
         pub fn setPrimColor(rq: *Self, color: Rgba32) void {
             rq.cmd_queue.setPrimColor(color);
+        }
+
+        pub fn setFogColor(rq: *Self, color: Rgba32) void {
+            rq.cmd_queue.setFogColor(color);
         }
 
         pub fn clearScreen(rq: *Self, color: anytype) void {
@@ -177,6 +250,9 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
         // Explicit texture load into TMEM (bypasses cache).
         fn loadTexture(rq: *Self, image: anytype, tile: u3, tmem_addr: u9, sampler: texture.Sampler) void {
+            // Finish primitives that can still reference the tiles or TMEM
+            // about to be reused, including glyphs from the previous atlas.
+            rq.cmd_queue.pipeSync();
             texture.loadTexture(&rq.cmd_queue, image, tile, tmem_addr, sampler);
         }
 
@@ -272,3 +348,60 @@ const TexCacheEntry = struct {
     tmem_addr: usize = 0,
     sampler: texture.Sampler = .{},
 };
+
+test "material binding selects cached tiles and returns to tile zero after eviction" {
+    const image_module = @import("../image.zig");
+    const pixels: [*]@import("../color.zig").I8 = @ptrFromInt(0x80400000);
+    const first: image_module.ImgI8 = .{ .width = 8, .height = 8, .texel_data = pixels[0..64] };
+    const second: image_module.ImgI8 = .{ .width = 8, .height = 8, .texel_data = pixels[64..128] };
+    var commands: [128]u64 = undefined;
+    var render = FixedRenderQueue.init(.{ .buffer = &commands });
+    try std.testing.expectEqual(@as(u3, 0), render.useTextureSampler(first, .{}));
+    try std.testing.expectEqual(@as(u3, 2), render.useTextureSampler(second, .{}));
+    try std.testing.expectEqual(@as(u3, 2), render.material_tile);
+    const previous = render.cmd_queue.queue.index;
+    try std.testing.expectEqual(@as(u3, 0), render.useTextureSampler(first, .{}));
+    try std.testing.expectEqual(previous, render.cmd_queue.queue.index);
+    render.invalidateState();
+    try std.testing.expectEqual(@as(u3, 0), render.useTextureSampler(second, .{}));
+    render.useTexturePair(first, second, .{}, .{});
+    try std.testing.expectEqual(@as(u3, 0), render.material_tile);
+}
+
+test "texture pair binds adjacent tiles with independent scale and scroll" {
+    const image_module = @import("../image.zig");
+    const pixels: [*]@import("../color.zig").Rgba16 = @ptrFromInt(0x80400000);
+    const image: image_module.ImgRgba16 = .{ .width = 32, .height = 32, .texel_data = pixels[0 .. 32 * 32] };
+    var commands: [32]u64 = undefined;
+    var render = FixedRenderQueue.init(.{ .buffer = &commands });
+    render.useTexturePair(image, image, .{ .mask_s = 5, .mask_t = 5, .offset_s = 4, .offset_t = 8 }, .{ .mask_s = 5, .mask_t = 5, .shift_s = 15, .shift_t = 15 });
+    var render_tiles: usize = 0;
+    var tile_sizes: usize = 0;
+    for (commands[0..render.cmd_queue.queue.index]) |command| {
+        const opcode: u8 = @truncate(command >> 56);
+        if (opcode == 0xf5 and (command >> 41) & 0x1ff == 8) {
+            const tile = (command >> 24) & 7;
+            if (tile == 0) {
+                try std.testing.expectEqual(@as(u64, 0), (command >> 32) & 0x1ff);
+                try std.testing.expectEqual(@as(u64, 0), command & 15);
+            } else {
+                try std.testing.expectEqual(@as(u64, 1), tile);
+                try std.testing.expectEqual(@as(u64, 256), (command >> 32) & 0x1ff);
+                try std.testing.expectEqual(@as(u64, 15), command & 15);
+                try std.testing.expectEqual(@as(u64, 15), (command >> 10) & 15);
+            }
+            render_tiles += 1;
+        }
+        if (opcode == 0xf2) {
+            const first = (command >> 24) & 7 == 0;
+            try std.testing.expectEqual(@as(u64, if (first) 4 else 0), (command >> 44) & 0xfff);
+            try std.testing.expectEqual(@as(u64, if (first) 8 else 0), (command >> 32) & 0xfff);
+            tile_sizes += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), render_tiles);
+    try std.testing.expectEqual(@as(usize, 2), tile_sizes);
+    try std.testing.expectEqual(@as(u10, 512), render.tmem_next);
+    try std.testing.expect(!texture.Sampler.eql(.{}, .{ .shift_s = 15 }));
+    try std.testing.expect(!texture.Sampler.eql(.{}, .{ .offset_t = 8 }));
+}

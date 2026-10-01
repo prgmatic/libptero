@@ -49,6 +49,8 @@ pub const FontOptions = struct {
 
 pub const ModelOptions = struct {
     scale: f32 = 64,
+    max_vertices_per_batch: usize = 70,
+    preserve_triangle_order: bool = false,
 };
 
 pub const Resident = struct {
@@ -124,6 +126,8 @@ pub const AssetBundle = struct {
         const generated_source = convert.addOutputFileArg(self.b.fmt("{s}.model.zig", .{name}));
         convert.addArg(name);
         convert.addArg(self.b.fmt("{d}", .{options.scale}));
+        convert.addArg(self.b.fmt("{d}", .{options.max_vertices_per_batch}));
+        convert.addArg(if (options.preserve_triangle_order) "true" else "false");
         self.asset_module.addModelEntry(name, generated_source, data);
     }
 

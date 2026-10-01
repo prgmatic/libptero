@@ -7,7 +7,10 @@ pub const graphics = @import("graphics.zig");
 
 test {
     _ = graphics.model;
+    _ = graphics.geometry;
+    _ = @import("graphics/material.zig");
     _ = io.joypad;
+    _ = graphics.rdp.RenderQueue;
 }
 pub const rsp = @import("rsp/rsp.zig");
 pub const interrupt = @import("interrupt.zig");

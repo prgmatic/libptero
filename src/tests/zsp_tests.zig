@@ -240,6 +240,8 @@ fn geometryLightingApi() !void {
     rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
 }
 
+var geometry_material_texels: [128]n64.graphics.color.I8 align(16) = undefined;
+
 fn geometryContextInitialization() !void {
     geometry_api_context = undefined;
     geometry_api_context.init();
@@ -260,6 +262,40 @@ fn geometryContextInitialization() !void {
     const clipping_size: u16 = @intCast(clipping.text.len - (clipping_start - clipping.text_offset));
     try testing.expectEqual(clipping_size, rsp.io.readDmem(u16, geometry_symbols.clipping_code_size).*);
     try testing.expect(clipping_size != 0);
+
+    // Fog state is a vertex attribute offset, not a boolean. A wrong offset
+    // writes the computed fog factor into position data instead of alpha.
+    try expectDmemWord(u8, geometry_symbols.fog_store_offset, 0x0c);
+    geometry_api_context.setFogRange(0.4, 80);
+    geometry_api_context.setFogEnabled(true);
+    rsp.flush(&geometry_api_context.queue);
+    try waitQueueTimeout(&geometry_api_context.queue);
+    try expectDmemWord(u8, geometry_symbols.fog_store_offset, 0x0b);
+    try expectDmemWord(u16, geometry_symbols.fog_scale_offset + 4, 32767);
+    try expectDmemWord(u16, geometry_symbols.fog_scale_offset + 6, 205);
+    geometry_api_context.setFogRange(0, 0);
+    geometry_api_context.setFogEnabled(false);
+    rsp.flush(&geometry_api_context.queue);
+    try waitQueueTimeout(&geometry_api_context.queue);
+    try expectDmemWord(u8, geometry_symbols.fog_store_offset, 0x0c);
+    try expectDmemWord(u32, geometry_symbols.fog_scale_offset + 4, 0x7fff0000);
+
+    @memset(&geometry_material_texels, .{ .intensity = 255 });
+    n64.cache.writebackData(&geometry_material_texels);
+    const first: n64.graphics.image.ImgI8 = .{ .width = 8, .height = 8, .texel_data = geometry_material_texels[0..64] };
+    const second: n64.graphics.image.ImgI8 = .{ .width = 8, .height = 8, .texel_data = geometry_material_texels[64..128] };
+    geometry_api_context.setDrawFlags(.{ .depth = true, .textured = true });
+    _ = geometry_api_context.render.useTextureSampler(first, .{});
+    _ = geometry_api_context.render.useTextureSampler(second, .{});
+    geometry_api_context.beginModelMaterial();
+    rsp.flush(&geometry_api_context.queue);
+    try waitQueueTimeout(&geometry_api_context.queue);
+    try expectDmemWord(u32, geometry_symbols.triangle_command, 0xcb02);
+    _ = geometry_api_context.render.useTextureSampler(first, .{});
+    geometry_api_context.beginModelMaterial();
+    rsp.flush(&geometry_api_context.queue);
+    try waitQueueTimeout(&geometry_api_context.queue);
+    try expectDmemWord(u32, geometry_symbols.triangle_command, 0xcb00);
 
     rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
     rsp.unregisterOverlay(&geometry_api_context.rdp_overlay);

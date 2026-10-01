@@ -22,6 +22,31 @@ locality. glTF `BLEND` materials preserve source triangle order and use alpha
 blending without depth writes. Fast64-wrapped materials instead use their N64
 render-mode preset to distinguish opaque and translucent surfaces.
 
+Legacy Fast64 `extras.f3d_mat.tex0` tile bounds supply UV dimensions when no
+embedded image dimensions are available. External images still need separate
+texture assets and a material callback; this metadata fallback does not load them.
+
+Material state is exposed as `asset.material(index)` (a native
+`n64.graphics.model.Material`). The generated `asset.draw(context)` applies it
+automatically for embedded textures. For external textures, callbacks can use
+`asset.material(index).bind(context, texture)` without recreating material settings.
+The legacy Fast64 subset preserves front/back culling, unlit shading, fog enable,
+sampler masks/clamping/mirroring/signed shifts for both texture units, point/median/
+bilinear filtering, one/two-cycle combiners, and primitive/environment colors.
+glTF `MASK` preserves its alpha cutoff; `BLEND` preserves alpha and disables depth
+writes. Unsupported sampler/filter/combiner values are conversion errors.
+
+Filtered UVs receive the half-texel adjustment at conversion (subtract 16 in 10.5
+fixed-point); point-filtered UVs do not. Do not apply another runtime adjustment.
+Geometry automatically samples the most recently bound material tile, including
+cache hits on nonzero tiles. Recorded models restore tracked material state when
+replayed; callers do not need to discard the texture cache at each material change.
+
+Native materials handle fog plus transparency with two-cycle blending and a
+passthrough second combiner when needed. `rdp.BlendMode.fogVisibility(translucent)`
+is also available for handwritten materials; it interprets shade alpha as visibility.
+Application code still owns fog color/range and animated sampler offsets.
+
 The renderer streams model parts asynchronously through the RSP command queue.
 The queue rolls over according to its actual word capacity, so model code does
 not guess a safe batch size from triangle counts. Generated parts declare their
@@ -45,5 +70,8 @@ triangle primitives, static meshes, one base-color texture per material, and
 PNG images are supported. `JOINTS_0` and `WEIGHTS_0` are parsed and rejected as
 `UnsupportedSkinning` instead of being silently discarded. Node transforms,
 skins, animations, morph targets, sparse accessors, external buffers/images,
-texture palettes, multiple texture units, alpha-mask cutoff, and the full
-Fast64 combiner/render-mode extension are not implemented.
+texture palettes, automatic loading of multiple texture units, and the full modern
+Fast64 combiner/render-mode extension are not implemented. Two external textures
+can be bound with `render.useTexturePair`; generated legacy materials expose both
+samplers and both combiner cycles. Key/conversion constants, arbitrary advanced
+blender equations, texture generation, and material lighting rigs remain unsupported.

@@ -32,7 +32,7 @@ state {
     triangle_command: u32 = 0;
     matrix_stack_pointer: i32 = 0;
     face_culling: u8 = 0;
-    fog_store_offset: u8 = 72;
+    fog_store_offset: u8 = 12;
     active_light_size: u8 = 0;
     unused_state_byte: u8 = 0;
     vertex_effect_function: u16 = 0;

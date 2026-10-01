@@ -5,11 +5,18 @@ pub const Sampler = struct {
     mirror_t: bool = false,
     mask_s: u4 = 0,
     mask_t: u4 = 0,
+    shift_s: u4 = 0,
+    shift_t: u4 = 0,
+    // Tile origin in unsigned 10.2 texel units; offsets subtract from UVs.
+    offset_s: u12 = 0,
+    offset_t: u12 = 0,
 
     pub fn eql(a: Sampler, b: Sampler) bool {
         return a.clamp_s == b.clamp_s and a.clamp_t == b.clamp_t and
             a.mirror_s == b.mirror_s and a.mirror_t == b.mirror_t and
-            a.mask_s == b.mask_s and a.mask_t == b.mask_t;
+            a.mask_s == b.mask_s and a.mask_t == b.mask_t and
+            a.shift_s == b.shift_s and a.shift_t == b.shift_t and
+            a.offset_s == b.offset_s and a.offset_t == b.offset_t;
     }
 };
 
@@ -91,14 +98,18 @@ pub inline fn loadTexture(cmd_queue: anytype, image: anytype, tile: u3, tmem_add
         .mirror_t = sampler.mirror_t,
         .mask_s = sampler.mask_s,
         .mask_t = sampler.mask_t,
+        .shift_s = sampler.shift_s,
+        .shift_t = sampler.shift_t,
     });
 
     cmd_queue.loadSync();
 
     cmd_queue.setTileSize(.{
         .tile = tile,
-        .lower_right_s = @intCast((width - 1) * 4),
-        .lower_right_t = @intCast((height - 1) * 4),
+        .upper_left_s = sampler.offset_s,
+        .upper_left_t = sampler.offset_t,
+        .lower_right_s = @intCast(@as(u32, sampler.offset_s) + (width - 1) * 4),
+        .lower_right_t = @intCast(@as(u32, sampler.offset_t) + (height - 1) * 4),
     });
 }
 

@@ -151,6 +151,10 @@ pub const OverlayQueue = struct {
         rsp.flush(self.rsp_queue);
     }
 
+    pub fn prepare(self: *OverlayQueue) void {
+        self.ensureConfigured();
+    }
+
     pub fn clear(self: *OverlayQueue) void {
         // Overlay commands are written directly into the resident queue, so
         // they cannot be discarded like a CPU-side command buffer. At a frame
@@ -533,12 +537,25 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.push(cmd);
         }
 
+        // 0xF8
+        pub fn setFogColor(cq: *Self, color: Rgba32) void {
+            const cmd: u64 =
+                (@as(u64, 0xF8) << 56) |
+                (@as(u64, @as(u32, @bitCast(color))));
+            cq.queue.push(cmd);
+        }
+
         // 0xFA
         pub fn setPrimColor(cq: *Self, color: Rgba32) void {
             const cmd: u64 =
                 (@as(u64, 0xFA) << 56) |
                 (@as(u64, @as(u32, @bitCast(color))));
             cq.queue.push(cmd);
+        }
+
+        // 0xFB
+        pub fn setEnvironmentColor(cq: *Self, color: Rgba32) void {
+            cq.queue.push((@as(u64, 0xFB) << 56) | @as(u32, @bitCast(color)));
         }
 
         // 0xFC

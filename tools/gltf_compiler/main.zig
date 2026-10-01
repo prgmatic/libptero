@@ -9,14 +9,21 @@ fn run(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(allocator);
     defer allocator.free(args);
-    if (args.len != 6) return error.InvalidArguments;
+    if (args.len != 8) return error.InvalidArguments;
     const source = try readFile(init.io, allocator, args[1]);
     defer allocator.free(source);
     const glb = try gltf.parseGlb(source);
     var document = try gltf.parseDocument(allocator, glb.json);
     defer document.deinit();
     const scale = try std.fmt.parseFloat(f32, args[5]);
-    const model = try gltf.convert(allocator, document.value, glb.binary, .{ .scale = scale });
+    const max_vertices = try std.fmt.parseInt(usize, args[6], 10);
+    const preserve_triangle_order = std.mem.eql(u8, args[7], "true");
+    if (!preserve_triangle_order and !std.mem.eql(u8, args[7], "false")) return error.InvalidArguments;
+    const model = try gltf.convert(allocator, document.value, glb.binary, .{
+        .scale = scale,
+        .max_vertices_per_batch = max_vertices,
+        .preserve_triangle_order = preserve_triangle_order,
+    });
     defer model.deinit(allocator);
     const generated = try gltf.generate(allocator, model, document.value, glb.binary, args[4]);
     defer generated.deinit(allocator);
@@ -43,6 +50,6 @@ fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
     std.debug.print("gltf-compiler: " ++ format ++ "\n", args);
-    std.debug.print("usage: gltf-compiler <input.glb> <model.bin> <model.zig> <name> <scale>\n", .{});
+    std.debug.print("usage: gltf-compiler <input.glb> <model.bin> <model.zig> <name> <scale> <max-vertices-per-batch> <preserve-triangle-order>\n", .{});
     std.process.exit(1);
 }

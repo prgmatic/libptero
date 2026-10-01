@@ -88,6 +88,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     instrumentTests(font_compiler_tests, coverage, coverage_runtime);
     test_step.dependOn(&b.addRunArtifact(font_compiler_tests).step);
     inline for (.{
+        .{ "runtime-host-tests", "src/n64/n64.zig" },
         .{ "zsp-tests", "tools/zsp/tests.zig" },
         .{ "ucode-tests", "src/n64/rsp/ucode_tests.zig" },
         .{ "command-queue-tests", "src/n64/rsp/command_queue_tests.zig" },

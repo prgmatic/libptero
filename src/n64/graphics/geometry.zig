@@ -8,6 +8,56 @@ const Rgba32 = @import("color.zig").Rgba32;
 const vertex_output_size = 36;
 pub const max_lights = 7;
 
+/// An immutable, reusable RSP command block containing a model draw.
+pub const RecordedModel = struct {
+    buffer: [rsp.command_queue.rdram_buffer_word_count]u32 align(rsp.command_queue.fetch_window_byte_len) = undefined,
+    commands: rsp.CommandQueue = undefined,
+    final_state: MaterialState = undefined,
+
+    /// Encode a model and its material setup once for later draws.
+    pub fn record(self: *RecordedModel, context: *Context, model: anytype, materials: anytype) void {
+        self.commands = rsp.CommandQueue.init(self.buffer[0..]);
+        context.render.prepare();
+        context.render.invalidateState();
+        const previous = MaterialState.read(context);
+        context.last_draw_flags = null;
+        context.queue.beginBlock(&self.commands);
+        model.draw(context, materials);
+        context.queue.endBlock(&self.commands);
+        self.final_state = MaterialState.read(context);
+        previous.restore(context);
+        context.render.invalidateState();
+    }
+
+    /// Append a call to this recorded model to the active render queue.
+    pub fn draw(self: *const RecordedModel, context: *Context) void {
+        context.queue.runBlock(&self.commands);
+        self.final_state.restore(context);
+        context.render.invalidateState();
+    }
+};
+
+// Recording does not execute material commands. Replaying does: keep the CPU
+// state tracker aligned with that distinction without caching recorded TMEM.
+const MaterialState = struct {
+    flags: DrawFlags,
+    fog: bool,
+    tile: u3,
+    mode: rdp.OtherModes,
+    combine: rdp.CombineMode,
+    fn read(context: *const Context) MaterialState {
+        return .{ .flags = context.draw_flags, .fog = context.fog_enabled, .tile = context.render.material_tile, .mode = context.render.mode, .combine = context.render.combine_mode };
+    }
+    fn restore(self: MaterialState, context: *Context) void {
+        context.draw_flags = self.flags;
+        context.fog_enabled = self.fog;
+        context.render.material_tile = self.tile;
+        context.render.mode = self.mode;
+        context.render.combine_mode = self.combine;
+        context.last_draw_flags = null;
+    }
+};
+
 pub const DrawFlags = packed struct(u17) {
     depth: bool = false,
     textured: bool = false,
@@ -69,6 +119,10 @@ pub const Context = struct {
     render: rdp.DefaultRenderQueue,
     matrix_stack: [8]math.FixedMat4 align(16),
     view_matrix: math.Mat4,
+    draw_flags: DrawFlags = .{},
+    fog_enabled: bool = false,
+    last_draw_flags: ?DrawFlags = null,
+    last_material_tile: u3 = 0,
 
     pub fn init(self: *Context) void {
         rsp.halt();
@@ -89,6 +143,10 @@ pub const Context = struct {
         ));
         @memset(&self.matrix_stack, math.FixedMat4.identity);
         self.view_matrix = .identity;
+        self.draw_flags = .{};
+        self.fog_enabled = false;
+        self.last_draw_flags = null;
+        self.last_material_tile = 0;
         cache.writebackData(&self.matrix_stack);
         const program = self.geometry_overlay.program;
         const symbols = rsp.programs.geometry_overlay_symbols;
@@ -195,18 +253,64 @@ pub const Context = struct {
         const light_address = rsp.programs.geometry_overlay_symbols.directional_light_color + @as(u32, index) * 16;
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, light_address, &.{ @as(u32, @bitCast(color)), packed_direction, packed_direction });
     }
+    pub fn setFogEnabled(self: *Context, enabled: bool) void {
+        self.fog_enabled = enabled;
+        // The vertex loader stores a halfword at this attribute offset. When
+        // enabled its high byte replaces shade alpha; otherwise UV is scratch
+        // until the vertex effect writes the final texture coordinates.
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 9, if (enabled) 0x0b else 0x0c, &.{});
+    }
+    pub fn setFogRange(self: *Context, near: f32, far: f32) void {
+        const address = rsp.programs.geometry_overlay_symbols.fog_scale_offset;
+        if (near == 0 and far == 0) {
+            self.queue.writeDmem(address, 0);
+            self.queue.writeDmem(address + 4, 0x7fff0000);
+            return;
+        }
+        var difference = far - near;
+        if (@abs(difference) < 1.5) difference = 1.5;
+        const scale_float = std.math.clamp(@floor(16384.0 / difference), -32768.0, 32767.0);
+        const scale: u16 = @bitCast(@as(i16, @intFromFloat(scale_float)));
+        const offset: i32 = @intFromFloat(-near * 2.0 * 65536.0);
+        self.queue.writeDmem(address, @bitCast(offset));
+        // The upper halfword is the full-intensity constant used by both fog
+        // and unlit vertex colors. Only the lower halfword is the fog scale.
+        self.queue.writeDmem(address + 4, 0x7fff0000 | @as(u32, scale));
+    }
     pub fn setDrawFlags(self: *Context, flags: DrawFlags) void {
+        self.draw_flags = flags;
+        self.emitDrawFlags();
+    }
+
+    fn emitDrawFlags(self: *Context) void {
+        const flags = self.draw_flags;
         if (flags.cull_front and flags.cull_back) @panic("cannot cull both triangle faces");
+        if (self.last_draw_flags) |previous| {
+            if (std.meta.eql(previous, flags) and self.last_material_tile == self.render.material_tile) return;
+        }
+        self.last_draw_flags = flags;
+        self.last_material_tile = self.render.material_tile;
         // Match Tiny3D's host-side ABI (the triangle include's historical
         // comment describes these two selector values in reverse).
         const culling: u32 = if (flags.cull_front) 1 else if (flags.cull_back) 0 else 2;
         var bits: u32 = @as(u17, @bitCast(flags));
         bits &= ~@as(u32, (1 << 3) | (1 << 4));
-        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 6, culling, &.{0xc000 | ((bits | 8) << 8)});
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 6, culling, &.{0xc000 | ((bits | 8) << 8) | @as(u32, self.render.material_tile)});
     }
     pub fn pushMatrix(self: *Context, matrix: *const math.FixedMat4) void {
         cache.writebackData(matrix);
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, (64 << 8) | 1, &.{physical(matrix)});
+    }
+    /// Load a matrix, optionally multiplying it by the current matrix.
+    pub fn setMatrix(self: *Context, matrix: *const math.FixedMat4, multiply: bool) void {
+        cache.writebackData(matrix);
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, @intFromBool(multiply), &.{physical(matrix)});
+    }
+    /// Reserve matrix-stack slots without loading matrices into them.
+    pub fn advanceMatrixStack(self: *Context, count: u8) void {
+        const advance = @as(u32, count) * 64;
+        if (advance > std.math.maxInt(i16)) @panic("matrix stack advance is too large");
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, (advance << 8) | 2, &.{0});
     }
     pub fn popMatrix(self: *Context) void {
         const stack_advance = @as(u32, @bitCast(@as(i32, -64 << 8))) & 0x00ff_ff00;
@@ -228,6 +332,7 @@ pub const Context = struct {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 4, input_size, &.{ physical(vertices.ptr), temp_address << 16 | output_address });
     }
     pub fn drawTriangle(self: *Context, a: u8, b: u8, c: u8) void {
+        self.beginModelMaterial();
         const vertex_buffer = rsp.programs.geometry_overlay_symbols.vertex_buffer;
         const va = vertex_buffer + @as(u32, a) * vertex_output_size;
         const vb = vertex_buffer + @as(u32, b) * vertex_output_size;
@@ -240,6 +345,7 @@ pub const Context = struct {
     }
     /// Draw an immutable asset index strip which is already coherent in RDRAM.
     pub fn drawStaticTriangleStrip(self: *Context, indices: []const i16, sync: bool) void {
+        self.beginModelMaterial();
         const symbols = rsp.programs.geometry_overlay_symbols;
         const vertex_buffer = symbols.vertex_buffer;
         const strip_buffer_end = symbols.clipping_buffer_temporary;
@@ -258,6 +364,9 @@ pub const Context = struct {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 10, 0, &.{});
     }
     pub fn beginModelMaterial(self: *Context) void {
+        // Textures can be bound after draw flags and can live on any cached tile.
+        // Emit at submission time, including inside recorded model blocks.
+        self.emitDrawFlags();
         self.render.flushModes();
     }
 };
@@ -268,4 +377,25 @@ fn physical(pointer: anytype) u32 {
 
 comptime {
     if (@sizeOf(VertexPair) != 32 or @alignOf(VertexPair) < 8) @compileError("geometry vertex ABI mismatch");
+}
+
+test "recorded material snapshots restore CPU trackers without claiming TMEM residency" {
+    var context: Context = undefined;
+    context.draw_flags = .{ .textured = true, .no_light = true };
+    context.fog_enabled = true;
+    context.render.material_tile = 6;
+    context.render.mode = .{ .cycle_type = .two_cycle, .z_update_en = false };
+    context.render.combine_mode = .decal_rgba;
+    const state = MaterialState.read(&context);
+    context.draw_flags = .{};
+    context.fog_enabled = false;
+    context.render.material_tile = 0;
+    context.last_draw_flags = .{};
+    state.restore(&context);
+    try std.testing.expect(context.draw_flags.textured and context.draw_flags.no_light);
+    try std.testing.expect(context.fog_enabled);
+    try std.testing.expectEqual(@as(u3, 6), context.render.material_tile);
+    try std.testing.expectEqual(rdp.CycleType.two_cycle, context.render.mode.cycle_type);
+    try std.testing.expect(std.meta.eql(rdp.CombineMode.decal_rgba, context.render.combine_mode));
+    try std.testing.expect(context.last_draw_flags == null);
 }

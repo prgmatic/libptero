@@ -1,5 +1,6 @@
 const std = @import("std");
 const texture_compiler = @import("texture_compiler");
+const materials = @import("materials.zig");
 
 pub const Glb = struct {
     json: []const u8,
@@ -57,8 +58,18 @@ pub const Material = struct {
     name: []const u8 = "",
     pbrMetallicRoughness: ?Pbr = null,
     extensions: ?MaterialExtensions = null,
+    extras: ?MaterialExtras = null,
     alphaMode: AlphaMode = .OPAQUE,
+    alphaCutoff: f32 = 0.5,
+    doubleSided: bool = false,
 };
+
+// Older Fast64 exports keep external texture metadata in extras rather than
+// glTF images. Tile bounds provide the UV dimensions when no image is embedded.
+pub const MaterialExtras = materials.Extras;
+pub const LegacyFast64Material = materials.Fast64;
+pub const LegacyFast64Texture = materials.Texture;
+pub const LegacyFast64Axis = materials.Axis;
 
 pub const AlphaMode = enum { OPAQUE, MASK, BLEND };
 
@@ -100,7 +111,7 @@ pub const Pbr = struct {
 
 pub const TextureRef = struct { index: u32 };
 pub const Texture = struct { source: u32, sampler: ?u32 = null, name: []const u8 = "" };
-pub const Sampler = struct { wrapS: u32 = 10497, wrapT: u32 = 10497 };
+pub const Sampler = struct { wrapS: u32 = 10497, wrapT: u32 = 10497, magFilter: ?u32 = null, minFilter: ?u32 = null };
 pub const Image = struct { bufferView: u32, mimeType: []const u8 = "", name: []const u8 = "" };
 
 pub fn parseDocument(allocator: std.mem.Allocator, json: []const u8) !std.json.Parsed(Document) {
@@ -450,6 +461,7 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
         \\    model: n64.graphics.model.Model,
         \\    pub fn draw(self: @This(), context: anytype) void {{ self.model.draw(context, Materials{{}}); }}
         \\    pub fn applyMaterial(_: @This(), context: anytype, index: u16) void {{ (Materials{{}}).apply(context, index); }}
+        \\    pub fn material(_: @This(), index: u16) n64.graphics.model.Material {{ return Materials.get(index); }}
         \\}};
         \\pub const Materials = struct {{
         \\    pub fn apply(_: @This(), context: anytype, index: u16) void {{
@@ -461,34 +473,40 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
 fn emitMaterials(allocator: std.mem.Allocator, source: *std.ArrayList(u8), document: Document, binary: []const u8) !void {
     for (document.materials, 0..) |material, material_index| {
         const texture_index = materialImageIndex(document, material);
-        const culling = materialCulling(material);
-        const is_blended = materialIsBlended(material);
-        const depth_write = !is_blended;
-        const blend_mode = if (is_blended) "alpha" else "opaque_surface";
         if (texture_index) |image_index| {
-            const sampler = materialSampler(document, binary, material, image_index);
             try appendFormat(
                 allocator,
                 source,
-                "            {d} => {{ context.setDrawFlags(.{{ .depth = true, .textured = true, .shaded = true, .cull_front = {}, .cull_back = {} }}); context.render.setDepthState(true, {}); context.render.setPerspectiveTexture(true); context.render.setBlendMode(.{s}); context.render.setCombineMode(.single(.{{ .rgb_a = .tex0, .rgb_c = .shade, .alpha_d = .{s} }})); _ = context.render.useTextureSampler(texture_{d}, .{{ .clamp_s = {}, .clamp_t = {}, .mirror_s = {}, .mirror_t = {}, .mask_s = {d}, .mask_t = {d} }}); }},\n",
-                .{ material_index, culling.front, culling.back, depth_write, blend_mode, if (is_blended) "tex0" else "one", image_index, sampler.clamp_s, sampler.clamp_t, sampler.mirror_s, sampler.mirror_t, sampler.mask_s, sampler.mask_t },
+                "            {d} => get(index).bind(context, texture_{d}),\n",
+                .{ material_index, image_index },
             );
         } else {
-            try appendFormat(
-                allocator,
-                source,
-                "            {d} => {{ context.setDrawFlags(.{{ .depth = true, .shaded = true, .cull_front = {}, .cull_back = {} }}); context.render.setDepthState(true, {}); context.render.setBlendMode(.{s}); context.render.setCombineMode(.single(.{{ .rgb_a = .shade, .rgb_c = .primitive, .alpha_d = .{s} }})); }},\n",
-                .{ material_index, culling.front, culling.back, depth_write, blend_mode, if (is_blended) "shade" else "one" },
-            );
+            try appendFormat(allocator, source, "            {d} => get(index).apply(context),\n", .{material_index});
         }
     }
     try source.appendSlice(
         allocator,
-        "            65535 => { context.setDrawFlags(.{ .depth = true, .shaded = true }); context.render.setDepthState(true, true); context.render.setBlendMode(.opaque_surface); context.render.setCombineMode(.shade); },\n",
+        "            65535 => get(index).apply(context),\n",
     );
     try source.appendSlice(allocator,
         \\            else => @panic("invalid model material index"),
         \\        }
+        \\    }
+        \\    pub fn get(index: u16) n64.graphics.model.Material {
+        \\        return switch (index) {
+        \\
+    );
+    for (document.materials, 0..) |material, index| {
+        const image = materialImageIndex(document, material);
+        const sampler = if (image) |i| materialSampler(document, binary, material, i) else materials.Sampler{};
+        try appendFormat(allocator, source, "            {d} => ", .{index});
+        try materials.emit(allocator, source, material, materialCulling(material), materialIsBlended(material), image != null, sampler, try materialFilter(document, material));
+        try source.appendSlice(allocator, ",\n");
+    }
+    try source.appendSlice(allocator,
+        \\            65535 => .{},
+        \\            else => @panic("invalid model material index"),
+        \\        };
         \\    }
         \\};
         \\
@@ -496,7 +514,7 @@ fn emitMaterials(allocator: std.mem.Allocator, source: *std.ArrayList(u8), docum
 }
 
 fn materialCulling(material: Material) struct { front: bool, back: bool } {
-    const extension = material.extensions orelse return .{ .front = false, .back = false };
+    const extension = material.extensions orelse return .{ .front = false, .back = !material.doubleSided };
     const fast64 = extension.FAST64_materials_f3d orelse nested: {
         const n64 = extension.FAST64_materials_n64 orelse return .{ .front = false, .back = false };
         const nested_extensions = n64.extensions orelse return .{ .front = false, .back = false };
@@ -521,7 +539,7 @@ fn materialIsBlended(material: Material) bool {
     return false;
 }
 
-const GeneratedSampler = struct { clamp_s: bool, clamp_t: bool, mirror_s: bool, mirror_t: bool, mask_s: u4, mask_t: u4 };
+const GeneratedSampler = materials.Sampler;
 
 fn materialSampler(document: Document, binary: []const u8, material: Material, image_index: u32) GeneratedSampler {
     const size = pngSize(document, binary, document.images[image_index]) orelse default_texture_size;
@@ -534,6 +552,14 @@ fn materialSampler(document: Document, binary: []const u8, material: Material, i
     const s = samplerAxis(sampler.wrapS, size[0]);
     const t = samplerAxis(sampler.wrapT, size[1]);
     return .{ .clamp_s = s.clamp, .clamp_t = t.clamp, .mirror_s = s.mirror, .mirror_t = t.mirror, .mask_s = s.mask, .mask_t = t.mask };
+}
+
+fn materialFilter(document: Document, material: Material) ![]const u8 {
+    const image = materialImageIndex(document, material);
+    if (image == null) return materials.filter(material, false);
+    const texture = document.textures[material.pbrMetallicRoughness.?.baseColorTexture.?.index];
+    const sampler = if (texture.sampler) |index| if (index < document.samplers.len) document.samplers[index] else Sampler{} else Sampler{};
+    return materials.filter(material, sampler.magFilter == 9728);
 }
 
 const SamplerAxis = struct { clamp: bool, mirror: bool, mask: u4 };
@@ -615,6 +641,7 @@ fn appendFormat(allocator: std.mem.Allocator, output: *std.ArrayList(u8), compti
 pub const ConvertOptions = struct {
     scale: f32 = 64,
     max_vertices_per_batch: usize = 70,
+    preserve_triangle_order: bool = false,
 };
 
 pub fn convert(allocator: std.mem.Allocator, document: Document, binary: []const u8, options: ConvertOptions) !ConvertedModel {
@@ -656,7 +683,7 @@ fn convertPrimitive(
         .views = views,
         .options = options,
         .material = primitive.material,
-        .preserve_order = materialPreservesOrder(document, primitive.material),
+        .preserve_order = options.preserve_triangle_order or materialPreservesOrder(document, primitive.material),
         .output = output,
     };
     defer builder.deinit();
@@ -709,6 +736,7 @@ const PrimitiveViews = struct {
     uvs: ?AccessorView,
     indices: AccessorView,
     texture_size: [2]u32,
+    uv_adjust: bool,
 
     fn init(document: Document, binary: []const u8, primitive: Primitive) !PrimitiveViews {
         // Parse skinning attributes now so they cannot be silently discarded
@@ -727,12 +755,19 @@ const PrimitiveViews = struct {
             .uvs = try optionalAccessor(document, binary, primitive.attributes.TEXCOORD_0),
             .indices = indices,
             .texture_size = materialTextureSize(document, binary, primitive.material),
+            .uv_adjust = try materialUvAdjustment(document, primitive.material),
         };
     }
 };
 
 fn optionalAccessor(document: Document, binary: []const u8, index: ?u32) !?AccessorView {
     return if (index) |value| try accessorView(document, binary, value) else null;
+}
+
+fn materialUvAdjustment(document: Document, material: ?u32) !bool {
+    const index = material orelse return false;
+    if (index >= document.materials.len) return false;
+    return !std.mem.eql(u8, try materialFilter(document, document.materials[index]), "point");
 }
 
 const BatchBuilder = struct {
@@ -792,7 +827,9 @@ const BatchBuilder = struct {
         if (index >= self.views.positions.count) return error.InvalidVertexIndex;
         if (findRemap(self.remap.items, index)) |local| return local;
         const local: u8 = @intCast(self.vertices.items.len);
-        try self.vertices.append(self.allocator, try convertVertex(self.views.positions, self.views.normals, self.views.colors, self.views.uvs, index, self.views.texture_size, self.options.scale));
+        var vertex = try convertVertex(self.views.positions, self.views.normals, self.views.colors, self.views.uvs, index, self.views.texture_size, self.options.scale);
+        if (self.views.uv_adjust and self.views.uvs != null) try centerUv(&vertex.uv);
+        try self.vertices.append(self.allocator, vertex);
         try self.remap.append(self.allocator, .{ .source = index, .local = local });
         return local;
     }
@@ -882,6 +919,13 @@ fn convertUv(view: AccessorView, index: u32, texture_size: [2]u32) ![2]i16 {
     return result;
 }
 
+fn centerUv(uv: *[2]i16) !void {
+    for (uv) |*coordinate| {
+        if (coordinate.* < std.math.minInt(i16) + 16) return error.UvOutOfRange;
+        coordinate.* -= 16;
+    }
+}
+
 fn packNormal(value: [3]f32) u16 {
     const length = @sqrt(value[0] * value[0] + value[1] * value[1] + value[2] * value[2]);
     if (length == 0) return 0;
@@ -894,8 +938,25 @@ fn packNormal(value: [3]f32) u16 {
 fn materialTextureSize(document: Document, binary: []const u8, material_index: ?u32) [2]u32 {
     const index = material_index orelse return default_texture_size;
     if (index >= document.materials.len) return default_texture_size;
-    const image_index = materialImageIndex(document, document.materials[index]) orelse return default_texture_size;
-    return pngSize(document, binary, document.images[image_index]) orelse default_texture_size;
+    const material = document.materials[index];
+    if (materialImageIndex(document, material)) |image_index| {
+        if (pngSize(document, binary, document.images[image_index])) |size| return size;
+    }
+    return legacyTextureSize(material) orelse default_texture_size;
+}
+
+fn legacyTextureSize(material: Material) ?[2]u32 {
+    const extras = material.extras orelse return null;
+    const fast64 = extras.f3d_mat orelse return null;
+    const tex = fast64.tex0 orelse return null;
+    return .{ legacyAxisSize(tex.S) orelse return null, legacyAxisSize(tex.T) orelse return null };
+}
+
+fn legacyAxisSize(axis: ?LegacyFast64Axis) ?u32 {
+    const bounds = axis orelse return null;
+    const size = bounds.high - bounds.low + 1;
+    if (!std.math.isFinite(size) or size < 1 or size > 1024 or @trunc(size) != size) return null;
+    return @intFromFloat(size);
 }
 
 const default_texture_size = [2]u32{ 32, 32 };
@@ -1073,8 +1134,8 @@ test "blend materials preserve order and skinning is explicit" {
     var source: std.ArrayList(u8) = .empty;
     defer source.deinit(std.testing.allocator);
     try emitMaterials(std.testing.allocator, &source, blend_document, &.{});
-    try std.testing.expect(std.mem.indexOf(u8, source.items, "setDepthState(true, false)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.items, "setBlendMode(.alpha)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, ".translucent = true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "get(index).apply(context)") != null);
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".alpha_d = .shade") != null);
 
     const primitive: Primitive = .{
@@ -1099,8 +1160,8 @@ test "Fast64 blend wrapper uses its N64 render mode" {
     var source: std.ArrayList(u8) = .empty;
     defer source.deinit(std.testing.allocator);
     try emitMaterials(std.testing.allocator, &source, document, &.{});
-    try std.testing.expect(std.mem.indexOf(u8, source.items, "setDepthState(true, true)") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.items, "setBlendMode(.opaque_surface)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, ".translucent = false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "get(index).apply(context)") != null);
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".alpha_d = .one") != null);
 
     const translucent = Material{
@@ -1173,7 +1234,10 @@ test "embedded PNG dimensions feed material UV conversion" {
         .accessors = &.{},
         .meshes = &.{},
         .bufferViews = &.{.{ .buffer = 0, .byteLength = png.len }},
-        .materials = &.{.{ .pbrMetallicRoughness = .{ .baseColorTexture = .{ .index = 0 } } }},
+        .materials = &.{.{
+            .pbrMetallicRoughness = .{ .baseColorTexture = .{ .index = 0 } },
+            .extras = .{ .f3d_mat = .{ .tex0 = .{ .S = .{ .high = 15 }, .T = .{ .high = 15 } } } },
+        }},
         .textures = &.{.{ .source = 0, .sampler = 0 }},
         .samplers = &.{.{ .wrapS = 33071, .wrapT = 10497 }},
         .images = &.{.{ .bufferView = 0, .mimeType = "image/png", .name = "diffuse.i8.png" }},
@@ -1189,6 +1253,25 @@ test "embedded PNG dimensions feed material UV conversion" {
     try std.testing.expectEqual(@as(u4, 5), sampler.mask_t);
     try std.testing.expect(samplerAxis(33648, 32).mirror);
     try std.testing.expect(samplerAxis(10497, 96).clamp);
+}
+
+test "legacy Fast64 external texture bounds feed material UV conversion" {
+    const parsed = try std.json.parseFromSlice(Document, std.testing.allocator,
+        \\{"accessors":[],"bufferViews":[],"meshes":[],"materials":[{"extras":{"f3d_mat":{"tex0":{"S":{"low":0,"high":63},"T":{"low":0,"high":63}}}}},{"extras":{"f3d_mat":{"tex0":{"S":{"high":31},"T":{"high":63}}}}}]}
+    , .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqual([2]u32{ 64, 64 }, materialTextureSize(parsed.value, &.{}, 0));
+    try std.testing.expectEqual([2]u32{ 32, 64 }, materialTextureSize(parsed.value, &.{}, 1));
+    const bytes = std.mem.asBytes(&[_]f32{ 0.5, 0.25 });
+    const uv: AccessorView = .{ .bytes = bytes, .count = 1, .stride = 8, .component_type = 5126, .component_count = 2, .normalized = false };
+    try std.testing.expectEqual([2]i16{ 1024, 512 }, try convertUv(uv, 0, materialTextureSize(parsed.value, &.{}, 0)));
+    try std.testing.expectEqual(@as(?u32, null), legacyAxisSize(.{ .high = -1 }));
+    try std.testing.expectEqual(@as(?u32, null), legacyAxisSize(.{ .high = 1.5 }));
+    try std.testing.expectEqual(@as(?u32, null), legacyAxisSize(.{ .high = std.math.inf(f32) }));
+    try std.testing.expectEqual(@as(?u32, null), legacyAxisSize(null));
+    var invalid = parsed.value.materials[0];
+    invalid.extras.?.f3d_mat.?.tex0.?.T = null;
+    try std.testing.expectEqual(@as(?[2]u32, null), legacyTextureSize(invalid));
 }
 
 test "model conversion remaps vertices and splits hardware-safe batches" {
@@ -1229,4 +1312,48 @@ test "helper validation rejects invalid embedded ranges" {
     try std.testing.expectError(error.InvalidImage, imageBytes(document, &.{ 0, 1, 2 }, .{ .bufferView = 0 }));
     _ = signedFloat(&.{0xff}, 5120, true);
     _ = signedFloat(&.{ 0xff, 0x7f }, 5122, false);
+}
+
+test "filtered legacy UVs are centered at conversion, point UVs are unchanged" {
+    var binary: [63]u8 = undefined;
+    @memcpy(binary[0..36], std.mem.asBytes(&[_]f32{ 0, 0, 0, 1, 0, 0, 0, 1, 0 }));
+    @memcpy(binary[36..60], std.mem.asBytes(&[_]f32{ 0.5, 0.25, 0.5, 0.25, 0.5, 0.25 }));
+    @memcpy(binary[60..63], &[_]u8{ 0, 1, 2 });
+    var material: Material = .{ .extras = .{ .f3d_mat = .{ .tex0 = .{ .S = .{ .high = 63 }, .T = .{ .high = 63 } } } } };
+    var document: Document = .{
+        .accessors = &.{
+            .{ .bufferView = 0, .componentType = 5126, .count = 3, .type = "VEC3" },
+            .{ .bufferView = 1, .componentType = 5126, .count = 3, .type = "VEC2" },
+            .{ .bufferView = 2, .componentType = 5121, .count = 3, .type = "SCALAR" },
+        },
+        .bufferViews = &.{
+            .{ .buffer = 0, .byteLength = 36 },
+            .{ .buffer = 0, .byteOffset = 36, .byteLength = 24 },
+            .{ .buffer = 0, .byteOffset = 60, .byteLength = 3 },
+        },
+        .meshes = &.{.{ .primitives = &.{.{ .attributes = .{ .POSITION = 0, .TEXCOORD_0 = 1 }, .indices = 2, .material = 0 }} }},
+        .materials = &.{material},
+    };
+    const filtered = try convert(std.testing.allocator, document, &binary, .{});
+    defer filtered.deinit(std.testing.allocator);
+    try std.testing.expectEqual([2]i16{ 1008, 496 }, filtered.batches[0].vertices[0].uv);
+    material.extras.?.f3d_mat.?.rdp_settings.g_mdsft_text_filt = 0;
+    document.materials = &.{material};
+    const point = try convert(std.testing.allocator, document, &binary, .{});
+    defer point.deinit(std.testing.allocator);
+    try std.testing.expectEqual([2]i16{ 1024, 512 }, point.batches[0].vertices[0].uv);
+    var extreme = [2]i16{ std.math.minInt(i16), 0 };
+    try std.testing.expectError(error.UvOutOfRange, centerUv(&extreme));
+}
+
+test "generated materials preserve mask, legacy sampler, culling and two cycles" {
+    const parsed = try parseDocument(std.testing.allocator,
+        \\{"accessors":[],"bufferViews":[],"meshes":[],"materials":[{"alphaMode":"MASK","alphaCutoff":0.125,"extras":{"f3d_mat":{"tex0":{"S":{"high":31,"mask":5,"clamp":false},"T":{"high":63,"mask":6,"mirror":true,"shift":-1}},"combiner1":{"A":1,"B":8,"C":4,"D":7,"D_alpha":1},"combiner2":{"A":0,"B":8,"C":3,"D":7,"D_alpha":0},"rdp_settings":{"g_cull_back":1,"g_lighting":false,"g_fog":true,"g_mdsft_cycletype":1},"set_prim":true,"set_env":1}}}]}
+    );
+    defer parsed.deinit();
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+    try emitMaterials(std.testing.allocator, &output, parsed.value, &.{});
+    for ([_][]const u8{ ".alpha_cutoff = 32", ".mirror_t = true", ".shift_t = 15", ".cull_back = true", ".no_light = true", ".fog = true", ".cycle_type = .two_cycle", ".alpha_d = @enumFromInt(1)", ".primitive = .fromBytes", ".environment = .fromBytes" }) |fragment|
+        try std.testing.expect(std.mem.indexOf(u8, output.items, fragment) != null);
 }

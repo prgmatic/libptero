@@ -1,4 +1,5 @@
 const geometry = @import("geometry.zig");
+pub const Material = @import("material.zig").Material;
 
 /// A model is stored as already-packed vertex batches. Strip entries contain
 /// vertex-buffer-relative byte offsets plus the RSP strip control flags; the
