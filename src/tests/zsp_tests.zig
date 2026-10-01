@@ -75,6 +75,7 @@ var geometry_vertex_input: [64]u8 align(16) = undefined;
 var geometry_triangle_output: [32]u64 align(16) = undefined;
 var geometry_api_context: geometry.Context = undefined;
 var geometry_strip_indices: [4]i16 align(8) = .{ 0, 0x0024, 0x4048, 0 };
+var diagnostic_vertices: [1]geometry.VertexPair align(16) = undefined;
 
 pub const tests = [_]runner.Test{
     .{ .name = "ZSP: arithmetic", .run = arithmetic },
@@ -103,6 +104,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: polling syncpoint", .run = pollingSyncpoint },
     .{ .name = "ZSP: high-priority queue", .run = highPriorityQueue },
     .{ .name = "RDP: direct CPU renderer", .run = directRdpRenderer },
+    .{ .name = "Debug: render diagnostics", .run = renderDiagnostics },
     .{ .name = "RDP: RSP-submitted raw queue", .run = rspBackedRdpQueue },
     .{ .name = "RDP: completion fence", .run = rdpCompletionFence },
     .{ .name = "RDP: native overlay textured triangle", .run = nativeOverlayTexturedTriangle },
@@ -1554,7 +1556,43 @@ fn rspBackedRdpQueue() !void {
     rsp.unregisterOverlay(&rdp_overlay);
 }
 
+fn renderDiagnostics() !void {
+    const diagnostics = n64.debug.diagnostics;
+    @memset(std.mem.asBytes(&diagnostic_vertices), 0);
+    n64.cache.writebackData(&diagnostic_vertices);
+    var probe = diagnostics.probeVertices(&diagnostic_vertices, 0);
+    try testing.expectEqual(@as(usize, 0), probe.mismatched_bytes);
+    const dirty: *volatile u8 = @ptrCast(&diagnostic_vertices);
+    dirty.* = 0x12;
+    probe = diagnostics.probeVertices(&diagnostic_vertices, 1);
+    try testing.expectEqual(@as(usize, 1), probe.mismatched_bytes);
+    n64.cache.writebackData(&diagnostic_vertices);
+    probe = diagnostics.probeVertices(&diagnostic_vertices, 0);
+    try testing.expectEqual(@as(usize, 0), probe.mismatched_bytes);
+    try testing.expectEqual(@sizeOf(geometry.VertexPair), probe.compared_bytes);
+
+    @memset(&direct_rdp_render_target, n64.graphics.color.Rgba32.black);
+    n64.cache.writebackData(&direct_rdp_render_target);
+    const image = n64.graphics.image.ImgRgba32{ .width = 4, .height = 4, .texel_data = &direct_rdp_render_target };
+    var render_queue = rdp.DirectRenderQueue.init(.{ .buffer = &direct_rdp_command_buffer });
+    render_queue.setFrameBuffer(image);
+    render_queue.clearScreen(n64.graphics.color.Rgba32.green);
+    const fence = rdp.syncFull(&render_queue);
+    try diagnostics.captureFramebuffer(image, fence, 9001, rsp_timeout_attempts);
+    // One full 64-byte packet above plus a short packet using the same pixels.
+    const short_image = n64.graphics.image.ImgRgba32{ .width = 3, .height = 1, .texel_data = direct_rdp_render_target[0..3] };
+    try diagnostics.captureFramebuffer(short_image, fence, 9002, rsp_timeout_attempts);
+    n64.cache.invalidateData(&direct_rdp_render_target);
+    for (direct_rdp_render_target) |pixel| try testing.expectEqual(n64.graphics.color.Rgba32.green, pixel);
+    // Exercise reports without requiring any format-buffer allocation inside them.
+    continuous_queue.init(.low);
+    diagnostics.reportRenderTimeout("diagnostic self-test (not an actual timeout)", &continuous_queue);
+}
+
 fn directRdpRenderer() !void {
+    rsp.halt();
+    rsp.waitHalted();
+    rsp.releaseRdpToDirect();
     @memset(&direct_rdp_render_target, n64.graphics.color.Rgba32.black);
     n64.cache.writebackData(&direct_rdp_render_target);
     const image = n64.graphics.image.ImgRgba32{

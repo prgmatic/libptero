@@ -6,6 +6,7 @@ pub const backtrace = @import("debug/backtrace.zig");
 pub const srcmap = @import("debug/srcmap.zig");
 pub const crash_screen = @import("debug/crash_screen.zig");
 pub const console_font = @import("debug/console_font.zig");
+pub const diagnostics = @import("debug/diagnostics.zig");
 
 const std = @import("std");
 const io = @import("io.zig");

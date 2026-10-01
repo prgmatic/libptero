@@ -30,6 +30,18 @@ pub fn build(b: *std.Build) void {
     var sdk = init(b, .{ .root = b.path("") });
     b.installArtifact(sdk.tools.font_compiler);
     b.installArtifact(sdk.tools.gltf_compiler);
+    const capture_module = b.createModule(.{
+        .root_source_file = b.path("tools/framebuffer_capture/root.zig"),
+        .target = b.graph.host,
+    });
+    b.installArtifact(b.addExecutable(.{
+        .name = "framebuffer-capture",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/framebuffer_capture/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "framebuffer_capture", .module = capture_module }},
+        }),
+    }));
 
     tests_build.addToolTests(b, coverage, coverage_runtime);
     tests_build.addConsumerFixtureTests(b);

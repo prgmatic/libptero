@@ -38,6 +38,30 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
         .root_source_file = b.path("tools/imgparse/png.zig"),
         .target = b.graph.host,
     });
+    const capture_tests = b.addTest(.{
+        .name = "framebuffer-capture-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/framebuffer_capture/root.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "png", .module = png }},
+        }),
+    });
+    instrumentTests(capture_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(capture_tests).step);
+    const capture_cli_tests = b.addTest(.{
+        .name = "framebuffer-capture-cli-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/framebuffer_capture/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "framebuffer_capture", .module = b.createModule(.{
+                .root_source_file = b.path("tools/framebuffer_capture/root.zig"),
+                .target = b.graph.host,
+                .imports = &.{.{ .name = "png", .module = png }},
+            }) }},
+        }),
+    });
+    instrumentTests(capture_cli_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(capture_cli_tests).step);
     const texture_compiler_module = b.createModule(.{
         .root_source_file = b.path("tools/texture_compiler/root.zig"),
         .target = b.graph.host,
@@ -95,6 +119,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
         .{ "rsp-overlay-link-tests", "tools/build/rsp_overlay_link.zig" },
         .{ "rsp-pack-tests", "tools/build/rsp_pack.zig" },
         .{ "test-protocol-tests", "tools/test_protocol.zig" },
+        .{ "framebuffer-hex-tests", "src/n64/debug/framebuffer_hex.zig" },
         .{ "math-tests", "src/n64/math_tests.zig" },
         .{ "font-tests", "src/n64/graphics/font.zig" },
         .{ "model-tests", "src/n64/n64.zig" },
