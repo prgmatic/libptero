@@ -4,6 +4,7 @@ pub const interfaces = @import("interfaces.zig");
 pub const cpu = @import("cpu.zig");
 pub const cache = @import("cpu/cache.zig");
 pub const graphics = @import("graphics.zig");
+pub const display = @import("display.zig");
 
 test {
     _ = graphics.model;
@@ -11,6 +12,7 @@ test {
     _ = @import("graphics/material.zig");
     _ = io.joypad;
     _ = graphics.rdp.RenderQueue;
+    _ = display;
 }
 pub const rsp = @import("rsp/rsp.zig");
 pub const interrupt = @import("interrupt.zig");

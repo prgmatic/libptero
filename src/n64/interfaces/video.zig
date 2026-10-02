@@ -15,7 +15,7 @@ const vi_y_scale:        *volatile u32     = @ptrFromInt(0xA4400034);
 
 var detected_tv_type: TvType = .ntsc;
 
-const TvType = enum(u2) {
+pub const TvType = enum(u2) {
     pal,
     ntsc,
     m_pal,
@@ -124,6 +124,45 @@ pub fn setFrameBuffer(buffer_addr: u32) void {
     frame_buffer_addr.* = buffer_addr;
 }
 
+/// Stop framebuffer sampling while leaving the VI timing generator running.
+pub fn blank() void {
+    vi_h_video.* = 0;
+}
+
+/// Wait for a fresh vertical blank, even when VI interrupts are disabled.
+/// The limit counts register polls, not elapsed time.
+pub fn waitVBlank(max_attempts: u32) error{VBlankTimeout}!void {
+    try nextVBlank(null, max_attempts);
+}
+
+/// Change the origin during a fresh vertical blank. Interrupts are masked only
+/// for the final scanline check and register write, preserving the caller's status.
+pub fn setFrameBufferAtVBlank(buffer_addr: u32, max_attempts: u32) error{VBlankTimeout}!void {
+    try nextVBlank(buffer_addr, max_attempts);
+}
+
+fn nextVBlank(buffer_addr: ?u32, max_attempts: u32) error{VBlankTimeout}!void {
+    @setEvalBranchQuota(10_000);
+    const cp0 = @import("../cpu/cp0.zig");
+    var remaining = max_attempts;
+    var saw_active = false;
+    while (remaining > 0) : (remaining -= 1) {
+        // Ignore the interlace field bit. All supported timings start visible
+        // video after half-line 32; use the first 20 half-lines for the swap.
+        const line = vi_v_current.* & 0x3fe;
+        if (line >= 32) saw_active = true;
+        if (!saw_active or line >= 20) continue;
+        const status = cp0.regRead(.Status);
+        cp0.regWrite(.Status, status & ~@as(u32, 1));
+        defer cp0.regWrite(.Status, status);
+        // An interrupt may have delayed us before it was masked.
+        if ((vi_v_current.* & 0x3fe) >= 20) continue;
+        if (buffer_addr) |address| setFrameBuffer(address);
+        return;
+    }
+    return error.VBlankTimeout;
+}
+
 pub fn claerInterrupt() void {
     vi_v_current.* = vi_v_current.*;
 }
@@ -135,6 +174,15 @@ pub const Resolution = enum(u8) {
     @"640x240p",
     @"512x480i",
     @"640x480i",
+
+    pub fn dimensions(self: Resolution) struct { width: u16, height: u16 } {
+        const info = resolutions[@intFromEnum(self)];
+        return .{ .width = @intCast(info.width), .height = @intCast(info.height) };
+    }
+
+    pub fn isInterlaced(self: Resolution) bool {
+        return resolutions[@intFromEnum(self)].scan_mode == .interlaced;
+    }
 };
 
 const ResolutionInfo = struct {
