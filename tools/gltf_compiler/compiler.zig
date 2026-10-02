@@ -456,13 +456,8 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
     }
     try appendFormat(allocator, source,
         \\}};
-        \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts }} }};
-        \\pub const ModelAsset = struct {{
-        \\    model: n64.graphics.model.Model,
-        \\    pub fn draw(self: @This(), context: anytype) void {{ self.model.draw(context, Materials{{}}); }}
-        \\    pub fn applyMaterial(_: @This(), context: anytype, index: u16) void {{ (Materials{{}}).apply(context, index); }}
-        \\    pub fn material(_: @This(), index: u16) n64.graphics.model.Material {{ return Materials.get(index); }}
-        \\}};
+        \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts }}, .materials = .{{}} }};
+        \\pub const ModelAsset = n64.graphics.model.Asset(Materials);
         \\pub const Materials = struct {{
         \\    pub fn apply(_: @This(), context: anytype, index: u16) void {{
         \\        switch (index) {{

@@ -24,7 +24,7 @@ pub const RecordedModel = struct {
         const previous = MaterialState.read(context);
         context.last_draw_flags = null;
         context.queue.beginBlock(&self.commands);
-        model.draw(context, materials);
+        @import("model.zig").draw(context, model, materials);
         context.queue.endBlock(&self.commands);
         self.final_state = MaterialState.read(context);
         previous.restore(context);
@@ -236,6 +236,22 @@ pub const Context = struct {
     pub fn submit(self: *Context) rdp.Completion {
         self.syncTriangles();
         return self.render.submit();
+    }
+
+    /// Draw a model asset with its typed material provider. Does not submit or wait.
+    pub fn drawModel(self: *Context, asset: anytype) void {
+        self.drawModelWithMaterials(asset.model, asset.materials);
+    }
+
+    /// Draw packed model geometry using custom material bindings.
+    pub fn drawModelWithMaterials(self: *Context, model: @import("model.zig").Model, materials: anytype) void {
+        @import("model.zig").draw(self, model, materials);
+    }
+
+    /// Push a borrowed transform, draw an asset, and restore the previous matrix.
+    /// Keep the transform and asset storage alive until submission completes.
+    pub fn drawModelWithTransform(self: *Context, asset: anytype, matrix: *const math.FixedMat4) void {
+        @import("model.zig").drawWithTransform(self, asset, matrix);
     }
 
     pub fn setAmbientLight(self: *Context, color: Rgba32) void {

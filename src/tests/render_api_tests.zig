@@ -10,6 +10,7 @@ var owned_renderer: n64.graphics.geometry.Renderer = undefined;
 var pixels: [8 * 8]n64.graphics.color.Rgba32 align(64) = undefined;
 
 pub const tests = [_]runner.Test{
+    .{ .name = "Render API: model draw scopes a borrowed transform", .run = transformedModel },
     .{ .name = "Render API: owning geometry renderer lifecycle", .run = owningRenderer },
     .{ .name = "Render API: owned depth clears and restores color target", .run = depthClear },
     .{ .name = "Render API: standalone RDP setup and optional geometry", .run = standalone },
@@ -123,4 +124,77 @@ fn owningRenderer() !void {
     // All registrations can be acquired again after teardown.
     owned_renderer.init();
     owned_renderer.deinit();
+}
+
+var model_vertices: [2]n64.graphics.geometry.VertexPair align(16) = .{
+    .{ .pos_a = .{ -1, -1, 0 }, .normal_a = 0, .pos_b = .{ 1, -1, 0 }, .normal_b = 0, .color_a = .white, .color_b = .white },
+    .{ .pos_a = .{ 0, 1, 0 }, .normal_a = 0, .pos_b = .{ 0, 1, 0 }, .normal_b = 0, .color_a = .white, .color_b = .white },
+};
+var model_indices: [3]i16 align(8) = .{ 0, 36, 0x4048 };
+var model_transform: n64.math.FixedMat4 align(16) = .identity;
+var model_viewport = n64.graphics.geometry.Viewport.init(8, 8);
+
+const TestMaterials = struct {
+    pub fn apply(_: @This(), context: *n64.graphics.geometry.Context, _: u16) void {
+        (n64.graphics.model.Material{
+            .flags = .{ .no_light = true },
+            .combine = .primitive,
+            .primitive = .green,
+        }).apply(context);
+    }
+};
+
+fn transformedModel() !void {
+    owned_renderer.init();
+    const image = try n64.graphics.image.ImgRgba32.initBuffer(&pixels, 8, 8);
+    owned_renderer.beginFrame(image, .{ .clear_color = .black });
+    model_viewport = .init(8, 8);
+    owned_renderer.geometry.attachViewport(&model_viewport);
+    model_transform = n64.math.Mat4.fromSrtEuler(.splat(0.5), .zero, .init(0.25, 0, 0)).toFixed();
+    const parts = [_]n64.graphics.model.Part{.{
+        .vertices = &model_vertices,
+        .strip_indices = &model_indices,
+        .material_index = 0,
+        .vertex_count = 3,
+        .data_usage = .dynamic,
+    }};
+    const asset: n64.graphics.model.Asset(TestMaterials) = .{
+        .model = .{ .parts = &parts },
+        .materials = .{},
+    };
+    owned_renderer.geometry.drawModelWithTransform(asset, &model_transform);
+    const submitted = owned_renderer.submit();
+    try submitted.wait(.{ .max_attempts = 1_000_000 });
+    defer owned_renderer.deinit();
+    n64.cache.invalidateData(&pixels);
+    var green_pixels: usize = 0;
+    // Validate RGB independently of alpha written by rasterization.
+    for (pixels) |pixel| {
+        if (pixel.r == 0 and pixel.g == 255 and pixel.b == 0) green_pixels += 1;
+    }
+    try testing.expect(green_pixels > 0 and green_pixels < pixels.len);
+    n64.cache.invalidateData(&owned_renderer.geometry.matrix_stack);
+    try testing.expect(std.mem.eql(u8, std.mem.asBytes(&model_transform), std.mem.asBytes(&owned_renderer.geometry.matrix_stack[1])));
+    // Drawing restores the camera matrix and its original stack position.
+    const symbols = n64.rsp.programs.geometry_overlay_symbols;
+    const stack = @as(u32, @truncate(@intFromPtr(&owned_renderer.geometry.matrix_stack))) & 0x00ff_ffff;
+    try testing.expectEqual(stack, n64.rsp.io.readDmem(u32, symbols.matrix_stack_pointer).*);
+    const camera_bytes = std.mem.asBytes(&model_viewport.camera);
+    for (0..16) |index| {
+        const word = std.mem.readInt(u32, camera_bytes[index * 4 ..][0..4], .big);
+        try testing.expectEqual(word, n64.rsp.io.readDmem(u32, symbols.matrix_mv + @as(u32, @intCast(index)) * 4).*);
+    }
+    // An explicitly loaded matrix with drawModel produces the same RGB image
+    // as the scoped helper, including material binding and vertex submission.
+    var expected_rgb: [pixels.len]u32 = undefined;
+    for (&expected_rgb, pixels) |*expected, pixel| expected.* = @as(u32, @bitCast(pixel)) >> 8;
+    owned_renderer.beginFrame(image, .{ .clear_color = .black });
+    owned_renderer.geometry.setMatrix(&model_transform, false);
+    owned_renderer.geometry.drawModel(asset);
+    const direct = owned_renderer.submit();
+    try direct.wait(.{ .max_attempts = 1_000_000 });
+    n64.cache.invalidateData(&pixels);
+    for (expected_rgb, pixels) |expected, pixel| {
+        try testing.expectEqual(expected, @as(u32, @bitCast(pixel)) >> 8);
+    }
 }

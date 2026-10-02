@@ -231,3 +231,24 @@ Complete all borrowed-resource work before teardown. It does not own display,
 images, vertices, or application matrices. The individual `rsp.Runtime`,
 `graphics.Renderer`, and `geometry.Context` types remain available for applications
 that need separate lifetimes or an RDP-only renderer.
+
+## Drawing model data
+
+Models contain packed parts; generated `model.Asset(Materials)` values pair that
+geometry with a typed material provider. They carry no renderer or drawing
+methods. Submit model draws through the geometry context:
+
+```zig
+renderer.geometry.drawModel(assets.model);
+renderer.geometry.drawModelWithTransform(assets.model, &model_matrix);
+// For custom material bindings:
+renderer.geometry.drawModelWithMaterials(assets.model.model, MyMaterials{});
+```
+
+`drawModelWithTransform` queues push/draw/pop, restoring the previous matrix while
+leaving material/pipeline changes visible. The matrix is borrowed, not copied;
+keep it unchanged and alive until RSP/RDP completion. Neither draw method submits,
+waits, or allocates. Custom providers implement `apply(context, material_index)`;
+texture types remain known at compile time. `asset.material(index)` still reads
+native material metadata. The module-level `model.draw(context, model, materials)`
+primitive is also available to callers building their own draw traversal.

@@ -10,8 +10,9 @@ var assets = sdk.createAssets("assets");
 assets.addModel("scene", b.path("assets/scene.glb"), .{ .scale = 64 });
 ```
 
-The resulting value owns a native `n64.graphics.model.Model` and exposes
-`draw(&geometry_context)`. Mesh primitives are remapped into batches that fit
+The resulting value pairs a native `n64.graphics.model.Model` with a typed
+material provider. Draw it with `geometry_context.drawModel(asset)` or
+`geometry_context.drawModelWithTransform(asset, &matrix)`. Mesh primitives are remapped into batches that fit
 the shared RSP vertex/index workspace, preserving as much vertex reuse as that
 workspace allows. It reorders triangles for vertex-cache locality and emits
 winding-preserving strips. Positions, 5.6.5 normals, gamma-adjusted vertex
@@ -27,9 +28,12 @@ embedded image dimensions are available. External images still need separate
 texture assets and a material callback; this metadata fallback does not load them.
 
 Material state is exposed as `asset.material(index)` (a native
-`n64.graphics.model.Material`). The generated `asset.draw(context)` applies it
+`n64.graphics.model.Material`). `context.drawModel(asset)` applies it
 automatically for embedded textures. For external textures, callbacks can use
 `asset.material(index).bind(context, texture)` without recreating material settings.
+Pass a custom provider through `context.drawModelWithMaterials(asset.model, provider)`;
+it implements `apply(context, material_index)`. Asset values contain borrowed geometry
+and their provider, with no drawing methods or hidden renderer ownership.
 The legacy Fast64 subset preserves front/back culling, unlit shading, fog enable,
 sampler masks/clamping/mirroring/signed shifts for both texture units, point/median/
 bilinear filtering, one/two-cycle combiners, and primitive/environment colors.
