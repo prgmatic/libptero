@@ -181,3 +181,29 @@ view can also wrap caller-owned 64-byte aligned storage. `setDepthBuffer` and
 `clearDepth` require dimensions matching the current framebuffer; `clearDepth`
 uses the packed far value and restores the color target. Raw command queues retain
 `setDepthImage` for custom hardware scheduling.
+
+## Frame setup
+
+`beginFrame(color, options)` is available on RDP render queues, `graphics.Renderer`, and
+`geometry.Context`. It binds borrowed color/depth images, sets a full-target
+scissor, and performs only the clears requested by the caller:
+
+```zig
+renderer.beginFrame(frame.image, .{
+    .depth = depth.view(), // Optional.
+    .clear_color = Pixel.black, // Omit to preserve color contents.
+    .clear_depth = true, // Defaults to false; requires a depth image.
+});
+```
+
+Previous GPU work must be complete. The helper clears CPU command storage but
+keeps streamed RSP buffers attached. Pipeline state, lights, and geometry settings
+persist; no state preset is applied automatically. It does not allocate, submit,
+wait, or present. Targets remain borrowed until submission completes. The typed
+`rdp.FrameOptions(Pixel)` is available when storing or passing options explicitly.
+Individual target, scissor, and clear methods remain available.
+
+A synchronous frame loop can reuse one depth buffer across all swapchain frames:
+VI scans color only, and presentation waits for GPU completion before the next
+frame starts. Separate depth buffers are useful only when their contents must be
+preserved independently.

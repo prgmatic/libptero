@@ -224,9 +224,11 @@ pub const Context = struct {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, 0, &.{physical(&viewport.camera)});
     }
 
-    /// Compatibility hook. RDPQ buffers remain attached across frames and
-    /// advance through their sentinels, matching libdragon/Tiny3D.
-    pub fn beginFrame(_: *Context) void {}
+    /// Bind borrowed frame targets and perform explicitly requested clears.
+    /// Previous frame work must be complete. Geometry and pipeline state persist.
+    pub fn beginFrame(self: *Context, image: anytype, options: rdp.FrameOptions(@TypeOf(image).Pixel)) void {
+        self.render.beginFrame(image, options);
+    }
 
     /// Submit geometry and RDP work together. Keep this context and borrowed
     /// vertex/matrix storage alive until the returned completion finishes.

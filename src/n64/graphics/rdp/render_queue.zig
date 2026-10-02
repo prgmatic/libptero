@@ -9,6 +9,16 @@ const texture = @import("texture.zig");
 pub const SpriteDrawOptions = texture.SpriteDrawOptions;
 pub const Pivot = texture.Pivot;
 
+/// Frame setup borrows targets and performs only explicitly requested clears.
+/// It does not allocate, submit, wait, or reset pipeline state.
+pub fn FrameOptions(comptime Pixel: type) type {
+    return struct {
+        depth: ?@import("../depth.zig").Image = null,
+        clear_color: ?Pixel = null,
+        clear_depth: bool = false,
+    };
+}
+
 const CommandQueue = q.CommandQueue;
 const FixedQueue = q.FixedQueue;
 const TextureRectangleOptions = q.TextureRectangleOptions;
@@ -63,6 +73,26 @@ pub fn RenderQueue(comptime QueueType: type) type {
             // CPU buffers discard recorded commands; their tracked hardware
             // state and texture residency must be reconstructed on reuse.
             if (!@hasDecl(QueueType, "prepare")) rq.invalidateState();
+        }
+
+        /// Begin recording a frame after previous GPU work has completed.
+        /// CPU command buffers are cleared; streamed RSP buffers remain attached.
+        /// Target storage must stay alive until the submitted work completes.
+        pub fn beginFrame(rq: *Self, image: anytype, options: FrameOptions(@TypeOf(image).Pixel)) void {
+            const frame = options;
+            std.debug.assert(image.width > 0 and image.height > 0);
+            std.debug.assert(!frame.clear_depth or frame.depth != null);
+            if (frame.depth) |depth| {
+                std.debug.assert(depth.width == image.width and depth.height == image.height);
+            }
+            if (@hasField(QueueType, "rsp_queue")) {
+                std.debug.assert(!rq.cmd_queue.queue.rsp_queue.storage.syncpoint_pending);
+            }
+            rq.clear();
+            rq.setFrameBuffer(image);
+            if (frame.depth) |depth| rq.setDepthBuffer(depth);
+            if (frame.clear_color) |color| rq.clearScreen(color);
+            if (frame.clear_depth) rq.clearDepth(frame.depth.?, image);
         }
 
         pub fn execute(rq: *Self) void {
@@ -493,4 +523,46 @@ test "presets replace translucent and sprite state with complete opaque geometry
     try std.testing.expect(!value.force_blend and !value.image_read_en and !value.write_on_cvg_overflow);
     try std.testing.expectEqual(modes.ZMode.opaque_surface, value.z_mode);
     try std.testing.expect(std.meta.eql(CombineMode.shade, render.getState().combine));
+}
+
+test "frame setup binds and preserves targets unless clearing is requested" {
+    const color = @import("../color.zig");
+    inline for (.{ color.Rgba16, color.Rgba32 }) |Pixel| {
+        var pixels: [8 * 8]Pixel align(64) = undefined;
+        var depths: [8 * 8]u16 align(64) = undefined;
+        const image = try @import("../image.zig").Image(Pixel).initBuffer(&pixels, 8, 8);
+        const depth = try @import("../depth.zig").Image.initBuffer(&depths, 8, 8);
+        var commands: [64]u64 = undefined;
+        var render = FixedRenderQueue.init(.{ .buffer = &commands });
+        render.setState(@import("state.zig").State.textured_sprite);
+        const state = render.getState();
+        render.cmd_queue.pipeSync(); // Old CPU commands are discarded.
+        render.beginFrame(image, .{});
+        try std.testing.expectEqual(@as(usize, 2), render.cmd_queue.queue.index);
+        try std.testing.expectEqual(@as(u8, 0xff), @as(u8, @truncate(commands[0] >> 56)));
+        try std.testing.expectEqual(@as(u8, 0xed), @as(u8, @truncate(commands[1] >> 56)));
+        try std.testing.expectEqual(@as(u16, 8), render.fb_width);
+        try std.testing.expectEqual(@as(u16, 8), render.fb_height);
+        try std.testing.expect(std.meta.eql(state, render.getState()));
+        render.beginFrame(image, .{ .depth = depth });
+        try std.testing.expectEqual(@as(usize, 3), render.cmd_queue.queue.index);
+        try std.testing.expectEqual(@as(u8, 0xfe), @as(u8, @truncate(commands[2] >> 56)));
+        render.beginFrame(image, .{
+            .depth = depth,
+            .clear_color = Pixel.green,
+            .clear_depth = true,
+        });
+        var fills: usize = 0;
+        var last_target: u64 = 0;
+        for (commands[0..render.cmd_queue.queue.index]) |command| {
+            switch (@as(u8, @truncate(command >> 56))) {
+                0xf6 => fills += 1,
+                0xff => last_target = command,
+                else => {},
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 2), fills);
+        try std.testing.expectEqual(@as(u64, @intFromPtr(image.texel_data.ptr)) & 0x00ff_ffff, last_target & 0x00ff_ffff);
+        try std.testing.expect(std.meta.eql(state, render.getState()));
+    }
 }

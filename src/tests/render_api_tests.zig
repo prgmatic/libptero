@@ -88,10 +88,11 @@ fn depthClear() !void {
     n64.cache.writebackData(depth.pixels);
     runtime.init();
     renderer.init(&runtime);
-    renderer.render.setFrameBuffer(color.view());
-    renderer.render.setDepthBuffer(depth.view());
-    renderer.render.clearDepth(depth.view(), color.view());
-    renderer.render.clearScreen(n64.graphics.color.Rgba16.green);
+    renderer.beginFrame(color.view(), .{
+        .depth = depth.view(),
+        .clear_color = n64.graphics.color.Rgba16.green,
+        .clear_depth = true,
+    });
     const submitted = renderer.submit();
     try submitted.wait(.{ .max_attempts = 1_000_000 });
     n64.cache.invalidateData(depth.pixels);

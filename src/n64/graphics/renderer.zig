@@ -30,6 +30,12 @@ pub const Renderer = struct {
         runtime.renderer_attached = true;
     }
 
+    /// Bind borrowed frame targets and perform explicitly requested clears.
+    /// Previous frame work must be complete. Does not allocate, submit, or wait.
+    pub fn beginFrame(self: *Renderer, image: anytype, options: rdp.FrameOptions(@TypeOf(image).Pixel)) void {
+        self.render.beginFrame(image, options);
+    }
+
     pub fn submit(self: *Renderer) rdp.Completion {
         return self.render.submit();
     }

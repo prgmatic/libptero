@@ -18,6 +18,7 @@ pub const RspSubmittedCommandQueue = queue.RspSubmittedCommandQueue;
 pub const OverlayCommandQueue = queue.OverlayCommandQueue;
 pub const LoadTextureOptions = queue.LoadTextureOptions;
 
+pub const FrameOptions = rq.FrameOptions;
 pub const RenderQueue = rq.RenderQueue;
 pub const FixedRenderQueue = rq.FixedRenderQueue;
 pub const RspRenderQueue = rq.RspRenderQueue;
