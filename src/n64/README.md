@@ -207,3 +207,27 @@ A synchronous frame loop can reuse one depth buffer across all swapchain frames:
 VI scans color only, and presentation waits for GPU completion before the next
 frame starts. Separate depth buffers are useful only when their contents must be
 preserved independently.
+
+## Owning geometry renderer
+
+For the standard 3D path, `geometry.Renderer` owns the runtime, RDP renderer, and
+geometry context together. It initializes in place without heap allocation:
+
+```zig
+var renderer: n64.graphics.geometry.Renderer = undefined;
+renderer.init();
+// Access components directly as renderer.runtime, renderer.rdp, renderer.geometry.
+renderer.beginFrame(frame.image, .{ .depth = depth.view(), .clear_depth = true });
+renderer.geometry.attachViewport(&viewport);
+const completion = renderer.submit();
+try completion.wait(.{});
+renderer.deinit();
+```
+
+Keep it in persistent storage: its components contain pointers to one another and
+must not move after initialization. It starts an exclusive RSP session, submits
+both geometry and RDP completion markers, and tears down in dependency order.
+Complete all borrowed-resource work before teardown. It does not own display,
+images, vertices, or application matrices. The individual `rsp.Runtime`,
+`graphics.Renderer`, and `geometry.Context` types remain available for applications
+that need separate lifetimes or an RDP-only renderer.

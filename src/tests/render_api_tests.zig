@@ -6,9 +6,11 @@ const testing = @import("assert.zig");
 var runtime: n64.rsp.Runtime = undefined;
 var renderer: n64.graphics.Renderer = undefined;
 var geometry: n64.graphics.geometry.Context = undefined;
+var owned_renderer: n64.graphics.geometry.Renderer = undefined;
 var pixels: [8 * 8]n64.graphics.color.Rgba32 align(64) = undefined;
 
 pub const tests = [_]runner.Test{
+    .{ .name = "Render API: owning geometry renderer lifecycle", .run = owningRenderer },
     .{ .name = "Render API: owned depth clears and restores color target", .run = depthClear },
     .{ .name = "Render API: standalone RDP setup and optional geometry", .run = standalone },
     .{ .name = "Render API: submission completes RSP and RDP resources", .run = completion },
@@ -101,4 +103,24 @@ fn depthClear() !void {
     for (color.pixels) |value| try testing.expectEqual(n64.graphics.color.Rgba16.green, value);
     renderer.deinit();
     runtime.deinit();
+}
+
+fn owningRenderer() !void {
+    owned_renderer.init();
+    try testing.expect(owned_renderer.geometry.render == &owned_renderer.rdp.render);
+    try testing.expect(owned_renderer.geometry.queue == &owned_renderer.rdp.queue);
+    const image = try n64.graphics.image.ImgRgba32.initBuffer(&pixels, 8, 8);
+    owned_renderer.beginFrame(image, .{ .clear_color = .blue });
+    const completion_token = owned_renderer.submit();
+    try testing.expect(completion_token.rsp != null);
+    try completion_token.wait(.{ .max_attempts = 1_000_000 });
+    n64.cache.invalidateData(&pixels);
+    for (pixels) |pixel| try testing.expectEqual(n64.graphics.color.Rgba32.blue, pixel);
+    owned_renderer.deinit();
+    const table = n64.rsp.programs.command_dispatcher_symbols.overlay_data_rdram;
+    try testing.expectEqual(@as(u32, 0), n64.rsp.io.readDmem(u32, table + 4).*);
+    try testing.expectEqual(@as(u32, 0), n64.rsp.io.readDmem(u32, table + 12 * 4).*);
+    // All registrations can be acquired again after teardown.
+    owned_renderer.init();
+    owned_renderer.deinit();
 }

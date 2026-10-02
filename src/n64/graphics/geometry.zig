@@ -3,7 +3,8 @@ const cache = @import("../cpu/cache.zig");
 const math = @import("../math.zig");
 const rsp = @import("../rsp/rsp.zig");
 const rdp = @import("rdp.zig");
-const Renderer = @import("renderer.zig").Renderer;
+const RdpRenderer = @import("renderer.zig").Renderer;
+pub const Renderer = @import("geometry_renderer.zig").Renderer;
 const Rgba32 = @import("color.zig").Rgba32;
 
 const vertex_output_size = 36;
@@ -112,7 +113,7 @@ pub const Viewport = struct {
 };
 
 pub const Context = struct {
-    renderer: *Renderer,
+    renderer: *RdpRenderer,
     queue: *rsp.Queue,
     geometry_overlay: rsp.Overlay,
     render: *rdp.DefaultRenderQueue,
@@ -126,7 +127,7 @@ pub const Context = struct {
     /// Attach geometry to an idle renderer. Borrows its RSP queue and RDP state,
     /// registering geometry only when needed. Keep both at stable addresses.
     /// Only one geometry context may attach to a renderer at a time.
-    pub fn init(self: *Context, renderer: *Renderer) void {
+    pub fn init(self: *Context, renderer: *RdpRenderer) void {
         std.debug.assert(!renderer.geometry_attached);
         std.debug.assert(!renderer.queue.storage.syncpoint_pending);
         self.renderer = renderer;
