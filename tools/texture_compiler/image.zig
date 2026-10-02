@@ -20,7 +20,30 @@ pub const Palette = struct {
             if (std.mem.eql(u8, &candidate, &color)) return @intCast(i);
         return null;
     }
+    pub fn nearest(self: *const Palette, color: [4]u8) u8 {
+        var selected: u8 = 0;
+        var best: u32 = std.math.maxInt(u32);
+        for (self.colors[0..self.len], 0..) |candidate, index| {
+            const distance = colorDistance(color, candidate);
+            if (distance < best) {
+                selected = @intCast(index);
+                best = distance;
+            }
+        }
+        return selected;
+    }
 };
+
+fn colorDistance(a: [4]u8, b: [4]u8) u32 {
+    // Keep transparent pixels transparent even when RGB palettes are quantized.
+    const alpha: i32 = @as(i32, a[3]) - b[3];
+    var distance: u32 = @intCast(alpha * alpha * 16);
+    for (0..3) |i| {
+        const delta: i32 = @as(i32, a[i]) - b[i];
+        distance += @intCast(delta * delta);
+    }
+    return distance;
+}
 
 pub const Prepared = struct {
     levels: std.ArrayList(Level) = .empty,
@@ -50,7 +73,8 @@ pub fn prepare(
     if (options.gamma_correct) applyGamma(pixels);
     try prepared.levels.append(allocator, .{ .width = width, .height = height, .pixels = pixels, .owned = true });
     if (options.mipmap == .box) try makeMipmaps(allocator, &prepared.levels);
-    prepared.palette = try makePalette(prepared.levels.items, format);
+    prepared.palette = makePalette(prepared.levels.items, format) catch
+        try @import("quantize.zig").make(allocator, prepared.levels.items, if (format == .ci4) 16 else 256);
     return prepared;
 }
 

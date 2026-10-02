@@ -52,4 +52,5 @@ pub fn convertRgba(
 
 test {
     _ = @import("tests.zig");
+    _ = @import("quantize.zig");
 }

@@ -10,6 +10,8 @@ test {
     _ = graphics.image;
     _ = graphics.depth;
     _ = graphics.model;
+    _ = graphics.animation;
+    _ = @import("graphics/skinned_model.zig");
     _ = graphics.geometry;
     _ = @import("graphics/material.zig");
     _ = io.joypad;

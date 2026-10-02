@@ -73,6 +73,20 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     });
     instrumentTests(texture_compiler_tests, coverage, coverage_runtime);
     test_step.dependOn(&b.addRunArtifact(texture_compiler_tests).step);
+    const texture_cli_tests = b.addTest(.{
+        .name = "texture-compiler-cli-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/texture_compiler/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "texture_compiler", .module = b.createModule(.{
+                .root_source_file = b.path("tools/texture_compiler/root.zig"),
+                .target = b.graph.host,
+                .imports = &.{.{ .name = "png", .module = png }},
+            }) }},
+        }),
+    });
+    instrumentTests(texture_cli_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(texture_cli_tests).step);
     const font_texture_compiler_module = b.createModule(.{
         .root_source_file = b.path("tools/texture_compiler/root.zig"),
         .target = b.graph.host,
@@ -112,6 +126,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     instrumentTests(font_compiler_tests, coverage, coverage_runtime);
     test_step.dependOn(&b.addRunArtifact(font_compiler_tests).step);
     inline for (.{
+        .{ "png-decoder-tests", "tools/imgparse/png.zig" },
         .{ "runtime-host-tests", "src/n64/n64.zig" },
         .{ "zsp-tests", "tools/zsp/tests.zig" },
         .{ "ucode-tests", "src/n64/rsp/ucode_tests.zig" },

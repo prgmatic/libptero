@@ -1,6 +1,7 @@
 const std = @import("std");
 const texture_compiler = @import("texture_compiler");
 const materials = @import("materials.zig");
+const rig = @import("rig.zig");
 
 pub const Glb = struct {
     json: []const u8,
@@ -15,6 +16,9 @@ pub const Document = struct {
     textures: []const Texture = &.{},
     samplers: []const Sampler = &.{},
     images: []const Image = &.{},
+    nodes: []const rig.Node = &.{},
+    skins: []const rig.Skin = &.{},
+    animations: []const rig.Animation = &.{},
 };
 
 pub const Accessor = struct {
@@ -225,6 +229,7 @@ pub const Vertex = struct {
     normal: u16,
     color: [4]u8,
     uv: [2]i16,
+    influence: rig.Influence = .{},
 };
 
 pub const Triangle = [3]u8;
@@ -234,6 +239,7 @@ pub const Batch = struct {
     triangles: []Triangle,
     material_index: u16,
     preserve_order: bool = false,
+    skin: ?u16 = null,
 
     fn deinit(self: Batch, allocator: std.mem.Allocator) void {
         allocator.free(self.vertices);
@@ -243,6 +249,7 @@ pub const Batch = struct {
 
 pub const ConvertedModel = struct {
     batches: []Batch,
+    scale: f32 = 64,
 
     pub fn deinit(self: ConvertedModel, allocator: std.mem.Allocator) void {
         for (self.batches) |batch| batch.deinit(allocator);
@@ -276,6 +283,7 @@ pub fn generate(allocator: std.mem.Allocator, model: ConvertedModel, document: D
     );
     try emitBatchData(allocator, &data, &source, model.batches);
     try emitImages(allocator, &data, &source, document, binary);
+    try rig.emit(allocator, &source, document, binary, model.scale);
     try emitParts(allocator, &source, model.batches, name);
     try emitMaterials(allocator, &source, document, binary);
     return .{ .data = try data.toOwnedSlice(allocator), .source = try source.toOwnedSlice(allocator) };
@@ -299,6 +307,14 @@ fn emitBatch(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *st
         "const vertices_{d} = std.mem.bytesAsSlice(VertexPair, model_data[{d}..{d}]);\nconst indices_{d} = std.mem.bytesAsSlice(i16, model_data[{d}..{d}]);\n",
         .{ batch_index, data_offset, vertices_end, batch_index, indices_offset, data.items.len },
     );
+    if (batch.skin != null) {
+        try appendFormat(allocator, source, "const influences_{d} = [_]n64.graphics.animation.Influence{{\n", .{batch_index});
+        for (batch.vertices) |vertex| {
+            const i = vertex.influence;
+            try appendFormat(allocator, source, ".{{ .joints = .{{ {d}, {d}, {d}, {d} }}, .weights = .{{ {e}, {e}, {e}, {e} }} }},\n", .{ i.joints[0], i.joints[1], i.joints[2], i.joints[3], i.weights[0], i.weights[1], i.weights[2], i.weights[3] });
+        }
+        try source.appendSlice(allocator, "};\n");
+    }
 }
 
 fn alignData(allocator: std.mem.Allocator, data: *std.ArrayList(u8)) !void {
@@ -450,13 +466,15 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
         try appendFormat(
             allocator,
             source,
-            "    .{{ .vertices = vertices_{d}, .strip_indices = indices_{d}, .material_index = {d}, .vertex_count = {d} }},\n",
+            "    .{{ .vertices = vertices_{d}, .strip_indices = indices_{d}, .material_index = {d}, .vertex_count = {d}",
             .{ batch_index, batch_index, batch.material_index, batch.vertices.len },
         );
+        if (batch.skin) |skin| try appendFormat(allocator, source, ", .skin = {d}, .influences = &influences_{d}", .{ skin, batch_index });
+        try source.appendSlice(allocator, " },\n");
     }
     try appendFormat(allocator, source,
         \\}};
-        \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts }}, .materials = .{{}} }};
+        \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts, .nodes = &nodes, .skins = &skins, .animations = &animations }}, .materials = .{{}} }};
         \\pub const ModelAsset = n64.graphics.model.Asset(Materials);
         \\pub const Materials = struct {{
         \\    pub fn apply(_: @This(), context: anytype, index: u16) void {{
@@ -647,18 +665,24 @@ pub fn convert(allocator: std.mem.Allocator, document: Document, binary: []const
         batches.deinit(allocator);
     }
     try convertMeshes(allocator, document, binary, options, &batches);
-    return .{ .batches = try batches.toOwnedSlice(allocator) };
+    return .{ .batches = try batches.toOwnedSlice(allocator), .scale = options.scale };
 }
 
 fn validateConvertOptions(options: ConvertOptions) !void {
+    if (!std.math.isFinite(options.scale) or options.scale <= 0) return error.InvalidScale;
     if (options.max_vertices_per_batch < 3) return error.InvalidBatchSize;
     if (options.max_vertices_per_batch > 70) return error.InvalidBatchSize;
 }
 
 fn convertMeshes(allocator: std.mem.Allocator, document: Document, binary: []const u8, options: ConvertOptions, batches: *std.ArrayList(Batch)) !void {
-    for (document.meshes) |mesh| for (mesh.primitives) |primitive| {
+    try rig.validate(document, binary);
+    for (document.meshes, 0..) |mesh, mesh_index| for (mesh.primitives) |primitive| {
         if (primitive.mode != 4) return error.UnsupportedPrimitiveMode;
+        const start = batches.items.len;
         try convertPrimitive(allocator, document, binary, primitive, options, batches);
+        const skin = try rig.meshSkin(document, mesh_index);
+        for (batches.items[start..]) |*batch| batch.skin = skin;
+        try @import("node_transforms.zig").bake(document, mesh_index, batches.items[start..], options.scale);
     };
 }
 
@@ -729,16 +753,14 @@ const PrimitiveViews = struct {
     normals: ?AccessorView,
     colors: ?AccessorView,
     uvs: ?AccessorView,
+    joints: ?AccessorView,
+    weights: ?AccessorView,
     indices: AccessorView,
     texture_size: [2]u32,
     uv_adjust: bool,
 
     fn init(document: Document, binary: []const u8, primitive: Primitive) !PrimitiveViews {
-        // Parse skinning attributes now so they cannot be silently discarded
-        // by the otherwise permissive glTF JSON decoder. The packed runtime
-        // vertex ABI does not support them yet.
-        if (primitive.attributes.JOINTS_0 != null or primitive.attributes.WEIGHTS_0 != null)
-            return error.UnsupportedSkinning;
+        if ((primitive.attributes.JOINTS_0 == null) != (primitive.attributes.WEIGHTS_0 == null)) return error.InvalidSkinAttributes;
         const positions = try accessorView(document, binary, primitive.attributes.POSITION);
         if (positions.component_count != 3 or positions.component_type != 5126) return error.InvalidPositionAccessor;
         const indices = try accessorView(document, binary, primitive.indices);
@@ -748,6 +770,8 @@ const PrimitiveViews = struct {
             .normals = try optionalAccessor(document, binary, primitive.attributes.NORMAL),
             .colors = try optionalAccessor(document, binary, primitive.attributes.COLOR_0),
             .uvs = try optionalAccessor(document, binary, primitive.attributes.TEXCOORD_0),
+            .joints = try optionalAccessor(document, binary, primitive.attributes.JOINTS_0),
+            .weights = try optionalAccessor(document, binary, primitive.attributes.WEIGHTS_0),
             .indices = indices,
             .texture_size = materialTextureSize(document, binary, primitive.material),
             .uv_adjust = try materialUvAdjustment(document, primitive.material),
@@ -823,6 +847,7 @@ const BatchBuilder = struct {
         if (findRemap(self.remap.items, index)) |local| return local;
         const local: u8 = @intCast(self.vertices.items.len);
         var vertex = try convertVertex(self.views.positions, self.views.normals, self.views.colors, self.views.uvs, index, self.views.texture_size, self.options.scale);
+        vertex.influence = try rig.readInfluence(self.views.joints, self.views.weights, index);
         if (self.views.uv_adjust and self.views.uvs != null) try centerUv(&vertex.uv);
         try self.vertices.append(self.allocator, vertex);
         try self.remap.append(self.allocator, .{ .source = index, .local = local });
@@ -921,7 +946,7 @@ fn centerUv(uv: *[2]i16) !void {
     }
 }
 
-fn packNormal(value: [3]f32) u16 {
+pub fn packNormal(value: [3]f32) u16 {
     const length = @sqrt(value[0] * value[0] + value[1] * value[1] + value[2] * value[2]);
     if (length == 0) return 0;
     const x: i16 = @intFromFloat(@round(std.math.clamp(value[0] / length * 15.5, -16, 15)));
@@ -971,6 +996,7 @@ fn componentCount(kind: []const u8) ?usize {
     if (std.mem.eql(u8, kind, "VEC2")) return 2;
     if (std.mem.eql(u8, kind, "VEC3")) return 3;
     if (std.mem.eql(u8, kind, "VEC4")) return 4;
+    if (std.mem.eql(u8, kind, "MAT4")) return 16;
     return null;
 }
 
@@ -1116,7 +1142,7 @@ test "ordered triangle encoding preserves translucent draw order" {
     );
 }
 
-test "blend materials preserve order and skinning is explicit" {
+test "blend materials preserve order and incomplete skinning is rejected" {
     const blend_document: Document = .{
         .accessors = &.{},
         .bufferViews = &.{},
@@ -1134,10 +1160,10 @@ test "blend materials preserve order and skinning is explicit" {
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".alpha_d = .shade") != null);
 
     const primitive: Primitive = .{
-        .attributes = .{ .POSITION = 0, .JOINTS_0 = 1, .WEIGHTS_0 = 2 },
+        .attributes = .{ .POSITION = 0, .JOINTS_0 = 1 },
         .indices = 3,
     };
-    try std.testing.expectError(error.UnsupportedSkinning, PrimitiveViews.init(blend_document, &.{}, primitive));
+    try std.testing.expectError(error.InvalidSkinAttributes, PrimitiveViews.init(blend_document, &.{}, primitive));
 }
 
 test "Fast64 blend wrapper uses its N64 render mode" {

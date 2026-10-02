@@ -13,7 +13,8 @@ pub const Mat4 = extern struct {
         .{ 0, 0, 1, 0 }, .{ 0, 0, 0, 1 },
     } };
 
-    pub fn fromSrt(scale: Vec3, rotation: Quat, translation: Vec3) Mat4 {
+    pub fn fromSrt(scale: Vec3, input_rotation: Quat, translation: Vec3) Mat4 {
+        const rotation = input_rotation.canonicalized();
         const x2 = rotation.x * rotation.x;
         const y2 = rotation.y * rotation.y;
         const z2 = rotation.z * rotation.z;
@@ -150,4 +151,11 @@ test "optimized affine conversion matches the generic fixed matrix" {
     const generic = matrix.toFixed();
     const optimized = matrix.toFixed3x4();
     try std.testing.expectEqualDeep(generic, optimized);
+}
+
+test "SRT ignores tiny imported quaternion components before their products" {
+    const rotation: Quat = .{ .x = 0.70710677, .y = -3.3897e-21, .z = 7.1077e-21, .w = 0.70710677 };
+    const matrix = Mat4.fromSrt(.one, rotation, .zero);
+    try std.testing.expectEqualDeep(Mat4.fromSrt(.one, rotation.canonicalized(), .zero), matrix);
+    try std.testing.expectEqual(@as(f32, 0), matrix.m[0][1]);
 }

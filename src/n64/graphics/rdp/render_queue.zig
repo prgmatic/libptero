@@ -57,6 +57,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
         tex_cache: [8]TexCacheEntry = [_]TexCacheEntry{.{}} ** 8,
         tex_cache_len: usize = 0,
+        palette_ptr: usize = 0,
         tmem_next: u10 = 0, // next free TMEM word offset (8-byte words, max 512)
         next_tile: u3 = 0, // next render tile; load tile = next_tile +% 1
         /// Most recently bound material texture, consumed by geometry draws.
@@ -120,9 +121,8 @@ pub fn RenderQueue(comptime QueueType: type) type {
         pub fn invalidateState(rq: *Self) void {
             rq.emitted_mode = null;
             rq.emitted_combine = null;
-            rq.tex_cache_len = 0;
-            rq.tmem_next = 0;
-            rq.next_tile = 0;
+            rq.resetTextureCache();
+            rq.palette_ptr = 0;
         }
 
         pub fn fullSync(rq: *Self) void {
@@ -202,9 +202,16 @@ pub fn RenderQueue(comptime QueueType: type) type {
             // RGBA32 occupies both TMEM banks and needs a different allocator.
             if (@TypeOf(first).bit_depth == .@"32" or @TypeOf(second).bit_depth == .@"32")
                 @panic("32-bit texture pairs are not supported");
+            const first_indexed = @TypeOf(first).format == .color_indexed;
+            const second_indexed = @TypeOf(second).format == .color_indexed;
+            if (first_indexed and second_indexed) {
+                if (first.palette.ptr != second.palette.ptr) @panic("texture pairs require a shared palette");
+            }
+            if (first_indexed) rq.configureTexture(first) else rq.configureTexture(second);
+            const capacity: u32 = if (first_indexed or second_indexed) 256 else 512;
             const first_words = textureWords(first);
             const second_words = textureWords(second);
-            if (first_words + second_words > 512) @panic("texture pair exceeds TMEM");
+            if (first_words + second_words > capacity) @panic("texture pair exceeds TMEM");
             rq.tex_cache_len = 0;
             rq.loadTexture(first, 0, 0, first_sampler);
             rq.loadTexture(second, 1, @intCast(first_words), second_sampler);
@@ -326,26 +333,18 @@ pub fn RenderQueue(comptime QueueType: type) type {
         // Returns the render tile for `image`, loading it into TMEM if not cached.
         // Emits a tileSync when a load occurs. TMEM cache is evicted when full.
         fn ensureTexture(rq: *Self, image: anytype, sampler: texture.Sampler) u3 {
+            rq.configureTexture(image);
             const ptr = @intFromPtr(image.texel_data.ptr);
             for (rq.tex_cache[0..rq.tex_cache_len]) |entry| {
                 if (entry.ptr == ptr and entry.sampler.eql(sampler)) return entry.tile;
             }
-            // Compute TMEM size: (w * h * bpp) bits rounded up to 64-bit words.
-            const T = @TypeOf(image);
-            const bpp: u16 = switch (T.bit_depth) {
-                .@"4" => 4,
-                .@"8" => 8,
-                .@"16" => 16,
-                .@"32" => 32,
-            };
-            const required_words = (@as(u32, image.width) * image.height * bpp + 63) / 64;
-            if (required_words > 512) @panic("texture exceeds TMEM capacity");
+            const required_words = textureWords(image);
+            const capacity: u32 = if (@TypeOf(image).format == .color_indexed) 256 else 512;
+            if (required_words > capacity) @panic("texture exceeds TMEM capacity");
             const tmem_words: u10 = @intCast(required_words);
             // Evict entire cache when TMEM is full or all 4 render slots are used.
-            if (rq.tex_cache_len >= 4 or @as(u32, rq.tmem_next) + required_words > 512) {
-                rq.tex_cache_len = 0;
-                rq.tmem_next = 0;
-                rq.next_tile = 0;
+            if (rq.tex_cache_len >= 4 or @as(u32, rq.tmem_next) + required_words > capacity) {
+                rq.resetTextureCache();
             }
             const tile = rq.next_tile;
             const tmem_addr: u9 = @intCast(rq.tmem_next);
@@ -356,6 +355,44 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.tmem_next += tmem_words;
             rq.next_tile +%= 2;
             return tile;
+        }
+
+        fn resetTextureCache(rq: *Self) void {
+            rq.tex_cache_len = 0;
+            rq.tmem_next = 0;
+            rq.next_tile = 0;
+        }
+
+        fn configureTexture(rq: *Self, image: anytype) void {
+            const indexed = @TypeOf(image).format == .color_indexed;
+            rq.mode.tlut_en = indexed;
+            rq.mode.tlut_format = .rgba16;
+            if (indexed) {
+                if (!@hasField(@TypeOf(image), "palette")) @compileError("CI textures require PalettedImage with an RGBA16 palette");
+                const palette = image.palette;
+                std.debug.assert(palette.len > 0 and palette.len <= (if (@TypeOf(image).bit_depth == .@"4") @as(usize, 16) else 256));
+                const address = @intFromPtr(palette.ptr);
+                if (rq.palette_ptr == address) return;
+                rq.resetTextureCache();
+                rq.loadPalette(palette);
+                rq.palette_ptr = address;
+            } else if (rq.palette_ptr != 0) {
+                rq.resetTextureCache();
+                rq.palette_ptr = 0;
+            }
+        }
+
+        fn loadPalette(rq: *Self, palette: []const @import("../color.zig").Rgba16) void {
+            rq.cmd_queue.pipeSync();
+            // TLUT upload follows libdragon's hardware-tested I4 tile layout.
+            // The source remains RGBA16; the 33-word pitch avoids corrupt loads
+            // observed with a zero-pitch RGBA16 tile on the local N64.
+            std.debug.assert(@intFromPtr(palette.ptr) & 7 == 0);
+            rq.cmd_queue.setTextureImage(.rgba, .@"16", 260, @intFromPtr(palette.ptr));
+            rq.cmd_queue.setTile(.{ .color_format = .intensity, .bit_depth = .@"4", .line_length = 33, .tmem_addr = 256, .tile_index = 7 });
+            rq.cmd_queue.loadSync();
+            rq.cmd_queue.loadTlut(7, @intCast(palette.len));
+            rq.cmd_queue.loadSync();
         }
 
         pub fn drawSprite(rq: *Self, image: anytype, x: f32, y: f32, opts: SpriteDrawOptions) void {
@@ -565,4 +602,55 @@ test "frame setup binds and preserves targets unless clearing is requested" {
         try std.testing.expectEqual(@as(u64, @intFromPtr(image.texel_data.ptr)) & 0x00ff_ffff, last_target & 0x00ff_ffff);
         try std.testing.expect(std.meta.eql(state, render.getState()));
     }
+}
+
+test "palette textures load TLUT reserve upper TMEM and restore direct texture mode" {
+    const images = @import("../image.zig");
+    const colors = @import("../color.zig");
+    const texels: [*]const colors.Ci4Pair = @ptrFromInt(0x80400000);
+    const palette: [*]const colors.Rgba16 = @ptrFromInt(0x80401000);
+    const image: images.PalettedImage(colors.Ci4Pair) = .{ .width = 64, .height = 64, .texel_data = texels[0..2048], .palette = palette[0..16] };
+    var commands: [128]u64 = undefined;
+    var render = FixedRenderQueue.init(.{ .buffer = &commands });
+    try std.testing.expectEqual(@as(u3, 0), render.useTextureSampler(image, .{}));
+    try std.testing.expect(render.mode.tlut_en);
+    try std.testing.expectEqual(@as(u10, 256), render.tmem_next);
+    var tlut_commands: usize = 0;
+    var palette_image = false;
+    var palette_tile = false;
+    for (commands[0..render.cmd_queue.queue.index]) |command| {
+        if (command >> 56 == 0xfd and command & 0x00ff_ffff == 0x00401000) {
+            palette_image = true;
+            try std.testing.expectEqual(@as(u64, 2), command >> 51 & 3);
+            try std.testing.expectEqual(@as(u64, 259), command >> 32 & 0x3ff);
+        }
+        if (command >> 56 == 0xf5 and command >> 24 & 7 == 7) {
+            palette_tile = true;
+            try std.testing.expectEqual(@as(u64, 4), command >> 53 & 7);
+            try std.testing.expectEqual(@as(u64, 0), command >> 51 & 3);
+            try std.testing.expectEqual(@as(u64, 33), command >> 41 & 0x1ff);
+            try std.testing.expectEqual(@as(u64, 256), command >> 32 & 0x1ff);
+        }
+        if (command >> 56 == 0xf0) {
+            tlut_commands += 1;
+            try std.testing.expectEqual(@as(u64, 7), command >> 24 & 7);
+            try std.testing.expectEqual(@as(u64, 15), command >> 14 & 0x3ff);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), tlut_commands);
+    try std.testing.expect(palette_image and palette_tile);
+    const count = render.cmd_queue.queue.index;
+    _ = render.useTextureSampler(image, .{});
+    try std.testing.expectEqual(count, render.cmd_queue.queue.index);
+    var other = image;
+    other.palette = palette[16..32];
+    _ = render.useTextureSampler(other, .{});
+    try std.testing.expectEqual(@as(usize, 1), render.tex_cache_len);
+    const direct: images.ConstImage(colors.I8) = .{ .width = 8, .height = 8, .texel_data = @as([*]const colors.I8, @ptrFromInt(0x80402000))[0..64] };
+    _ = render.useTextureSampler(direct, .{});
+    try std.testing.expect(!render.mode.tlut_en);
+    try std.testing.expectEqual(@as(usize, 0), render.palette_ptr);
+    render.invalidateState();
+    _ = render.useTextureSampler(image, .{});
+    try std.testing.expect(render.mode.tlut_en);
 }

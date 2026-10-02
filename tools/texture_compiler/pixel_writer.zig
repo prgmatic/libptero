@@ -102,7 +102,7 @@ fn writeColor(allocator: Allocator, output: *std.ArrayList(u8), format: Format, 
     switch (format) {
         .rgba16 => try appendInt(output, allocator, u16, rgba5551(pixel)),
         .rgba32 => try output.appendSlice(allocator, &pixel),
-        .ci8 => try output.append(allocator, palette.find(pixel).?),
+        .ci8 => try output.append(allocator, palette.nearest(pixel)),
         else => unreachable,
     }
 }
@@ -120,7 +120,7 @@ fn encodeNibble(format: Format, pixel: [4]u8, palette: Palette) u8 {
     return switch (format) {
         .i4 => intensity(pixel) >> 4,
         .ia4 => (intensity(pixel) >> 5) << 1 | @intFromBool(pixel[3] >= 128),
-        .ci4 => palette.find(pixel).?,
+        .ci4 => palette.nearest(pixel),
         else => unreachable,
     };
 }

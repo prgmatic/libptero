@@ -2,6 +2,10 @@ const n64 = @import("n64");
 const assets = @import("assets");
 
 comptime {
+    if (@TypeOf(assets.fixture_ci4).format != .color_indexed) @compileError("indexed asset was not generated");
+    if (assets.fixture_ci4.palette.len == 0 or assets.fixture_ci4.palette.len > 16) @compileError("CI4 palette was not generated");
+    if (assets.fixture_ci4.texel_data.len != 4096) @compileError("CI4 texels were not packed");
+    if (!@typeInfo(@TypeOf(assets.fixture_ci4.palette)).pointer.is_const) @compileError("embedded palette must be read-only");
     if (assets.raw_data.len != 10) @compileError("raw asset was not embedded");
     if (assets.generated_data.len != 15) @compileError("generated asset was not embedded");
     if (assets.custom_rsp.len == 0) @compileError("ZSP asset was not embedded");

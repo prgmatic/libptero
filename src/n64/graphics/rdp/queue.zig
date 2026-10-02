@@ -455,6 +455,12 @@ pub fn CommandQueue(comptime QueueType: type) type {
             cq.queue.push(cmd);
         }
 
+        /// Load RGBA16 palette entries to the upper TMEM bank.
+        pub fn loadTlut(cq: *Self, tile: u3, color_count: u16) void {
+            std.debug.assert(color_count > 0 and color_count <= 256);
+            cq.queue.push((@as(u64, 0xF0) << 56) | (@as(u64, tile) << 24) | (@as(u64, color_count - 1) << 14));
+        }
+
         // 0xF3
         pub fn loadBlock(cq: *Self, options: LoadBlockOptions) void {
             const cmd: u64 =

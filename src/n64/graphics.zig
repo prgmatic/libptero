@@ -5,5 +5,6 @@ pub const DepthBuffer = depth.DepthBuffer;
 pub const image = @import("graphics/image.zig");
 pub const font = @import("graphics/font.zig");
 pub const geometry = @import("graphics/geometry.zig");
+pub const animation = @import("graphics/animation.zig");
 pub const model = @import("graphics/model.zig");
 pub const Renderer = @import("graphics/renderer.zig").Renderer;

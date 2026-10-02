@@ -140,8 +140,8 @@ pub const Ci8 = packed struct(u8) {
 
 /// Two 4-bit palette color indices packed into one byte.
 pub const Ci4Pair = packed struct(u8) {
-    texel0_index: u4,
     texel1_index: u4,
+    texel0_index: u4,
 
     pub const format: Format = .color_indexed;
     pub const bit_depth: BitDepth = .@"4";

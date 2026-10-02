@@ -1,3 +1,5 @@
+const animation = @import("animation.zig");
+pub const SkinnedModel = @import("skinned_model.zig").SkinnedModel;
 const math = @import("../math.zig");
 const geometry = @import("geometry.zig");
 pub const Material = @import("material.zig").Material;
@@ -8,6 +10,9 @@ pub const Material = @import("material.zig").Material;
 /// The asset compiler splits primitives so every part fits in that workspace.
 pub const Model = struct {
     parts: []const Part,
+    nodes: []const animation.Node = &.{},
+    skins: []const animation.Skin = &.{},
+    animations: []const animation.Clip = &.{},
 };
 
 /// Borrowed model geometry and a typed material provider. Drawing lives on the
@@ -67,6 +72,8 @@ pub const Part = struct {
     vertex_count: u8,
     strip_indices: []const i16 = &.{},
     data_usage: DataUsage = .immutable,
+    skin: ?u16 = null,
+    influences: []const animation.Influence = &.{},
 };
 
 test "model applies changed materials and submits packed batches" {

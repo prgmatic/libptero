@@ -13,4 +13,6 @@ pub const generate = compiler.generate;
 
 test {
     _ = compiler;
+    _ = @import("rig.zig");
+    _ = @import("node_transforms.zig");
 }

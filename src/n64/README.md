@@ -83,7 +83,7 @@ counts of two or greater, and NTSC/PAL/M-PAL timing selection are supported.
 Interlaced resolutions return `UnsupportedResolution`: field-aware interlaced
 scanout is not implemented in this manager. The raw VI API remains available for
 custom display management. See `examples/src/spinning-cube.zig` in the examples
-repository for manual allocation and presentation.
+repository for the owning renderer and swapchain frame loop.
 
 ## Render state
 
@@ -252,3 +252,65 @@ waits, or allocates. Custom providers implement `apply(context, material_index)`
 texture types remain known at compile time. `asset.material(index)` still reads
 native material metadata. The module-level `model.draw(context, model, materials)`
 primitive is also available to callers building their own draw traversal.
+
+## Skeletons and animation
+
+Generated model data exposes `nodes`, `skins`, and `animations`. The
+`graphics.animation` module keeps these immutable definitions separate from
+mutable instances:
+
+```zig
+const animation = n64.graphics.animation;
+var skeleton = try animation.Skeleton.init(allocator, assets.snake.model.nodes);
+defer skeleton.deinit();
+var player: animation.Player = .{ .clip = &assets.snake.model.animations[0] };
+var mesh = try n64.graphics.model.SkinnedModel.init(allocator, assets.snake.model);
+defer mesh.deinit();
+
+player.update(&skeleton, delta_seconds);
+skeleton.update();
+mesh.update(&skeleton);
+renderer.geometry.drawModelWithMaterials(mesh.model(), assets.snake.materials);
+const completion = renderer.submit();
+try completion.wait(.{});
+```
+
+`Skeleton.bones` holds editable local translation, quaternion rotation, and
+scale. `reset()` restores the rest pose; `findBone(name)` returns a node index.
+`update()` calculates global matrices, including transformed ancestors, without
+allocation. Node ordering need not place parents before children; initialization
+rejects invalid parents and cycles. A global matrix from `skeleton.matrices[i]`
+can attach another model to that node after conversion with `toFixed3x4()`.
+Keep the fixed attachment matrix alive until GPU completion.
+
+Each `Player` has independent time, speed, playing, and looping state. `seek()`
+clamps to the clip's duration, and `apply()` samples the current time.
+`update(skeleton, delta)` advances when playing and applies even while paused,
+so seeking a paused clip updates its pose. Looping handles multiple wraps and
+negative playback; a nonlooping clip stops on its final pose. Only targeted
+properties change. Applying another player later overrides the properties it
+targets. Tracks support step, linear (spherical quaternion interpolation), and
+cubic Hermite interpolation. Cubic quaternion results are normalized.
+
+To blend animations, initialize a second skeleton from the same nodes, sample
+another player into it, then call `skeleton.blend(&skeleton, &other, factor)`
+before `skeleton.update()`. The destination can alias either source. Blend
+factors are clamped to 0–1, and rotations use normalized shortest-path blending.
+
+`SkinnedModel` allocates writable packed vertex copies and per-skin palettes
+once. Initialization rejects invalid skin indices, vertex/influence counts,
+joint references, and weights. Use a skeleton created from the same model nodes.
+`update()` performs CPU skinning with all four joint weights and inverse
+bind matrices, including inverse-transpose normals of the blended vertex transform for
+nonuniform scale. The
+original asset stays untouched. UVs, colors, materials, and triangle topology
+are preserved, and draws use the dynamic cache-writeback path. This initial
+implementation spends CPU time and writable memory on skinning; it does not
+submit a separate RSP skinning job.
+
+Wait for completion before updating or freeing a mesh instance. Alternatively,
+keep one instance per application frame slot and reuse it only after that slot's
+GPU work completes. Skeleton transforms may change after CPU skinning, but
+queued fixed matrices, vertices, and textures retain the usual borrowed-resource
+lifetime. `Skeleton` and `SkinnedModel` own allocations; free each instance once
+with `deinit()` and keep their immutable source model alive throughout.

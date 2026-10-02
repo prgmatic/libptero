@@ -69,13 +69,34 @@ Implementation layout:
 - `root.zig` is the small public conversion facade used by builds and tests.
 - `compiler.zig` owns GLB decoding, mesh conversion, packing, and Zig emission.
 
-Current initial-port limitations are explicit: only embedded-buffer GLB files,
-triangle primitives, static meshes, one base-color texture per material, and
-PNG images are supported. `JOINTS_0` and `WEIGHTS_0` are parsed and rejected as
-`UnsupportedSkinning` instead of being silently discarded. Node transforms,
-skins, animations, morph targets, sparse accessors, external buffers/images,
-texture palettes, automatic loading of multiple texture units, and the full modern
-Fast64 combiner/render-mode extension are not implemented. Two external textures
-can be bound with `render.useTexturePair`; generated legacy materials expose both
-samplers and both combiner cycles. Key/conversion constants, arbitrary advanced
-blender equations, texture generation, and material lighting rigs remain unsupported.
+Skeletons and animation are native metadata on `asset.model`: `nodes`, `skins`,
+and `animations`. Conversion preserves local SRT hierarchies, inverse bind
+matrices, all four `JOINTS_0`/`WEIGHTS_0` influences, named clips, and translation,
+rotation, and scale channels with STEP, LINEAR, or CUBICSPLINE interpolation.
+Integer normalized skin weights are decoded and normalized. Bone translations,
+animation translations/tangents, and inverse-bind translations use the same
+position scale as packed geometry. Skinned source vertices remain in bind space;
+rigid mesh node transforms and inherited transforms are baked into geometry with
+inverse-transpose normals. See [runtime animation](../../src/n64/README.md#skeletons-and-animation)
+for mutable skeletons, independent playback, blending, attachments, and CPU
+skinning through `model.SkinnedModel`.
+
+Values below an absolute magnitude of `1e-18` are canonicalized to zero in
+skeleton and animation metadata. They are negligible for unit quaternions, but
+multiplying the tiny exporter-generated components otherwise creates subnormal
+results unsupported by the VR4300 FPU. Runtime quaternion normalization and SRT
+construction protect against the same issue after interpolation.
+
+Remaining limitations are explicit: only embedded-buffer GLB files, triangle
+primitives, one base-color texture per material, and PNG images are supported.
+Node matrix transforms, instanced mesh nodes, animated rigid meshes, morph
+targets, sparse accessors, external buffers/images, embedded texture palettes, automatic
+loading of multiple texture units, and the full modern Fast64
+combiner/render-mode extension are not implemented. External textures can be
+bound by a typed material provider, as the skeleton and animation examples do.
+External CI4/CI8 textures and their palettes are supported by the public texture SDK.
+Two external textures can be bound with `render.useTexturePair`; generated legacy
+materials expose both samplers and both combiner cycles. Key/conversion
+constants, arbitrary advanced blender equations, texture generation, and material
+lighting rigs remain unsupported. These limitations do not prevent conversion
+of the GLBs used by Tiny3D's skeleton, animation, and animation viewer demos.

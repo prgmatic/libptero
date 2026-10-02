@@ -172,3 +172,19 @@ test "four-bit storage and regions address logical pixels including odd rows" {
         try std.testing.expectEqual(@as(u8, 0x11), @as(u8, @bitCast(buffer.pixels[4])));
     }
 }
+
+/// Borrowed color-indexed texture plus its RGBA16 lookup table. Both slices must
+/// remain coherent and alive until GPU completion. The palette must be eight-byte
+/// aligned and occupies upper TMEM.
+pub fn PalettedImage(comptime PixelFormat: type) type {
+    if (PixelFormat.format != .color_indexed) @compileError("palette textures require CI4 or CI8 pixels");
+    return struct {
+        pub const Pixel = PixelFormat;
+        pub const format = Pixel.format;
+        pub const bit_depth = Pixel.bit_depth;
+        width: u16,
+        height: u16,
+        texel_data: []const Pixel,
+        palette: []const colors.Rgba16,
+    };
+}

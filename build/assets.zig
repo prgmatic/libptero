@@ -27,6 +27,8 @@ const ModelEntry = struct {
 };
 
 pub const TextureFormat = enum {
+    ci4,
+    ci8,
     rgba16,
     rgba32,
     yuv16,
