@@ -84,3 +84,25 @@ Interlaced resolutions return `UnsupportedResolution`: field-aware interlaced
 scanout is not implemented in this manager. The raw VI API remains available for
 custom display management. See `examples/src/spinning-cube.zig` in the examples
 repository for manual allocation and presentation.
+
+## Render state
+
+Render queues accept complete pipeline values through `getModes`/`setModes` and
+`getState`/`setState`. State is compared against the last emitted values before
+drawing; there are no public dirty flags. Reapplying the same state emits no
+redundant mode commands. Convenience setters update the same tracked values.
+
+```zig
+var state = n64.graphics.rdp.State.opaque_geometry;
+state.modes.antialias_en = false;
+render.setState(state);
+```
+
+`opaque_geometry`, `translucent_geometry`, and `textured_sprite` are editable
+`State` values. They include modes and the combiner; they do not bind textures,
+set color registers, or change geometry flags. `withBlend` returns a modified
+copy for a custom blender. Use `flushModes` to emit changes explicitly.
+`clearScreen`, `clearDepth`, and `drawRect` temporarily use fill mode and restore
+the requested modes on the next draw. After bypassing the renderer through
+`cmd_queue`, call `invalidateState` to invalidate mode and TMEM tracking. Clearing
+a CPU command buffer also invalidates tracking because its commands are discarded.

@@ -40,8 +40,8 @@ pub fn RenderQueue(comptime QueueType: type) type {
         mode: OtherModes = .{},
         combine_mode: CombineMode = .primitive,
 
-        mode_dirty: bool = true,
-        combine_dirty: bool = false,
+        emitted_mode: ?OtherModes = null,
+        emitted_combine: ?CombineMode = null,
         fb_width: u16 = 0,
         fb_height: u16 = 0,
 
@@ -60,6 +60,9 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
         pub fn clear(rq: *Self) void {
             rq.cmd_queue.clear();
+            // CPU buffers discard recorded commands; their tracked hardware
+            // state and texture residency must be reconstructed on reuse.
+            if (!@hasDecl(QueueType, "prepare")) rq.invalidateState();
         }
 
         pub fn execute(rq: *Self) void {
@@ -85,8 +88,8 @@ pub fn RenderQueue(comptime QueueType: type) type {
         }
 
         pub fn invalidateState(rq: *Self) void {
-            rq.mode_dirty = true;
-            rq.combine_dirty = true;
+            rq.emitted_mode = null;
+            rq.emitted_combine = null;
             rq.tex_cache_len = 0;
             rq.tmem_next = 0;
             rq.next_tile = 0;
@@ -101,43 +104,59 @@ pub fn RenderQueue(comptime QueueType: type) type {
         }
 
         fn flushPendingModes(rq: *Self) void {
-            if (!rq.mode_dirty and !rq.combine_dirty) return;
+            const mode_changed = if (rq.emitted_mode) |previous|
+                @as(u64, @bitCast(previous)) != @as(u64, @bitCast(rq.mode))
+            else
+                true;
+            const combine_changed = if (rq.emitted_combine) |previous|
+                !std.meta.eql(previous, rq.combine_mode)
+            else
+                true;
+            if (!mode_changed and !combine_changed) return;
             rq.cmd_queue.pipeSync();
-            if (rq.mode_dirty) {
+            if (mode_changed) {
                 rq.cmd_queue.setOtherModes(rq.mode);
-                rq.mode_dirty = false;
+                rq.emitted_mode = rq.mode;
             }
-            if (rq.combine_dirty) {
+            if (combine_changed) {
                 rq.cmd_queue.setCombiner(rq.combine_mode);
-                rq.combine_dirty = false;
+                rq.emitted_combine = rq.combine_mode;
             }
+        }
+
+        pub fn getModes(rq: *const Self) OtherModes {
+            return rq.mode;
+        }
+
+        /// Replace the complete mode word. Applied lazily before drawing or
+        /// flushModes, without dirty flags or immediate hardware waits.
+        pub fn setModes(rq: *Self, value: OtherModes) void {
+            rq.mode = value;
+        }
+
+        pub fn getState(rq: *const Self) @import("state.zig").State {
+            return .{ .modes = rq.mode, .combine = rq.combine_mode };
+        }
+
+        pub fn setState(rq: *Self, value: @import("state.zig").State) void {
+            rq.mode = value.modes;
+            rq.combine_mode = value.combine;
+        }
+
+        pub fn setAntialias(rq: *Self, enabled: bool) void {
+            rq.mode.antialias_en = enabled;
         }
 
         pub fn setCycleType(rq: *Self, cycle_type: CycleType) void {
-            if (rq.mode.cycle_type == cycle_type) return;
             rq.mode.cycle_type = cycle_type;
-            rq.mode_dirty = true;
         }
 
         pub fn setBlendMode(rq: *Self, blend: BlendMode) void {
-            const previous: u64 = @bitCast(rq.mode);
-            rq.mode.force_blend = blend.force_blend;
-            rq.mode.image_read_en = blend.image_read_en;
-            rq.mode.blend_p0 = blend.pass1.p;
-            rq.mode.blend_a0 = blend.pass1.a;
-            rq.mode.blend_m0 = blend.pass1.m;
-            rq.mode.blend_b0 = blend.pass1.b;
-            rq.mode.blend_p1 = blend.pass2.p;
-            rq.mode.blend_a1 = blend.pass2.a;
-            rq.mode.blend_m1 = blend.pass2.m;
-            rq.mode.blend_b1 = blend.pass2.b;
-            if (@as(u64, @bitCast(rq.mode)) != previous) rq.mode_dirty = true;
+            rq.setState(rq.getState().withBlend(blend));
         }
 
-        pub fn setCombineMode(rq: *Self, mode: CombineMode) void {
-            if (std.meta.eql(rq.combine_mode, mode)) return;
-            rq.combine_mode = mode;
-            rq.combine_dirty = true;
+        pub fn setCombineMode(rq: *Self, value: CombineMode) void {
+            rq.combine_mode = value;
         }
 
         /// Make a texture resident with explicit sampler state and return its render tile.
@@ -174,13 +193,11 @@ pub fn RenderQueue(comptime QueueType: type) type {
             if (rq.mode.z_compare_en == compare and rq.mode.z_update_en == update) return;
             rq.mode.z_compare_en = compare;
             rq.mode.z_update_en = update;
-            rq.mode_dirty = true;
         }
 
         pub fn setAlphaCompare(rq: *Self, alpha_compare: AlphaCompare) void {
             if (rq.mode.alpha_compare == alpha_compare) return;
             rq.mode.alpha_compare = alpha_compare;
-            rq.mode_dirty = true;
         }
 
         pub fn setBlendColor(rq: *Self, color: Rgba32) void {
@@ -190,13 +207,11 @@ pub fn RenderQueue(comptime QueueType: type) type {
         pub fn setPerspectiveTexture(rq: *Self, enabled: bool) void {
             if (rq.mode.persp_tex_en == enabled) return;
             rq.mode.persp_tex_en = enabled;
-            rq.mode_dirty = true;
         }
 
         pub fn setTextureFilter(rq: *Self, filter: modes.TextureSample) void {
             if (rq.mode.texture_sample == filter) return;
             rq.mode.texture_sample = filter;
-            rq.mode_dirty = true;
         }
 
         /// Reset the surface state as well as setting it, avoiding leakage
@@ -205,7 +220,6 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.mode.z_mode = if (translucent) .transparent else .opaque_surface;
             rq.mode.cvg_dest = if (translucent) .wrap else .full;
             rq.mode.write_on_cvg_overflow = translucent;
-            rq.mode_dirty = true;
         }
 
         pub fn setEnvironmentColor(rq: *Self, color: Rgba32) void {
@@ -232,7 +246,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.cmd_queue.setOtherModes(.{ .cycle_type = .fill });
             rq.cmd_queue.setFillColor(color);
             rq.cmd_queue.fillRect(0, 0, (rq.fb_width - 1) * 4, (rq.fb_height - 1) * 4);
-            rq.mode_dirty = true;
+            rq.emitted_mode = null;
         }
 
         /// Clear a 16-bit depth image through the RDP and restore the active
@@ -246,7 +260,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.cmd_queue.fillRect(0, 0, (rq.fb_width - 1) * 4, (rq.fb_height - 1) * 4);
             rq.cmd_queue.pipeSync();
             rq.cmd_queue.setColorFrame(color_image);
-            rq.mode_dirty = true;
+            rq.emitted_mode = null;
         }
 
         pub fn drawRect(rq: *Self, x: u16, y: u16, w: u16, h: u16, color: anytype) void {
@@ -259,7 +273,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
                 @truncate((@as(u32, x) + w - 1) * 4),
                 @truncate((@as(u32, y) + h - 1) * 4),
             );
-            rq.mode_dirty = true;
+            rq.emitted_mode = null;
         }
 
         // Explicit texture load into TMEM (bypasses cache).
@@ -418,4 +432,56 @@ test "texture pair binds adjacent tiles with independent scale and scroll" {
     try std.testing.expectEqual(@as(u10, 512), render.tmem_next);
     try std.testing.expect(!texture.Sampler.eql(.{}, .{ .shift_s = 15 }));
     try std.testing.expect(!texture.Sampler.eql(.{}, .{ .offset_t = 8 }));
+}
+
+test "complete state values emit changes once and restore after fill and raw commands" {
+    const State = @import("state.zig").State;
+    var commands: [64]u64 = undefined;
+    var render = FixedRenderQueue.init(.{ .buffer = &commands });
+    var state = State.opaque_geometry;
+    state.modes.antialias_en = false;
+    render.setState(state);
+    render.flushModes();
+    const initial = render.cmd_queue.queue.index;
+    try std.testing.expectEqual(@as(usize, 3), initial);
+    try std.testing.expectEqual(@as(u64, @bitCast(state.modes)), commands[1]);
+    render.setState(state);
+    render.flushModes();
+    try std.testing.expectEqual(initial, render.cmd_queue.queue.index);
+    var updated = render.getModes();
+    updated.antialias_en = true;
+    render.setModes(updated);
+    render.flushModes();
+    try std.testing.expectEqual(initial + 2, render.cmd_queue.queue.index);
+    render.drawRect(0, 0, 4, 4, @import("../color.zig").Rgba16.black);
+    const after_fill = render.cmd_queue.queue.index;
+    render.flushModes();
+    try std.testing.expectEqual(after_fill + 2, render.cmd_queue.queue.index);
+    try std.testing.expectEqual(@as(u64, @bitCast(updated)), commands[after_fill + 1]);
+    render.cmd_queue.setOtherModes(.{ .cycle_type = .copy });
+    render.invalidateState();
+    const before_restore = render.cmd_queue.queue.index;
+    render.flushModes();
+    try std.testing.expectEqual(before_restore + 3, render.cmd_queue.queue.index);
+    render.clear();
+    render.flushModes();
+    try std.testing.expectEqual(@as(usize, 3), render.cmd_queue.queue.index);
+}
+
+test "presets replace translucent and sprite state with complete opaque geometry state" {
+    const State = @import("state.zig").State;
+    var commands: [32]u64 = undefined;
+    var render = FixedRenderQueue.init(.{ .buffer = &commands });
+    render.setState(State.translucent_geometry);
+    try std.testing.expect(render.getModes().force_blend);
+    try std.testing.expect(!render.getModes().z_update_en);
+    render.setState(State.textured_sprite);
+    try std.testing.expect(!render.getModes().z_compare_en);
+    try std.testing.expect(!render.getModes().persp_tex_en);
+    render.setState(State.opaque_geometry);
+    const value = render.getModes();
+    try std.testing.expect(value.z_update_en and value.z_compare_en and value.persp_tex_en);
+    try std.testing.expect(!value.force_blend and !value.image_read_en and !value.write_on_cvg_overflow);
+    try std.testing.expectEqual(modes.ZMode.opaque_surface, value.z_mode);
+    try std.testing.expect(std.meta.eql(CombineMode.shade, render.getState().combine));
 }

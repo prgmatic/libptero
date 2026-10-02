@@ -41,6 +41,7 @@ pub const SpriteDrawOptions = rq.SpriteDrawOptions;
 pub const Pivot = rq.Pivot;
 pub const TexVertex = rq.TexVertex;
 
+pub const State = @import("rdp/state.zig").State;
 pub const OtherModes = modes.OtherModes;
 pub const CycleType = modes.CycleType;
 pub const ZMode = modes.ZMode;

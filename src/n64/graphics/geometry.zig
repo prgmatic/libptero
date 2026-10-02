@@ -46,14 +46,13 @@ const MaterialState = struct {
     mode: rdp.OtherModes,
     combine: rdp.CombineMode,
     fn read(context: *const Context) MaterialState {
-        return .{ .flags = context.draw_flags, .fog = context.fog_enabled, .tile = context.render.material_tile, .mode = context.render.mode, .combine = context.render.combine_mode };
+        return .{ .flags = context.draw_flags, .fog = context.fog_enabled, .tile = context.render.material_tile, .mode = context.render.getModes(), .combine = context.render.getState().combine };
     }
     fn restore(self: MaterialState, context: *Context) void {
         context.draw_flags = self.flags;
         context.fog_enabled = self.fog;
         context.render.material_tile = self.tile;
-        context.render.mode = self.mode;
-        context.render.combine_mode = self.combine;
+        context.render.setState(.{ .modes = self.mode, .combine = self.combine });
         context.last_draw_flags = null;
     }
 };
