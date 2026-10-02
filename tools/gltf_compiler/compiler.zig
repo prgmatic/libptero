@@ -271,7 +271,7 @@ pub fn generate(allocator: std.mem.Allocator, model: ConvertedModel, document: D
         \\const n64 = @import("n64");
         \\const VertexPair = n64.graphics.geometry.VertexPair;
         \\const Part = n64.graphics.model.Part;
-        \\var model_data align(8) = @embedFile("model_data").*;
+        \\const model_data align(8) = @embedFile("model_data").*;
         \\
     );
     try emitBatchData(allocator, &data, &source, model.batches);
@@ -438,7 +438,7 @@ fn emitImages(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *s
         try appendFormat(
             allocator,
             source,
-            "const texture_{d}: n64.graphics.image.{s} = .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.image.{s}.Pixel, model_data[{d}..{d}]) }};\n",
+            "const texture_{d}: n64.graphics.image.ConstImage(n64.graphics.image.{s}.Pixel) = .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.image.{s}.Pixel, model_data[{d}..{d}]) }};\n",
             .{ image_index, image_type, converted.width, converted.height, image_type, offset, data.items.len },
         );
     }

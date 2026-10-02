@@ -115,7 +115,7 @@ fn generateSource(allocator: std.mem.Allocator, name: []const u8, result: font_c
     var out: std.Io.Writer.Allocating = .init(allocator);
     errdefer out.deinit();
     const writer = &out.writer;
-    try writer.print("const std = @import(\"std\");\nconst n64 = @import(\"n64\");\nvar texels align(8) = @embedFile(\"font_texels\").*;\n", .{});
+    try writer.print("const std = @import(\"std\");\nconst n64 = @import(\"n64\");\nconst texels align(8) = @embedFile(\"font_texels\").*;\n", .{});
     try writer.print("const ranges = [_]n64.graphics.font.Range{{\n", .{});
     for (result.ranges) |range| try writer.print("    .{{ .first_codepoint = {d}, .glyph_count = {d}, .first_glyph = {d} }},\n", .{ range.first_codepoint, range.glyph_count, range.first_glyph });
     try writer.print("}};\n", .{});
@@ -125,7 +125,7 @@ fn generateSource(allocator: std.mem.Allocator, name: []const u8, result: font_c
     try writer.print("const kernings = [_]n64.graphics.font.Kerning{{\n", .{});
     for (result.kernings) |pair| try writer.print("    .{{ .first = {d}, .second = {d}, .amount = {d} }},\n", .{ pair.first, pair.second, pair.amount });
     try writer.print("}};\n", .{});
-    try writer.print("const atlases = [_]n64.graphics.image.ImgRgba16{{\n", .{});
+    try writer.print("const atlases = [_]n64.graphics.image.ConstImage(n64.graphics.image.ImgRgba16.Pixel){{\n", .{});
     for (result.atlases) |atlas| try writer.print("    .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.image.ImgRgba16.Pixel, texels[{d}..{d}]) }},\n", .{ atlas.width, atlas.height, atlas.texel_offset, atlas.texel_offset + atlas.texel_length });
     try writer.print("}};\n", .{});
     try writer.print("pub const {s}: n64.graphics.font.Font = .{{ .point_size = {d}, .ascent = {d}, .descent = {d}, .line_height = {d}, .ranges = &ranges, .glyphs = &glyphs, .atlases = &atlases, .kernings = &kernings, .ellipsis = ", .{ name, result.point_size, result.ascent, result.descent, result.line_height });

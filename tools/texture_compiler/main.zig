@@ -38,8 +38,8 @@ fn generateSource(allocator: std.mem.Allocator, name: []const u8, result: textur
     return std.fmt.allocPrint(allocator,
         \\const std = @import("std");
         \\const n64 = @import("n64");
-        \\var bytes align(8) = @embedFile("texture_data").*;
-        \\pub const {s}: n64.graphics.image.{s} = .{{
+        \\const bytes align(8) = @embedFile("texture_data").*;
+        \\pub const {s}: n64.graphics.image.ConstImage(n64.graphics.image.{s}.Pixel) = .{{
         \\    .width = {d},
         \\    .height = {d},
         \\    .texel_data = std.mem.bytesAsSlice(n64.graphics.image.{s}.Pixel, &bytes),

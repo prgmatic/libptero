@@ -7,6 +7,8 @@ pub const graphics = @import("graphics.zig");
 pub const display = @import("display.zig");
 
 test {
+    _ = graphics.image;
+    _ = graphics.depth;
     _ = graphics.model;
     _ = graphics.geometry;
     _ = @import("graphics/material.zig");

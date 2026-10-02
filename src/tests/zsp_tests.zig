@@ -189,7 +189,7 @@ fn rspTextRenderer() !void {
             .{ .x_advance = 2, .x_offset = 0, .y_offset = -1, .width = 1, .height = 1, .s = 0, .t = 0, .atlas = 0 },
             .{ .x_advance = 2, .x_offset = 0, .y_offset = -1, .width = 1, .height = 1, .s = 0, .t = 0, .atlas = 0 },
         },
-        .atlases = &.{atlas},
+        .atlases = &.{atlas.asConst()},
         .kernings = &.{.{ .first = 0, .second = 1, .amount = -1 }},
     };
     var render = rdp.OverlayRenderQueue.init(rdp.OverlayQueue.init(

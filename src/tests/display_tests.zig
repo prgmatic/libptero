@@ -21,7 +21,7 @@ fn presentation() !void {
     const origin: *volatile u32 = @ptrFromInt(0xa4400004);
     const first_origin = origin.*;
     const cpu_frame = try chain.acquire();
-    var cpu_image = cpu_frame.image;
+    const cpu_image = cpu_frame.image;
     cpu_image.fill(.blue);
     try chain.presentCpu(cpu_frame, .{});
     try testing.expectEqual(@as(u32, @intFromPtr(cpu_image.texel_data.ptr)) & 0x1fff_ffff, origin.*);

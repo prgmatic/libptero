@@ -23,7 +23,7 @@ pub const Font = struct {
     line_height: u16,
     ranges: []const Range,
     glyphs: []const Glyph,
-    atlases: []const image.ImgRgba16,
+    atlases: []const image.ConstImage(image.ImgRgba16.Pixel),
     kernings: []const Kerning = &.{},
     ellipsis: ?Ellipsis = null,
 

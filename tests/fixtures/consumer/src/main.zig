@@ -5,6 +5,8 @@ comptime {
     if (assets.raw_data.len != 10) @compileError("raw asset was not embedded");
     if (assets.generated_data.len != 15) @compileError("generated asset was not embedded");
     if (assets.custom_rsp.len == 0) @compileError("ZSP asset was not embedded");
+    if (!@typeInfo(@TypeOf(assets.fixture_font.atlases[0].texel_data)).pointer.is_const)
+        @compileError("embedded font atlas must be read-only");
     if (assets.fixture_font.glyphs.len != 2) @compileError("font asset was not generated");
 }
 

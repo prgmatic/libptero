@@ -138,3 +138,46 @@ remains usable for 2D drawing after geometry is detached. Only one runtime may
 control the hardware, one renderer may attach to it, and one geometry context
 may attach to that renderer. Raw RSP programs, queues, overlays, and direct RDP
 render queues remain available for custom storage and hardware scheduling.
+
+## Image storage and depth buffers
+
+`image.Image(Pixel)` and `image.ConstImage(Pixel)` are borrowed views. The existing
+`ImgRgba16`, `ImgRgba32`, and other format aliases name mutable views. Construct a
+view with `initBuffer(pixels, width, height)` to validate caller-owned storage, or
+use a literal when storage has already been checked. Views never free memory.
+Embedded textures, model textures, and font atlases expose `ConstImage` values.
+Framebuffer bindings require mutable storage.
+
+`image.ImageBuffer(Pixel)` owns an aligned allocation and takes an explicit
+allocator for both initialization and teardown:
+
+```zig
+var color = try n64.graphics.image.ImageBuffer(Pixel).init(allocator, width, height);
+defer color.deinit(allocator);
+var depth = try n64.graphics.DepthBuffer.init(allocator, width, height);
+defer depth.deinit(allocator);
+
+render.setFrameBuffer(color.view());
+render.setDepthBuffer(depth.view());
+render.clearDepth(depth.view(), color.view());
+render.clearScreen(Pixel.black);
+const completion = render.submit();
+try completion.wait(.{});
+```
+
+Keep owners alive and do not resize, overwrite, or free their storage until GPU
+work completes. Owners are not implicitly copyable: each allocation must be freed
+exactly once. `view()` permits CPU mutation; `constView()` exposes read-only texels.
+Views do not flush CPU caches. Write back CPU changes before GPU reads and
+invalidate cached pixels after GPU writes before reading them on the CPU.
+
+Four-bit image storage holds two logical pixels per element, including across odd
+row widths. `get`, `set`, `fill`, and `fillRegion` use logical pixel coordinates
+and raw four-bit values for these formats. Allocation rounds odd pixel counts up
+to one final pair. The other formats use their native pixel values.
+
+`DepthBuffer` owns hardware packed 16-bit depth values. Its borrowed `depth.Image`
+view can also wrap caller-owned 64-byte aligned storage. `setDepthBuffer` and
+`clearDepth` require dimensions matching the current framebuffer; `clearDepth`
+uses the packed far value and restores the color target. Raw command queues retain
+`setDepthImage` for custom hardware scheduling.

@@ -227,6 +227,8 @@ pub fn RenderQueue(comptime QueueType: type) type {
         }
 
         pub fn setFrameBuffer(rq: *Self, image: anytype) void {
+            if (@typeInfo(@TypeOf(image.texel_data)).pointer.is_const)
+                @compileError("framebuffer storage must be mutable");
             rq.fb_width = @intCast(image.width);
             rq.fb_height = @intCast(image.height);
             rq.cmd_queue.setColorFrame(image);
@@ -249,10 +251,17 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.emitted_mode = null;
         }
 
-        /// Clear a 16-bit depth image through the RDP and restore the active
-        /// color image. The depth buffer uses the same packed all-ones value
-        /// as an RGBA16 white fill.
-        pub fn clearDepth(rq: *Self, depth_image: anytype, color_image: anytype) void {
+        pub fn setDepthBuffer(rq: *Self, depth_image: @import("../depth.zig").Image) void {
+            std.debug.assert(depth_image.width == rq.fb_width and depth_image.height == rq.fb_height);
+            rq.cmd_queue.setDepthImage(depth_image);
+        }
+
+        /// Clear packed hardware depth and restore the active color image.
+        pub fn clearDepth(rq: *Self, depth_image: @import("../depth.zig").Image, color_image: anytype) void {
+            if (@typeInfo(@TypeOf(color_image.texel_data)).pointer.is_const)
+                @compileError("framebuffer storage must be mutable");
+            std.debug.assert(depth_image.width == rq.fb_width and depth_image.height == rq.fb_height);
+            std.debug.assert(color_image.width == rq.fb_width and color_image.height == rq.fb_height);
             rq.cmd_queue.pipeSync();
             rq.cmd_queue.setOtherModes(.{ .cycle_type = .fill });
             rq.cmd_queue.setColorFrame(depth_image);

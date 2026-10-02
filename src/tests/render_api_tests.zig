@@ -1,3 +1,4 @@
+const std = @import("std");
 const n64 = @import("n64");
 const runner = @import("runner.zig");
 const testing = @import("assert.zig");
@@ -8,6 +9,7 @@ var geometry: n64.graphics.geometry.Context = undefined;
 var pixels: [8 * 8]n64.graphics.color.Rgba32 align(64) = undefined;
 
 pub const tests = [_]runner.Test{
+    .{ .name = "Render API: owned depth clears and restores color target", .run = depthClear },
     .{ .name = "Render API: standalone RDP setup and optional geometry", .run = standalone },
     .{ .name = "Render API: submission completes RSP and RDP resources", .run = completion },
 };
@@ -68,6 +70,34 @@ fn standalone() !void {
     try after_geometry.wait(.{ .max_attempts = 1_000_000 });
     n64.cache.invalidateData(&pixels);
     for (pixels) |pixel| try testing.expectEqual(n64.graphics.color.Rgba32.blue, pixel);
+    renderer.deinit();
+    runtime.deinit();
+}
+
+fn depthClear() !void {
+    var memory: [1024]u8 align(64) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&memory);
+    const allocator = fixed.allocator();
+    var color = try n64.graphics.image.ImageBuffer(n64.graphics.color.Rgba16).init(allocator, 8, 8);
+    defer color.deinit(allocator);
+    var depth = try n64.graphics.DepthBuffer.init(allocator, 8, 8);
+    defer depth.deinit(allocator);
+    @memset(color.pixels, .black);
+    @memset(depth.pixels, 0);
+    n64.cache.writebackData(color.pixels);
+    n64.cache.writebackData(depth.pixels);
+    runtime.init();
+    renderer.init(&runtime);
+    renderer.render.setFrameBuffer(color.view());
+    renderer.render.setDepthBuffer(depth.view());
+    renderer.render.clearDepth(depth.view(), color.view());
+    renderer.render.clearScreen(n64.graphics.color.Rgba16.green);
+    const submitted = renderer.submit();
+    try submitted.wait(.{ .max_attempts = 1_000_000 });
+    n64.cache.invalidateData(depth.pixels);
+    n64.cache.invalidateData(color.pixels);
+    for (depth.pixels) |value| try testing.expectEqual(n64.graphics.depth.clear_value, value);
+    for (color.pixels) |value| try testing.expectEqual(n64.graphics.color.Rgba16.green, value);
     renderer.deinit();
     runtime.deinit();
 }

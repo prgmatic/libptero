@@ -17,6 +17,9 @@ const allocator = fixed_buffer_allocator.allocator();
 
 const width: u16 = 320;
 const height: u16 = 240;
+var frame_storage0: n64.graphics.image.ImageBuffer(Rgba16) = undefined;
+var frame_storage1: n64.graphics.image.ImageBuffer(Rgba16) = undefined;
+var star_storage: n64.graphics.image.ImageBuffer(Rgba32) = undefined;
 var frame_buffer0: Img16 = undefined;
 var frame_buffer1: Img16 = undefined;
 var current_frame_buffer: *Img16 = undefined;
@@ -60,8 +63,10 @@ fn init() !void {
         .color_depth = .Rgba5551,
     });
 
-    frame_buffer0 = try Img16.init(allocator, width, height);
-    frame_buffer1 = try Img16.init(allocator, width, height);
+    frame_storage0 = try .init(allocator, width, height);
+    frame_storage1 = try .init(allocator, width, height);
+    frame_buffer0 = frame_storage0.view();
+    frame_buffer1 = frame_storage1.view();
     current_frame_buffer = &frame_buffer0;
 
     try initStarTexture();
@@ -112,7 +117,8 @@ fn elapsedSeconds() f32 {
 }
 
 fn initStarTexture() !void {
-    star_texture = try .init(allocator, 32, 32);
+    star_storage = try .init(allocator, 32, 32);
+    star_texture = star_storage.view();
     for (0..star_texture.height) |y| {
         for (0..star_texture.width) |x| {
             const idx = y * star_texture.width + x;

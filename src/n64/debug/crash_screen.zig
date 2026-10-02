@@ -36,7 +36,8 @@ pub fn show(crash_type: CrashType, msg: []const u8, trace_opt: ?backtrace.Trace)
         .color_depth = .Rgba5551,
     });
 
-    var img = ImgRgba16.init(allocator, 640, 240) catch undefined;
+    const storage = @import("../graphics/image.zig").ImageBuffer(ImgRgba16.Pixel).init(allocator, 640, 240) catch undefined;
+    const img = storage.view();
     img.fillRegion(colorBackground, 0, 0, img.width, img.height);
     img.fillRegion(colorPrimaryAccent, 0, 20, img.width, 1);
     const title = "Stack Trace";
