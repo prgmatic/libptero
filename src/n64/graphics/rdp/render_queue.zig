@@ -338,6 +338,20 @@ pub fn RenderQueue(comptime QueueType: type) type {
             for (rq.tex_cache[0..rq.tex_cache_len]) |entry| {
                 if (entry.ptr == ptr and entry.sampler.eql(sampler)) return entry.tile;
             }
+            // A different CI4 palette bank can share already resident texels.
+            for (rq.tex_cache[0..rq.tex_cache_len]) |entry| {
+                var existing = entry.sampler;
+                existing.palette = sampler.palette;
+                if (entry.ptr == ptr and existing.eql(sampler) and rq.tex_cache_len < 4) {
+                    const tile = rq.next_tile;
+                    rq.cmd_queue.tileSync();
+                    texture.configureTile(&rq.cmd_queue, image, tile, @intCast(entry.tmem_addr), sampler);
+                    rq.tex_cache[rq.tex_cache_len] = .{ .ptr = ptr, .tile = tile, .tmem_addr = entry.tmem_addr, .sampler = sampler };
+                    rq.tex_cache_len += 1;
+                    rq.next_tile +%= 2;
+                    return tile;
+                }
+            }
             const required_words = textureWords(image);
             const capacity: u32 = if (@TypeOf(image).format == .color_indexed) 256 else 512;
             if (required_words > capacity) @panic("texture exceeds TMEM capacity");
@@ -366,11 +380,14 @@ pub fn RenderQueue(comptime QueueType: type) type {
         fn configureTexture(rq: *Self, image: anytype) void {
             const indexed = @TypeOf(image).format == .color_indexed;
             rq.mode.tlut_en = indexed;
-            rq.mode.tlut_format = .rgba16;
+            rq.mode.tlut_format = if (@hasField(@TypeOf(image), "palette_format")) switch (image.palette_format) {
+                .rgba16 => .rgba16,
+                .ia16 => .ia16,
+            } else .rgba16;
             if (indexed) {
                 if (!@hasField(@TypeOf(image), "palette")) @compileError("CI textures require PalettedImage with an RGBA16 palette");
                 const palette = image.palette;
-                std.debug.assert(palette.len > 0 and palette.len <= (if (@TypeOf(image).bit_depth == .@"4") @as(usize, 16) else 256));
+                std.debug.assert(palette.len > 0 and palette.len <= 256);
                 const address = @intFromPtr(palette.ptr);
                 if (rq.palette_ptr == address) return;
                 rq.resetTextureCache();
@@ -393,6 +410,18 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.cmd_queue.loadSync();
             rq.cmd_queue.loadTlut(7, @intCast(palette.len));
             rq.cmd_queue.loadSync();
+        }
+
+        /// Integer glyph path: one rectangle and a resident atlas/palette bank.
+        pub fn drawGlyph(rq: *Self, atlas: anytype, x: i16, y: i16, s: u8, t: u8, width: u16, height: u16, palette: u4) void {
+            const tile = rq.ensureTexture(atlas, .{ .palette = palette });
+            rq.flushPendingModes();
+            const left: i32 = @as(i32, x) * 4;
+            const top: i32 = @as(i32, y) * 4;
+            const right = left + @as(i32, width) * 4;
+            const bottom = top + @as(i32, height) * 4;
+            if (right <= 0 or bottom <= 0 or left >= 4095 or top >= 4095) return;
+            rq.cmd_queue.textureRectangle(.{ .tile = tile, .ulx = @intCast(@max(left, 0)), .uly = @intCast(@max(top, 0)), .lrx = @intCast(@min(right, 4095)), .lry = @intCast(@min(bottom, 4095)), .s = @intCast(@as(i32, s) * 32 + @max(-left, 0) * 8), .t = @intCast(@as(i32, t) * 32 + @max(-top, 0) * 8), .dsdx = 1024, .dtdy = 1024 });
         }
 
         pub fn drawSprite(rq: *Self, image: anytype, x: f32, y: f32, opts: SpriteDrawOptions) void {
@@ -427,7 +456,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
                 .custom => |p| @floatFromInt(p.y),
             };
 
-            const tile = rq.ensureTexture(image, .{});
+            const tile = rq.ensureTexture(image, .{ .palette = opts.palette });
 
             if (opts.rotation == 0.0) {
                 rq.flushPendingModes();
@@ -653,4 +682,24 @@ test "palette textures load TLUT reserve upper TMEM and restore direct texture m
     render.invalidateState();
     _ = render.useTextureSampler(image, .{});
     try std.testing.expect(render.mode.tlut_en);
+}
+
+test "font palette banks reuse texels and retain IA16 TLUT interpretation" {
+    const images = @import("../image.zig");
+    const colors = @import("../color.zig");
+    const texels: [128]colors.Ci4Pair align(8) = @splat(@bitCast(@as(u8, 0x69)));
+    const palette: [32]colors.Rgba16 align(8) = @import("../font.zig").outline_palette;
+    const atlas: images.PalettedImage(colors.Ci4Pair) = .{ .width = 16, .height = 16, .texel_data = &texels, .palette = &palette, .palette_format = .ia16 };
+    var commands: [256]u64 = undefined;
+    var render: FixedRenderQueue = .init(.{ .buffer = &commands });
+    for (0..20) |index| render.drawGlyph(atlas, @intCast(index * 4), 0, 0, 0, 3, 3, @intCast(index % 2));
+    try std.testing.expectEqual(@as(usize, 2), render.tex_cache_len);
+    try std.testing.expectEqual(render.tex_cache[0].tmem_addr, render.tex_cache[1].tmem_addr);
+    try std.testing.expectEqual(@as(usize, 16), render.tmem_next);
+    try std.testing.expectEqual(@import("modes.zig").TlutFormat.ia16, render.mode.tlut_format);
+    var uploads: usize = 0;
+    for (commands[0..render.cmd_queue.queue.index]) |command| if (command >> 56 == 0xfd) {
+        uploads += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), uploads); // One TLUT, one atlas.
 }

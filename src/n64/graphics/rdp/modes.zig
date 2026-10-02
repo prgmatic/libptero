@@ -104,9 +104,11 @@ pub const TexFilter = enum(u1) {
 
 /// Alpha source for the blender's A input.
 pub const BlenderAlphaSrc = enum(u2) {
-    combiner     = 0,
-    coverage     = 1,
-    cvg_times_cc = 2,
+    combiner = 0,
+    /// Combiner alpha, with coverage scaled by that alpha.
+    combiner_scaled_coverage = 1,
+    coverage = 2,
+    cvg_times_cc = 3,
 };
 
 pub const AlphaCompare = enum(u2) {
@@ -128,4 +130,12 @@ test "texture sampling encodes sample type and mid-texel in their hardware bits"
     const median: u64 = @bitCast(OtherModes{ .texture_sample = .median });
     try std.testing.expectEqual(@as(u64, 2), (bilinear >> 44) & 3);
     try std.testing.expectEqual(@as(u64, 3), (median >> 44) & 3);
+}
+
+test "coverage alpha selectors encode the RDP alpha coverage bits" {
+    const std = @import("std");
+    const coverage: OtherModes = .{ .blender_alpha = .coverage };
+    const multiplied: OtherModes = .{ .blender_alpha = .cvg_times_cc };
+    try std.testing.expectEqual(@as(u64, 0x2000), @as(u64, @bitCast(coverage)) & 0x3000);
+    try std.testing.expectEqual(@as(u64, 0x3000), @as(u64, @bitCast(multiplied)) & 0x3000);
 }

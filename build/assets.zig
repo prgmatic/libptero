@@ -44,6 +44,7 @@ pub const TextureOptions = struct {
 };
 
 pub const FontOptions = struct {
+    format: enum { rgba16, mono_outline } = .rgba16,
     kerning: bool = true,
     ellipsis_codepoint: u32 = '.',
     ellipsis_repetitions: u16 = 3,
@@ -53,6 +54,7 @@ pub const ModelOptions = struct {
     scale: f32 = 64,
     max_vertices_per_batch: usize = 70,
     preserve_triangle_order: bool = false,
+    skinning: enum { weighted, first_joint } = .weighted,
 };
 
 pub const Resident = struct {
@@ -111,6 +113,7 @@ pub const AssetBundle = struct {
         const texels = compile.addOutputFileArg(self.b.fmt("{s}.font.texels", .{name}));
         const generated_source = compile.addOutputFileArg(self.b.fmt("{s}.font.zig", .{name}));
         compile.addArg(name);
+        if (options.format == .mono_outline) compile.addArg("--mono-outline");
         if (!options.kerning) compile.addArg("--no-kerning");
         if (options.ellipsis_repetitions != 3 or options.ellipsis_codepoint != '.') {
             compile.addArg("--ellipsis");
@@ -130,6 +133,7 @@ pub const AssetBundle = struct {
         convert.addArg(self.b.fmt("{d}", .{options.scale}));
         convert.addArg(self.b.fmt("{d}", .{options.max_vertices_per_batch}));
         convert.addArg(if (options.preserve_triangle_order) "true" else "false");
+        convert.addArg(@tagName(options.skinning));
         self.asset_module.addModelEntry(name, generated_source, data);
     }
 

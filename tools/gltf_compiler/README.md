@@ -90,6 +90,17 @@ inverse-transpose normals. See [runtime animation](../../src/n64/README.md#skele
 for mutable skeletons, independent playback, blending, attachments, and CPU
 skinning through `model.SkinnedModel`.
 
+The default `.skinning = .weighted` preserves all four influences. Opt into
+`.skinning = .first_joint` in `addModel` for Tiny3D-style RSP skinning: conversion
+uses `JOINTS_0[0]` regardless of weights, transforms unquantized source vertices
+and normals into that joint's bind-local space, and emits joint-grouped parts.
+Mixed-joint triangles retain their independently transformed corners. Upload a
+caller-owned fixed matrix pose with `Skeleton.writeMatrices` and
+`Context.setPose` before drawing the model or its `RecordedModel`. Keep pose
+storage alive and unchanged until completion. This is a deliberately different
+skinning contract; use weighted assets with `SkinnedModel` when weighted
+deformation is required.
+
 Values below an absolute magnitude of `1e-18` are canonicalized to zero in
 skeleton and animation metadata. They are negligible for unit quaternions, but
 multiplying the tiny exporter-generated components otherwise creates subnormal

@@ -1,7 +1,7 @@
 # font-compiler
 
 `font-compiler` converts text-format AngelCode BMFont (`.fnt`) files and their
-PNG pages into libptero-native font assets. It emits RDP-ready RGBA16 texels and
+PNG pages into libptero-native font assets. It emits RDP-ready RGBA16 or outlined CI4 texels and
 a Zig module containing typed metrics, glyphs, ranges, kerning pairs, atlases,
 and optional ellipsis layout data.
 
@@ -15,9 +15,16 @@ adds the generated `n64.graphics.font.Font` value to the asset module.
 The ellipsis width is the right edge of the final repeated glyph. Its advance
 includes self-kerning when the source font defines it.
 
-This initial port supports text BMFont input and RGBA16 atlases. TTF/OTF input,
-outlines, variable-font axes, indexed-color atlases, and asset compression are
-intentionally unsupported.
+The default format retains RGBA16 colors. Select `.format = .mono_outline` in
+`addFont` (or pass `--mono-outline` to the CLI) for an opaque monochrome fill
+and outline mask: white visible pixels become fill, black visible pixels become
+outline, and alpha below 128 becomes transparent. The compiler packs two
+independent two-bit glyph layers into each 64×64 CI4 atlas, with two IA16 palette
+banks. `TextOptions.color` sets the fill; `outline_color` defaults to gray64.
+Scaling and fractional coordinates remain supported.
+
+TTF/OTF rasterization, automatic outline generation, variable-font axes, arbitrary
+indexed-color atlases, and asset compression remain intentionally unsupported.
 
 ## Rendering
 

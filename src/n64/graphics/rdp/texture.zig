@@ -1,4 +1,5 @@
 pub const Sampler = struct {
+    palette: u4 = 0,
     clamp_s: bool = false,
     clamp_t: bool = false,
     mirror_s: bool = false,
@@ -12,7 +13,7 @@ pub const Sampler = struct {
     offset_t: u12 = 0,
 
     pub fn eql(a: Sampler, b: Sampler) bool {
-        return a.clamp_s == b.clamp_s and a.clamp_t == b.clamp_t and
+        return a.palette == b.palette and a.clamp_s == b.clamp_s and a.clamp_t == b.clamp_t and
             a.mirror_s == b.mirror_s and a.mirror_t == b.mirror_t and
             a.mask_s == b.mask_s and a.mask_t == b.mask_t and
             a.shift_s == b.shift_s and a.shift_t == b.shift_t and
@@ -35,12 +36,6 @@ pub inline fn loadTexture(cmd_queue: anytype, image: anytype, tile: u3, tmem_add
     };
 
     const words_per_row: u32 = (width * bpp + 63) / 64;
-
-    // RGBA32 is stored across two TMEM banks, so effective words-per-row per bank is halved.
-    const render_line_len: u9 = switch (T.bit_depth) {
-        .@"32" => @intCast((width * 16 + 63) / 64),
-        else => @intCast(words_per_row),
-    };
 
     // dxt: ceil(2048 / words_per_row), 1.11 fixed point.
     const dxt: u12 = @intCast((2048 + words_per_row - 1) / words_per_row);
@@ -85,13 +80,19 @@ pub inline fn loadTexture(cmd_queue: anytype, image: anytype, tile: u3, tmem_add
         .dxt = dxt,
     });
 
-    // Rendering tile: real format and pitch, set after the load completes.
+    configureTile(cmd_queue, image, tile, tmem_addr, sampler);
+}
+
+pub fn configureTile(cmd_queue: anytype, image: anytype, tile: u3, tmem_addr: u9, sampler: Sampler) void {
+    const T = @TypeOf(image);
+    const render_line_len: u9 = @intCast((@as(u32, image.width) * (if (T.bit_depth == .@"32") @as(u32, 16) else @as(u32, 4) << @intFromEnum(T.bit_depth)) + 63) / 64);
     cmd_queue.setTile(.{
         .color_format = T.format,
         .bit_depth = T.bit_depth,
         .line_length = render_line_len,
         .tmem_addr = tmem_addr,
         .tile_index = tile,
+        .palette_index = sampler.palette,
         .clamp_s = sampler.clamp_s,
         .clamp_t = sampler.clamp_t,
         .mirror_s = sampler.mirror_s,
@@ -108,8 +109,8 @@ pub inline fn loadTexture(cmd_queue: anytype, image: anytype, tile: u3, tmem_add
         .tile = tile,
         .upper_left_s = sampler.offset_s,
         .upper_left_t = sampler.offset_t,
-        .lower_right_s = @intCast(@as(u32, sampler.offset_s) + (width - 1) * 4),
-        .lower_right_t = @intCast(@as(u32, sampler.offset_t) + (height - 1) * 4),
+        .lower_right_s = @intCast(@as(u32, sampler.offset_s) + (@as(u32, image.width) - 1) * 4),
+        .lower_right_t = @intCast(@as(u32, sampler.offset_t) + (@as(u32, image.height) - 1) * 4),
     });
 }
 
@@ -162,6 +163,7 @@ pub inline fn drawNonRotatedSprite(cmd_queue: anytype, tile: u3, x: f32, y: f32,
 
 pub const SpriteDrawOptions = struct {
     tile_index: u3 = 0,
+    palette: u4 = 0,
     s0: u8 = 0,
     t0: u8 = 0,
     width: u8 = 0, // 0 = full texture width

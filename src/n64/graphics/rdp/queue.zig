@@ -235,7 +235,9 @@ pub const OverlayQueue = struct {
             argument_len += 2;
         }
         const opcode: u8 = @truncate(first >> 56);
-        self.rsp_queue.writeOverlayCommand(
+        // Packet size and command index are validated by the fixed RDP ABI
+        // above; avoid scanning overlay metadata for every glyph rectangle.
+        self.rsp_queue.writeOverlayCommandKnown(
             self.overlay,
             overlayCommandIndex(opcode),
             @as(u32, @truncate(first >> 32)) & 0x00ffffff,

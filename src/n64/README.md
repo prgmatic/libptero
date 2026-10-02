@@ -315,6 +315,24 @@ are preserved, and draws use the dynamic cache-writeback path. This initial
 implementation spends CPU time and writable memory on skinning; it does not
 submit a separate RSP skinning job.
 
+For first-joint assets (`addModel(..., .{ .skinning = .first_joint })`), retain
+immutable bind-local vertices and use the geometry RSP instead:
+
+```zig
+const pose = try allocator.alloc(n64.math.FixedMat4, skeleton.matrices.len);
+// Reuse or free pose only after GPU completion.
+skeleton.writeMatrices(pose);
+renderer.geometry.setPose(pose);
+renderer.geometry.drawModelWithMaterials(assets.snake.model, assets.snake.materials);
+```
+
+`setPose` writes back the fixed matrices and selects the pose for subsequent
+draws. Parts load each joint group under its bone matrix before drawing
+mixed-joint triangles. Recorded model blocks use relative bone addresses, so
+they can replay against a different pose buffer each frame. Choose this contract
+explicitly: first-joint conversion ignores the other influences and weights,
+and `SkinnedModel.init` rejects these parts. The weighted default is unchanged.
+
 Wait for completion before updating or freeing a mesh instance. Alternatively,
 keep one instance per application frame slot and reuse it only after that slot's
 GPU work completes. Skeleton transforms may change after CPU skinning, but
@@ -373,6 +391,10 @@ are explicit options.
 the same font API. Formatting overflow returns `NoSpaceLeft` before any render
 commands are emitted. Scratch can be reused immediately after the call; font
 atlas storage remains borrowed until GPU completion.
+Outlined monochrome assets use `.format = .mono_outline` in `addFont` and
+CI4 atlases with two IA16 palette banks. `TextOptions.color` and `outline_color`
+control fill and outline independently. Integer placement uses one rectangle per
+glyph; scaling and fractional placement use the general sprite path.
 
 ```zig
 var text: [64]u8 = undefined;

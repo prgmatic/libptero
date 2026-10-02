@@ -186,5 +186,7 @@ pub fn PalettedImage(comptime PixelFormat: type) type {
         height: u16,
         texel_data: []const Pixel,
         palette: []const colors.Rgba16,
+        /// IA16 palettes use the same raw16-bit storage; bits are interpreted by TLUT.
+        palette_format: enum { rgba16, ia16 } = .rgba16,
     };
 }

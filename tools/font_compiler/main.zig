@@ -6,6 +6,7 @@ const usage =
     \\Usage: font-compiler <input.fnt> <texels.bin> <font.zig> <name> [options]
     \\
     \\Options:
+    \\  --mono-outline           Pack monochrome fill/outline into layered CI4
     \\  --no-kerning             Omit kerning pairs
     \\  --ellipsis <hex>,<reps>  Ellipsis glyph and repetitions (default: 2E,3)
     \\  -h, --help               Show this help
@@ -30,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
 fn parseOptions(args: []const []const u8, options: *font_compiler.Options) void {
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--no-kerning")) options.kerning = false else if (std.mem.eql(u8, args[index], "--ellipsis")) {
+        if (std.mem.eql(u8, args[index], "--mono-outline")) options.format = .mono_outline else if (std.mem.eql(u8, args[index], "--no-kerning")) options.kerning = false else if (std.mem.eql(u8, args[index], "--ellipsis")) {
             index += 1;
             if (index == args.len) fatal("missing argument for --ellipsis", .{});
             parseEllipsis(args[index], options) catch fatal("invalid ellipsis specification: {s}", .{args[index]});
@@ -120,19 +121,31 @@ fn generateSource(allocator: std.mem.Allocator, name: []const u8, result: font_c
     for (result.ranges) |range| try writer.print("    .{{ .first_codepoint = {d}, .glyph_count = {d}, .first_glyph = {d} }},\n", .{ range.first_codepoint, range.glyph_count, range.first_glyph });
     try writer.print("}};\n", .{});
     try writer.print("const glyphs = [_]n64.graphics.font.Glyph{{\n", .{});
-    for (result.glyphs) |glyph| try writer.print("    .{{ .x_advance = {d}, .x_offset = {d}, .y_offset = {d}, .width = {d}, .height = {d}, .s = {d}, .t = {d}, .atlas = {d} }},\n", .{ glyph.x_advance, glyph.x_offset, glyph.y_offset, glyph.width, glyph.height, glyph.s, glyph.t, glyph.atlas });
+    for (result.glyphs) |glyph| try writer.print("    .{{ .x_advance = {d}, .x_offset = {d}, .y_offset = {d}, .width = {d}, .height = {d}, .s = {d}, .t = {d},  .atlas = {d}, .layer = {d} }},\n", .{ glyph.x_advance, glyph.x_offset, glyph.y_offset, glyph.width, glyph.height, glyph.s, glyph.t, glyph.atlas, glyph.layer });
     try writer.print("}};\n", .{});
     try writer.print("const kernings = [_]n64.graphics.font.Kerning{{\n", .{});
     for (result.kernings) |pair| try writer.print("    .{{ .first = {d}, .second = {d}, .amount = {d} }},\n", .{ pair.first, pair.second, pair.amount });
     try writer.print("}};\n", .{});
-    try writer.print("const atlases = [_]n64.graphics.image.ConstImage(n64.graphics.image.ImgRgba16.Pixel){{\n", .{});
-    for (result.atlases) |atlas| try writer.print("    .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.image.ImgRgba16.Pixel, texels[{d}..{d}]) }},\n", .{ atlas.width, atlas.height, atlas.texel_offset, atlas.texel_offset + atlas.texel_length });
-    try writer.print("}};\n", .{});
-    try writer.print("pub const {s}: n64.graphics.font.Font = .{{ .point_size = {d}, .ascent = {d}, .descent = {d}, .line_height = {d}, .ranges = &ranges, .glyphs = &glyphs, .atlases = &atlases, .kernings = &kernings, .ellipsis = ", .{ name, result.point_size, result.ascent, result.descent, result.line_height });
+    try emitAtlases(writer, result);
+    try writer.print("pub const {s}: n64.graphics.font.Font = .{{ .point_size = {d}, .ascent = {d}, .descent = {d}, .line_height = {d}, .ranges = &ranges, .glyphs = &glyphs, .{s} = &atlases, .kernings = &kernings, .ellipsis = ", .{ name, result.point_size, result.ascent, result.descent, result.line_height, if (result.format == .mono_outline) "outline_atlases" else "atlases" });
     if (result.ellipsis) |ellipsis| try writer.print(".{{ .glyph = {d}, .repetitions = {d}, .advance = {d}, .width = {d} }}", .{ ellipsis.glyph, ellipsis.repetitions, ellipsis.advance, ellipsis.width }) else try writer.print("null", .{});
     try writer.print(" }};\n", .{});
     return out.toOwnedSlice();
 }
+fn emitAtlases(writer: *std.Io.Writer, result: font_compiler.Result) !void {
+    const mono = result.format == .mono_outline;
+    const pixel = if (mono) "Ci4Pair" else "Rgba16";
+    const view = if (mono) "PalettedImage" else "ConstImage";
+    if (mono) try writer.print("const palette align(8) = n64.graphics.font.outline_palette;\n", .{});
+    try writer.print("const atlases = [_]n64.graphics.image.{s}(n64.graphics.color.{s}){{\n", .{ view, pixel });
+    for (result.atlases) |atlas| {
+        try writer.print("    .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.color.{s}, texels[{d}..{d}])", .{ atlas.width, atlas.height, pixel, atlas.texel_offset, atlas.texel_offset + atlas.texel_length });
+        if (mono) try writer.print(", .palette = &palette, .palette_format = .ia16", .{});
+        try writer.print(" }},\n", .{});
+    }
+    try writer.print("}};\n", .{});
+}
+
 fn parseEllipsis(value: []const u8, options: *font_compiler.Options) !void {
     const comma = std.mem.indexOfScalar(u8, value, ',') orelse return error.Invalid;
     options.ellipsis_codepoint = try std.fmt.parseInt(u32, value[0..comma], 16);
@@ -163,4 +176,15 @@ test "generates typed native font source" {
     const source = try generateSource(std.testing.allocator, "fixture", result);
     defer std.testing.allocator.free(source);
     try std.testing.expect(std.mem.indexOf(u8, source, "pub const fixture: n64.graphics.font.Font") != null);
+}
+
+test "outlined source binds layered CI4 atlas and ellipsis metrics" {
+    var atlases = [_]font_compiler.Atlas{.{ .width = 64, .height = 64, .texel_offset = 0, .texel_length = 2048 }};
+    const result: font_compiler.Result = .{ .format = .mono_outline, .point_size = 8, .ascent = 7, .descent = -1, .line_height = 10, .ranges = &.{}, .glyphs = &.{}, .kernings = &.{}, .atlases = &atlases, .texels = &.{}, .ellipsis = .{ .glyph = 0, .repetitions = 3, .advance = 18, .width = 17 } };
+    const source = try generateSource(std.testing.allocator, "fixture", result);
+    defer std.testing.allocator.free(source);
+    try std.testing.expect(std.mem.indexOf(u8, source, "PalettedImage(n64.graphics.color.Ci4Pair)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, ".palette_format = .ia16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, ".outline_atlases = &atlases") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, ".width = 17") != null);
 }

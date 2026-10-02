@@ -13,6 +13,7 @@ pub const generate = compiler.generate;
 
 test {
     _ = compiler;
+    _ = @import("rigid_skin.zig");
     _ = @import("rig.zig");
     _ = @import("node_transforms.zig");
 }

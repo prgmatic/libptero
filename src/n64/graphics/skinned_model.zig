@@ -88,6 +88,7 @@ fn validateModel(source: model_types.Model) !void {
     for (source.parts) |part| try validatePart(source, part);
 }
 fn validatePart(source: model_types.Model, part: model_types.Part) !void {
+    if (part.bone != null) return error.RspSkinningRequiresPose;
     if (part.vertices.len * 2 < part.vertex_count) return error.InvalidVertices;
     const skin = part.skin orelse return;
     if (skin >= source.skins.len) return error.InvalidSkin;

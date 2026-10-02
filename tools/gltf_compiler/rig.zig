@@ -110,7 +110,7 @@ fn validateSkins(document: compiler.Document, binary: []const u8) !void {
     }
 }
 
-fn inverseBindView(document: compiler.Document, binary: []const u8, skin: Skin) !?compiler.AccessorView {
+pub fn inverseBindView(document: compiler.Document, binary: []const u8, skin: Skin) !?compiler.AccessorView {
     const accessor = skin.inverseBindMatrices orelse return null;
     const view = try compiler.accessorView(document, binary, accessor);
     if (view.component_count != 16 or view.count < skin.joints.len or view.component_type != 5126) return error.InvalidInverseBindMatrices;
@@ -214,7 +214,7 @@ fn emitInverseBind(allocator: Allocator, source: *Source, view: ?compiler.Access
     try source.appendSlice(allocator, "} },\n");
 }
 
-fn inverseBindCoefficient(view: ?compiler.AccessorView, joint: usize, column: usize, row: usize, scale: f32) !f32 {
+pub fn inverseBindCoefficient(view: ?compiler.AccessorView, joint: usize, column: usize, row: usize, scale: f32) !f32 {
     var value = if (view) |v| try v.float(joint, column * 4 + row) else @as(f32, @floatFromInt(@intFromBool(column == row)));
     if (column == 3 and row < 3) value *= scale;
     if (!std.math.isFinite(value)) return error.InvalidInverseBindMatrices;

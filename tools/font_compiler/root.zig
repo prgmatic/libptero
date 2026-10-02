@@ -2,15 +2,17 @@ const std = @import("std");
 const texture_compiler = @import("texture_compiler");
 
 pub const Error = error{ InvalidBmFont, MissingPage, InvalidPage, GlyphTooLarge, EllipsisGlyphMissing };
-pub const Options = struct { kerning: bool = true, ellipsis_codepoint: u32 = '.', ellipsis_repetitions: u16 = 3 };
+pub const Format = enum { rgba16, mono_outline };
+pub const Options = struct { format: Format = .rgba16, kerning: bool = true, ellipsis_codepoint: u32 = '.', ellipsis_repetitions: u16 = 3 };
 pub const Page = struct { id: u16, width: u32, height: u32, rgba: []const u8 };
 pub const Range = struct { first_codepoint: u32, glyph_count: u16, first_glyph: u16 };
-pub const Glyph = struct { x_advance: i16, x_offset: i16, y_offset: i16, width: u16, height: u16, s: u8, t: u8, atlas: u8 };
+pub const Glyph = struct { x_advance: i16, x_offset: i16, y_offset: i16, width: u16, height: u16, s: u8, t: u8, atlas: u8, layer: u1 = 0 };
 pub const Kerning = struct { first: u16, second: u16, amount: i16 };
 pub const Atlas = struct { texel_offset: u32, texel_length: u32, width: u16, height: u16 };
 pub const Ellipsis = struct { glyph: u16, repetitions: u16, advance: i16, width: i16 };
 
 pub const Result = struct {
+    format: Format = .rgba16,
     point_size: u16,
     ascent: i16,
     descent: i16,
@@ -44,7 +46,7 @@ const Parsed = struct {
         self.kernings.deinit(allocator);
     }
 };
-const WorkingAtlas = struct { rgba: []u8, skyline: [64]u8 = @splat(0), used_width: u16 = 1, used_height: u16 = 1 };
+const WorkingAtlas = struct { rgba: []u8, skyline: [64]u8 = @splat(0), height: u16 = 32, layered: bool = false, used_width: u16 = 1, used_height: u16 = 1 };
 
 pub fn compile(allocator: std.mem.Allocator, description: []const u8, pages: []const Page, options: Options) !Result {
     var parsed = try parse(allocator, description);
@@ -65,18 +67,18 @@ pub fn compile(allocator: std.mem.Allocator, description: []const u8, pages: []c
         for (working.items) |atlas| allocator.free(atlas.rgba);
         working.deinit(allocator);
     }
-    const glyphs = try packGlyphs(allocator, parsed.glyphs.items, pages, parsed.base, &working);
+    const glyphs = try packGlyphs(allocator, parsed.glyphs.items, pages, parsed.base, &working, options.format);
     errdefer allocator.free(glyphs);
     const kernings = if (options.kerning) try makeKernings(allocator, parsed.kernings.items, parsed.glyphs.items) else try allocator.alloc(Kerning, 0);
     errdefer allocator.free(kernings);
     const ellipsis = try makeEllipsis(options, parsed.glyphs.items, glyphs, kernings);
-    const encoded = try encodeAtlases(allocator, working.items);
+    const encoded = try encodeAtlases(allocator, working.items, options.format);
     errdefer {
         allocator.free(encoded.atlases);
         allocator.free(encoded.texels);
     }
     const descent = std.math.cast(i16, @as(i32, parsed.base) - parsed.line_height) orelse return Error.InvalidBmFont;
-    return .{ .point_size = parsed.point_size, .ascent = parsed.base, .descent = descent, .line_height = parsed.line_height, .ranges = ranges, .glyphs = glyphs, .kernings = kernings, .atlases = encoded.atlases, .texels = encoded.texels, .ellipsis = ellipsis };
+    return .{ .format = options.format, .point_size = parsed.point_size, .ascent = parsed.base, .descent = descent, .line_height = parsed.line_height, .ranges = ranges, .glyphs = glyphs, .kernings = kernings, .atlases = encoded.atlases, .texels = encoded.texels, .ellipsis = ellipsis };
 }
 
 fn validatePages(expected: u16, pages: []const Page) !void {
@@ -211,7 +213,7 @@ fn makeRanges(allocator: std.mem.Allocator, glyphs: []const SourceGlyph) ![]Rang
     }
     return ranges.toOwnedSlice(allocator);
 }
-fn packGlyphs(allocator: std.mem.Allocator, source: []const SourceGlyph, pages: []const Page, base: i16, atlases: *std.ArrayList(WorkingAtlas)) ![]Glyph {
+fn packGlyphs(allocator: std.mem.Allocator, source: []const SourceGlyph, pages: []const Page, base: i16, atlases: *std.ArrayList(WorkingAtlas), format: Format) ![]Glyph {
     const glyphs = try allocator.alloc(Glyph, source.len);
     errdefer allocator.free(glyphs);
     const order = try allocator.alloc(usize, source.len);
@@ -224,7 +226,7 @@ fn packGlyphs(allocator: std.mem.Allocator, source: []const SourceGlyph, pages: 
             return ga.height > gb.height or (ga.height == gb.height and ga.width > gb.width);
         }
     }.less);
-    var packer: Packer = .{};
+    var packer: Packer = .{ .format = format };
     for (order) |index| {
         const glyph = source[index];
         const placement = try packer.place(allocator, atlases, glyph.width, glyph.height);
@@ -235,17 +237,17 @@ fn packGlyphs(allocator: std.mem.Allocator, source: []const SourceGlyph, pages: 
         atlas.used_width = @max(atlas.used_width, placement.x + glyph.width);
         atlas.used_height = @max(atlas.used_height, placement.y + glyph.height);
         const y_offset = std.math.cast(i16, @as(i32, glyph.y_offset) - base) orelse return Error.InvalidBmFont;
-        glyphs[index] = .{ .x_advance = glyph.x_advance, .x_offset = glyph.x_offset, .y_offset = y_offset, .width = glyph.width, .height = glyph.height, .s = @intCast(placement.x), .t = @intCast(placement.y), .atlas = placement.atlas };
+        glyphs[index] = .{ .x_advance = glyph.x_advance, .x_offset = glyph.x_offset, .y_offset = y_offset, .width = glyph.width, .height = glyph.height, .s = @intCast(placement.x), .t = @intCast(if (format == .mono_outline) placement.y % 64 else placement.y), .atlas = placement.atlas, .layer = @intCast(if (format == .mono_outline) placement.y / 64 else 0) };
     }
     return glyphs;
 }
 const Packer = struct {
+    format: Format = .rgba16,
     fn place(self: *Packer, allocator: std.mem.Allocator, atlases: *std.ArrayList(WorkingAtlas), width: u16, height: u16) !Placement {
-        _ = self;
-        if (width > 64 or height > 32) return Error.GlyphTooLarge;
+        if (width > 64 or height > (if (self.format == .mono_outline) @as(u16, 64) else 32)) return Error.GlyphTooLarge;
         for (atlases.items, 0..) |*atlas, atlas_index| if (findSkylinePlacement(atlas, width, height)) |position|
             return occupy(atlas, @intCast(atlas_index), position, width, height);
-        try addAtlas(allocator, atlases);
+        try addAtlas(allocator, atlases, self.format);
         return occupy(&atlases.items[atlases.items.len - 1], @intCast(atlases.items.len - 1), .{ .x = 0, .y = 0 }, width, height);
     }
 };
@@ -257,7 +259,8 @@ fn findSkylinePlacement(atlas: *const WorkingAtlas, width: u16, height: u16) ?Po
     for (0..65 - width) |x| {
         var y: u8 = 0;
         for (atlas.skyline[x..][0..width]) |column| y = @max(y, column);
-        if (@as(u16, y) + height > 32) continue;
+        if (atlas.layered and y < 64 and @as(u16, y) + height > 64) y = 64;
+        if (@as(u16, y) + height > atlas.height) continue;
         if (best == null or y < best.?.y) best = .{ .x = @intCast(x), .y = y };
     }
     return best;
@@ -267,11 +270,11 @@ fn occupy(atlas: *WorkingAtlas, atlas_index: u8, position: Position, width: u16,
     @memset(atlas.skyline[position.x..][0..width], top);
     return .{ .x = position.x, .y = position.y, .atlas = atlas_index };
 }
-fn addAtlas(allocator: std.mem.Allocator, atlases: *std.ArrayList(WorkingAtlas)) !void {
+fn addAtlas(allocator: std.mem.Allocator, atlases: *std.ArrayList(WorkingAtlas), format: Format) !void {
     if (atlases.items.len >= 256) return Error.GlyphTooLarge;
-    const rgba = try allocator.alloc(u8, 64 * 32 * 4);
+    const rgba = try allocator.alloc(u8, 64 * @as(usize, if (format == .mono_outline) 128 else 32) * 4);
     @memset(rgba, 0);
-    try atlases.append(allocator, .{ .rgba = rgba });
+    try atlases.append(allocator, .{ .rgba = rgba, .height = if (format == .mono_outline) 128 else 32, .layered = format == .mono_outline });
 }
 fn copyGlyph(dst: []u8, dx: u16, dy: u16, page: Page, glyph: SourceGlyph) void {
     for (0..glyph.height) |row| {
@@ -315,12 +318,22 @@ fn makeEllipsis(options: Options, source: []const SourceGlyph, glyphs: []const G
         .width = std.math.cast(i16, advance * (options.ellipsis_repetitions - 1) + right_edge) orelse return Error.InvalidBmFont,
     };
 }
-fn encodeAtlases(allocator: std.mem.Allocator, working: []const WorkingAtlas) !struct { atlases: []Atlas, texels: []u8 } {
+fn encodeAtlases(allocator: std.mem.Allocator, working: []const WorkingAtlas, format: Format) !struct { atlases: []Atlas, texels: []u8 } {
     const atlases = try allocator.alloc(Atlas, working.len);
     errdefer allocator.free(atlases);
     var texels: std.ArrayList(u8) = .empty;
     errdefer texels.deinit(allocator);
     for (working, 0..) |atlas, index| {
+        if (format == .mono_outline) {
+            const start = texels.items.len;
+            for (0..64 * 64 / 2) |pair| {
+                const high = outlinePixel(atlas, pair * 2);
+                const low = outlinePixel(atlas, pair * 2 + 1);
+                try texels.append(allocator, (high << 4) | low);
+            }
+            atlases[index] = .{ .texel_offset = @intCast(start), .texel_length = 2048, .width = 64, .height = 64 };
+            continue;
+        }
         const rgba = try cropAtlas(allocator, atlas);
         defer allocator.free(rgba);
         const converted = try texture_compiler.convertRgba(allocator, atlas.used_width, atlas.used_height, rgba, .{ .format = .rgba16 });
@@ -329,6 +342,15 @@ fn encodeAtlases(allocator: std.mem.Allocator, working: []const WorkingAtlas) !s
         try texels.appendSlice(allocator, converted.texels[0..converted.base_texel_bytes]);
     }
     return .{ .atlases = atlases, .texels = try texels.toOwnedSlice(allocator) };
+}
+fn outlinePixel(atlas: WorkingAtlas, pixel: usize) u8 {
+    var result: u8 = 0;
+    for (0..2) |layer| {
+        const rgba = atlas.rgba[(pixel + layer * 4096) * 4 ..][0..4];
+        const value: u8 = if (rgba[3] < 128) 0 else if (rgba[0] > 128) 2 else 1;
+        result |= value << @intCast(layer * 2);
+    }
+    return result;
 }
 fn cropAtlas(allocator: std.mem.Allocator, atlas: WorkingAtlas) ![]u8 {
     const rgba = try allocator.alloc(u8, @as(usize, atlas.used_width) * atlas.used_height * 4);
@@ -358,4 +380,33 @@ test "compiles native font metadata and atlas texels" {
     try std.testing.expectEqual(@as(i16, 1), result.ellipsis.?.advance);
     try std.testing.expectEqual(@as(i16, 4), result.ellipsis.?.width);
     try std.testing.expectEqual(@as(usize, 4), result.texels.len);
+}
+
+test "mono outlined atlases pack two layers and retain binary fill and outline" {
+    const allocator = std.testing.allocator;
+    const input =
+        \\info face="layers" size=8
+        \\common lineHeight=64 base=0 pages=1
+        \\page id=0 file="page.png"
+        \\chars count=2
+        \\char id=65 x=0 y=0 width=64 height=64 xoffset=0 yoffset=0 xadvance=64 page=0 chnl=15
+        \\char id=66 x=64 y=0 width=64 height=64 xoffset=0 yoffset=0 xadvance=64 page=0 chnl=15
+    ;
+    const rgba = try allocator.alloc(u8, 128 * 64 * 4);
+    defer allocator.free(rgba);
+    @memset(rgba, 0);
+    @memcpy(rgba[0..4], &[_]u8{ 255, 255, 255, 255 });
+    @memcpy(rgba[4..8], &[_]u8{ 0, 0, 0, 255 });
+    @memcpy(rgba[64 * 4 ..][0..4], &[_]u8{ 0, 0, 0, 255 });
+    @memcpy(rgba[65 * 4 ..][0..4], &[_]u8{ 255, 255, 255, 255 });
+    const result = try compile(allocator, input, &.{.{ .id = 0, .width = 128, .height = 64, .rgba = rgba }}, .{ .format = .mono_outline, .ellipsis_repetitions = 0 });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.atlases.len);
+    try std.testing.expectEqual(@as(usize, 2048), result.texels.len);
+    try std.testing.expectEqual(@as(u1, 0), result.glyphs[0].layer);
+    try std.testing.expectEqual(@as(u1, 1), result.glyphs[1].layer);
+    try std.testing.expectEqual(@as(u8, 0), result.glyphs[1].t);
+    // First packed nibble: fill in layer0, outline in layer1 (2 | 1<<2).
+    try std.testing.expectEqual(@as(u8, 0x69), result.texels[0]);
+    try std.testing.expectEqual(@as(u8, 0), result.texels[1]);
 }

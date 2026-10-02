@@ -4,6 +4,7 @@ const color = @import("color.zig");
 pub const TextOptions = struct {
     color: color.Rgba32 = color.Rgba32.white,
     scale: f32 = 1,
+    outline_color: color.Rgba32 = .fromInt(0x40404040),
     line_spacing: i16 = 0,
 };
 
@@ -16,6 +17,16 @@ pub const TextMetrics = struct {
 
 pub const Error = error{InvalidUtf8};
 
+/// IA16 TLUT banks for two independent fill/outline glyph layers in CI4.
+pub const outline_palette: [32]color.Rgba16 align(8) = blk: {
+    var result: [32]color.Rgba16 = undefined;
+    for (0..2) |layer| for (0..16) |index| {
+        const pixel = (index >> (layer * 2)) & 3;
+        result[layer * 16 + index] = @bitCast(@as(u16, if (pixel == 0) 0 else if (pixel == 1) 0x00ff else 0xffff));
+    };
+    break :blk result;
+};
+
 pub const Font = struct {
     point_size: u16,
     ascent: i16,
@@ -23,7 +34,8 @@ pub const Font = struct {
     line_height: u16,
     ranges: []const Range,
     glyphs: []const Glyph,
-    atlases: []const image.ConstImage(image.ImgRgba16.Pixel),
+    atlases: []const image.ConstImage(image.ImgRgba16.Pixel) = &.{},
+    outline_atlases: []const image.PalettedImage(color.Ci4Pair) = &.{},
     kernings: []const Kerning = &.{},
     ellipsis: ?Ellipsis = null,
 
@@ -66,6 +78,17 @@ pub const Font = struct {
     /// Draw UTF-8 text through a graphics RDP RenderQueue. The queue may be the
     /// default RSP overlay queue or one of the lower-level queue variants.
     pub fn draw(self: Font, render_queue: anytype, x: f32, baseline_y: f32, utf8: []const u8, options: TextOptions) Error!TextMetrics {
+        if (self.outline_atlases.len != 0) {
+            render_queue.setCombineMode(.single(.{ .rgb_a = .primitive, .rgb_b = .environment, .rgb_c = .tex0, .rgb_d = .environment, .alpha_a = .tex0, .alpha_c = .primitive }));
+            render_queue.setEnvironmentColor(options.outline_color);
+            render_queue.setBlendMode(.alpha);
+            var modes = render_queue.getModes();
+            modes.antialias_en = true;
+            modes.blender_alpha = .cvg_times_cc;
+            render_queue.setModes(modes);
+            render_queue.setPrimColor(options.color);
+            return self.layout(@as(?@TypeOf(render_queue), render_queue), x, baseline_y, utf8, options);
+        }
         render_queue.setCombineMode(.single(.{
             .rgb_a = .tex0,
             .rgb_c = .primitive,
@@ -147,7 +170,13 @@ const TextCursor = struct {
         const glyph = font.glyphs[index];
         if (self.previous) |prior| self.x += @as(f32, @floatFromInt(font.kerning(prior, index))) * self.options.scale;
         if (render_queue) |queue| {
-            if (glyph.width != 0 and glyph.height != 0) queue.drawSprite(
+            if (glyph.width != 0 and glyph.height != 0 and font.outline_atlases.len != 0) {
+                const x = self.x + @as(f32, @floatFromInt(glyph.x_offset)) * self.options.scale;
+                const y = self.y + @as(f32, @floatFromInt(glyph.y_offset)) * self.options.scale;
+                if (self.options.scale == 1 and x == @trunc(x) and y == @trunc(y)) {
+                    queue.drawGlyph(font.outline_atlases[glyph.atlas], @intFromFloat(x), @intFromFloat(y), glyph.s, glyph.t, glyph.width, glyph.height, glyph.layer);
+                } else queue.drawSprite(font.outline_atlases[glyph.atlas], x, y, .{ .s0 = glyph.s, .t0 = glyph.t, .width = @intCast(glyph.width), .height = @intCast(glyph.height), .scale_x = self.options.scale, .scale_y = self.options.scale, .palette = glyph.layer });
+            } else if (glyph.width != 0 and glyph.height != 0) queue.drawSprite(
                 font.atlases[glyph.atlas],
                 self.x + @as(f32, @floatFromInt(glyph.x_offset)) * self.options.scale,
                 self.y + @as(f32, @floatFromInt(glyph.y_offset)) * self.options.scale,
@@ -175,6 +204,7 @@ pub const Glyph = struct {
     s: u8,
     t: u8,
     atlas: u8,
+    layer: u1 = 0,
 };
 
 pub const Kerning = struct {
@@ -250,6 +280,14 @@ test "formatted drawing consumes scratch and reports overflow before rendering" 
         }
         pub fn setPrimColor(self: *@This(), _: color.Rgba32) void {
             self.commands += 1;
+        }
+        pub fn setEnvironmentColor(_: *@This(), _: color.Rgba32) void {}
+        pub fn getModes(_: *@This()) @import("rdp/modes.zig").OtherModes {
+            return .{};
+        }
+        pub fn setModes(_: *@This(), _: @import("rdp/modes.zig").OtherModes) void {}
+        pub fn drawGlyph(_: *@This(), _: anytype, _: i16, _: i16, _: u8, _: u8, _: u16, _: u16, _: u4) void {
+            unreachable;
         }
         pub fn drawSprite(self: *@This(), _: anytype, _: f32, _: f32, _: texture.SpriteDrawOptions) void {
             self.glyph_count += 1;

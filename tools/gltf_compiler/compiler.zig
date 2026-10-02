@@ -230,9 +230,13 @@ pub const Vertex = struct {
     color: [4]u8,
     uv: [2]i16,
     influence: rig.Influence = .{},
+    source_position: ?[3]f32 = null,
+    source_normal: ?[3]f32 = null,
 };
 
 pub const Triangle = [3]u8;
+
+pub const JointGroup = struct { node: u16, offset: u8, count: u8 };
 
 pub const Batch = struct {
     vertices: []Vertex,
@@ -240,10 +244,12 @@ pub const Batch = struct {
     material_index: u16,
     preserve_order: bool = false,
     skin: ?u16 = null,
+    groups: []const JointGroup = &.{},
 
     fn deinit(self: Batch, allocator: std.mem.Allocator) void {
         allocator.free(self.vertices);
         allocator.free(self.triangles);
+        if (self.groups.len != 0) allocator.free(self.groups);
     }
 };
 
@@ -296,7 +302,15 @@ fn emitBatchData(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source:
 fn emitBatch(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *std.ArrayList(u8), batch: Batch, batch_index: usize) !void {
     try alignData(allocator, data);
     const data_offset = data.items.len;
-    try emitVertices(allocator, data, batch.vertices);
+    if (batch.groups.len == 0) {
+        try emitVertices(allocator, data, batch.vertices);
+    } else {
+        for (batch.groups, 0..) |group, index| {
+            const start = data.items.len;
+            try emitVertices(allocator, data, batch.vertices[group.offset..][0..group.count]);
+            try appendFormat(allocator, source, "const vertices_{d}_{d} = std.mem.bytesAsSlice(VertexPair, model_data[{d}..{d}]);\n", .{ batch_index, index, start, data.items.len });
+        }
+    }
     const vertices_end = data.items.len;
     try alignData(allocator, data);
     const indices_offset = data.items.len;
@@ -307,7 +321,7 @@ fn emitBatch(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *st
         "const vertices_{d} = std.mem.bytesAsSlice(VertexPair, model_data[{d}..{d}]);\nconst indices_{d} = std.mem.bytesAsSlice(i16, model_data[{d}..{d}]);\n",
         .{ batch_index, data_offset, vertices_end, batch_index, indices_offset, data.items.len },
     );
-    if (batch.skin != null) {
+    if (batch.skin != null and batch.groups.len == 0) {
         try appendFormat(allocator, source, "const influences_{d} = [_]n64.graphics.animation.Influence{{\n", .{batch_index});
         for (batch.vertices) |vertex| {
             const i = vertex.influence;
@@ -463,6 +477,14 @@ fn emitImages(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *s
 fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: []const Batch, name: []const u8) !void {
     try source.appendSlice(allocator, "const parts = [_]Part{\n");
     for (batches, 0..) |batch, batch_index| {
+        if (batch.groups.len != 0) {
+            for (batch.groups, 0..) |group, index| {
+                try appendFormat(allocator, source, "    .{{ .vertices = vertices_{d}_{d}, .material_index = {d}, .vertex_offset = {d}, .vertex_count = {d}, .bone = {d}", .{ batch_index, index, batch.material_index, group.offset, group.count, group.node });
+                if (index + 1 == batch.groups.len) try appendFormat(allocator, source, ", .strip_indices = indices_{d}", .{batch_index});
+                try source.appendSlice(allocator, " },\n");
+            }
+            continue;
+        }
         try appendFormat(
             allocator,
             source,
@@ -658,6 +680,8 @@ pub const ConvertOptions = struct {
     scale: f32 = 64,
     max_vertices_per_batch: usize = 70,
     preserve_triangle_order: bool = false,
+    /// First JOINTS_0 component, with bind-local geometry transformed on RSP.
+    skinning: enum { weighted, first_joint } = .weighted,
 };
 
 pub fn convert(allocator: std.mem.Allocator, document: Document, binary: []const u8, options: ConvertOptions) !ConvertedModel {
@@ -686,6 +710,7 @@ fn convertMeshes(allocator: std.mem.Allocator, document: Document, binary: []con
         const skin = try rig.meshSkin(document, mesh_index);
         for (batches.items[start..]) |*batch| batch.skin = skin;
         try @import("node_transforms.zig").bake(document, mesh_index, batches.items[start..], options.scale);
+        if (options.skinning == .first_joint) try @import("rigid_skin.zig").prepare(allocator, document, binary, batches.items[start..], options.scale);
     };
 }
 
@@ -851,6 +876,16 @@ const BatchBuilder = struct {
         const local: u8 = @intCast(self.vertices.items.len);
         var vertex = try convertVertex(self.views.positions, self.views.normals, self.views.colors, self.views.uvs, index, self.views.texture_size, self.options.scale);
         vertex.influence = try rig.readInfluence(self.views.joints, self.views.weights, index);
+        if (self.options.skinning == .first_joint) {
+            var position: [3]f32 = undefined;
+            for (0..3) |component| position[component] = try self.views.positions.float(index, component) * self.options.scale;
+            vertex.source_position = position;
+            if (self.views.normals) |normals| {
+                var normal: [3]f32 = undefined;
+                for (0..3) |component| normal[component] = try normals.float(index, component);
+                vertex.source_normal = normal;
+            }
+        }
         if (self.views.uv_adjust and self.views.uvs != null) try centerUv(&vertex.uv);
         try self.vertices.append(self.allocator, vertex);
         try self.remap.append(self.allocator, .{ .source = index, .local = local });

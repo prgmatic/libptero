@@ -52,20 +52,29 @@ pub fn Asset(comptime Materials: type) type {
 /// Providers implement apply(context, index); geometry and materials are borrowed.
 pub fn draw(context: anytype, model: Model, materials: anytype) void {
     var active_material: ?u16 = null;
+    var bone_active = false;
+    defer if (bone_active) context.popMatrix();
     for (model.parts) |part| {
         if (active_material == null or active_material.? != part.material_index) {
             materials.apply(context, part.material_index);
             context.beginModelMaterial();
             active_material = part.material_index;
         }
+        if (part.bone) |bone| {
+            if (bone_active) context.setBoneMatrix(bone, false) else context.setBoneMatrix(bone, true);
+            bone_active = true;
+        } else if (bone_active) {
+            context.popMatrix();
+            bone_active = false;
+        }
         switch (part.data_usage) {
             .immutable => {
                 context.loadStaticVertices(part.vertices, part.vertex_offset, part.vertex_count);
-                context.drawStaticTriangleStrip(part.strip_indices, true);
+                if (part.strip_indices.len != 0) context.drawStaticTriangleStrip(part.strip_indices, true);
             },
             .dynamic => {
                 context.loadVertices(part.vertices, part.vertex_offset, part.vertex_count);
-                context.drawTriangleStrip(part.strip_indices, true);
+                if (part.strip_indices.len != 0) context.drawTriangleStrip(part.strip_indices, true);
             },
         }
     }
@@ -91,6 +100,8 @@ pub const Part = struct {
     vertex_count: u8,
     strip_indices: []const i16 = &.{},
     data_usage: DataUsage = .immutable,
+    /// Global node index for bind-local RSP skinning; the pose is set on Context.
+    bone: ?u16 = null,
     skin: ?u16 = null,
     influences: []const animation.Influence = &.{},
 };
@@ -138,6 +149,9 @@ test "model applies changed materials and submits packed batches" {
             pub fn drawTriangleStrip(self: *@This(), indices: []const i16, sync: bool) void {
                 self.dynamic_draws += 1;
                 self.drawStaticTriangleStrip(indices, sync);
+            }
+            pub fn setBoneMatrix(_: *@This(), _: u16, _: bool) void {
+                unreachable;
             }
             pub fn beginModelMaterial(_: *@This()) void {}
         };

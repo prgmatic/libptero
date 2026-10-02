@@ -132,6 +132,13 @@ pub const Skeleton = struct {
         self.* = undefined;
     }
 
+    /// Copy global matrices into caller-owned RSP pose storage. Do not overwrite
+    /// an in-flight destination; use one pose buffer per outstanding frame.
+    pub fn writeMatrices(self: *const Skeleton, destination: []math.FixedMat4) void {
+        std.debug.assert(destination.len == self.matrices.len);
+        for (destination, self.matrices) |*fixed, matrix| fixed.* = matrix.toFixed();
+    }
+
     pub fn reset(self: *Skeleton) void {
         for (self.bones, self.nodes) |*bone, node| bone.* = node.transform;
     }

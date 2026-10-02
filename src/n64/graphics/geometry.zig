@@ -327,6 +327,19 @@ pub const Context = struct {
         bits &= ~@as(u32, (1 << 3) | (1 << 4));
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 6, culling, &.{0xc000 | ((bits | 8) << 8) | @as(u32, self.render.material_tile)});
     }
+    /// Bind fixed global bone matrices for first-joint assets. Borrowed until
+    /// submission completes. Segmented addresses keep recorded model blocks
+    /// independent of the current pose buffer.
+    pub fn setPose(self: *Context, matrices: []const math.FixedMat4) void {
+        cache.writebackData(matrices);
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, rsp.programs.geometry_overlay_symbols.segment_table + 4, &.{physical(matrices.ptr)});
+    }
+
+    pub fn setBoneMatrix(self: *Context, node: u16, push: bool) void {
+        const address = (@as(u32, 4) << 24) | @as(u32, node) * 64;
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, (if (push) @as(u32, 64 << 8) else 0) | 1, &.{address});
+    }
+
     pub fn pushMatrix(self: *Context, matrix: *const math.FixedMat4) void {
         cache.writebackData(matrix);
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, (64 << 8) | 1, &.{physical(matrix)});
