@@ -224,6 +224,13 @@ pub const Context = struct {
     /// advance through their sentinels, matching libdragon/Tiny3D.
     pub fn beginFrame(_: *Context) void {}
 
+    /// Submit geometry and RDP work together. Keep this context and borrowed
+    /// vertex/matrix storage alive until the returned completion finishes.
+    pub fn submit(self: *Context) rdp.Completion {
+        self.syncTriangles();
+        return self.render.submit();
+    }
+
     pub fn setAmbientLight(self: *Context, color: Rgba32) void {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, rsp.programs.geometry_overlay_symbols.ambient_color, &.{ @as(u32, @bitCast(color)), 0, 0 });
     }

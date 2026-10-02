@@ -21,9 +21,8 @@ while (true) {
     render.setFrameBuffer(frame.image);
     render.clearScreen(Pixel.black);
     // Record drawing commands here.
-    const fence = n64.graphics.rdp.syncFull(&render);
-    // Finish the RSP queue here when using an RSP-backed renderer.
-    try display.present(frame, fence, .{});
+    const completion = render.submit();
+    try display.present(frame, completion, .{});
 }
 ```
 
@@ -42,11 +41,22 @@ outstanding at a time. Presenting or releasing it invalidates every copy of its
 token. Call `release(frame)` to abandon an acquisition after any work using it
 has completed. Do not access pixels after returning the frame.
 
-Presentation is synchronous: it waits for the supplied RDP fence, then changes
-VI origin during a fresh vertical blank. It neither submits rendering commands
-nor waits for an RSP queue. Keep matrices, vertices, command buffers, and other
-RSP resources alive until their queue finishes. The current RDP API supports
-only one outstanding completion fence; the swapchain does not add queued fences.
+Presentation is synchronous: it waits for the supplied render completion, then
+changes VI origin during a fresh vertical blank. `render.submit()` submits RDP
+commands and, for an RSP-backed render queue, inserts a stable RSP syncpoint.
+`geometry.submit()` also synchronizes pending triangle work. The returned
+`Completion` supports `poll()`, `isComplete()`, and `wait(.{ .max_attempts = ... })`.
+Polling services DP interrupts even while RSP work is pending. A wait reports
+`RspTimeout` or `RdpFenceTimeout` and can be retried. Copies of a completed token
+stay complete after later submissions (within 2^31 completion markers).
+
+Keep matrices, vertices, command buffers, and the queue itself alive until both
+processors complete. A queue must remain at a stable address and must not be
+reset while its token is pending. Submission and waiting allocate no memory.
+Only one RDP fence and one RSP syncpoint may be outstanding; this API does not
+introduce queued frames or multiple in-flight fences. For raw control,
+`rdp.syncFull` remains available and `display.presentFence` accepts its fence,
+with the caller responsible for separately finishing RSP work.
 
 `.present_mode = .immediate` switches origin as soon as rendering finishes and
 may tear. Its next `acquire` waits for a fresh retrace before making the previous

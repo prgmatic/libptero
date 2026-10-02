@@ -1,7 +1,7 @@
 const std = @import("std");
 const display = @import("display.zig");
 const color = @import("graphics/color.zig");
-const Fence = @import("interrupt.zig").RdpFence;
+const Completion = @import("graphics/rdp.zig").Completion;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectError = std.testing.expectError;
@@ -33,8 +33,8 @@ const Backend = struct {
         if (!vblank_ready) return error.VBlankTimeout;
         retirements += 1;
     }
-    pub fn waitFence(_: Fence, _: u32) bool {
-        return fence_ready;
+    pub fn waitCompletion(_: Completion, _: u32) error{ RspTimeout, RdpFenceTimeout }!void {
+        if (!fence_ready) return error.RdpFenceTimeout;
     }
     pub fn swap(frame: anytype, mode: display.PresentMode, _: u32) error{VBlankTimeout}!void {
         if (mode == .vsync and !vblank_ready) return error.VBlankTimeout;
@@ -61,7 +61,7 @@ test "acquire and present protect scanout across double and triple buffering" {
             try expectEqual(@as(u16, 240), frame.image.height);
             try expectEqual(@as(usize, 0), @intFromPtr(frame.image.texel_data.ptr) % 64);
             try expectError(error.FrameAlreadyAcquired, chain.acquire());
-            try chain.present(frame, .{ .target = 1 }, .{});
+            try chain.present(frame, .{ .rdp = .{ .target = 1 } }, .{});
             try expectEqual(@intFromPtr(frame.image.texel_data.ptr), Backend.front);
             try expectError(error.InvalidFrame, chain.release(frame));
         }
@@ -77,15 +77,15 @@ test "timeouts preserve frame ownership and allow retry" {
     const frame = try chain.acquire();
     const old_front = Backend.front;
     Backend.fence_ready = false;
-    try expectError(error.RdpFenceTimeout, chain.present(frame, .{ .target = 1 }, .{}));
+    try expectError(error.RdpFenceTimeout, chain.present(frame, .{ .rdp = .{ .target = 1 } }, .{}));
     Backend.fence_ready = true;
     Backend.vblank_ready = false;
-    try expectError(error.VBlankTimeout, chain.present(frame, .{ .target = 1 }, .{}));
+    try expectError(error.VBlankTimeout, chain.present(frame, .{ .rdp = .{ .target = 1 } }, .{}));
     try expectEqual(old_front, Backend.front);
     try expectEqual(@as(usize, 0), Backend.swaps);
     try expectError(error.FrameAlreadyAcquired, chain.acquire());
     Backend.vblank_ready = true;
-    try chain.present(frame, .{ .target = 1 }, .{});
+    try chain.present(frame, .{ .rdp = .{ .target = 1 } }, .{});
 }
 
 test "immediate presentation does not recycle the previous scanout until retrace" {
@@ -94,7 +94,7 @@ test "immediate presentation does not recycle the previous scanout until retrace
     const old_front = Backend.front;
     const frame = try chain.acquire();
     Backend.vblank_ready = false;
-    try chain.present(frame, .{ .target = 1 }, .{});
+    try chain.present(frame, .{ .rdp = .{ .target = 1 } }, .{});
     try expectError(error.VBlankTimeout, chain.acquire());
     try expectEqual(@as(usize, 0), Backend.retirements);
     Backend.vblank_ready = true;

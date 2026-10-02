@@ -35,8 +35,10 @@ fn presentation() !void {
     var render = n64.graphics.rdp.DirectRenderQueue.init(.{ .buffer = &commands });
     render.setFrameBuffer(gpu_frame.image);
     render.clearScreen(n64.graphics.color.Rgba32.green);
-    const fence = n64.graphics.rdp.syncFull(&render);
-    try chain.present(gpu_frame, fence, .{});
+    const completion = render.submit();
+    try chain.present(gpu_frame, completion, .{});
+    try testing.expect(completion.isComplete());
+    try completion.wait(.{ .max_attempts = 0 });
     try testing.expectEqual(first_origin, origin.*);
     n64.cache.invalidateData(gpu_frame.image.texel_data);
     for (gpu_frame.image.texel_data) |pixel| try testing.expectEqual(n64.graphics.color.Rgba32.green, pixel);

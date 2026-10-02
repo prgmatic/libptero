@@ -28,10 +28,12 @@ pub const OverlayRenderQueue = rq.OverlayRenderQueue;
 // RspSubmittedRenderQueue when raw CPU command construction is intentional.
 pub const DefaultRenderQueue = OverlayRenderQueue;
 pub const Fence = interrupt.RdpFence;
+pub const Completion = @import("rdp/completion.zig").Completion;
+pub const WaitOptions = @import("rdp/completion.zig").WaitOptions;
 
 pub fn syncFull(render_queue: anytype) Fence {
-    render_queue.fullSync();
     const fence = interrupt.armRdpFence();
+    render_queue.fullSync();
     render_queue.execute();
     return fence;
 }

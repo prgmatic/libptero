@@ -10,6 +10,7 @@ var debug_buffer: [1024]u8 = undefined;
 const tests = [_]runner.Test{} ++
     @import("zsp_tests.zig").tests ++
     @import("rsp_tests.zig").tests ++
+    @import("render_api_tests.zig").tests ++
     @import("display_tests.zig").tests;
 
 export fn __start() linksection(".text.startup") noreturn {

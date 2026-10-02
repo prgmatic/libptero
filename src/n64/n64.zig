@@ -12,6 +12,7 @@ test {
     _ = @import("graphics/material.zig");
     _ = io.joypad;
     _ = graphics.rdp.RenderQueue;
+    _ = graphics.rdp.Completion;
     _ = display;
 }
 pub const rsp = @import("rsp/rsp.zig");

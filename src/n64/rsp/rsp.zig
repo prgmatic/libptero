@@ -21,11 +21,15 @@ pub const Queue = struct {
     storage: command_queue.QueueStorage,
     priority: Priority,
     recording: ?*CommandQueue,
+    syncpoints_scheduled: u32,
+    syncpoints_completed: u32,
 
     pub fn init(self: *Queue, priority: Priority) void {
         self.storage.init();
         self.priority = priority;
         self.recording = null;
+        self.syncpoints_scheduled = 0;
+        self.syncpoints_completed = 0;
     }
 
     pub fn writeDmem(self: *Queue, offset: u32, value: u32) void {
@@ -177,26 +181,41 @@ pub const Queue = struct {
         if (accept_wait == 0) @panic("timed out initializing RSP-owned RDP buffers");
     }
 
+    /// Compatibility operation; prefer insertSyncpoint when retaining a token.
     pub fn syncpoint(self: *Queue) void {
+        _ = self.insertSyncpoint();
+    }
+
+    /// Append a completion marker and flush. Only one marker may be pending.
+    /// Keep this queue at a stable address until the token is complete.
+    pub fn insertSyncpoint(self: *Queue) Syncpoint {
         if (self.priority != .low) @panic("syncpoints require a low-priority RSP queue");
+        self.pollSyncpoint();
         if (self.storage.syncpoint_pending) @panic("only one RSP syncpoint may be outstanding");
         self.ensureCapacity(2);
         io.status_register_write.* = io.status_clear_signal2;
+        self.syncpoints_scheduled +%= 1;
         self.current().waitThenWriteStatus(io.status_signal2, io.status_set_signal2);
         flush(self);
         self.storage.syncpoint_pending = true;
+        return .{ .queue = self, .target = self.syncpoints_scheduled };
     }
 
     pub fn waitSyncpointTimeout(self: *Queue, max_attempts: u32) bool {
-        if (!self.storage.syncpoint_pending) return true;
+        const point: Syncpoint = .{ .queue = self, .target = self.syncpoints_scheduled };
         var remaining = max_attempts;
-        while (!io.status_register_read.signal2) {
+        while (!point.isComplete()) {
             if (remaining == 0) return false;
             remaining -= 1;
         }
-        io.status_register_write.* = io.status_clear_signal2;
-        self.storage.syncpoint_pending = false;
         return true;
+    }
+
+    fn pollSyncpoint(self: *Queue) void {
+        if (!self.storage.syncpoint_pending or !io.status_register_read.signal2) return;
+        io.status_register_write.* = io.status_clear_signal2;
+        self.syncpoints_completed = self.syncpoints_scheduled;
+        self.storage.syncpoint_pending = false;
     }
 
     inline fn current(self: *Queue) *CommandQueue {
@@ -226,6 +245,18 @@ fn validateQueueDma(rdram: anytype, dmem_address: u32) void {
         @panic("RSP queue DMA transfer does not fit in DMEM");
     }
 }
+
+/// A stable completion token for one queue marker. Tokens remain completed
+/// across later submissions; comparisons are valid within 2^31 markers.
+pub const Syncpoint = struct {
+    queue: *Queue,
+    target: u32,
+
+    pub fn isComplete(self: Syncpoint) bool {
+        self.queue.pollSyncpoint();
+        return @as(i32, @bitCast(self.queue.syncpoints_completed -% self.target)) >= 0;
+    }
+};
 
 pub const rdp_syncfull_ongoing_dmem = programs.command_dispatcher_symbols.rdp_syncfull_ongoing;
 pub const rdp_target_bitdepth_dmem = programs.command_dispatcher_symbols.rdp_target_bitdepth;

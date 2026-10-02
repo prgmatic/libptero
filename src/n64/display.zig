@@ -6,7 +6,9 @@ const video = @import("interfaces/video.zig");
 const cache = @import("cpu/cache.zig");
 const image = @import("graphics/image.zig");
 const color = @import("graphics/color.zig");
-const Fence = @import("interrupt.zig").RdpFence;
+const rdp = @import("graphics/rdp.zig");
+const Fence = rdp.Fence;
+const Completion = rdp.Completion;
 
 pub const PresentMode = enum {
     /// Swap during a fresh vertical blank. Does not consume interrupt events.
@@ -29,7 +31,7 @@ pub const Options = struct {
 };
 
 pub const PresentOptions = struct {
-    /// Polling limit applied separately to RDP completion and vertical blank.
+    /// Polling limit applied separately to render completion and vertical blank.
     max_attempts: u32 = 100_000_000,
 };
 
@@ -38,8 +40,7 @@ pub const PresentOptions = struct {
 ///
 /// Frame 0 starts as a black front buffer. At least two buffers are required.
 /// One frame may be acquired at a time. Presentation is synchronous and does
-/// not submit commands or wait for an RSP queue; retain resources used by that
-/// queue until it completes. Complete outstanding rendering before deinit.
+/// not submit commands; it waits for the supplied render completion. Complete outstanding rendering before deinit.
 ///
 /// Progressive VI modes are supported. Interlaced modes require field-aware
 /// scanout setup and are rejected rather than silently treated as progressive.
@@ -143,15 +144,21 @@ fn SwapchainImpl(comptime Pixel: type, comptime Backend: type) type {
             self.acquired_index = null;
         }
 
-        /// Wait for the supplied RDP fence, then present the acquired buffer.
+        /// Wait for the supplied RSP/RDP completion, then present the buffer.
         /// Does not write back CPU cache lines over RDP output. CPU writes used
         /// by the RDP must have been written back before command submission.
         /// On timeout the frame remains acquired for retry or release after
         /// completing outstanding rendering. Only one RDP fence may be pending.
-        pub fn present(self: *Self, frame: Frame, completion: Fence, options: PresentOptions) (FrameError || error{ RdpFenceTimeout, VBlankTimeout })!void {
+        pub fn present(self: *Self, frame: Frame, completion: Completion, options: PresentOptions) (FrameError || error{ RspTimeout, RdpFenceTimeout, VBlankTimeout })!void {
             try self.validateFrame(frame);
-            if (!Backend.waitFence(completion, options.max_attempts)) return error.RdpFenceTimeout;
+            try Backend.waitCompletion(completion, options.max_attempts);
             try self.show(frame.index, options);
+        }
+
+        /// Present a raw RDP fence. The caller must separately finish any RSP
+        /// work using borrowed resources; prefer present with submit's result.
+        pub fn presentFence(self: *Self, frame: Frame, fence: Fence, options: PresentOptions) (FrameError || error{ RspTimeout, RdpFenceTimeout, VBlankTimeout })!void {
+            try self.present(frame, .{ .rdp = fence }, options);
         }
 
         /// Present CPU-rendered pixels after writing back their cache lines.
@@ -209,8 +216,8 @@ const Hardware = struct {
         try video.waitVBlank(max_attempts);
     }
 
-    fn waitFence(fence: Fence, max_attempts: u32) bool {
-        return fence.waitTimeout(max_attempts);
+    fn waitCompletion(completion: Completion, max_attempts: u32) error{ RspTimeout, RdpFenceTimeout }!void {
+        try completion.wait(.{ .max_attempts = max_attempts });
     }
 
     fn swap(frame: anytype, mode: PresentMode, max_attempts: u32) error{VBlankTimeout}!void {

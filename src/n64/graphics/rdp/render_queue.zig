@@ -66,6 +66,20 @@ pub fn RenderQueue(comptime QueueType: type) type {
             rq.cmd_queue.execute();
         }
 
+        /// Submit the recorded batch with an RDP fence and, for RSP-backed
+        /// queues, an RSP marker. Borrowed resources remain in use until both
+        /// complete. Does not allocate. Do not submit while recording a block.
+        pub fn submit(rq: *Self) @import("completion.zig").Completion {
+            const fence = @import("../../interrupt.zig").armRdpFence();
+            rq.fullSync();
+            rq.execute();
+            const point = if (@hasField(QueueType, "rsp_queue"))
+                rq.cmd_queue.queue.rsp_queue.insertSyncpoint()
+            else
+                null;
+            return .{ .rdp = fence, .rsp = point };
+        }
+
         pub fn prepare(rq: *Self) void {
             if (@hasDecl(QueueType, "prepare")) rq.cmd_queue.queue.prepare();
         }

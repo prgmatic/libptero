@@ -27,7 +27,7 @@ pub const RdpFence = struct {
 
     pub fn isComplete(self: RdpFence) bool {
         pollRdpInterrupt();
-        return @atomicLoad(u32, &rdp_fences_completed, .acquire) == self.target;
+        return sequenceReached(@atomicLoad(u32, &rdp_fences_completed, .acquire), self.target);
     }
 
     pub fn waitTimeout(self: RdpFence, max_attempts: u32) bool {
@@ -89,3 +89,17 @@ pub const InterruptMask = packed struct(u32) {
     rdp: bool = false,
     _pad: u26 = 0,
 };
+
+// Serial comparisons remain valid across wraparound within half the range.
+fn sequenceReached(completed: u32, target: u32) bool {
+    return @as(i32, @bitCast(completed -% target)) >= 0;
+}
+
+test "completed fences stay complete after later fences and counter wrap" {
+    const std = @import("std");
+    try std.testing.expect(sequenceReached(3, 2));
+    try std.testing.expect(sequenceReached(2, 2));
+    try std.testing.expect(!sequenceReached(1, 2));
+    try std.testing.expect(sequenceReached(0, 0xffffffff));
+    try std.testing.expect(!sequenceReached(0xffffffff, 0));
+}
