@@ -15,6 +15,7 @@ const Backend = struct {
     var invalidations: usize = 0;
     var retirements: usize = 0;
     var swaps: usize = 0;
+    var epoch: u32 = 0;
 
     pub fn start(comptime _: type, _: display.Options, first: anytype) void {
         front = @intFromPtr(first.texel_data.ptr);
@@ -24,20 +25,26 @@ const Backend = struct {
         invalidations = 0;
         retirements = 0;
         swaps = 0;
+        epoch = 0;
     }
     pub fn stop(_: u32) error{VBlankTimeout}!void {
         if (!vblank_ready) return error.VBlankTimeout;
         front = 0;
     }
-    pub fn retire(_: u32) error{VBlankTimeout}!void {
+    pub fn videoFrame() u32 {
+        return epoch;
+    }
+    pub fn retire(_: u32, _: u32) error{VBlankTimeout}!void {
         if (!vblank_ready) return error.VBlankTimeout;
         retirements += 1;
+        epoch +%= 1;
     }
     pub fn waitCompletion(_: Completion, _: u32) error{ RspTimeout, RdpFenceTimeout }!void {
         if (!fence_ready) return error.RdpFenceTimeout;
     }
     pub fn swap(frame: anytype, mode: display.PresentMode, _: u32) error{VBlankTimeout}!void {
         if (mode == .vsync and !vblank_ready) return error.VBlankTimeout;
+        if (mode == .vsync) epoch +%= 1;
         front = @intFromPtr(frame.texel_data.ptr);
         swaps += 1;
     }
@@ -71,6 +78,19 @@ test "acquire and present protect scanout across double and triple buffering" {
     }
 }
 
+test "GPU-only frames avoid cache invalidation while retaining completion ownership" {
+    var chain = try Swapchain.init(std.testing.allocator, .{ .framebuffer_access = .gpu_only });
+    defer chain.deinit(std.testing.allocator) catch unreachable;
+    const frame = try chain.acquire();
+    try expectEqual(@as(usize, 0), Backend.invalidations);
+    Backend.fence_ready = false;
+    try expectError(error.RdpFenceTimeout, chain.present(frame, .{ .rdp = .{ .target = 1 } }, .{}));
+    try expectError(error.FrameAlreadyAcquired, chain.acquire());
+    Backend.fence_ready = true;
+    try chain.present(frame, .{ .rdp = .{ .target = 1 } }, .{});
+    try expectEqual(@as(usize, 0), Backend.writebacks);
+}
+
 test "timeouts preserve frame ownership and allow retry" {
     var chain = try Swapchain.init(std.testing.allocator, .{});
     defer chain.deinit(std.testing.allocator) catch unreachable;
@@ -102,6 +122,48 @@ test "immediate presentation does not recycle the previous scanout until retrace
     try expectEqual(old_front, @intFromPtr(recycled.image.texel_data.ptr));
     try expectEqual(@as(usize, 1), Backend.retirements);
     try chain.release(recycled);
+}
+
+test "immediate triple buffering uses a free frame before waiting for retirement" {
+    var chain = try Swapchain.init(std.testing.allocator, .{ .present_mode = .immediate, .buffer_count = 3 });
+    defer chain.deinit(std.testing.allocator) catch unreachable;
+    const first = try chain.acquire();
+    Backend.vblank_ready = false;
+    try chain.present(first, .{ .rdp = .{ .target = 1 } }, .{});
+    const second = try chain.acquire();
+    try expectEqual(@as(usize, 2), second.index);
+    try chain.present(second, .{ .rdp = .{ .target = 2 } }, .{});
+    try expectError(error.VBlankTimeout, chain.acquire());
+    // Rendering crossed a retrace: recycling is already safe, without another wait.
+    Backend.epoch +%= 1;
+    const recycled = try chain.acquire();
+    try expectEqual(@as(usize, 0), recycled.index);
+    try expectEqual(@as(usize, 0), Backend.retirements);
+    try chain.release(recycled);
+    Backend.vblank_ready = true;
+}
+
+test "new immediate origins after retrace form a new retirement cohort" {
+    var chain = try Swapchain.init(std.testing.allocator, .{ .present_mode = .immediate, .buffer_count = 3 });
+    defer chain.deinit(std.testing.allocator) catch unreachable;
+    const first = try chain.acquire();
+    try chain.presentCpu(first, .{});
+    const second = try chain.acquire();
+    Backend.epoch +%= 1;
+    try chain.presentCpu(second, .{});
+    Backend.vblank_ready = false;
+    const free = try chain.acquire();
+    try expectEqual(@as(usize, 0), free.index);
+    // Releasing a free frame cannot bypass a buffer retired in the newer epoch.
+    try chain.release(free);
+    try expectError(error.VBlankTimeout, chain.acquire());
+    Backend.epoch = 0xffffffff;
+    const retired = try chain.acquire();
+    try chain.presentCpu(retired, .{});
+    Backend.epoch +%= 1;
+    const wrapped = try chain.acquire();
+    try chain.release(wrapped);
+    Backend.vblank_ready = true;
 }
 
 test "released and foreign acquisition tokens are rejected" {

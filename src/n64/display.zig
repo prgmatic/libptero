@@ -13,8 +13,8 @@ const Completion = rdp.Completion;
 pub const PresentMode = enum {
     /// Swap during a fresh vertical blank. Does not consume interrupt events.
     vsync,
-    /// Swap as soon as rendering finishes. May tear. The next acquire waits for
-    /// a fresh vertical blank before making the previous front buffer reusable.
+    /// Swap as soon as rendering finishes. May tear. Acquire waits for retrace
+    /// only when the next buffer is still awaiting scanout retirement.
     immediate,
 };
 
@@ -26,6 +26,9 @@ pub const Options = struct {
     gamma_enabled: bool = false,
     de_dither_enabled: bool = false,
     present_mode: PresentMode = .vsync,
+    /// GPU-only frames must not be read or written through cached CPU aliases.
+    /// Skips acquisition's cache invalidation when every frame is GPU-rendered.
+    framebuffer_access: enum { cpu_and_gpu, gpu_only } = .cpu_and_gpu,
     /// Register polling limit for acquire and deinit. This is not a duration.
     max_attempts: u32 = 100_000_000,
 };
@@ -64,7 +67,8 @@ fn SwapchainImpl(comptime Pixel: type, comptime Backend: type) type {
         next_index: usize = 1,
         acquired_index: ?usize = null,
         generation: usize = 0,
-        needs_retirement: bool = false,
+        retired_index: ?usize = null,
+        retirement_epoch: u32 = 0,
 
         /// A borrowed image and an acquisition token. Copies of the token are
         /// invalid after present/release. Do not modify the token's fields.
@@ -118,19 +122,21 @@ fn SwapchainImpl(comptime Pixel: type, comptime Backend: type) type {
         }
 
         /// Obtain a writable buffer distinct from the current front buffer.
-        /// Usually does not wait; after immediate presentation it first waits
-        /// for scanout retirement. Invalidates CPU cache lines so CPU reads see
-        /// the last rendered contents. No allocation or command submission.
+        /// Usually does not wait; immediate presentation waits only when the
+        /// next buffer still needs scanout retirement. With CPU access enabled,
+        /// invalidates cache lines so reads see the last rendered contents.
+        /// No allocation or command submission.
         pub fn acquire(self: *Self) (FrameError || error{VBlankTimeout})!Frame {
             if (self.acquired_index != null) return error.FrameAlreadyAcquired;
-            if (self.needs_retirement) {
-                try Backend.retire(self.options.max_attempts);
-                self.needs_retirement = false;
-            }
+            self.refreshRetirement();
             var index = self.next_index;
             if (index == self.front_index) index = (index + 1) % self.options.buffer_count;
+            if (self.retired_index == index) {
+                try Backend.retire(self.retirement_epoch, self.options.max_attempts);
+                self.retired_index = null;
+            }
             const target = self.getImage(index);
-            Backend.invalidate(target.texel_data);
+            if (self.options.framebuffer_access == .cpu_and_gpu) Backend.invalidate(target.texel_data);
             self.acquired_index = index;
             self.generation +%= 1;
             self.next_index = (index + 1) % self.options.buffer_count;
@@ -182,9 +188,21 @@ fn SwapchainImpl(comptime Pixel: type, comptime Backend: type) type {
 
         fn show(self: *Self, index: usize, options: PresentOptions) error{VBlankTimeout}!void {
             try Backend.swap(self.getImage(index), self.options.present_mode, options.max_attempts);
+            if (self.options.present_mode == .immediate) {
+                self.refreshRetirement();
+                if (self.retired_index == null) self.retired_index = self.front_index;
+                self.retirement_epoch = Backend.videoFrame();
+            } else self.retired_index = null;
             self.front_index = index;
             self.acquired_index = null;
-            self.needs_retirement = self.options.present_mode == .immediate;
+        }
+
+        fn refreshRetirement(self: *Self) void {
+            // All origins in this cohort were changed during the same retrace
+            // epoch. In ring order, the oldest retired buffer is encountered
+            // before any later one, including when an acquisition is released.
+            if (self.retired_index != null and Backend.videoFrame() != self.retirement_epoch)
+                self.retired_index = null;
         }
     };
 }
@@ -212,8 +230,16 @@ const Hardware = struct {
         try video.waitVBlank(max_attempts);
     }
 
-    fn retire(max_attempts: u32) error{VBlankTimeout}!void {
-        try video.waitVBlank(max_attempts);
+    fn videoFrame() u32 {
+        return @import("interrupt.zig").videoFrame();
+    }
+
+    fn retire(epoch: u32, max_attempts: u32) error{VBlankTimeout}!void {
+        var remaining = max_attempts;
+        while (videoFrame() == epoch) {
+            if (remaining == 0) return error.VBlankTimeout;
+            remaining -= 1;
+        }
     }
 
     fn waitCompletion(completion: Completion, max_attempts: u32) error{ RspTimeout, RdpFenceTimeout }!void {

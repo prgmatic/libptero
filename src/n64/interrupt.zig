@@ -7,19 +7,38 @@ var lock: u8 = 0;
 var pending_interrupts: u32 = 0;
 var rdp_fences_scheduled: u32 = 0;
 var rdp_fences_completed: u32 = 0;
+var video_frames: u32 = 0;
 
 pub fn interruptHandler() void {
     const raised = mi.getCurrentInterrupt();
 
     if (raised.rdp) {
         serviceRdpInterrupt();
-    } else if (raised.video) {
-        vi.claerInterrupt();
     }
+    if (raised.video) pollVideoInterrupt();
 
     // print("Int {} {}\n", .{raised.rdp, raised.video});
     const bits: u32 = @bitCast(raised);
     _ = @atomicRmw(u32, &pending_interrupts, .Or, bits, .release);
+}
+
+/// Monotonic retrace sequence. Services a pending VI event even when CPU
+/// interrupts are disabled, without consuming waitForInterrupt's notification.
+pub fn videoFrame() u32 {
+    pollVideoInterrupt();
+    return @atomicLoad(u32, &video_frames, .acquire);
+}
+
+fn pollVideoInterrupt() void {
+    const cp0 = @import("cpu/cp0.zig");
+    const status = cp0.regRead(.Status);
+    cp0.regWrite(.Status, status & ~@as(u32, 1));
+    defer cp0.regWrite(.Status, status);
+    if (!mi.isVideoInterruptPending()) return;
+    vi.claerInterrupt();
+    _ = @atomicRmw(u32, &video_frames, .Add, 1, .release);
+    const notification: u32 = @bitCast(InterruptMask{ .video = true });
+    _ = @atomicRmw(u32, &pending_interrupts, .Or, notification, .release);
 }
 
 pub const RdpFence = struct {

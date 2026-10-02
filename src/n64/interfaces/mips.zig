@@ -17,6 +17,10 @@ pub fn isRdpInterruptPending() bool {
     return interrupt.* & (@as(u32, 1) << 5) != 0;
 }
 
+pub fn isVideoInterruptPending() bool {
+    return interrupt.* & (@as(u32, 1) << 3) != 0;
+}
+
 pub fn getCurrentInterrupt() InterruptMask {
     return @bitCast(interrupt.* & interrupt_mask.*);
 }

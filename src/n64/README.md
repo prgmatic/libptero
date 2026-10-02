@@ -59,12 +59,18 @@ introduce queued frames or multiple in-flight fences. For raw control,
 with the caller responsible for separately finishing RSP work.
 
 `.present_mode = .immediate` switches origin as soon as rendering finishes and
-may tear. Its next `acquire` waits for a fresh retrace before making the previous
-scanout reusable. The default `.vsync` finishes this retirement during present.
-Both modes poll VI directly and work without enabling VI interrupts. Polling
+may tear. Acquisition uses free buffers immediately and waits only when recycling
+a buffer whose scanout has not retired. A retrace during rendering already
+satisfies retirement. The default `.vsync` finishes retirement during present.
+Both modes poll VI directly and work without enabling CPU interrupts. Polling
 does not consume interrupt events. `max_attempts` limits polls, not elapsed time.
 A presentation timeout retains the acquisition for retry; complete outstanding
 work before releasing it. An acquire timeout does not acquire a frame.
+
+Use `.framebuffer_access = .gpu_only` for frames rendered entirely by the GPU.
+This avoids a full-frame cache invalidation on acquisition. Those frames must
+not be accessed through cached CPU aliases; the default `.cpu_and_gpu` mode
+keeps CPU framebuffer access coherent.
 
 For CPU rendering, fill `frame.image` and use `presentCpu(frame, .{})`, which
 writes the pixels back before presentation. Acquire invalidates the buffer's
@@ -297,8 +303,9 @@ another player into it, then call `skeleton.blend(&skeleton, &other, factor)`
 before `skeleton.update()`. The destination can alias either source. Blend
 factors are clamped to 0–1, and rotations use normalized shortest-path blending.
 
-`SkinnedModel` allocates writable packed vertex copies and per-skin palettes
-once. Initialization rejects invalid skin indices, vertex/influence counts,
+`SkinnedModel` allocates writable packed vertex copies and per-skin position
+and normal palettes once. The normal palette uses an additional 64 bytes per
+joint to cache inverse-transpose transforms for single-joint vertices. Initialization rejects invalid skin indices, vertex/influence counts,
 joint references, and weights. Use a skeleton created from the same model nodes.
 `update()` performs CPU skinning with all four joint weights and inverse
 bind matrices, including inverse-transpose normals of the blended vertex transform for

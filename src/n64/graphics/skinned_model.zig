@@ -10,6 +10,7 @@ pub const SkinnedModel = struct {
     source: model_types.Model,
     parts: []model_types.Part,
     palettes: [][]math.Mat4,
+    normal_palettes: [][]math.Mat4,
 
     pub fn init(allocator: std.mem.Allocator, source: model_types.Model) !SkinnedModel {
         try validateModel(source);
@@ -29,11 +30,13 @@ pub const SkinnedModel = struct {
         }
         const palettes = try allocatePalettes(allocator, source.skins);
         errdefer freePalettes(allocator, palettes);
-        return .{ .source = source, .parts = parts, .palettes = palettes };
+        const normal_palettes = try allocatePalettes(allocator, source.skins);
+        return .{ .source = source, .parts = parts, .palettes = palettes, .normal_palettes = normal_palettes };
     }
 
     pub fn deinit(self: *SkinnedModel, allocator: std.mem.Allocator) void {
         freePalettes(allocator, self.palettes);
+        freePalettes(allocator, self.normal_palettes);
         for (self.parts) |part| {
             if (part.skin != null) allocator.free(part.vertices);
         }
@@ -51,9 +54,10 @@ pub const SkinnedModel = struct {
     /// All weights participate; inverse-transpose normals handle nonuniform scale.
     pub fn update(self: *SkinnedModel, skeleton: *const animation.Skeleton) void {
         std.debug.assert(self.source.nodes.ptr == skeleton.nodes.ptr and self.source.nodes.len == skeleton.nodes.len);
-        for (self.source.skins, self.palettes) |skin, palette| {
-            for (skin.joints, skin.inverse_bind_matrices, palette) |joint, inverse_bind, *matrix| {
+        for (self.source.skins, self.palettes, self.normal_palettes) |skin, palette, normals| {
+            for (skin.joints, skin.inverse_bind_matrices, palette, normals) |joint, inverse_bind, *matrix, *normal| {
                 matrix.* = skeleton.matrices[joint].mul(&inverse_bind);
+                normal.* = normalMatrix(matrix.*);
             }
         }
         for (self.source.parts, self.parts) |source, destination| {
@@ -63,13 +67,14 @@ pub const SkinnedModel = struct {
 
     fn updatePart(self: *SkinnedModel, source: model_types.Part, vertices: []geometry.VertexPair, skin: u16) void {
         const palette = self.palettes[skin];
+        const normals = self.normal_palettes[skin];
         for (source.influences, 0..) |influence, i| {
             const pair = &vertices[i / 2];
             const original = source.vertices[i / 2];
             if (i % 2 == 0) {
-                skinVertex(&pair.pos_a, &pair.normal_a, original.pos_a, original.normal_a, influence, palette);
+                skinVertex(&pair.pos_a, &pair.normal_a, original.pos_a, original.normal_a, influence, palette, normals);
             } else {
-                skinVertex(&pair.pos_b, &pair.normal_b, original.pos_b, original.normal_b, influence, palette);
+                skinVertex(&pair.pos_b, &pair.normal_b, original.pos_b, original.normal_b, influence, palette, normals);
             }
         }
     }
@@ -115,9 +120,29 @@ fn freePalettes(allocator: std.mem.Allocator, palettes: [][]math.Mat4) void {
     for (palettes) |palette| allocator.free(palette);
     allocator.free(palettes);
 }
-fn skinVertex(position_out: *[3]i16, normal_out: *u16, position: [3]i16, packed_normal: u16, influence: animation.Influence, palette: []const math.Mat4) void {
+fn skinVertex(position_out: *[3]i16, normal_out: *u16, position: [3]i16, packed_normal: u16, influence: animation.Influence, palette: []const math.Mat4, normals: []const math.Mat4) void {
     const input = math.Vec3.init(@floatFromInt(position[0]), @floatFromInt(position[1]), @floatFromInt(position[2]));
     const normal = unpackNormal(packed_normal);
+    if (singleJoint(influence)) |joint| {
+        // A lone positive weight cancels during normalization. Cache its
+        // inverse-transpose once per joint, rather than once per vertex.
+        storeVertex(position_out, normal_out, palette[joint].transformPoint(input).xyz(), normals[joint].transformDirection(normal));
+        return;
+    }
+    skinWeightedVertex(position_out, normal_out, position, packed_normal, input, normal, influence, palette);
+}
+
+fn singleJoint(influence: animation.Influence) ?u16 {
+    var result: ?u16 = null;
+    for (influence.joints, influence.weights) |joint, weight| {
+        if (weight == 0) continue;
+        if (result != null) return null;
+        result = joint;
+    }
+    return result;
+}
+
+fn skinWeightedVertex(position_out: *[3]i16, normal_out: *u16, position: [3]i16, packed_normal: u16, input: math.Vec3, normal: math.Vec3, influence: animation.Influence, palette: []const math.Mat4) void {
     var blended: math.Mat4 = .{ .m = @splat(@splat(0)) };
     var weight_sum: f32 = 0;
     for (influence.joints, influence.weights) |joint, weight| {
@@ -132,8 +157,12 @@ fn skinVertex(position_out: *[3]i16, normal_out: *u16, position: [3]i16, packed_
     }
     const result = blended.transformPoint(input).xyz().scale(1 / weight_sum);
     const normal_matrix = normalMatrix(blended);
-    position_out.* = .{ quantize(result.x), quantize(result.y), quantize(result.z) };
-    normal_out.* = geometry.packNormal(normal_matrix.transformDirection(normal));
+    storeVertex(position_out, normal_out, result, normal_matrix.transformDirection(normal));
+}
+
+fn storeVertex(position_out: *[3]i16, normal_out: *u16, position: math.Vec3, normal: math.Vec3) void {
+    position_out.* = .{ quantize(position.x), quantize(position.y), quantize(position.z) };
+    normal_out.* = geometry.packNormal(normal);
 }
 fn addWeightedMatrix(destination: *math.Mat4, matrix: math.Mat4, weight: f32) void {
     for (0..4) |column| for (0..3) |row| {
@@ -190,6 +219,31 @@ test "weighted skinning keeps immutable source and preserves per-instance pose" 
     const normal = unpackNormal(first.parts[0].vertices[0].normal_a);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 1.25), normal.x / normal.y, 0.05);
     try std.testing.expectEqual(@as(i16, 3), first.model().parts[0].vertices[0].pos_a[0]);
+}
+
+test "single-joint skinning normalizes weights in any slot and refreshes normal matrices" {
+    const nodes = [_]animation.Node{.{ .transform = .{ .scale = .init(2, 1, 1), .translation = .init(4, 0, 0) } }};
+    const vertices = [_]geometry.VertexPair{.{ .pos_a = .{ 2, 0, 0 }, .normal_a = geometry.packNormal(.init(1, 1, 0)), .pos_b = .{ 1, 0, 0 }, .normal_b = 0, .color_a = .white, .color_b = .white }};
+    const parts = [_]model_types.Part{.{ .vertices = &vertices, .material_index = 0, .vertex_count = 1, .skin = 0, .influences = &.{.{
+        .joints = .{ 0xffff, 0xffff, 0xffff, 0 },
+        .weights = .{ 0, 0, 0, 0.25 },
+    }} }};
+    const skins = [_]animation.Skin{.{ .joints = &.{0}, .inverse_bind_matrices = &.{math.Mat4.identity} }};
+    var skeleton = try animation.Skeleton.init(std.testing.allocator, &nodes);
+    defer skeleton.deinit(std.testing.allocator);
+    var instance = try SkinnedModel.init(std.testing.allocator, .{ .parts = &parts, .nodes = &nodes, .skins = &skins });
+    defer instance.deinit(std.testing.allocator);
+    instance.update(&skeleton);
+    try std.testing.expectEqual(@as(i16, 8), instance.parts[0].vertices[0].pos_a[0]);
+    const normal = unpackNormal(instance.parts[0].vertices[0].normal_a);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), normal.x / normal.y, 0.05);
+    skeleton.bones[0].scale = .init(1, 2, 1);
+    skeleton.update();
+    instance.update(&skeleton);
+    const later = unpackNormal(instance.parts[0].vertices[0].normal_a);
+    try std.testing.expectApproxEqAbs(@as(f32, 2), later.x / later.y, 0.1);
+    try std.testing.expectEqual(vertices[0].pos_b, instance.parts[0].vertices[0].pos_b);
+    try std.testing.expectEqual(@as(i16, 2), vertices[0].pos_a[0]);
 }
 
 test "four joint weights and separate skin palettes preserve the bind pose" {
