@@ -12,11 +12,11 @@ pub fn dmemPrint(fmt: []const u8, args: []const u32) void {
     if (!config.debug_logging) return;
 
     switch (n64.debug.current_backend) {
-        .IsViewer => {
+        .is_viewer => {
             const s = dmemFormat(n64.debug.is_viewer.buffer, fmt, args);
             n64.debug.is_viewer.flushBuffer(s.len * 4);
         },
-        .Sc64 => {
+        .sc64 => {
             @memset(n64.debug.sc64.data_buffer, 0);
             const s = dmemFormat(n64.debug.sc64.data_buffer, fmt, args);
             n64.debug.sc64.flushBuffer(s.len * 4);

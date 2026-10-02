@@ -477,7 +477,10 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
         \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts, .nodes = &nodes, .skins = &skins, .animations = &animations }}, .materials = .{{}} }};
         \\pub const ModelAsset = n64.graphics.model.Asset(Materials);
         \\pub const Materials = struct {{
-        \\    pub fn apply(_: @This(), context: anytype, index: u16) void {{
+        \\    pub fn apply(self: @This(), context: anytype, index: u16) void {{
+        \\        self.bind(context, index, self.get(index));
+        \\    }}
+        \\    pub fn bind(_: @This(), context: anytype, index: u16, material: n64.graphics.model.Material) void {{
         \\        switch (index) {{
         \\
     , .{name});
@@ -490,22 +493,22 @@ fn emitMaterials(allocator: std.mem.Allocator, source: *std.ArrayList(u8), docum
             try appendFormat(
                 allocator,
                 source,
-                "            {d} => get(index).bind(context, texture_{d}),\n",
+                "            {d} => material.bind(context, texture_{d}),\n",
                 .{ material_index, image_index },
             );
         } else {
-            try appendFormat(allocator, source, "            {d} => get(index).apply(context),\n", .{material_index});
+            try appendFormat(allocator, source, "            {d} => material.apply(context),\n", .{material_index});
         }
     }
     try source.appendSlice(
         allocator,
-        "            65535 => get(index).apply(context),\n",
+        "            65535 => material.apply(context),\n",
     );
     try source.appendSlice(allocator,
         \\            else => @panic("invalid model material index"),
         \\        }
         \\    }
-        \\    pub fn get(index: u16) n64.graphics.model.Material {
+        \\    pub fn get(_: @This(), index: u16) n64.graphics.model.Material {
         \\        return switch (index) {
         \\
     );
@@ -873,7 +876,7 @@ fn batchFits(unique_vertices: usize, triangle_count: usize, max_vertices: usize)
 
 fn finishBatch(allocator: std.mem.Allocator, output: *std.ArrayList(Batch), vertices: *std.ArrayList(Vertex), triangles: *std.ArrayList(Triangle), material: ?u32, preserve_order: bool) !void {
     if (triangles.items.len == 0) return;
-    if (vertices.items.len % 2 != 0) try vertices.append(allocator, vertices.items[vertices.items.len - 1]);
+    // Preserve logical counts; emitVertices pads only the hardware byte layout.
     try output.append(allocator, .{
         .vertices = try vertices.toOwnedSlice(allocator),
         .triangles = try triangles.toOwnedSlice(allocator),
@@ -1156,7 +1159,7 @@ test "blend materials preserve order and incomplete skinning is rejected" {
     defer source.deinit(std.testing.allocator);
     try emitMaterials(std.testing.allocator, &source, blend_document, &.{});
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".translucent = true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.items, "get(index).apply(context)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "material.apply(context)") != null);
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".alpha_d = .shade") != null);
 
     const primitive: Primitive = .{
@@ -1182,7 +1185,7 @@ test "Fast64 blend wrapper uses its N64 render mode" {
     defer source.deinit(std.testing.allocator);
     try emitMaterials(std.testing.allocator, &source, document, &.{});
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".translucent = false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.items, "get(index).apply(context)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "material.apply(context)") != null);
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".alpha_d = .one") != null);
 
     const translucent = Material{
@@ -1318,7 +1321,7 @@ test "model conversion remaps vertices and splits hardware-safe batches" {
     const model = try convert(std.testing.allocator, document, &binary, .{ .scale = 8, .max_vertices_per_batch = 4 });
     defer model.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 2), model.batches.len);
-    try std.testing.expectEqual(@as(usize, 4), model.batches[0].vertices.len);
+    try std.testing.expectEqual(@as(usize, 3), model.batches[0].vertices.len);
     try std.testing.expectEqual(@as(u16, 2), model.batches[1].material_index);
     try std.testing.expectEqual(Triangle{ 0, 1, 2 }, model.batches[1].triangles[0]);
     try std.testing.expectError(error.InvalidBatchSize, convert(std.testing.allocator, document, &binary, .{ .max_vertices_per_batch = 2 }));

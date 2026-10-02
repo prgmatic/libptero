@@ -6,11 +6,8 @@ const pi = n64.interfaces.parallel;
 const si = n64.interfaces.serial;
 
 export fn __start() linksection(".loader") callconv(.c) noreturn {
-    var sys_buffer: [256]u8 = undefined;
-    var fixed_buffer_alloc = std.heap.FixedBufferAllocator.init(&sys_buffer);
     if (config.debug_logging) {
         n64.debug.init();
-        n64.debug.initFmtBuffer(fixed_buffer_alloc.allocator()) catch undefined;
     }
 
     const detected_rdram: *volatile u32 = @ptrFromInt(0xA4000000);

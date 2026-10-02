@@ -7,7 +7,6 @@ const animation = @import("animation.zig");
 /// Writable model instance. Allocate one per in-flight frame, or wait for GPU
 /// completion before updating again. The borrowed source stays immutable.
 pub const SkinnedModel = struct {
-    allocator: std.mem.Allocator,
     source: model_types.Model,
     parts: []model_types.Part,
     palettes: [][]math.Mat4,
@@ -30,15 +29,15 @@ pub const SkinnedModel = struct {
         }
         const palettes = try allocatePalettes(allocator, source.skins);
         errdefer freePalettes(allocator, palettes);
-        return .{ .allocator = allocator, .source = source, .parts = parts, .palettes = palettes };
+        return .{ .source = source, .parts = parts, .palettes = palettes };
     }
 
-    pub fn deinit(self: *SkinnedModel) void {
-        freePalettes(self.allocator, self.palettes);
+    pub fn deinit(self: *SkinnedModel, allocator: std.mem.Allocator) void {
+        freePalettes(allocator, self.palettes);
         for (self.parts) |part| {
-            if (part.skin != null) self.allocator.free(part.vertices);
+            if (part.skin != null) allocator.free(part.vertices);
         }
-        self.allocator.free(self.parts);
+        allocator.free(self.parts);
         self.* = undefined;
     }
 
@@ -73,10 +72,6 @@ pub const SkinnedModel = struct {
                 skinVertex(&pair.pos_b, &pair.normal_b, original.pos_b, original.normal_b, influence, palette);
             }
         }
-    }
-
-    pub fn draw(self: *const SkinnedModel, context: anytype, materials: anytype) void {
-        model_types.draw(context, self.model(), materials);
     }
 };
 
@@ -176,11 +171,11 @@ test "weighted skinning keeps immutable source and preserves per-instance pose" 
     const nodes = [_]animation.Node{ .{ .transform = .{ .translation = .init(4, 0, 0) } }, .{ .transform = .{ .translation = .init(8, 0, 0) } } };
     const source: model_types.Model = .{ .parts = &parts, .skins = &skins, .nodes = &nodes };
     var skeleton = try animation.Skeleton.init(allocator, &nodes);
-    defer skeleton.deinit();
+    defer skeleton.deinit(std.testing.allocator);
     var first = try SkinnedModel.init(allocator, source);
-    defer first.deinit();
+    defer first.deinit(std.testing.allocator);
     var second = try SkinnedModel.init(allocator, source);
-    defer second.deinit();
+    defer second.deinit(std.testing.allocator);
     first.update(&skeleton);
     try std.testing.expectEqual(@as(i16, 9), first.parts[0].vertices[0].pos_a[0]);
     try std.testing.expectEqual(@as(i16, 2), source.parts[0].vertices[0].pos_a[0]);
@@ -205,7 +200,7 @@ test "four joint weights and separate skin palettes preserve the bind pose" {
         .{},
     };
     var skeleton = try animation.Skeleton.init(std.testing.allocator, &nodes);
-    defer skeleton.deinit();
+    defer skeleton.deinit(std.testing.allocator);
     // Child global T(5,0) Rz(90) T(2,0); inverse is T(-2,0) Rz(-90) T(-5,0).
     const inverse_r = math.Mat4.fromSrt(.one, .fromAxisAngle(.init(0, 0, 1), -std.math.pi / 2.0), .zero);
     const inverse_t = math.Mat4.fromSrt(.one, .identity, .init(-5, 0, 0));
@@ -224,7 +219,7 @@ test "four joint weights and separate skin palettes preserve the bind pose" {
     };
     const source: model_types.Model = .{ .nodes = &nodes, .skins = &skins, .parts = &parts };
     var instance = try SkinnedModel.init(std.testing.allocator, source);
-    defer instance.deinit();
+    defer instance.deinit(std.testing.allocator);
     instance.update(&skeleton);
     for (instance.parts) |part| try std.testing.expectEqualDeep(vertices[0].pos_a, part.vertices[0].pos_a);
     try std.testing.expect(instance.parts[2].vertices.ptr == vertices[0..].ptr);
@@ -240,7 +235,7 @@ fn allocationFixture(allocator: std.mem.Allocator) !void {
     const vertices = [_]geometry.VertexPair{.{ .pos_a = .{ 0, 0, 0 }, .normal_a = 0, .pos_b = .{ 0, 0, 0 }, .normal_b = 0, .color_a = .fromBytes(255, 255, 255, 255), .color_b = .fromBytes(255, 255, 255, 255) }};
     const source: model_types.Model = .{ .nodes = &.{.{}}, .skins = &.{.{ .joints = &.{0}, .inverse_bind_matrices = &.{math.Mat4.identity} }}, .parts = &.{.{ .vertices = &vertices, .vertex_count = 1, .material_index = 0, .skin = 0, .influences = &.{.{ .joints = .{ 0, 0, 0, 0 }, .weights = .{ 1, 0, 0, 0 } }} }} };
     var instance = try SkinnedModel.init(allocator, source);
-    defer instance.deinit();
+    defer instance.deinit(allocator);
 }
 
 test "skinned model validates native metadata and cleans up allocation failures" {

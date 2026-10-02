@@ -1,5 +1,6 @@
 const animation = @import("animation.zig");
 pub const SkinnedModel = @import("skinned_model.zig").SkinnedModel;
+pub const MutableModel = @import("mutable_model.zig").MutableModel;
 const math = @import("../math.zig");
 const geometry = @import("geometry.zig");
 pub const Material = @import("material.zig").Material;
@@ -13,6 +14,13 @@ pub const Model = struct {
     nodes: []const animation.Node = &.{},
     skins: []const animation.Skin = &.{},
     animations: []const animation.Clip = &.{},
+
+    pub fn findAnimation(self: Model, name: []const u8) ?*const animation.Clip {
+        for (self.animations) |*clip| {
+            if (@import("std").mem.eql(u8, clip.name, name)) return clip;
+        }
+        return null;
+    }
 };
 
 /// Borrowed model geometry and a typed material provider. Drawing lives on the
@@ -23,8 +31,19 @@ pub fn Asset(comptime Materials: type) type {
         materials: Materials,
 
         /// Read native material metadata without drawing or binding it.
-        pub fn material(_: @This(), index: u16) Material {
-            return Materials.get(index);
+        pub fn material(self: @This(), index: u16) Material {
+            return self.materials.get(index);
+        }
+
+        /// Replace borrowed geometry while retaining this asset's materials.
+        pub fn withModel(self: @This(), model: Model) @This() {
+            return .{ .model = model, .materials = self.materials };
+        }
+
+        /// Declarative material/texture overrides. Entries form a heterogeneous
+        /// tuple; omit index to affect every material. Later entries win.
+        pub fn withOverrides(self: @This(), entries: anytype) Asset(@import("material_overrides.zig").Provider(Materials, @TypeOf(entries))) {
+            return .{ .model = self.model, .materials = .{ .base = self.materials, .entries = entries } };
         }
     };
 }
@@ -177,4 +196,69 @@ test "model applies changed materials and submits packed batches" {
     try @import("std").testing.expectEqual(@as(usize, 2), context.pops);
     try @import("std").testing.expectEqual(@as(usize, 3), context.draws);
     try @import("std").testing.expectEqual(@as(usize, 2), applications);
+}
+
+test "asset overrides preserve embedded bindings, compose, and bind typed textures" {
+    const std = @import("std");
+    const rdp = @import("rdp.zig");
+    const colors = @import("color.zig");
+    const image = @import("image.zig");
+    const Fixture = struct {
+        const pixels = [_]colors.Rgba16{.white} ** 4;
+        const other_pixels = [_]colors.Rgba16{.red} ** 4;
+        const texture: image.ConstImage(colors.Rgba16) = .{ .width = 2, .height = 2, .texel_data = &pixels };
+        const other: image.ConstImage(colors.Rgba16) = .{ .width = 2, .height = 2, .texel_data = &other_pixels };
+        const Context = struct {
+            render: rdp.FixedRenderQueue,
+            fog_enabled: bool = true,
+            flags: geometry.DrawFlags = .{},
+            fallback_bindings: usize = 0,
+            pub fn setDrawFlags(self: *@This(), flags: geometry.DrawFlags) void {
+                self.flags = flags;
+            }
+            pub fn setFogEnabled(self: *@This(), enabled: bool) void {
+                self.fog_enabled = enabled;
+            }
+        };
+        const Materials = struct {
+            pub fn get(_: @This(), _: u16) Material {
+                return .{ .flags = .{ .depth = true, .textured = true }, .sampler = .{ .mask_t = 3 }, .combine = .shade };
+            }
+            pub fn bind(_: @This(), context: *Context, _: u16, material: Material) void {
+                context.fallback_bindings += 1;
+                material.bind(context, texture);
+            }
+        };
+    };
+    const original: Asset(Fixture.Materials) = .{ .model = .{ .parts = &.{} }, .materials = .{} };
+    const overridden = original.withOverrides(.{
+        .{ .fog = false, .no_light = true },
+        .{ .index = 1, .texture = Fixture.other, .sampler = rdp.Sampler{ .mask_s = 1 } },
+    }).withOverrides(.{.{ .index = 1, .no_light = false, .primitive = colors.Rgba32.red }});
+    try std.testing.expect(overridden.material(0).flags.no_light);
+    try std.testing.expect(!overridden.material(1).flags.no_light);
+    try std.testing.expectEqual(colors.Rgba32.red, overridden.material(1).primitive.?);
+    try std.testing.expectEqual(@as(?bool, null), original.material(0).fog);
+    const literal_override = original.withOverrides(.{.{ .sampler = .{ .mask_s = 2 }, .flags = .{ .shaded = true }, .primitive = colors.Rgba32.blue }});
+    try std.testing.expectEqual(@as(u4, 2), literal_override.material(0).sampler.mask_s);
+    try std.testing.expectEqual(@as(u4, 3), literal_override.material(0).sampler.mask_t);
+    try std.testing.expect(literal_override.material(0).flags.depth);
+    try std.testing.expect(literal_override.material(0).flags.shaded);
+    try std.testing.expectEqual(colors.Rgba32.blue, literal_override.material(0).primitive.?);
+    var commands: [256]u64 = undefined;
+    var context: Fixture.Context = .{ .render = .init(.{ .buffer = &commands }) };
+    overridden.materials.apply(&context, 0);
+    try std.testing.expectEqual(@as(usize, 1), context.fallback_bindings);
+    try std.testing.expectEqual(@intFromPtr(Fixture.pixels[0..].ptr), context.render.tex_cache[0].ptr);
+    overridden.materials.apply(&context, 1);
+    try std.testing.expectEqual(@as(usize, 1), context.fallback_bindings);
+    try std.testing.expectEqual(@intFromPtr(Fixture.other_pixels[0..].ptr), context.render.tex_cache[1].ptr);
+    try std.testing.expectEqual(@as(u4, 1), context.render.tex_cache[1].sampler.mask_s);
+    try std.testing.expect(!context.fog_enabled);
+    const pair = original.withOverrides(.{.{ .texture = Fixture.texture, .second_texture = Fixture.other }});
+    pair.materials.apply(&context, 0);
+    try std.testing.expectEqual(@as(usize, 1), context.fallback_bindings);
+    const replacement: Model = .{ .parts = &.{}, .animations = &.{.{ .name = "idle", .duration = 1, .tracks = &.{} }} };
+    try std.testing.expect(overridden.withModel(replacement).model.findAnimation("idle") != null);
+    try std.testing.expect(replacement.findAnimation("missing") == null);
 }

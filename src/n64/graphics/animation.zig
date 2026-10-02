@@ -101,7 +101,6 @@ pub const Clip = struct {
 /// Mutable node transforms and global matrices. Definitions stay borrowed.
 /// Hierarchies are validated and ordered once; update performs no allocation.
 pub const Skeleton = struct {
-    allocator: std.mem.Allocator,
     nodes: []const Node,
     bones: []Transform,
     matrices: []math.Mat4,
@@ -120,16 +119,16 @@ pub const Skeleton = struct {
         @memset(states, 0);
         var count: usize = 0;
         for (nodes, 0..) |_, i| try visit(nodes, states, order, &count, i);
-        var result: Skeleton = .{ .allocator = allocator, .nodes = nodes, .bones = bones, .matrices = matrices, .order = order };
+        var result: Skeleton = .{ .nodes = nodes, .bones = bones, .matrices = matrices, .order = order };
         result.reset();
         result.update();
         return result;
     }
 
-    pub fn deinit(self: *Skeleton) void {
-        self.allocator.free(self.order);
-        self.allocator.free(self.matrices);
-        self.allocator.free(self.bones);
+    pub fn deinit(self: *Skeleton, allocator: std.mem.Allocator) void {
+        allocator.free(self.order);
+        allocator.free(self.matrices);
+        allocator.free(self.bones);
         self.* = undefined;
     }
 
@@ -251,13 +250,13 @@ test "hierarchy supports unordered nodes, attachment matrices, reset and aliased
         .{ .name = "root", .transform = .{ .translation = .init(3, 0, 0) } },
     };
     var skeleton = try Skeleton.init(std.testing.allocator, &nodes);
-    defer skeleton.deinit();
+    defer skeleton.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(?u16, 0), skeleton.findBone("child"));
     try std.testing.expectEqual(@as(?u16, null), skeleton.findBone("missing"));
     try std.testing.expectEqual(@as(f32, 3), skeleton.matrices[0].m[3][0]);
     try std.testing.expectEqual(@as(f32, 2), skeleton.matrices[0].m[3][1]);
     var other = try Skeleton.init(std.testing.allocator, &nodes);
-    defer other.deinit();
+    defer other.deinit(std.testing.allocator);
     other.bones[1].translation.x = 7;
     skeleton.blend(&skeleton, &other, 0.5);
     skeleton.update();
@@ -274,7 +273,7 @@ test "players loop, seek while paused, override properties and stop at final pos
     const tracks = [_]Track{.{ .node = 0, .path = .translation, .times = &times, .values = &.{ .{ 0, 0, 0, 0 }, .{ 10, 0, 0, 0 } } }};
     const clip: Clip = .{ .name = "move", .duration = 1, .tracks = &tracks };
     var skeleton = try Skeleton.init(std.testing.allocator, &.{.{}});
-    defer skeleton.deinit();
+    defer skeleton.deinit(std.testing.allocator);
     var player: Player = .{ .clip = &clip };
     player.update(&skeleton, 2.25);
     try std.testing.expectApproxEqAbs(@as(f32, 2.5), skeleton.bones[0].translation.x, 0.00001);
@@ -314,7 +313,7 @@ test "step, cubic Hermite and shortest quaternion interpolation" {
 test "sparse channels and later players preserve unrelated authored properties" {
     const nodes = [_]Node{ .{ .transform = .{ .scale = .init(2, 3, 4), .rotation = .fromAxisAngle(.init(0, 1, 0), 0.7) } }, .{ .transform = .{ .translation = .init(5, 6, 7) } } };
     var skeleton = try Skeleton.init(std.testing.allocator, &nodes);
-    defer skeleton.deinit();
+    defer skeleton.deinit(std.testing.allocator);
     const base: Clip = .{ .name = "base", .duration = 2, .tracks = &.{.{ .node = 0, .path = .translation, .times = &.{ 0, 2 }, .values = &.{ .{ 0, 0, 0, 0 }, .{ 4, 0, 0, 0 } } }} };
     const override: Clip = .{ .name = "override", .duration = 2, .tracks = &.{.{ .node = 0, .path = .translation, .times = &.{0}, .values = &.{.{ 9, 0, 0, 0 }} }} };
     var first: Player = .{ .clip = &base };
@@ -350,7 +349,7 @@ test "quaternion blending accepts opposite signs and cubic sampling normalizes" 
 
 fn allocationFixture(allocator: std.mem.Allocator) !void {
     var skeleton = try Skeleton.init(allocator, &.{ .{}, .{ .parent = 0 } });
-    defer skeleton.deinit();
+    defer skeleton.deinit(allocator);
 }
 
 test "skeleton frees partially allocated instances" {

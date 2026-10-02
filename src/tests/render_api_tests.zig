@@ -10,6 +10,7 @@ var owned_renderer: n64.graphics.geometry.Renderer = undefined;
 var pixels: [8 * 8]n64.graphics.color.Rgba32 align(64) = undefined;
 
 pub const tests = [_]runner.Test{
+    .{ .name = "Render API: mutable models and automatic queue rollover", .run = mutableModelRollover },
     .{ .name = "Render API: model draw scopes a borrowed transform", .run = transformedModel },
     .{ .name = "Render API: owning geometry renderer lifecycle", .run = owningRenderer },
     .{ .name = "Render API: owned depth clears and restores color target", .run = depthClear },
@@ -135,14 +136,58 @@ var model_transform: n64.math.FixedMat4 align(16) = .identity;
 var model_viewport = n64.graphics.geometry.Viewport.init(8, 8);
 
 const TestMaterials = struct {
-    pub fn apply(_: @This(), context: *n64.graphics.geometry.Context, _: u16) void {
-        (n64.graphics.model.Material{
+    pub fn get(_: @This(), _: u16) n64.graphics.model.Material {
+        return .{
             .flags = .{ .no_light = true },
             .combine = .primitive,
             .primitive = .green,
-        }).apply(context);
+        };
+    }
+    pub fn bind(_: @This(), context: *n64.graphics.geometry.Context, _: u16, material: n64.graphics.model.Material) void {
+        material.apply(context);
+    }
+    pub fn apply(self: @This(), context: *n64.graphics.geometry.Context, index: u16) void {
+        self.bind(context, index, self.get(index));
     }
 };
+
+fn mutableModelRollover() !void {
+    var memory: [1024]u8 align(64) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&memory);
+    const allocator = fixed.allocator();
+    const parts = [_]n64.graphics.model.Part{.{
+        .vertices = &model_vertices,
+        .strip_indices = &model_indices,
+        .material_index = 0,
+        .vertex_count = 3,
+    }};
+    const source: n64.graphics.model.Asset(TestMaterials) = .{
+        .model = .{ .parts = &parts },
+        .materials = .{},
+    };
+    var mesh = try n64.graphics.model.MutableModel.init(allocator, source.model);
+    defer mesh.deinit(allocator);
+    var vertices = mesh.vertices(0).iterator();
+    while (vertices.next()) |vertex| vertex.position[0] += 1;
+    try testing.expectEqual(@as(i16, -1), model_vertices[0].pos_a[0]);
+    const asset = source.withModel(mesh.model()).withOverrides(.{.{ .primitive = n64.graphics.color.Rgba32.blue }});
+    owned_renderer.init();
+    const image = try n64.graphics.image.ImgRgba32.initBuffer(&pixels, 8, 8);
+    owned_renderer.beginFrame(image, .{ .clear_color = .black });
+    model_viewport = .init(8, 8);
+    owned_renderer.geometry.attachViewport(&model_viewport);
+    // A scene larger than the old example's 32-draw workaround must stream
+    // without caller-selected batching or intermediate completion waits.
+    for (0..250) |_| owned_renderer.geometry.drawModel(asset);
+    try owned_renderer.submit().wait(.{ .max_attempts = 100_000_000 });
+    defer owned_renderer.deinit();
+    n64.cache.invalidateData(&pixels);
+    var blue: usize = 0;
+    for (pixels) |pixel| if (pixel.r == 0 and pixel.g == 0 and pixel.b == 255) {
+        blue += 1;
+    };
+    try testing.expect(blue > 0 and blue < pixels.len);
+}
 
 fn transformedModel() !void {
     owned_renderer.init();

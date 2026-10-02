@@ -262,10 +262,10 @@ mutable instances:
 ```zig
 const animation = n64.graphics.animation;
 var skeleton = try animation.Skeleton.init(allocator, assets.snake.model.nodes);
-defer skeleton.deinit();
+defer skeleton.deinit(allocator);
 var player: animation.Player = .{ .clip = &assets.snake.model.animations[0] };
 var mesh = try n64.graphics.model.SkinnedModel.init(allocator, assets.snake.model);
-defer mesh.deinit();
+defer mesh.deinit(allocator);
 
 player.update(&skeleton, delta_seconds);
 skeleton.update();
@@ -314,3 +314,121 @@ GPU work completes. Skeleton transforms may change after CPU skinning, but
 queued fixed matrices, vertices, and textures retain the usual borrowed-resource
 lifetime. `Skeleton` and `SkinnedModel` own allocations; free each instance once
 with `deinit()` and keep their immutable source model alive throughout.
+
+## Controller snapshots
+
+`io.joypad.System` owns fixed, aligned storage for all four ports. Initialization
+and polling allocate nothing and finish SI DMA before returning. Systems and
+snapshots are movable, but only one system or raw Joybus transaction may use SI
+at a time. No teardown is required.
+
+```zig
+var controllers = n64.io.joypad.System.init();
+controllers.poll();
+const input = controllers.get(.one);
+if (input.pressed(.a)) jump();
+if (input.held(.r)) accelerate();
+if (input.released(.z)) stopCharging();
+const horizontal = input.state.stick_x;
+```
+
+`Button` is an enum; held/pressed/released exclude axes and reserved PIF bits.
+Edges remain stable until the next poll. Failed or absent-device reads produce
+neutral input and release previously held buttons. `refresh()` updates controller
+styles after hot-plugging. Raw `State` preserves the hardware's packed response
+layout. This replaces the global joypad array, allocator-based initialization,
+and manual previous-state comparisons.
+
+## Time and FPS
+
+`time.Instant.now()` reads Count; `later.since(earlier)` returns a `Duration`.
+`Duration.seconds()`, `milliseconds()`, and `nanoseconds()` provide conversions.
+`Timer.start()`, `read()`, `reset()`, and `lap()` follow the usual timer pattern:
+
+```zig
+var timer = n64.time.Timer.start();
+var fps = n64.time.FpsCounter.init(.{ .refresh_rate = 60 });
+const elapsed = timer.lap();
+update(elapsed.seconds());
+const filtered_fps = fps.update(elapsed);
+```
+
+Count wraps about every 91.6 seconds. Differences handle one wrap; read/lap before
+a full counter period elapses. These are interval timers, not a persistent wall
+clock, and require no interrupts. FPS filtering is separate from the timer.
+Omit `refresh_rate` for immediate presentation; set it to the display's refresh
+rate when whole refresh intervals are appropriate. `smoothing` and `initial_fps`
+are explicit options.
+
+## Formatted text and debug output
+
+`Font.drawPrint` formats into caller-provided scratch storage and draws through
+the same font API. Formatting overflow returns `NoSpaceLeft` before any render
+commands are emitted. Scratch can be reused immediately after the call; font
+atlas storage remains borrowed until GPU completion.
+
+```zig
+var text: [64]u8 = undefined;
+_ = try assets.console.drawPrint(render, 16, 20, &text, .{}, "FPS: {d:.2}", .{fps});
+```
+
+`debug.init()` detects a backend. `debug.print` uses a local 256-byte formatting
+buffer, with no heap initialization or shared formatting storage. Oversized
+messages emit their buffered prefix and `[truncated]`. `debug.writeStr` remains
+the raw path for panic handling. The exception module is `debug.exception` and
+backend enum tags are `none`, `is_viewer`, and `sc64`.
+
+## Model overrides and writable instances
+
+Generated model assets expose declarative overrides while retaining typed texture
+bindings, imported pipeline state, and embedded textures on unmodified materials:
+
+```zig
+const map = assets.map.withOverrides(.{
+    .{ .fog = false }, // No index: apply to every material.
+    .{ .index = 0, .texture = assets.sand },
+    .{ .index = 1, .texture = assets.stone, .no_light = true },
+});
+renderer.geometry.drawModelWithTransform(map, &matrix);
+```
+
+Entries are a heterogeneous tuple. They may contain any `Material` field, a full
+`material` replacement, `no_light`, and a typed `texture`. `second_texture` binds
+a pair and requires `texture` in the same entry. Imported samplers are retained
+unless overridden. Anonymous nested structs such as `.sampler = .{ .mask_s = 5 }`
+patch only their named fields; explicitly typed values replace the whole field.
+Binding textures preserves the material's draw flags and
+combiner: override those explicitly when adding texturing to an untextured source.
+Later entries win; an omitted index affects all materials. Repeated
+`withOverrides` calls compose and retain earlier texture bindings.
+`asset.material(index)` reads the resulting state. Generated providers implement
+`get(index)` and `bind(context, index, material)`; custom draw providers can still
+implement just `apply(context, index)`.
+
+`withModel(model)` replaces borrowed geometry while retaining the asset's
+material provider. Use it for both skinned and otherwise mutable instances:
+
+```zig
+var mesh = try n64.graphics.model.MutableModel.init(allocator, assets.lava.model);
+defer mesh.deinit(allocator);
+var vertices = mesh.vertices(0).iterator();
+while (vertices.next()) |vertex| vertex.position[1] = 20;
+renderer.geometry.drawModel(assets.lava.withModel(mesh.model()));
+const completion = renderer.submit();
+try completion.wait(.{});
+```
+
+`MutableModel` copies vertex storage, borrows node/skin/animation metadata and
+triangle topology, and marks its parts dynamic. Draws perform cache writeback;
+application code does not cast away source constness or manually flush the mesh.
+`vertices(part_index).get(index)` and `iterator().next()` expose logical vertices,
+including odd vertex counts without exposing the final pair's padding. References
+contain position, normal, color, and UV pointers. `reset()` restores source data.
+Wait for GPU completion before changing, resetting, or freeing an instance.
+Models draw through the geometry context; `SkinnedModel.draw` has been removed.
+`Model.findAnimation(name)` returns an optional borrowed clip pointer.
+
+All allocator-owned runtime image/model/skeleton types now accept the original
+allocator in `deinit(allocator)`; they do not retain an allocator internally.
+Renderers/runtime retain their allocation-free in-place initialization and
+stable-address requirement.

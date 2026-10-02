@@ -1,6 +1,6 @@
 pub const sc64 = @import("debug/sc64.zig");
 pub const is_viewer = @import("debug/is_viewer.zig");
-pub const exepction = @import("debug/exception.zig");
+pub const exception = @import("debug/exception.zig");
 pub const TrapFrame = @import("debug/cpu_state.zig").TrapFrame;
 pub const backtrace = @import("debug/backtrace.zig");
 pub const srcmap = @import("debug/srcmap.zig");
@@ -9,17 +9,14 @@ pub const console_font = @import("debug/console_font.zig");
 pub const diagnostics = @import("debug/diagnostics.zig");
 
 const std = @import("std");
-const io = @import("io.zig");
-
-var fmt_buffer: ?[]u8 = null;
 
 pub const Backend = enum(u8) {
-    None,
-    IsViewer,
-    Sc64,
+    none,
+    is_viewer,
+    sc64,
 };
 
-pub var current_backend = Backend.None;
+pub var current_backend = Backend.none;
 
 pub fn init() void {
     current_backend = detect();
@@ -27,31 +24,32 @@ pub fn init() void {
 
 fn detect() Backend {
     if (sc64.detect())
-        return .Sc64;
+        return .sc64;
     if (is_viewer.detect())
-        return .IsViewer;
-    return .None;
+        return .is_viewer;
+    return .none;
 }
 
-pub fn initFmtBuffer(allocator: std.mem.Allocator) !void {
-    fmt_buffer = try allocator.alloc(u8, 256);
-}
-
+/// Best-effort formatting into a local 256-byte buffer; no heap setup is needed.
+/// Oversized messages emit their buffered prefix followed by a truncation marker.
 pub fn print(comptime fmt: []const u8, args: anytype) void {
-    const str = std.fmt.bufPrint(fmt_buffer.?, fmt, args) catch "";
-    switch (current_backend) {
-        .IsViewer => is_viewer.print(str),
-        .Sc64 => sc64.print(str),
-        else => {},
-    }
+    if (current_backend == .none) return;
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    writer.print(fmt, args) catch {
+        writeStr(writer.buffered());
+        writeStr("[truncated]\n");
+        return;
+    };
+    writeStr(writer.buffered());
 }
 
 // Write a raw string to the debug backend without going through std.fmt.
 // Safe to call from a panic handler (no safety checks, no allocations).
 pub fn writeStr(str: []const u8) void {
     switch (current_backend) {
-        .IsViewer => is_viewer.print(str),
-        .Sc64 => sc64.print(str),
+        .is_viewer => is_viewer.print(str),
+        .sc64 => sc64.print(str),
         else => {},
     }
 }

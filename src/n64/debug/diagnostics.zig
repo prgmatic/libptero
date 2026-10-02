@@ -16,7 +16,7 @@ fn print(comptime format: []const u8, args: anytype) void {
 /// Read through KSEG1: do not discard or write back CPU cache lines here.
 /// IDs identify transfers in logs and must not be reused within one capture log.
 pub fn captureFramebuffer(frame: anytype, fence: rdp.Fence, id: u32, max_attempts: u32) !void {
-    if (debug.current_backend == .None) return error.NoDebugBackend;
+    if (debug.current_backend == .none) return error.NoDebugBackend;
     const Frame = @TypeOf(frame);
     if (Frame.format != .rgba or (Frame.bit_depth != .@"16" and Frame.bit_depth != .@"32"))
         @compileError("framebuffer capture supports RGBA16 and RGBA32 only");
@@ -88,7 +88,7 @@ pub const RenderSnapshot = struct {
 };
 
 /// Report a timeout without waiting for hardware, halting the RSP, touching the
-/// semaphore, allocating, or relying on debug.initFmtBuffer. Label <= 80 bytes.
+/// semaphore or allocating formatting storage. Label <= 80 bytes.
 /// Backend transmission itself can block; this is not a transport watchdog.
 pub fn reportRenderTimeout(label: []const u8, queue: ?*const rsp.Queue) void {
     const state = RenderSnapshot.read();

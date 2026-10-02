@@ -12,7 +12,7 @@ export fn interruptHandler(frame: *n64.debug.TrapFrame) callconv(.c) noreturn {
     if (config.exception_handler.len != 0) {
         return @field(app, config.exception_handler)(frame);
     }
-    n64.debug.exepction.exceptionHandler(frame);
+    n64.debug.exception.exceptionHandler(frame);
 }
 
 export fn __MI_handler() callconv(.c) void {

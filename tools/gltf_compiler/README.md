@@ -25,12 +25,20 @@ render-mode preset to distinguish opaque and translucent surfaces.
 
 Legacy Fast64 `extras.f3d_mat.tex0` tile bounds supply UV dimensions when no
 embedded image dimensions are available. External images still need separate
-texture assets and a material callback; this metadata fallback does not load them.
+texture assets and declarative bindings or a material callback; this metadata fallback does not load them.
 
 Material state is exposed as `asset.material(index)` (a native
 `n64.graphics.model.Material`). `context.drawModel(asset)` applies it
 automatically for embedded textures. For external textures, callbacks can use
 `asset.material(index).bind(context, texture)` without recreating material settings.
+For ordinary bindings, use a value such as
+`asset.withOverrides(.{.{ .index = 0, .texture = assets.crate, .fog = false }})`.
+Overrides preserve imported material state and retain embedded textures for
+unmodified materials. Any native material field can be replaced; `no_light`
+updates that draw flag without replacing the other flags. `second_texture`
+binds a texture pair. Later entries win; omitting `index` affects all materials.
+`withModel(instance.model())` retains bindings for mutable/skinned geometry.
+
 Pass a custom provider through `context.drawModelWithMaterials(asset.model, provider)`;
 it implements `apply(context, material_index)`. Asset values contain borrowed geometry
 and their provider, with no drawing methods or hidden renderer ownership.
@@ -54,7 +62,8 @@ Application code still owns fog color/range and animated sampler offsets.
 The renderer streams model parts asynchronously through the RSP command queue.
 The queue rolls over according to its actual word capacity, so model code does
 not guess a safe batch size from triangle counts. Generated parts declare their
-data immutable; handwritten dynamic parts can select `.data_usage = .dynamic`
+data immutable; generated `vertex_count` describes logical vertices, while the
+binary storage rounds up to complete hardware pairs. Handwritten dynamic parts can select `.data_usage = .dynamic`
 to request cache writeback on every draw.
 
 The standalone CLI is:
@@ -93,7 +102,7 @@ Node matrix transforms, instanced mesh nodes, animated rigid meshes, morph
 targets, sparse accessors, external buffers/images, embedded texture palettes, automatic
 loading of multiple texture units, and the full modern Fast64
 combiner/render-mode extension are not implemented. External textures can be
-bound by a typed material provider, as the skeleton and animation examples do.
+bound with declarative asset overrides or a custom typed material provider.
 External CI4/CI8 textures and their palettes are supported by the public texture SDK.
 Two external textures can be bound with `render.useTexturePair`; generated legacy
 materials expose both samplers and both combiner cycles. Key/conversion

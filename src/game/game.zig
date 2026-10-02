@@ -44,7 +44,7 @@ const colors = [_]Rgba32{
 
 pub fn main() !void {
     n64.debug.init();
-    try n64.debug.initFmtBuffer(allocator);
+
     print("hello from n64\n", .{});
 
     try init();

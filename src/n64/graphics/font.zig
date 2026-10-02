@@ -46,14 +46,14 @@ pub const Font = struct {
         while (low < high) {
             const middle = low + (high - low) / 2;
             const pair = self.kernings[middle];
-            if (pair.first < first or (pair.first == first and pair.second < second))
+            if (kerningBefore(pair, first, second))
                 low = middle + 1
             else
                 high = middle;
         }
         if (low < self.kernings.len) {
             const pair = self.kernings[low];
-            if (pair.first == first and pair.second == second) return pair.amount;
+            if (kerningMatches(pair, first, second)) return pair.amount;
         }
         return 0;
     }
@@ -77,51 +77,86 @@ pub const Font = struct {
         return self.layout(@as(?@TypeOf(render_queue), render_queue), x, baseline_y, utf8, options);
     }
 
+    /// Format and draw using caller-owned scratch storage. The text is consumed
+    /// while recording: scratch may be reused immediately after this returns.
+    /// Formatting errors occur before any render commands are emitted.
+    pub fn drawPrint(self: Font, render_queue: anytype, x: f32, baseline_y: f32, buffer: []u8, options: TextOptions, comptime fmt: []const u8, args: anytype) (Error || error{NoSpaceLeft})!TextMetrics {
+        const text = try @import("std").fmt.bufPrint(buffer, fmt, args);
+        return self.draw(render_queue, x, baseline_y, text, options);
+    }
+
     fn layout(self: Font, render_queue: anytype, origin_x: f32, baseline_y: f32, utf8: []const u8, options: TextOptions) Error!TextMetrics {
         if (options.scale <= 0) return .{};
         const view = @import("std").unicode.Utf8View.init(utf8) catch return Error.InvalidUtf8;
         var iterator = view.iterator();
-        var pen_x = origin_x;
-        var pen_y = baseline_y;
-        var previous: ?u16 = null;
-        var metrics: TextMetrics = .{ .height = @as(f32, @floatFromInt(self.line_height)) * options.scale, .lines = 1 };
+        var cursor = TextCursor.init(origin_x, baseline_y, self.line_height, options);
         while (iterator.nextCodepoint()) |codepoint| {
             if (codepoint == '\n') {
-                metrics.width = @max(metrics.width, pen_x - origin_x);
-                pen_x = origin_x;
-                pen_y += @as(f32, @floatFromInt(@as(i32, self.line_height) + options.line_spacing)) * options.scale;
-                previous = null;
-                metrics.lines += 1;
-                metrics.height = (pen_y - baseline_y) + @as(f32, @floatFromInt(self.line_height)) * options.scale;
+                cursor.newline();
                 continue;
             }
             const glyph_index = self.glyphIndex(codepoint) orelse {
-                previous = null;
+                cursor.previous = null;
                 continue;
             };
-            const glyph_info = self.glyphs[glyph_index];
-            if (previous) |prior| pen_x += @as(f32, @floatFromInt(self.kerning(prior, glyph_index))) * options.scale;
-            if (render_queue) |queue| {
-                if (glyph_info.width != 0 and glyph_info.height != 0) queue.drawSprite(
-                    self.atlases[glyph_info.atlas],
-                    pen_x + @as(f32, @floatFromInt(glyph_info.x_offset)) * options.scale,
-                    pen_y + @as(f32, @floatFromInt(glyph_info.y_offset)) * options.scale,
-                    .{
-                        .s0 = glyph_info.s,
-                        .t0 = glyph_info.t,
-                        .width = @intCast(glyph_info.width),
-                        .height = @intCast(glyph_info.height),
-                        .scale_x = options.scale,
-                        .scale_y = options.scale,
-                    },
-                );
-            }
-            pen_x += @as(f32, @floatFromInt(glyph_info.x_advance)) * options.scale;
-            previous = glyph_index;
-            metrics.glyphs += 1;
+            cursor.place(self, render_queue, glyph_index);
         }
-        metrics.width = @max(metrics.width, pen_x - origin_x);
-        return metrics;
+        cursor.metrics.width = @max(cursor.metrics.width, cursor.x - origin_x);
+        return cursor.metrics;
+    }
+};
+
+fn kerningBefore(pair: Kerning, first: u16, second: u16) bool {
+    return pair.first < first or (pair.first == first and pair.second < second);
+}
+
+fn kerningMatches(pair: Kerning, first: u16, second: u16) bool {
+    return pair.first == first and pair.second == second;
+}
+
+const TextCursor = struct {
+    origin_x: f32,
+    origin_y: f32,
+    x: f32,
+    y: f32,
+    line_height: u16,
+    options: TextOptions,
+    previous: ?u16 = null,
+    metrics: TextMetrics,
+
+    fn init(x: f32, y: f32, line_height: u16, options: TextOptions) TextCursor {
+        return .{
+            .origin_x = x,
+            .origin_y = y,
+            .x = x,
+            .y = y,
+            .line_height = line_height,
+            .options = options,
+            .metrics = .{ .height = @as(f32, @floatFromInt(line_height)) * options.scale, .lines = 1 },
+        };
+    }
+    fn newline(self: *TextCursor) void {
+        self.metrics.width = @max(self.metrics.width, self.x - self.origin_x);
+        self.x = self.origin_x;
+        self.y += @as(f32, @floatFromInt(@as(i32, self.line_height) + self.options.line_spacing)) * self.options.scale;
+        self.previous = null;
+        self.metrics.lines += 1;
+        self.metrics.height = self.y - self.origin_y + @as(f32, @floatFromInt(self.line_height)) * self.options.scale;
+    }
+    fn place(self: *TextCursor, font: Font, render_queue: anytype, index: u16) void {
+        const glyph = font.glyphs[index];
+        if (self.previous) |prior| self.x += @as(f32, @floatFromInt(font.kerning(prior, index))) * self.options.scale;
+        if (render_queue) |queue| {
+            if (glyph.width != 0 and glyph.height != 0) queue.drawSprite(
+                font.atlases[glyph.atlas],
+                self.x + @as(f32, @floatFromInt(glyph.x_offset)) * self.options.scale,
+                self.y + @as(f32, @floatFromInt(glyph.y_offset)) * self.options.scale,
+                .{ .s0 = glyph.s, .t0 = glyph.t, .width = @intCast(glyph.width), .height = @intCast(glyph.height), .scale_x = self.options.scale, .scale_y = self.options.scale },
+            );
+        }
+        self.x += @as(f32, @floatFromInt(glyph.x_advance)) * self.options.scale;
+        self.previous = index;
+        self.metrics.glyphs += 1;
     }
 };
 
@@ -197,4 +232,48 @@ test "measure applies UTF-8 lookup, kerning, and newlines" {
     try testing.expectEqual(@as(u16, 2), metrics.lines);
     try testing.expectEqual(@as(u32, 3), metrics.glyphs);
     try testing.expectError(Error.InvalidUtf8, font.measure("\xff", .{}));
+}
+
+test "formatted drawing consumes scratch and reports overflow before rendering" {
+    const std = @import("std");
+    const combiner = @import("rdp/combiner.zig");
+    const blender = @import("rdp/blender.zig");
+    const texture = @import("rdp/texture.zig");
+    const Queue = struct {
+        glyph_count: usize = 0,
+        commands: usize = 0,
+        pub fn setCombineMode(self: *@This(), _: combiner.CombineMode) void {
+            self.commands += 1;
+        }
+        pub fn setBlendMode(self: *@This(), _: blender.BlendMode) void {
+            self.commands += 1;
+        }
+        pub fn setPrimColor(self: *@This(), _: color.Rgba32) void {
+            self.commands += 1;
+        }
+        pub fn drawSprite(self: *@This(), _: anytype, _: f32, _: f32, _: texture.SpriteDrawOptions) void {
+            self.glyph_count += 1;
+        }
+    };
+    const pixels = [_]color.Rgba16{.white};
+    const font: Font = .{
+        .point_size = 8,
+        .ascent = 7,
+        .descent = -1,
+        .line_height = 10,
+        .ranges = &.{.{ .first_codepoint = 'A', .glyph_count = 1, .first_glyph = 0 }},
+        .glyphs = &.{.{ .x_advance = 5, .x_offset = 0, .y_offset = 0, .width = 1, .height = 1, .s = 0, .t = 0, .atlas = 0 }},
+        .atlases = &.{.{ .width = 1, .height = 1, .texel_data = &pixels }},
+    };
+    var queue: Queue = .{};
+    var scratch: [8]u8 = undefined;
+    const metrics = try font.drawPrint(&queue, 0, 0, &scratch, .{}, "{s}\n{s}", .{ "AA", "A" });
+    @memset(&scratch, 0); // Recorded draws do not borrow formatted text.
+    try std.testing.expectEqual(@as(u32, 3), metrics.glyphs);
+    try std.testing.expectEqual(@as(u16, 2), metrics.lines);
+    try std.testing.expectEqual(@as(usize, 3), queue.glyph_count);
+    const commands = queue.commands;
+    try std.testing.expectError(error.NoSpaceLeft, font.drawPrint(&queue, 0, 0, scratch[0..1], .{}, "{s}", .{"AA"}));
+    try std.testing.expectEqual(commands, queue.commands);
+    try std.testing.expectError(error.InvalidUtf8, font.drawPrint(&queue, 0, 0, &scratch, .{}, "{s}", .{"\xff"}));
 }

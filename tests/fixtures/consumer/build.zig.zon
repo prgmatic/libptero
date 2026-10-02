@@ -6,5 +6,5 @@
     .dependencies = .{
         .libptero = .{ .path = "../../.." },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "assets", "src" },
+    .paths = .{ "build.zig", "build.zig.zon", "model_fixture.zig", "assets", "src" },
 }

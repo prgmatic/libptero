@@ -38,6 +38,7 @@ pub fn syncFull(render_queue: anytype) Fence {
     render_queue.execute();
     return fence;
 }
+pub const Sampler = @import("rdp/texture.zig").Sampler;
 pub const SpriteDrawOptions = rq.SpriteDrawOptions;
 pub const Pivot = rq.Pivot;
 pub const TexVertex = rq.TexVertex;

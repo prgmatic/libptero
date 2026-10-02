@@ -1,17 +1,15 @@
-const JoypadState = @import("joypad.zig").JoypadState;
+const State = @import("joypad.zig").State;
 const si = @import("../interfaces/serial.zig");
 const cache = @import("../cpu/cache.zig");
 
 const pif_ram_size = 64;
 
-
 pub const Commands = struct {
-
     pub const CommandIdentify = JoybusCommand(packed struct {
         extra: u8,
         id: u16,
     }, @as(u8, 0));
-    pub const CommandJoypadState = JoybusCommand(JoypadState, @as(u8, 1));
+    pub const CommandJoypadState = JoybusCommand(State, @as(u8, 1));
 
     pub const CommandIdentifyAll = JoybusCommandAllPorts(CommandIdentify);
     pub const CommandJoypadStateAll = JoybusCommandAllPorts(CommandJoypadState);
@@ -38,7 +36,7 @@ pub const Commands = struct {
 };
 
 pub const JoybusBuffer = struct {
-    memory: [pif_ram_size / @sizeOf(u32)]u32 = undefined, 
+    memory: [pif_ram_size / @sizeOf(u32)]u32 = undefined,
 
     pub fn clear(b: *JoybusBuffer) void {
         @memset(&b.memory, 0);
@@ -57,7 +55,7 @@ pub const JoybusBuffer = struct {
         cmd.* = .{};
         // TODO: remove this
         b.memory[15] = 1;
-        
+
         cache.writebackData(b);
         b.sendCommand();
         si.waitDmaIo();
@@ -73,7 +71,7 @@ pub const JoybusBuffer = struct {
 
     // pub fn setCommand(b: *JoybusBuffer, commandType: CommandType) void {
     //     switch (commandType) {
-    //         .Identify => 
+    //         .Identify =>
     //     }
     // }
 
@@ -82,5 +80,3 @@ pub const JoybusBuffer = struct {
         State = 1,
     };
 };
-
-
