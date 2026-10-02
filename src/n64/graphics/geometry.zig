@@ -3,6 +3,7 @@ const cache = @import("../cpu/cache.zig");
 const math = @import("../math.zig");
 const rsp = @import("../rsp/rsp.zig");
 const rdp = @import("rdp.zig");
+const Renderer = @import("renderer.zig").Renderer;
 const Rgba32 = @import("color.zig").Rgba32;
 
 const vertex_output_size = 36;
@@ -111,11 +112,10 @@ pub const Viewport = struct {
 };
 
 pub const Context = struct {
-    queue: rsp.Queue,
-    rdp_overlay: rsp.Overlay,
+    renderer: *Renderer,
+    queue: *rsp.Queue,
     geometry_overlay: rsp.Overlay,
-    rdp_buffers: [2][rsp.rdp_dynamic_buffer_len]u8 align(16),
-    render: rdp.DefaultRenderQueue,
+    render: *rdp.DefaultRenderQueue,
     matrix_stack: [8]math.FixedMat4 align(16),
     view_matrix: math.Mat4,
     draw_flags: DrawFlags = .{},
@@ -123,23 +123,18 @@ pub const Context = struct {
     last_draw_flags: ?DrawFlags = null,
     last_material_tile: u3 = 0,
 
-    pub fn init(self: *Context) void {
-        rsp.halt();
-        rsp.waitHalted();
-        rsp.loadResident(rsp.programs.command_dispatcher);
-        self.rdp_overlay.init(rsp.programs.rdp_overlay);
-        rsp.registerOverlayStatic(&self.rdp_overlay, 12);
+    /// Attach geometry to an idle renderer. Borrows its RSP queue and RDP state,
+    /// registering geometry only when needed. Keep both at stable addresses.
+    /// Only one geometry context may attach to a renderer at a time.
+    pub fn init(self: *Context, renderer: *Renderer) void {
+        std.debug.assert(!renderer.geometry_attached);
+        std.debug.assert(!renderer.queue.storage.syncpoint_pending);
+        self.renderer = renderer;
+        self.queue = &renderer.queue;
+        self.render = &renderer.render;
         self.geometry_overlay.init(rsp.programs.geometry_overlay);
         rsp.registerOverlayStatic(&self.geometry_overlay, 1);
-        self.queue.init(.low);
-        @memset(&self.rdp_buffers[0], 0);
-        @memset(&self.rdp_buffers[1], 0);
-        cache.writebackData(&self.rdp_buffers);
-        self.render = rdp.DefaultRenderQueue.init(rdp.OverlayQueue.init(
-            &self.queue,
-            &self.rdp_overlay,
-            .{ self.rdp_buffers[0][0..], self.rdp_buffers[1][0..] },
-        ));
+        renderer.geometry_attached = true;
         @memset(&self.matrix_stack, math.FixedMat4.identity);
         self.view_matrix = .identity;
         self.draw_flags = .{};
@@ -161,8 +156,8 @@ pub const Context = struct {
         // Enter the main overlay once while its lazy-code pointer is zero.
         // Its entry stub uses that pointer during the initial load.
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, 0x8000 | symbols.active_light_size, &.{0});
-        rsp.flush(&self.queue);
-        rsp.wait(&self.queue);
+        rsp.flush(self.queue);
+        rsp.wait(self.queue);
 
         const clipping = rsp.programs.geometry_clipping;
         const clipping_imem_start = symbols._start;
@@ -197,6 +192,16 @@ pub const Context = struct {
         // leaving the restore DMA length at zero when clipping first ran.
         rsp.io.readDmem(u32, symbols.vertex_effect_function).* =
             @as(u32, vertex_effect_none) << 16 | clipping_size;
+    }
+
+    /// Complete all geometry work and recorded calls before detaching. Does
+    /// not deinitialize the borrowed renderer; it remains usable for 2D work.
+    pub fn deinit(self: *Context) void {
+        std.debug.assert(!self.queue.storage.syncpoint_pending);
+        rsp.unregisterOverlay(&self.geometry_overlay);
+        self.renderer.geometry_attached = false;
+        self.render.invalidateState();
+        self.* = undefined;
     }
 
     pub fn attachViewport(self: *Context, viewport: *Viewport) void {
@@ -386,7 +391,9 @@ comptime {
 }
 
 test "recorded material snapshots restore CPU trackers without claiming TMEM residency" {
+    var render: rdp.DefaultRenderQueue = undefined;
     var context: Context = undefined;
+    context.render = &render;
     context.draw_flags = .{ .textured = true, .no_light = true };
     context.fog_enabled = true;
     context.render.material_tile = 6;

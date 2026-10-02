@@ -106,3 +106,35 @@ copy for a custom blender. Use `flushModes` to emit changes explicitly.
 the requested modes on the next draw. After bypassing the renderer through
 `cmd_queue`, call `invalidateState` to invalidate mode and TMEM tracking. Clearing
 a CPU command buffer also invalidates tracking because its commands are discarded.
+
+## RSP runtime, renderer, and optional geometry
+
+Setup is explicit and separate from allocation and display:
+
+```zig
+var runtime: n64.rsp.Runtime = undefined;
+runtime.init();
+var renderer: n64.graphics.Renderer = undefined;
+renderer.init(&runtime);
+// Sprite and font drawing uses &renderer.render directly.
+
+var geometry: n64.graphics.geometry.Context = undefined;
+geometry.init(&renderer); // Optional: adds geometry and clipping support.
+// Model drawing uses &geometry and shares renderer.render's tracked state.
+```
+
+Declare these large objects in persistent application storage. They initialize
+in place and must not move after initialization: their queues and overlays
+contain pointers into their own storage. `Runtime` loads the built-in resident
+program and registers RDP. `Renderer` borrows it and contains the command queue
+and two 64 KiB RDP buffers. It does not initialize geometry or allocate a heap.
+`geometry.Context` borrows the renderer's queue and render state, registers its
+own geometry overlay, and prepares clipping support. Font and sprite examples
+need only the first two objects.
+
+Complete pending RSP/RDP work before attaching or detaching geometry. Teardown
+order is `geometry.deinit()`, `renderer.deinit()`, `runtime.deinit()`. The renderer
+remains usable for 2D drawing after geometry is detached. Only one runtime may
+control the hardware, one renderer may attach to it, and one geometry context
+may attach to that renderer. Raw RSP programs, queues, overlays, and direct RDP
+render queues remain available for custom storage and hardware scheduling.

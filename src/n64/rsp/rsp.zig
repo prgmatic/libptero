@@ -13,6 +13,7 @@ pub const command_queue = @import("command_queue.zig");
 pub const CommandQueue = command_queue.CommandQueue;
 pub const overlay = @import("overlay.zig");
 pub const Overlay = overlay.Overlay;
+pub const Runtime = @import("runtime.zig").Runtime;
 
 pub const Priority = enum { low, high };
 pub const rdp_dynamic_buffer_len = 64 * 1024;

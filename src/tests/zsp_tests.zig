@@ -73,6 +73,9 @@ var geometry_matrix_stack: [32]u32 align(16) = undefined;
 var geometry_patch_target: [2]u32 align(8) = undefined;
 var geometry_vertex_input: [64]u8 align(16) = undefined;
 var geometry_triangle_output: [32]u64 align(16) = undefined;
+var geometry_runtime: rsp.Runtime = undefined;
+var geometry_renderer: n64.graphics.Renderer = undefined;
+var geometry_test_queue: rsp.Queue = undefined;
 var geometry_api_context: geometry.Context = undefined;
 var geometry_strip_indices: [4]i16 align(8) = .{ 0, 0x0024, 0x4048, 0 };
 var diagnostic_vertices: [1]geometry.VertexPair align(16) = undefined;
@@ -219,7 +222,8 @@ fn geometryLightingApi() !void {
     loadCommandDispatcher();
     geometry_api_context.geometry_overlay.init(zsp_programs.geometry_overlay);
     try testing.expectEqual(@as(u8, 1), rsp.registerOverlay(&geometry_api_context.geometry_overlay));
-    geometry_api_context.queue.init(.low);
+    geometry_test_queue.init(.low);
+    geometry_api_context.queue = &geometry_test_queue;
 
     geometry_api_context.view_matrix = n64.math.Mat4.lookAt(
         .init(10, 0, 0),
@@ -229,8 +233,8 @@ fn geometryLightingApi() !void {
     geometry_api_context.setAmbientLight(.fromBytes(0x11, 0x22, 0x33, 0x44));
     geometry_api_context.setDirectionalLightAt(1, .fromBytes(0x55, 0x66, 0x77, 0x88), .init(0, 0, 1));
     geometry_api_context.setLightCount(2);
-    rsp.flush(&geometry_api_context.queue);
-    try waitQueueTimeout(&geometry_api_context.queue);
+    rsp.flush(geometry_api_context.queue);
+    try waitQueueTimeout(geometry_api_context.queue);
 
     try expectDmemWord(u32, geometry_symbols.ambient_color, 0x11223344);
     try expectDmemWord(u32, 0x37c, 0x11223344);
@@ -246,7 +250,9 @@ var geometry_material_texels: [128]n64.graphics.color.I8 align(16) = undefined;
 
 fn geometryContextInitialization() !void {
     geometry_api_context = undefined;
-    geometry_api_context.init();
+    geometry_runtime.init();
+    geometry_renderer.init(&geometry_runtime);
+    geometry_api_context.init(&geometry_renderer);
 
     const vertex_handler = blk: {
         for (0..geometry_api_context.geometry_overlay.program.commandCount()) |metadata_index| {
@@ -270,15 +276,15 @@ fn geometryContextInitialization() !void {
     try expectDmemWord(u8, geometry_symbols.fog_store_offset, 0x0c);
     geometry_api_context.setFogRange(0.4, 80);
     geometry_api_context.setFogEnabled(true);
-    rsp.flush(&geometry_api_context.queue);
-    try waitQueueTimeout(&geometry_api_context.queue);
+    rsp.flush(geometry_api_context.queue);
+    try waitQueueTimeout(geometry_api_context.queue);
     try expectDmemWord(u8, geometry_symbols.fog_store_offset, 0x0b);
     try expectDmemWord(u16, geometry_symbols.fog_scale_offset + 4, 32767);
     try expectDmemWord(u16, geometry_symbols.fog_scale_offset + 6, 205);
     geometry_api_context.setFogRange(0, 0);
     geometry_api_context.setFogEnabled(false);
-    rsp.flush(&geometry_api_context.queue);
-    try waitQueueTimeout(&geometry_api_context.queue);
+    rsp.flush(geometry_api_context.queue);
+    try waitQueueTimeout(geometry_api_context.queue);
     try expectDmemWord(u8, geometry_symbols.fog_store_offset, 0x0c);
     try expectDmemWord(u32, geometry_symbols.fog_scale_offset + 4, 0x7fff0000);
 
@@ -290,17 +296,18 @@ fn geometryContextInitialization() !void {
     _ = geometry_api_context.render.useTextureSampler(first, .{});
     _ = geometry_api_context.render.useTextureSampler(second, .{});
     geometry_api_context.beginModelMaterial();
-    rsp.flush(&geometry_api_context.queue);
-    try waitQueueTimeout(&geometry_api_context.queue);
+    rsp.flush(geometry_api_context.queue);
+    try waitQueueTimeout(geometry_api_context.queue);
     try expectDmemWord(u32, geometry_symbols.triangle_command, 0xcb02);
     _ = geometry_api_context.render.useTextureSampler(first, .{});
     geometry_api_context.beginModelMaterial();
-    rsp.flush(&geometry_api_context.queue);
-    try waitQueueTimeout(&geometry_api_context.queue);
+    rsp.flush(geometry_api_context.queue);
+    try waitQueueTimeout(geometry_api_context.queue);
     try expectDmemWord(u32, geometry_symbols.triangle_command, 0xcb00);
 
-    rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
-    rsp.unregisterOverlay(&geometry_api_context.rdp_overlay);
+    geometry_api_context.deinit();
+    geometry_renderer.deinit();
+    geometry_runtime.deinit();
 }
 
 fn arithmetic() !void {

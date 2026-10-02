@@ -24,7 +24,7 @@ pub const Material = struct {
         context.setDrawFlags(self.flags);
         if (self.fog) |enabled| context.setFogEnabled(enabled);
         const fog = self.fog orelse context.fog_enabled;
-        const rq = &context.render;
+        const rq = if (@typeInfo(@TypeOf(context.render)) == .pointer) context.render else &context.render;
         // Material registers can be read by primitives still in the pipeline.
         rq.cmd_queue.pipeSync();
         rq.setDepthState(self.flags.depth, self.flags.depth and !self.translucent);
