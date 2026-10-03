@@ -6,6 +6,9 @@ cartridge ROM at boot. Pass the bundle through `Sdk.addRom(.{ .assets = &bundle 
 importing its module alone does not attach the payload to a ROM. Packing follows
 insertion order, aligns entries to 16 bytes, records logical sizes and pads tails.
 No runtime directory, file descriptor, or pointer fixup is required.
+The packed ROM, including boot data and final cartridge padding, must fit the
+selected layout's `rom_length` and the 64 MiB cartridge address space. Oversized
+payloads fail the build before a ROM is emitted.
 
 ```zig
 // build.zig

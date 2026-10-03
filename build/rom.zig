@@ -166,6 +166,7 @@ pub fn build(b: *std.Build, options: Options) Rom {
     if (options.rom_assets) |assets| {
         pack_step.addFileArg(assets);
         pack_step.addFileArg(boot);
+        pack_step.addArg(b.fmt("{d}", .{options.layout.rom_length}));
     }
 
     const make_rom_step = b.addRunArtifact(options.tools.ipl3_cat);

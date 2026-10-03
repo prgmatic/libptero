@@ -5,7 +5,7 @@ const std = @import("std");
 //   - removes section headers, symbols, DWARF, and other non-loadable data
 //   - appends srcmap as raw ROM data and patches its ROM offset/size into RAM
 //
-// Usage: elf_pack <input.elf> <input.srcmap> <output.elf> [<rom-assets.bin> <boot.bin>]
+// Usage: elf_pack <input.elf> <input.srcmap> <output.elf> [<rom-assets.bin> <boot.bin> [<rom-limit>]]
 
 pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.smp_allocator;
@@ -16,8 +16,8 @@ pub fn main(init: std.process.Init) !void {
     const stderr = &err_writer.interface;
 
     const args = try init.minimal.args.toSlice(alloc);
-    if (args.len != 4 and args.len != 6) {
-        try stderr.print("Usage: elf_pack <input.elf> <input.srcmap> <output.elf> [<rom-assets.bin> <boot.bin>]\n", .{});
+    if (args.len != 4 and args.len != 6 and args.len != 7) {
+        try stderr.print("Usage: elf_pack <input.elf> <input.srcmap> <output.elf> [<rom-assets.bin> <boot.bin> [<rom-limit>]]\n", .{});
         try stderr.flush();
         std.process.exit(1);
     }
@@ -27,13 +27,14 @@ pub fn main(init: std.process.Init) !void {
     const srcmap_data = try readAll(io, alloc, args[2]);
     defer alloc.free(srcmap_data);
 
-    const assets = if (args.len == 6) try readAll(io, alloc, args[4]) else &.{};
-    defer if (args.len == 6) alloc.free(assets);
-    const boot = if (args.len == 6) try readAll(io, alloc, args[5]) else &.{};
-    defer if (args.len == 6) alloc.free(boot);
+    const assets = if (args.len >= 6) try readAll(io, alloc, args[4]) else &.{};
+    defer if (args.len >= 6) alloc.free(assets);
+    const boot = if (args.len >= 6) try readAll(io, alloc, args[5]) else &.{};
+    defer if (args.len >= 6) alloc.free(boot);
     // ipl3_cat pads to the NEXT 256-byte boundary, even when already aligned.
     const rom_base: u32 = @intCast(boot.len + 256 - boot.len % 256);
-    const out = try pack(alloc, elf_data, srcmap_data, assets, rom_base);
+    const limit = if (args.len == 7) try std.fmt.parseInt(u32, args[6], 10) else 64 * 1024 * 1024;
+    const out = try pack(alloc, elf_data, srcmap_data, assets, rom_base, limit);
     defer alloc.free(out);
 
     const f = try std.Io.Dir.cwd().createFile(io, args[3], .{});
@@ -59,7 +60,7 @@ const Error = error{
     ProgramHeaderTableTooLarge,
 };
 
-fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8, assets: []const u8, rom_base: u32) ![]u8 {
+fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8, assets: []const u8, rom_base: u32, rom_limit: u32) ![]u8 {
     if (elf.len < 52) return Error.BadElf;
     if (!std.mem.eql(u8, elf[0..4], "\x7fELF")) return Error.BadElf;
     if (elf[4] != 1 or elf[5] != 2) return Error.UnsupportedElf; // ELF32, big-endian
@@ -101,6 +102,7 @@ fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8, assets: [
     if (assets.len != 0) {
         if (@as(u64, rom_base) + assets_offset + assets.len > 64 * 1024 * 1024) return error.RomTooLarge;
         cursor = assets_offset + @as(u32, @intCast(assets.len));
+        try validateRomSize(@as(u64, rom_base) + cursor, rom_limit);
     }
 
     const out = try alloc.alloc(u8, cursor);
@@ -150,6 +152,12 @@ fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8, assets: [
         @memcpy(out[assets_offset..][0..assets.len], assets);
     }
     return out;
+}
+
+fn validateRomSize(unpadded: u64, limit: u32) !void {
+    // ipl3_cat rounds to the NEXT 16 KiB boundary, including aligned inputs.
+    const padded = (unpadded / (16 * 1024) + 1) * (16 * 1024);
+    if (padded > @min(limit, 64 * 1024 * 1024)) return error.RomTooLarge;
 }
 
 fn patchU32AtVaddr(out: []u8, phoff: u32, phnum: u16, phent: u16, vaddr: u32, value: u32) !void {
@@ -288,7 +296,7 @@ test "ROM payload stays outside loaded segments and metadata uses final ROM addr
         offset += @intCast(name.len + 1);
     }
     w32(&elf, 480 + SH_SIZE, offset);
-    const out = try pack(std.testing.allocator, &elf, "srcmap", "ROM asset", 0x5000);
+    const out = try pack(std.testing.allocator, &elf, "srcmap", "ROM asset", 0x5000, 64 * 1024 * 1024);
     defer std.testing.allocator.free(out);
     try std.testing.expectEqual(@as(u32, 16), r32(out, 64 + PH_FILESZ));
     try std.testing.expectEqual(@as(u32, 32), r32(out, 64 + PH_MEMSZ));
@@ -297,7 +305,15 @@ test "ROM payload stays outside loaded segments and metadata uses final ROM addr
     try std.testing.expectEqualSlices(u8, "ROM asset", out[asset_offset..]);
     try std.testing.expectEqual(@as(u32, 9), r32(out, 108));
     try std.testing.expectEqual(@as(u16, 0), r16(out, EH_SHNUM));
-    const minimal = try pack(std.testing.allocator, &elf, "srcmap", &.{}, 0);
+    const minimal = try pack(std.testing.allocator, &elf, "srcmap", &.{}, 0, 64 * 1024 * 1024);
     defer std.testing.allocator.free(minimal);
     try std.testing.expectEqual(@as(usize, 118), minimal.len);
+}
+
+test "ROM limits include final cartridge padding and reject exact-capacity payloads" {
+    try validateRomSize(64 * 1024 * 1024 - 1, 64 * 1024 * 1024);
+    try std.testing.expectError(error.RomTooLarge, validateRomSize(64 * 1024 * 1024, 64 * 1024 * 1024));
+    try validateRomSize(32767, 32768);
+    try std.testing.expectError(error.RomTooLarge, validateRomSize(32768, 32768));
+    try std.testing.expectError(error.RomTooLarge, validateRomSize(0, 0));
 }

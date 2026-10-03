@@ -18,6 +18,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "Stream PCM: stereo8 matches resident output, ramps, rates and seeks", .run = stereo8 },
     .{ .name = "Stream PCM: stereo16 matches resident output, ramps, rates and seeks", .run = stereo16 },
     .{ .name = "Stream PCM: EOF silence and voice release", .run = finite },
+    .{ .name = "Stream PCM: partial tail loops match resident PCM", .run = tailLoop },
     .{ .name = "Stream PCM: independent voices and retry after PI timeout", .run = independent },
 };
 fn mono8() !void {
@@ -130,4 +131,16 @@ fn independent() !void {
     try mixer.stop(0);
     try testing.expect(second.attached);
     try mixer.stop(2);
+}
+
+var tail_pcm: [128 + 64]u8 align(16) = undefined;
+fn tailLoop() !void {
+    @memcpy(tail_pcm[0..128], assets.mono16.data[0..128]);
+    for (tail_pcm[128..], 0..) |*byte, index| byte.* = tail_pcm[114 + index % 14];
+    var resident = assets.mono16;
+    resident.data = &tail_pcm;
+    resident.loop_frames = 7;
+    var source = assets.mono16_stream;
+    source.loop_frames = 7;
+    try compare(resident, source);
 }

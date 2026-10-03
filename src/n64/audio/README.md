@@ -61,10 +61,10 @@ The caller owns entire DMA/cache lines, including up to four bytes of trailing
 DMA padding for an address that is 4 modulo 8. Sample memory includes 64 readable
 bytes after its logical end. The built asset pipeline supplies that padding.
 
-This first port supports fully resident samples smaller than 512 KiB. It does
-not implement streaming sample buffers, wav64 loading, VADPCM or Opus decoding,
-tracker playback, or event sequencing. The original mixertest uses compressed
-assets; these examples deliberately play its original WAV PCM instead.
+Resident samples must be smaller than 512 KiB; larger sources use the ROM-streamed
+path below. wav64 loading, VADPCM or Opus decoding, tracker playback, and event
+sequencing remain unsupported. The original mixertest uses compressed assets;
+these examples deliberately play its original WAV PCM instead.
 
 Host tests verify conversion, validation, fixed-point controls, FIFO ownership,
 and generated metadata. ROM tests exercise the public generated assets, EOF
