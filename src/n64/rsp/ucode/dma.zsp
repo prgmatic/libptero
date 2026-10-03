@@ -5,7 +5,7 @@
 //   $s4: DMEM address
 //   $t2: operation flags
 //
-// Returns through $ra. Clobbers $t2 and $t3. For DMA reads, $s4 is adjusted
+// Returns through $ra. Clobbers $at and $t2. For DMA reads, $s4 is adjusted
 // by the low three bits of the RDRAM address.
 pub export fn out(
     reg($t0) size: u32,
@@ -17,7 +17,7 @@ pub export fn out(
     jump exec(size, pitch, rdram, dmem, flags);
 }
 
-pub fn outAsync(
+pub export fn outAsync(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
@@ -54,8 +54,8 @@ pub export fn exec(
     reg($s4) dmem: dmem,
     reg($t2) flags: u32,
 ) noreturn {
-    reg dma_full: u32;
-    reg transfer_descriptor: u32;
+    reg($at) dma_full: u32;
+    reg($at) transfer_descriptor: u32;
     do {
         dma_full = rsp.cp0.dmaFull();
     } while(dma_full != 0) slot {
@@ -72,7 +72,7 @@ pub export fn exec(
     } else {
         rsp.cp0.startDmaWrite(transfer_descriptor);
     }
-    reg rdram_alignment: u32;
+    reg($at) rdram_alignment: u32;
     rdram_alignment = rdram & 7;
     dmem = dmem + rdram_alignment;
     flags &= 0x0f;
@@ -80,7 +80,7 @@ pub export fn exec(
 }
 
 pub export fn waitStatus(reg($t2) flags: u32) noreturn {
-    reg status: u32;
+    reg($at) status: u32;
     status = rsp.cp0.spStatus();
     do {
         status &= flags;

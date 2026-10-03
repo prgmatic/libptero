@@ -8,6 +8,10 @@ pub const command_dispatcher_symbols = assets.command_dispatcher_symbols;
 pub const rdp_overlay_rsp align(8) = assets.rdp_overlay;
 pub const rdp_overlay = UCode.fromBlob(&rdp_overlay_rsp);
 
+pub const audio_mixer_rsp align(8) = assets.audio_mixer;
+pub const audio_mixer = UCode.fromBlob(&audio_mixer_rsp);
+pub const audio_mixer_symbols = assets.audio_mixer_symbols;
+
 pub const geometry_overlay_rsp align(8) = assets.geometry_overlay;
 pub const geometry_overlay = UCode.fromBlob(&geometry_overlay_rsp);
 pub const geometry_overlay_symbols = assets.geometry_overlay_symbols;

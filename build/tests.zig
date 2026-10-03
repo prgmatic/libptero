@@ -34,6 +34,13 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     });
     instrumentTests(gltf_compiler_tests, coverage, coverage_runtime);
     test_step.dependOn(&b.addRunArtifact(gltf_compiler_tests).step);
+    const audio_cli_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/audio_compiler/main.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "audio_compiler", .module = b.createModule(.{ .root_source_file = b.path("tools/audio_compiler/root.zig"), .target = b.graph.host }) }},
+    }) });
+    instrumentTests(audio_cli_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(audio_cli_tests).step);
     const png = b.createModule(.{
         .root_source_file = b.path("tools/imgparse/png.zig"),
         .target = b.graph.host,
@@ -126,6 +133,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     instrumentTests(font_compiler_tests, coverage, coverage_runtime);
     test_step.dependOn(&b.addRunArtifact(font_compiler_tests).step);
     inline for (.{
+        .{ "audio-compiler-tests", "tools/audio_compiler/root.zig" },
         .{ "png-decoder-tests", "tools/imgparse/png.zig" },
         .{ "runtime-host-tests", "src/n64/n64.zig" },
         .{ "zsp-tests", "tools/zsp/tests.zig" },

@@ -8,6 +8,7 @@ const rsp = @import("rsp.zig");
 pub const Runtime = struct {
     rdp_overlay: rsp.Overlay,
     renderer_attached: bool,
+    mixer_attached: bool,
 
     /// Halt RSP, load the dispatcher, and register only the RDP overlay. Does
     /// not allocate or initialize geometry. Do not replace an active session.
@@ -18,11 +19,13 @@ pub const Runtime = struct {
         self.rdp_overlay.init(rsp.programs.rdp_overlay);
         rsp.registerOverlayStatic(&self.rdp_overlay, 12);
         self.renderer_attached = false;
+        self.mixer_attached = false;
     }
 
     /// Detach renderers first and complete all work before teardown.
     pub fn deinit(self: *Runtime) void {
         std.debug.assert(!self.renderer_attached);
+        std.debug.assert(!self.mixer_attached);
         rsp.unregisterOverlay(&self.rdp_overlay);
         self.* = undefined;
     }

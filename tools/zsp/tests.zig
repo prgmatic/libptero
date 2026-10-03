@@ -2981,8 +2981,8 @@ test "bitCast reinterprets scalar register values without conversion" {
         \\.text
         \\
         \\test:
-        \\  or $a1, $zero, $s5
-        \\  or $a0, $zero, $a1
+        \\  or $a1, $s5, $zero
+        \\  or $a0, $a1, $zero
         \\  break
         \\
         \\
@@ -5240,4 +5240,81 @@ test "resident instruction forms are expressible without inline assembly" {
         \\
         \\
     );
+}
+
+test "read-only pinned ABI bindings do not claim hardware writes" {
+    const source =
+        \\fn observe() {
+        \\    reg($t3) counter: u32 = undefined;
+        \\    reg($v13) volume: vec16 = undefined;
+        \\    store(u32, 128, counter);
+        \\    store(vec16, 144, volume);
+        \\}
+        \\fn test() noreturn {
+        \\    reg($t3) counter: u32 = 8;
+        \\    reg($v13) volume: vec16 = undefined;
+        \\    observe();
+        \\    counter += 1;
+        \\    store(vec16, 160, volume);
+        \\    rsp.halt();
+        \\}
+    ;
+    var parser = try parser_mod.Parser.init(testing.allocator, source);
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    try asm_writer.write(&output.writer, functions);
+}
+
+test "assigning an initially undefined ABI binding is a hardware write" {
+    try expectAsmError(
+        \\fn overwrite() {
+        \\    reg($t3) counter: u32 = undefined;
+        \\    counter = 0;
+        \\}
+        \\fn test() noreturn {
+        \\    reg($t3) counter: u32 = 8;
+        \\    overwrite();
+        \\    counter += 1;
+        \\    rsp.halt();
+        \\}
+    , error.PinnedRegisterClobberedByCall);
+}
+
+test "exact terminal return does not append a second return" {
+    var parser = try parser_mod.Parser.init(testing.allocator,
+        \\fn test() {
+        \\    exact {
+        \\        return;
+        \\    }
+        \\}
+    );
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    try asm_writer.write(&output.writer, functions);
+    const bytes = output.writer.buffered();
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "jr $ra"));
+}
+
+test "symbolic address addition distinguishes trapping and wrapping operators" {
+    var parser = try parser_mod.Parser.init(testing.allocator,
+        \\data { target: [8]u8; }
+        \\fn test() noreturn {
+        \\    reg($t0) address: u32 = 0;
+        \\    address = address + target;
+        \\    address = address +% target;
+        \\    rsp.halt();
+        \\}
+    );
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    try asm_writer.write(&output.writer, functions);
+    const bytes = output.writer.buffered();
+    try testing.expect(std.mem.indexOf(u8, bytes, "addi $t0, $t0, %lo(target)") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "addiu $t0, $t0, %lo(target)") != null);
 }

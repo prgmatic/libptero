@@ -8,9 +8,11 @@ pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.smp_allocator;
     const io = init.io;
     const args = try init.minimal.args.toSlice(alloc);
-    if (args.len != 5) return error.InvalidArguments;
+    if (args.len != 5 and args.len != 6) return error.InvalidArguments;
     const overlay_state_start = try std.fmt.parseInt(u16, args[3], 0);
-    if (overlay_state_start > overlay_data_start) return error.InvalidStateStart;
+    const data_start = if (args.len == 6) try std.fmt.parseInt(u16, args[5], 0) else overlay_data_start;
+    if (data_start < 0x0220 or data_start >= imem_base or data_start & 15 != 0) return error.InvalidDataStart;
+    if (overlay_state_start > data_start) return error.InvalidStateStart;
 
     const resident_elf = try readAll(io, alloc, args[1]);
     defer alloc.free(resident_elf);
@@ -30,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     defer output.close(io);
     var buffer: [4096]u8 = undefined;
     var file_writer = output.writer(io, &buffer);
-    try writeLinkerScript(&file_writer.interface, text_start, overlay_state_start, symbols);
+    try writeLinkerScript(&file_writer.interface, text_start, overlay_state_start, data_start, symbols);
     try file_writer.interface.flush();
 }
 
@@ -157,9 +159,9 @@ fn sectionBytes(bytes: []const u8, section: std.elf.Elf64_Shdr) ![]const u8 {
     return bytes[offset..][0..size];
 }
 
-fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, state_start: u16, symbols: []const ExportedSymbol) !void {
-    if (state_start == overlay_data_start) {
-        try writeStandardLinkerScript(writer, text_start, symbols);
+fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, state_start: u16, data_start: u16, symbols: []const ExportedSymbol) !void {
+    if (state_start == data_start) {
+        try writeStandardLinkerScript(writer, text_start, data_start, symbols);
         return;
     }
     try writer.print(
@@ -202,14 +204,14 @@ fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, state_start: u16, 
         \\}}
         \\
     , .{
-        overlay_data_start,
-        0x1000 - overlay_data_start,
+        data_start,
+        0x1000 - data_start,
         state_start,
         0x1000 - state_start,
         text_start,
         imem_end - text_start,
         state_start,
-        overlay_data_start,
+        data_start,
         text_start,
     });
     for (symbols) |symbol| {
@@ -217,7 +219,27 @@ fn writeLinkerScript(writer: *std.Io.Writer, text_start: u16, state_start: u16, 
     }
 }
 
-fn writeStandardLinkerScript(writer: *std.Io.Writer, text_start: u16, symbols: []const ExportedSymbol) !void {
+fn writeStandardLinkerScript(writer: *std.Io.Writer, text_start: u16, data_start: u16, symbols: []const ExportedSymbol) !void {
+    const state_first =
+        \\    .state ALIGN(16) : SUBALIGN(1) {
+        \\        KEEP(*(.state*))
+        \\    } > DMEM
+        \\
+        \\    .bss (NOLOAD) : SUBALIGN(1) {
+        \\        *(.bss*)
+        \\    } > DMEM
+        \\
+    ;
+    const bss_first =
+        \\    .bss (NOLOAD) : SUBALIGN(1) {
+        \\        *(.bss*)
+        \\    } > DMEM
+        \\
+        \\    .state ALIGN(16) : SUBALIGN(1) {
+        \\        KEEP(*(.state*))
+        \\    } > DMEM
+        \\
+    ;
     try writer.print(
         \\OUTPUT_ARCH(mips)
         \\ENTRY(_start)
@@ -233,14 +255,7 @@ fn writeStandardLinkerScript(writer: *std.Io.Writer, text_start: u16, symbols: [
         \\        KEEP(*(.rodata*))
         \\    }} > DMEM
         \\
-        \\    .bss (NOLOAD) : SUBALIGN(1) {{
-        \\        *(.bss*)
-        \\    }} > DMEM
-        \\
-        \\    .state ALIGN(16) : SUBALIGN(1) {{
-        \\        KEEP(*(.state*))
-        \\    }} > DMEM
-        \\
+        \\{s}
         \\    .text 0x{x:0>4} : {{
         \\        *(.text*)
         \\    }} > IMEM
@@ -257,11 +272,12 @@ fn writeStandardLinkerScript(writer: *std.Io.Writer, text_start: u16, symbols: [
         \\}}
         \\
     , .{
-        overlay_data_start,
-        0x1000 - overlay_data_start,
+        data_start,
+        0x1000 - data_start,
         text_start,
         imem_end - text_start,
-        overlay_data_start,
+        data_start,
+        if (data_start == overlay_data_start) bss_first else state_first,
         text_start,
     });
     for (symbols) |symbol| {
@@ -286,4 +302,19 @@ test "generated interface symbol metadata is parsed" {
     try std.testing.expectEqualStrings("zsp_m1_dma__out", aliases[0].symbol_name);
     try std.testing.expectEqualStrings("commandLoop", aliases[1].interface_name);
     try std.testing.expectEqualStrings("commandLoop", aliases[1].symbol_name);
+}
+
+test "compact PCM state precedes scratch while the legacy order is retained" {
+    var compact = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer compact.deinit();
+    try writeLinkerScript(&compact.writer, 0x1290, 0x220, 0x220, &.{});
+    const bytes = compact.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, bytes, ".data 0x0220") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, ".state ALIGN").? < std.mem.indexOf(u8, bytes, ".bss (NOLOAD)").?);
+    var legacy = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer legacy.deinit();
+    try writeLinkerScript(&legacy.writer, 0x1290, 0xa00, 0xa00, &.{});
+    const old = legacy.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, old, ".data 0x0a00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, old, ".bss (NOLOAD)").? < std.mem.indexOf(u8, old, ".state ALIGN").?);
 }

@@ -8,6 +8,9 @@ var pending_interrupts: u32 = 0;
 var rdp_fences_scheduled: u32 = 0;
 var rdp_fences_completed: u32 = 0;
 var video_frames: u32 = 0;
+/// AI owners register a short callback that only retires/enqueues buffers.
+/// RSP mixing must happen outside the interrupt handler.
+pub var audio_handler: ?*const fn () void = null;
 
 pub fn interruptHandler() void {
     const raised = mi.getCurrentInterrupt();
@@ -16,6 +19,10 @@ pub fn interruptHandler() void {
         serviceRdpInterrupt();
     }
     if (raised.video) pollVideoInterrupt();
+    if (raised.audio) {
+        @import("interfaces/audio.zig").acknowledge();
+        if (audio_handler) |handler| handler();
+    }
 
     // print("Int {} {}\n", .{raised.rdp, raised.video});
     const bits: u32 = @bitCast(raised);

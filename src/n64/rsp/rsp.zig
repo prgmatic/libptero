@@ -18,6 +18,9 @@ pub const Runtime = @import("runtime.zig").Runtime;
 pub const Priority = enum { low, high };
 pub const rdp_dynamic_buffer_len = 64 * 1024;
 
+var resident_queue_started = false;
+var idle_queue_buffer: [command_queue.batch_word_count]u32 align(8) = @splat(0);
+
 pub const Queue = struct {
     storage: command_queue.QueueStorage,
     priority: Priority,
@@ -394,6 +397,7 @@ pub fn flush(queue: *Queue) void {
         io.status_register_write.* = io.status_clear_signal6;
         io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(current.buffer.ptr));
         setProgramCounter(programs.command_dispatcher.pc_start);
+        resident_queue_started = true;
         wakeContinuous();
     } else {
         wakeContinuous();
@@ -432,6 +436,17 @@ pub fn submitHighPriority(queue: *Queue) void {
     current.swapBuffersToCaller(io.status_clear_signal3);
     current.stop();
     cache.writebackData(current.buffer[0..]);
+
+    // Audio may be the first user of the resident runtime. Give the priority
+    // switch a valid low-priority return stream before waking the dispatcher.
+    if (!resident_queue_started) {
+        halt();
+        waitHalted();
+        cache.writebackData(&idle_queue_buffer);
+        io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(&idle_queue_buffer));
+        setProgramCounter(programs.command_dispatcher.pc_start);
+        resident_queue_started = true;
+    }
 
     io.status_register_write.* = io.status_clear_signal5;
     io.readDmem(u32, pointer_stack_dmem + 9 * @sizeOf(u32)).* =
@@ -554,7 +569,8 @@ fn registerOverlayInternal(registered: *Overlay, static_id: ?u8) u8 {
     if (program.data.len & 7 != 0) {
         @panic("RSP overlay data must be DMA-aligned");
     }
-    if (@as(usize, overlay.program_data_offset) + program.data.len > io.dmem_len) {
+    const data_address = overlay.dataAddress(program);
+    if (@as(usize, data_address) + program.data.len > io.dmem_len) {
         @panic("RSP overlay program data does not fit in DMEM");
     }
     if (program.commandCount() == 0) {
@@ -603,9 +619,9 @@ fn registerOverlayInternal(registered: *Overlay, static_id: ?u8) u8 {
     const image_start: u16 = if (program.data.len == 0)
         program.state_offset
     else
-        @min(@as(u16, overlay.program_data_offset), program.state_offset);
+        @min(data_address, program.state_offset);
     const image_end: u16 = @intCast(@max(
-        @as(usize, overlay.program_data_offset) + program.data.len,
+        @as(usize, data_address) + program.data.len,
         @as(usize, program.state_offset) + program.state_len,
     ));
     const image = registered.state[image_start..image_end];
@@ -690,7 +706,7 @@ pub fn writeDmemByte(offset: u32, value: u8) void {
 
 pub fn load(program: UCode) void {
     loadText(program.text, 0);
-    loadData(program.data, 0);
+    loadData(program.data, program.data_address orelse 0);
 }
 
 pub fn loadResident(program: UCode) void {
@@ -698,6 +714,7 @@ pub fn loadResident(program: UCode) void {
     waitHalted();
     clearDmem();
     load(program);
+    resident_queue_started = false;
 }
 
 // The RSP must already be halted before directly accessing DMEM.
@@ -793,6 +810,6 @@ fn assertRspDma(data: []const u8, rsp_addr: u32) void {
     }
 }
 
-fn physicalAddress(addr: usize) u32 {
+pub fn physicalAddress(addr: usize) u32 {
     return @truncate(addr & 0x1FFFFFFF);
 }

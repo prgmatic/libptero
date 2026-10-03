@@ -26,6 +26,8 @@ const ModelEntry = struct {
     data: std.Build.LazyPath,
 };
 
+pub const AudioOptions = struct { loop: bool = false };
+
 pub const TextureFormat = enum {
     ci4,
     ci8,
@@ -137,6 +139,19 @@ pub const AssetBundle = struct {
         self.asset_module.addModelEntry(name, generated_source, data);
     }
 
+    /// Convert unsigned PCM8 or little-endian PCM16 WAV to a native resident
+    /// Sample, including the microcode's silence/loop overread padding.
+    pub fn addAudio(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath, options: AudioOptions) void {
+        self.asset_module.validateName(name);
+        const convert = self.b.addRunArtifact(self.tools.audio_compiler);
+        convert.addFileArg(source);
+        const data = convert.addOutputFileArg(self.b.fmt("{s}.pcm", .{name}));
+        const generated = convert.addOutputFileArg(self.b.fmt("{s}.audio.zig", .{name}));
+        convert.addArg(name);
+        if (options.loop) convert.addArg("--loop");
+        self.asset_module.audio.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = generated, .data = data }) catch @panic("OOM");
+    }
+
     pub fn buildZspProgram(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
         return buildZsp(self, name, source, self.root.path(self.b, "src/n64/rsp/link.ld"), null).rsp;
     }
@@ -171,11 +186,24 @@ pub const AssetBundle = struct {
         resident: Resident,
         state_start: u16,
     ) void {
+        self.addZspOverlayWithLayout(name, source, resident, state_start, 0x0a00);
+    }
+
+    /// Select initialized-data placement without changing existing overlay layouts.
+    pub fn addZspOverlayWithLayout(
+        self: *AssetBundle,
+        name: []const u8,
+        source: std.Build.LazyPath,
+        resident: Resident,
+        state_start: u16,
+        data_start: u16,
+    ) void {
         const overlay_link = self.b.addRunArtifact(self.tools.rsp_overlay_link);
         overlay_link.addArtifactArg(resident.elf);
         overlay_link.addFileArg(resident.interface);
         overlay_link.addArg(self.b.fmt("0x{x}", .{state_start}));
         const linker_script = overlay_link.addOutputFileArg(self.b.fmt("{s}.ld", .{name}));
+        overlay_link.addArg(self.b.fmt("0x{x}", .{data_start}));
         const built = buildZsp(self, name, source, linker_script, resident.interface);
         self.asset_module.addGeneratedFile(name, built.rsp, 8);
         if (self.include_zsp_symbols) self.asset_module.addSource(self.b.fmt("{s}_symbols", .{name}), built.symbols);
@@ -196,6 +224,7 @@ pub const AssetModule = struct {
     textures: std.ArrayList(TextureEntry) = .empty,
     fonts: std.ArrayList(FontEntry) = .empty,
     models: std.ArrayList(ModelEntry) = .empty,
+    audio: std.ArrayList(ModelEntry) = .empty,
     finalized: bool = false,
     module: ?*std.Build.Module = null,
 
@@ -241,6 +270,10 @@ pub const AssetModule = struct {
                 .{ entry.name, entry.name, entry.name },
             )) catch @panic("OOM");
         }
+        for (self.audio.items) |entry| source.appendSlice(self.b.allocator, self.b.fmt(
+            "pub const {s} = @import(\"audio_{s}\").{s};\n",
+            .{ entry.name, entry.name, entry.name },
+        )) catch @panic("OOM");
         const root_source = self.b.addWriteFiles().add(self.b.fmt("{s}.zig", .{self.name}), source.items);
         const module = self.b.createModule(.{ .root_source_file = root_source, .target = self.target });
         for (self.entries.items) |entry| {
@@ -276,6 +309,15 @@ pub const AssetModule = struct {
             });
             model_module.addAnonymousImport("model_data", .{ .root_source_file = entry.data });
             module.addImport(self.b.fmt("model_{s}", .{entry.name}), model_module);
+        }
+        for (self.audio.items) |entry| {
+            const audio_module = self.b.createModule(.{
+                .root_source_file = entry.source,
+                .target = self.target,
+                .imports = &.{.{ .name = "n64", .module = self.n64_module }},
+            });
+            audio_module.addAnonymousImport("audio_data", .{ .root_source_file = entry.data });
+            module.addImport(self.b.fmt("audio_{s}", .{entry.name}), audio_module);
         }
         self.module = module;
         return module;
@@ -317,6 +359,8 @@ pub const AssetModule = struct {
         for (self.textures.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
         for (self.fonts.items) |entry|
+            if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
+        for (self.audio.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
         for (self.models.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});

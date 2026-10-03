@@ -247,13 +247,7 @@ fn writeFunction(
     const function = functions[function_index];
     if (function.external) return;
     if (!function.inline_call) {
-        const terminal_jump = function.statements.len != 0 and switch (function.statements[function.statements.len - 1]) {
-            .builtin => |builtin| switch (builtin) {
-                .direct_goto, .tail, .jump, .return_from_function => true,
-                else => false,
-            },
-            else => false,
-        };
+        const terminal_jump = endsWithTerminalTransfer(function.statements);
         const saves_command_return = function.command_indices.len != 0 and
             statementsContainEmittedCall(functions, function.statements);
         if ((function.export_symbol or function.command_indices.len != 0) and function.emit_label) {
@@ -316,6 +310,18 @@ fn writeFunction(
     const target_index = findFunctionIndex(functions, target.name) orelse return error.UnknownFunction;
     if (functions[target_index].external or functions[target_index].inline_call) return;
     return writeFunction(writer, functions, top_level_context, emitted, target_index);
+}
+
+fn endsWithTerminalTransfer(statements: []const ast.Statement) bool {
+    if (statements.len == 0) return false;
+    return switch (statements[statements.len - 1]) {
+        .ordered_block => |items| endsWithTerminalTransfer(items),
+        .builtin => |builtin| switch (builtin) {
+            .direct_goto, .tail, .jump, .return_from_function => true,
+            else => false,
+        },
+        else => false,
+    };
 }
 
 fn findFunctionIndex(functions: []const ast.Function, name: []const u8) ?usize {
@@ -605,10 +611,11 @@ const FunctionClobberRegistry = struct {
                     }
                 }
             }
-            for (result.entries[0..result.len]) |entry| {
+            for (result.entries[0..result.len], 0..) |entry, index| {
                 if ((entry.scalar & entry.forbidden_scalar) != 0 or
                     (entry.vector & entry.forbidden_vector) != 0)
                 {
+                    if (diagnostic) |value| value.function_name = functions[index].source_name;
                     return error.PinnedRegisterClobberedByCall;
                 }
             }
@@ -701,7 +708,7 @@ fn scanDirectFunctionClobbers(
 fn scanDirectStatementClobbers(statements: []const ast.Statement, result: *FunctionClobber) void {
     for (statements) |statement| switch (statement) {
         .var_decl => |decl| {
-            if (decl.is_const) continue;
+            if (decl.is_const or decl.value == null) continue;
             if (isVectorType(decl.data_type)) {
                 if (decl.vector_reg) |reg| {
                     result.vector |= vectorRegisterBit(reg);
@@ -826,10 +833,12 @@ fn simulateAutomaticRegisters(
                 } else if (isVectorType(decl.data_type)) {
                     const reg = decl.vector_reg orelse try context.allocVectorRegister(decl.data_type, decl.name);
                     try validateVectorRegisterBinding(context, decl.data_type, reg, decl.name);
-                    clobber.vector |= vectorRegisterBit(reg);
-                    if (decl.data_type == .vec32) {
-                        clobber.vector |= vectorRegisterBit(nextVectorRegister(reg) orelse
-                            return error.InvalidVectorRegisterPair);
+                    if (decl.value != null) {
+                        clobber.vector |= vectorRegisterBit(reg);
+                        if (decl.data_type == .vec32) {
+                            clobber.vector |= vectorRegisterBit(nextVectorRegister(reg) orelse
+                                return error.InvalidVectorRegisterPair);
+                        }
                     }
                     try context.add(.{
                         .name = decl.name,
@@ -845,7 +854,7 @@ fn simulateAutomaticRegisters(
                 } else {
                     const reg = decl.reg orelse try context.allocRegister(decl.data_type, decl.name);
                     if (context.scalarLifetimeConflicts(decl.name, reg)) return error.RegisterAlreadyInUse;
-                    clobber.scalar |= registerBit(reg);
+                    if (decl.value != null) clobber.scalar |= registerBit(reg);
                     try context.add(.{
                         .name = decl.name,
                         .data_type = decl.data_type,
@@ -863,6 +872,14 @@ fn simulateAutomaticRegisters(
             },
             .assignment => |assignment| {
                 const destination = try context.lookup(assignment.destination);
+                if (destination.reg) |reg| clobber.scalar |= registerBit(reg);
+                if (destination.vector_reg) |reg| {
+                    clobber.vector |= vectorRegisterBit(reg);
+                    if (destination.data_type == .vec32) {
+                        clobber.vector |= vectorRegisterBit(nextVectorRegister(reg) orelse
+                            return error.InvalidVectorRegisterPair);
+                    }
+                }
                 if (!isVectorType(destination.data_type)) {
                     try simulateExpressionTemporaries(
                         context,
@@ -3443,7 +3460,7 @@ fn writeSet(
             if (source.vector_reg != null or source.reg == null) return error.RegisterTypeMismatch;
             const source_reg = source.reg.?;
             if (source_reg != destination_reg) {
-                try writer.print("  or {s}, $zero, {s}\n", .{
+                try writer.print("  or {s}, {s}, $zero\n", .{
                     regName(destination_reg), regName(source_reg),
                 });
             }
@@ -3821,8 +3838,11 @@ fn writeBinary(
             const rhs = try context.lookup(name);
             if (rhs.data_label) |label| {
                 if (op != .add and op != .add_wrap) return error.UnsupportedOperator;
-                try writer.print("  addiu {s}, {s}, %lo({s})\n", .{
-                    regName(destination_reg), regName(lhs_reg), label,
+                try writer.print("  {s} {s}, {s}, %lo({s})\n", .{
+                    if (op == .add) "addi" else "addiu",
+                    regName(destination_reg),
+                    regName(lhs_reg),
+                    label,
                 });
                 return;
             }

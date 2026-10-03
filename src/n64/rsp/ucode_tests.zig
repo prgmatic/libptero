@@ -38,3 +38,14 @@ test "parse packed blob" {
     try testing.expectEqual(@as(u8, 8), command.size);
     try testing.expectEqual(@as(u16, 0x240), command.handler_offset);
 }
+
+test "packed blob carries relocated initialized data address" {
+    const blob align(8) = [_]u8{
+        0, 8, 0, 8, 0, 32, 0, 0, 0, 0,  0, 40, 0, 0,
+        0, 0, 0, 0, 0, 40, 0, 0, 2, 32, 0, 0,  0, 0,
+        0, 0, 0, 0, 1, 2,  3, 4, 5, 6,  7, 8,
+    };
+    const program = UCode.fromBlob(&blob);
+    try testing.expectEqual(@as(?u16, 0x220), program.data_address);
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, program.data);
+}

@@ -6,6 +6,7 @@ pub const cache = @import("cpu/cache.zig");
 pub const graphics = @import("graphics.zig");
 pub const display = @import("display.zig");
 pub const time = @import("time.zig");
+pub const audio = @import("audio.zig");
 
 test {
     _ = graphics.image;
@@ -18,6 +19,7 @@ test {
     _ = @import("graphics/material.zig");
     _ = io.joypad;
     _ = time;
+    _ = audio;
     _ = graphics.rdp.RenderQueue;
     _ = graphics.rdp.Completion;
     _ = display;

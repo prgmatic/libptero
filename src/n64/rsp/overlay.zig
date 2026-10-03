@@ -26,7 +26,7 @@ pub const Overlay = struct {
             .state = undefined,
         };
         @memset(&self.state, 0);
-        @memcpy(self.state[program_data_offset..][0..program.data.len], program.data);
+        @memcpy(self.state[dataAddress(program)..][0..program.data.len], program.data);
         @memcpy(self.state[program.state_offset..][0..program.state_init.len], program.state_init);
     }
 
@@ -42,3 +42,7 @@ pub const Overlay = struct {
         return (self.id << 4) +% command_index;
     }
 };
+
+pub fn dataAddress(program: UCode) u16 {
+    return program.data_address orelse program_data_offset;
+}

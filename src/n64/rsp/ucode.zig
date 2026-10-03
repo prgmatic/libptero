@@ -5,6 +5,8 @@ const header_size = 24;
 pub const UCode = struct {
     text: []const u8,
     data: []const u8 = &.{},
+    /// Linked DMEM address of initialized data. Null supports older blobs.
+    data_address: ?u16 = null,
     pc_start: u16 = 0,
     text_offset: u16 = 0,
     commands: []const u8 = &.{},
@@ -34,6 +36,7 @@ pub const UCode = struct {
         return .{
             .text = blob[text_start..text_end],
             .data = blob[data_start..data_end],
+            .data_address = if (header.data_address == 0) null else header.data_address,
             .pc_start = header.pc_start,
             .text_offset = header.text_offset,
             .commands = blob[commands_start..commands_end],
@@ -81,6 +84,7 @@ const Header = struct {
     state_len: u16,
     state_init_offset: u16,
     state_init_len: u16,
+    data_address: u16,
 
     fn read(bytes: *const [header_size]u8) Header {
         return .{
@@ -95,6 +99,7 @@ const Header = struct {
             .state_len = std.mem.readInt(u16, bytes[16..18], .big),
             .state_init_offset = std.mem.readInt(u16, bytes[18..20], .big),
             .state_init_len = std.mem.readInt(u16, bytes[20..22], .big),
+            .data_address = std.mem.readInt(u16, bytes[22..24], .big),
         };
     }
 };

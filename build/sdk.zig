@@ -172,6 +172,13 @@ pub const Sdk = struct {
             self.root.path(self.b, "src/n64/rsp/ucode/rdp_overlay.zsp"),
             resident,
         );
+        assets.addZspOverlayWithLayout(
+            "audio_mixer",
+            self.root.path(self.b, "src/n64/rsp/ucode/audio_mixer.zsp"),
+            resident,
+            0x0220,
+            0x0220,
+        );
         assets.addZspOverlayWithStateStart(
             "geometry_overlay",
             self.root.path(self.b, "src/n64/rsp/ucode/geometry_overlay.zsp"),

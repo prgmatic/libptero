@@ -175,6 +175,10 @@ fn pack(alloc: std.mem.Allocator, bytes: []const u8) ![]u8 {
     w16(out, 16, state_size);
     w16(out, 18, @intCast(state_init_offset));
     w16(out, 20, @intCast(state_init_size));
+    if (data) |d| {
+        if (d.sh_addr + padded_data_size > 0x1000 or d.sh_addr & 7 != 0) return error.DataOutsideDmem;
+        w16(out, 22, @intCast(d.sh_addr));
+    }
 
     copySection(out[header_size..][0..text_size], bytes, text) catch |err| {
         alloc.free(out);
