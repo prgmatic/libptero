@@ -1,119 +1,104 @@
+//! Allocation-free emergency crash UI. Never submits or waits for RSP/RDP work.
 const std = @import("std");
-const font = @import("console_font.zig");
 const vi = @import("../interfaces/video.zig");
-const ImgRgba16 = @import("../graphics/image.zig").ImgRgba16;
-const Rgba16 = @import("../graphics/color.zig").Rgba16;
 const cache = @import("../cpu/cache.zig");
+const cp0 = @import("../cpu/cp0.zig");
 const backtrace = @import("backtrace.zig");
 const srcmap = @import("srcmap.zig");
+const TrapFrame = @import("cpu_state.zig").TrapFrame;
+const controls = @import("crash_screen/input.zig");
+pub const model = @import("crash_screen/model.zig");
+pub const font = @import("crash_screen/font.zig");
+pub const ui = @import("crash_screen/ui.zig");
+pub const memory = @import("crash_screen/memory.zig");
+pub const CrashType = model.Kind;
+pub const Report = model.Report;
+pub const State = model.State;
 
-// colors
-const colorBackground = Rgba16.fromInt(0x171717FF);
-const colorPrimaryAccent = Rgba16.fromInt(0x4C3672FF);
-const colorFont = Rgba16.fromInt(0xBCBFBEFF);
-const colorFontOrange = Rgba16.fromInt(0xF9AF4FFF);
-const colorFontBlue = Rgba16.fromInt(0x53BDFAFF);
-const colorFontTeal = Rgba16.fromInt(0x90E1C6FF);
-const colorFontGray = Rgba16.fromInt(0x686868FF);
+// Linker-owned BSS avoids overwriting application data at a guessed RDRAM address.
+var framebuffer: [ui.width * ui.height]ui.Pixel align(64) = undefined;
+var report: Report = .{};
+var state: State = .{};
 
-const addr = 0x80100000;
-const line_chars = 75;
-
-pub const CrashType = enum(u1) {
-    panic,
-    exception,
-};
-
-pub fn show(crash_type: CrashType, msg: []const u8, trace_opt: ?backtrace.Trace) void {
-    const buf: *[0x100000]u8 = @ptrFromInt(addr);
-    var fb_alloc: std.heap.FixedBufferAllocator = .init(buf);
-    const allocator = fb_alloc.allocator();
-
-    fb_alloc = .init(buf);
-
-    vi.init(.{
-        .resolution = .@"640x240p",
-        .color_depth = .Rgba5551,
-    });
-
-    const storage = @import("../graphics/image.zig").ImageBuffer(ImgRgba16.Pixel).init(allocator, 640, 240) catch undefined;
-    const img = storage.view();
-    img.fillRegion(colorBackground, 0, 0, img.width, img.height);
-    img.fillRegion(colorPrimaryAccent, 0, 20, img.width, 1);
-    const title = "Stack Trace";
-    const width = title.len * 8;
-    var x: u16 = 640 / 2 - width / 2;
-    _ =font.drawStr(img, colorFont, title, x, 8);
-
-    x = 40;
-    if(crash_type == .panic)
-        x = font.drawStr(img, colorFont, "Panic: ", x, 30)
-    else
-        x = font.drawStr(img, colorFont, "Exception: ", x, 30);
-    _ = font.drawStr(img, colorFontOrange, msg, x, 30);
-
-    drawBacktrace(img, trace_opt, 40, 46);
-
-    cache.writebackData(img.texel_data);
-    vi.setFrameBuffer(@intFromPtr(img.texel_data.ptr));
+/// Paint and present a panic report. Interrupts remain disabled; the runtime
+/// then calls waitForInput to keep this emergency framebuffer interactive.
+pub fn show(kind: CrashType, message: []const u8, trace: ?backtrace.Trace) void {
+    prepare(kind, message, trace);
+    present();
 }
 
-fn drawBacktrace(img: anytype, trace_opt: ?backtrace.Trace, x: u16, y: u16) void {
-    const y_spacing = 9;
-    var line_buf: [line_chars]u8 = undefined;
-    var func_name_buf: [128]u8 align(8) = undefined;
-    var file_name_buf: [192]u8 align(8) = undefined;
-    var line_text_buf: [512]u8 align(8) = undefined;
+pub fn showException(message: []const u8, trace: ?backtrace.Trace, frame: *const TrapFrame, badvaddr: u32) void {
+    prepare(.exception, message, trace);
+    report.registers = frame.*;
+    report.badvaddr = badvaddr;
+    var buffer: [128]u8 = undefined;
+    const pc = frame.epc +% (if (frame.cause & (1 << 31) != 0) @as(u32, 4) else 0);
+    state.memory = .init(report.memory_bounds, pc);
+    const detail = std.fmt.bufPrint(&buffer, "PC 0x{x:0>8}  BadVAddr 0x{x:0>8}  Cause 0x{x:0>8}", .{ pc, badvaddr, frame.cause }) catch "";
+    report.detail.set(detail);
+    present();
+}
 
-    var cur_y = y;
-    var trace = trace_opt orelse {
-        _ = font.drawStr(img, colorFont, "  <backtrace unavailable>", x, cur_y);
-        return;
-    };
+fn prepare(kind: CrashType, message: []const u8, trace_opt: ?backtrace.Trace) void {
+    cp0.regWrite(.Status, cp0.regRead(.Status) & ~@as(u32, 1));
+    report = .{ .kind = kind, .memory_bounds = memory.bounds() };
+    state = .{};
+    report.message.set(message);
+    if (std.mem.indexOfScalar(u8, message, '\n')) |newline| report.detail.set(message[newline + 1 ..]);
+    if (trace_opt) |trace| collectTrace(trace);
+    state.memory = .init(report.memory_bounds, if (report.frame_count != 0) report.frames[0].address else 0x80000000);
+    if (report.detail.len == 0) {
+        var buffer: [64]u8 = undefined;
+        const detail = std.fmt.bufPrint(&buffer, "Execution halted / {d} captured stack frames", .{report.frame_count}) catch "";
+        report.detail.set(detail);
+    }
+    vi.init(.{ .resolution = .@"640x240p", .color_depth = .Rgba5551 });
+}
 
+fn collectTrace(initial: backtrace.Trace) void {
+    var trace = initial;
     while (trace.next()) |entry| {
-        if (cur_y + 8 >= img.height) break;
-
+        if (report.frame_count == report.frames.len) break;
+        const frame = &report.frames[report.frame_count];
+        report.frame_count += 1;
+        frame.address = entry.addr;
+        var filename: [192]u8 = undefined;
         if (srcmap.getLineInfo(entry.addr, .{
-            .func_name = &func_name_buf,
-            .file_name = &file_name_buf,
-            .line_text = &line_text_buf,
+            .func_name = &frame.function.bytes,
+            .file_name = &filename,
+            .line_text = &frame.source.bytes,
         })) |info| {
-            const func_name = info.function_name orelse "";
-            const file_name = info.file_name orelse "";
-
-            var cur_x = x;
-            cur_x = font.drawStr(img, colorFontBlue, func_name, cur_x, cur_y);
-
-            var str = std.fmt.bufPrint( &line_buf, " {s}:{d}:{d} ",
-                .{ file_name, info.line, info.column }) catch "";
-            cur_x = font.drawStr(img, colorFont, str, cur_x, cur_y);
-
-            str = std.fmt.bufPrint( &line_buf, "0x{x:0>8}", .{ entry.addr }) catch "";
-            _ = font.drawStr(img, colorFontGray, str, cur_x, cur_y);
-
-            cur_y += y_spacing;
-
-            if(info.line_text) |line_text| {
-                _ = font.drawStr(img, colorFont, line_text, x, cur_y);
-                cur_y += y_spacing;
-                const x_off = x + (info.column - 1) * 8;
-                font.drawGlyph(img, colorFontTeal, '^', x_off, cur_y);
-                cur_y += y_spacing - 2;
-            }
-        }
-        else {
-            const str = formatAddressLine(&line_buf, entry);
-            _ = font.drawStr(img, colorFont, str, x, cur_y);
-            cur_y += y_spacing;
+            if (info.function_name) |name| frame.function.len = @intCast(name.len);
+            if (info.line_text) |line| frame.source.len = @intCast(line.len);
+            frame.line = info.line;
+            frame.column = info.column;
+            const location = std.fmt.bufPrint(&frame.location.bytes, "{s}:{d}:{d}", .{ info.file_name orelse "<source>", info.line, info.column }) catch "<source location too long>";
+            frame.location.set(location);
+        } else {
+            frame.function.set("<unknown function>");
+            frame.location.set("Source location unavailable");
         }
     }
 }
 
-fn formatAddressLine(buf: []u8, entry: backtrace.Entry) []const u8 {
-    return std.fmt.bufPrint(
-        buf,
-        "#{d}: 0x{x:0>8}",
-        .{ entry.depth, entry.addr },
-    ) catch buf[0..0];
+fn present() void {
+    if (state.tab == .memory and !state.memory.editing)
+        report.memory_view = memory.capture(report.memory_bounds, state.memory, 100_000);
+    const img: ui.Image = .{ .width = ui.width, .height = ui.height, .texel_data = &framebuffer };
+    ui.render(img, &report, state);
+    cache.writebackData(img.texel_data);
+    vi.setFrameBuffer(@intFromPtr(img.texel_data.ptr));
+}
+
+/// SI waits are bounded. A disconnected controller or stalled transfer leaves
+/// the crash display intact. Neither interrupts nor graphics hardware is needed.
+pub fn waitForInput() noreturn {
+    var input: controls.Controller = .{};
+    var last_poll = cp0.regRead(.Count);
+    while (true) {
+        const now = cp0.regRead(.Count);
+        if (now -% last_poll < 1_500_000) continue;
+        last_poll = now;
+        if (input.update(&report, &state, controls.poll())) present();
+    }
 }

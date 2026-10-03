@@ -69,6 +69,20 @@ pub const JoybusBuffer = struct {
         return @ptrFromInt(@intFromPtr(b));
     }
 
+    pub fn roundTripCommandTimeout(b: *JoybusBuffer, comptime CmdType: type, max_attempts: u32) error{SiTimeout}!*CmdType {
+        if (!si.waitDmaIoTimeout(max_attempts)) return error.SiTimeout;
+        const cmd = b.as(CmdType);
+        cmd.* = .{};
+        b.memory[15] = 1;
+        cache.writebackData(b);
+        b.sendCommand();
+        if (!si.waitDmaIoTimeout(max_attempts)) return error.SiTimeout;
+        b.readFromPif();
+        if (!si.waitDmaIoTimeout(max_attempts)) return error.SiTimeout;
+        cache.invalidateData(b);
+        return cmd;
+    }
+
     // pub fn setCommand(b: *JoybusBuffer, commandType: CommandType) void {
     //     switch (commandType) {
     //         .Identify =>

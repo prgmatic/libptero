@@ -33,6 +33,7 @@ export fn __start() linksection(".text.startup") noreturn {
 
     const bss_len = @intFromPtr(&__bss_end) - @intFromPtr(&__bss_start);
     @memset(@as([*]u8, @ptrCast(&__bss_start))[0..bss_len], 0);
+    n64.debug.crash_screen.memory.initBootBounds();
     @field(app, config.entry)() catch |err| @panic(@errorName(err));
     while (true) {}
 }
@@ -56,5 +57,5 @@ fn panicHandler(msg: []const u8, return_address: ?usize) noreturn {
         n64.debug.writeStr("  <backtrace unavailable>\n");
     }
     n64.debug.crash_screen.show(.panic, msg, trace);
-    while (true) {}
+    n64.debug.crash_screen.waitForInput();
 }

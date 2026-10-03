@@ -10,7 +10,7 @@ fn isAlignedWord(addr: u32) bool {
     return addr & 3 == 0;
 }
 
-fn isValidCodeAddr(addr: u32) bool {
+pub fn isValidCodeAddr(addr: u32) bool {
     const start: u32 = @truncate(@intFromPtr(&__text_start));
     const end: u32 = @truncate(@intFromPtr(&__text_end));
     return addr >= start and addr < end and isAlignedWord(addr);

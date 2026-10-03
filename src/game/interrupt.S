@@ -2,9 +2,9 @@
 
 #define EXC_STACK_SIZE (544)
 #define STACK_GPR      0
-#define STACK_HI     (STACK_GPR+(32*8))
-#define STACK_LO     (STACK_HI+8)
-#define STACK_SR     (STACK_LO+8)
+#define STACK_LO     (STACK_GPR+(32*8))
+#define STACK_HI     (STACK_LO+8)
+#define STACK_SR     (STACK_HI+8)
 #define STACK_CR     (STACK_SR+4)
 #define STACK_EPC    (STACK_CR+4)
 #define STACK_FC31   (STACK_EPC+4)
@@ -49,6 +49,8 @@ interrupt_handler:
     sd $15,(STACK_GPR+15*8)(sp) # T7
     sd $24,(STACK_GPR+24*8)(sp) # T8
     sd $25,(STACK_GPR+25*8)(sp) # T9
+    sd $26,(STACK_GPR+26*8)(sp) # K0
+    sd $27,(STACK_GPR+27*8)(sp) # K1
     sd $31,(STACK_GPR+31*8)(sp) # RA
 
     mflo t0
@@ -129,6 +131,8 @@ end_interrupt_gpr:
     ld $15,(STACK_GPR+15*8)(sp)
     ld $24,(STACK_GPR+24*8)(sp)
     ld $25,(STACK_GPR+25*8)(sp)
+    ld $26,(STACK_GPR+26*8)(sp)
+    ld $27,(STACK_GPR+27*8)(sp)
     ld $31,(STACK_GPR+31*8)(sp)
     addiu sp, EXC_STACK_SIZE
     eret
@@ -149,6 +153,37 @@ finalize_exception_frame:
     addiu $1, sp, EXC_STACK_SIZE
     sd $1, (STACK_GPR+29*8)(sp)   # SP
     sd $30,(STACK_GPR+30*8)(sp)   # FP
+    # Preserve original Status above, but enable CU1 to save the FPU even
+    # when the exception itself was Coprocessor Unusable. Respect CP0 hazards.
+    mfc0 t0, C0_SR
+    lui t1, 0x2000
+    or t0, t0, t1
+    mtc0 t0, C0_SR
+    nop
+    nop
+    nop
+    cfc1 t0, $31
+    sw t0, STACK_FC31(sp)
+    sdc1 $f0,(STACK_FPR+0*8)(sp)
+    sdc1 $f1,(STACK_FPR+1*8)(sp)
+    sdc1 $f2,(STACK_FPR+2*8)(sp)
+    sdc1 $f3,(STACK_FPR+3*8)(sp)
+    sdc1 $f4,(STACK_FPR+4*8)(sp)
+    sdc1 $f5,(STACK_FPR+5*8)(sp)
+    sdc1 $f6,(STACK_FPR+6*8)(sp)
+    sdc1 $f7,(STACK_FPR+7*8)(sp)
+    sdc1 $f8,(STACK_FPR+8*8)(sp)
+    sdc1 $f9,(STACK_FPR+9*8)(sp)
+    sdc1 $f10,(STACK_FPR+10*8)(sp)
+    sdc1 $f11,(STACK_FPR+11*8)(sp)
+    sdc1 $f12,(STACK_FPR+12*8)(sp)
+    sdc1 $f13,(STACK_FPR+13*8)(sp)
+    sdc1 $f14,(STACK_FPR+14*8)(sp)
+    sdc1 $f15,(STACK_FPR+15*8)(sp)
+    sdc1 $f16,(STACK_FPR+16*8)(sp)
+    sdc1 $f17,(STACK_FPR+17*8)(sp)
+    sdc1 $f18,(STACK_FPR+18*8)(sp)
+    sdc1 $f19,(STACK_FPR+19*8)(sp)
     sdc1 $f20,(STACK_FPR+20*8)(sp)
     sdc1 $f21,(STACK_FPR+21*8)(sp)
     sdc1 $f22,(STACK_FPR+22*8)(sp)

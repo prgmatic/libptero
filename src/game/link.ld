@@ -4,7 +4,7 @@ ram_start_address = 0x80000000;
 
 MEMORY {
     ROM : ORIGIN = 0x0, LENGTH = 0x100000 * 64 /* 64 MB of ROM */
-    RAM : ORIGIN = ram_start_address, LENGTH = 0x100000 /* 1 MB of RAM for now */
+    RAM : ORIGIN = ram_start_address, LENGTH = 0x400000 - 0x10000 /* standard 4 MiB RDRAM, reserve 64 KiB stack */
 }
 
 SECTIONS {

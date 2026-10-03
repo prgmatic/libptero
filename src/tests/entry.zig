@@ -12,7 +12,8 @@ const tests = [_]runner.Test{} ++
     @import("audio_tests.zig").tests ++
     @import("render_api_tests.zig").tests ++
     @import("display_tests.zig").tests ++
-    @import("input_time_tests.zig").tests;
+    @import("input_time_tests.zig").tests ++
+    @import("crash_memory_tests.zig").tests;
 
 export fn __start() linksection(".text.startup") noreturn {
     // The ROM packer patches these exported values with the appended source
@@ -22,6 +23,7 @@ export fn __start() linksection(".text.startup") noreturn {
 
     const bss_len = @intFromPtr(&__bss_end) - @intFromPtr(&__bss_start);
     @memset(@as([*]u8, @ptrCast(&__bss_start))[0..bss_len], 0);
+    n64.debug.crash_screen.memory.initBootBounds();
 
     n64.debug.init();
     _ = runner.run(&tests);

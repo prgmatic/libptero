@@ -4,6 +4,9 @@ Libptero is an attempt to create an open-soure SDK for the Nentendo 64 written i
 Opt-in framebuffer capture, vertex cache probes, and render-timeout snapshots are
 documented in [Render diagnostics](tools/framebuffer_capture/README.md).
 
+The CPU-rendered panic and exception UI, controller navigation and one-bit fonts
+are documented in [Emergency crash screen](src/n64/debug/crash_screen/README.md).
+
 [ROM assets](src/n64/ROM_ASSETS.md) stay on cartridge and support bounded reads.
 
 Resident and streamed PCM assets, AI output buffers, and the instruction-identical libdragon

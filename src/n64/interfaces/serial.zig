@@ -5,7 +5,6 @@ const status: *const volatile Status = @ptrFromInt(0xA4800018);
 
 const pif_ram_addr = 0x1FC007C0;
 
-
 pub fn pifTerminateBoot() void {
     // Notify the PIF that the boot process is finished. If this is not written,
     // the PIF will halt the CPU after 5 seconds.
@@ -20,17 +19,26 @@ pub fn setPifJoybusMode() void {
     ptr.* = 0x1;
 }
 
-
 pub fn waitDmaIo() void {
-    while(status.is_dma_busy or status.is_io_busy) { }
+    while (status.is_dma_busy or status.is_io_busy) {}
+}
+
+/// Bounded SI polling for emergency callers that must preserve the crash display.
+pub fn waitDmaIoTimeout(max_attempts: u32) bool {
+    var remaining = max_attempts;
+    while (status.is_dma_busy or status.is_io_busy) {
+        if (remaining == 0) return false;
+        remaining -= 1;
+    }
+    return true;
 }
 
 pub fn waitDma() void {
-    while(status.is_dma_busy) { }
+    while (status.is_dma_busy) {}
 }
 
 pub fn waitIo() void {
-    while(status.is_io_busy) { }
+    while (status.is_io_busy) {}
 }
 
 pub fn dmaPifToDram(dramAddr: u32) void {
@@ -49,6 +57,6 @@ const Status = packed struct(u32) {
     unused1: u1,
     dma_error: bool,
     pch_state: u3,
-    dma_state :u3,
-    reserved:u22,
+    dma_state: u3,
+    reserved: u22,
 };

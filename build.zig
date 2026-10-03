@@ -28,6 +28,15 @@ pub fn build(b: *std.Build) void {
     const coverage = b.option(bool, "coverage", "Enable zcov instrumentation") orelse false;
     const coverage_runtime = b.option([]const u8, "coverage-rt", "Path to zcov runtime object");
     var sdk = init(b, .{ .root = b.path("") });
+    const crash_options = b.addOptions();
+    crash_options.addOption(bool, "exception", b.option(bool, "crash-screen-exception", "Trigger a CPU breakpoint instead of a Zig panic in the crash-screen smoke ROM") orelse false);
+    _ = sdk.addRom(.{
+        .name = "crash-screen-smoke",
+        .title = "Real Crash Screen Test",
+        .app_source_file = b.path("src/tests/crash_screen_smoke.zig"),
+        .imports = &.{.{ .name = "crash_smoke_options", .module = crash_options.createModule() }},
+        .install = .{ .outputs = .{ .rom = true, .debug_elf = true }, .step_name = "crash-screen-smoke", .description = "Build a deliberate real panic or CPU exception" },
+    });
     b.installArtifact(sdk.tools.font_compiler);
     b.installArtifact(sdk.tools.audio_compiler);
     b.installArtifact(sdk.tools.rom_assets);

@@ -4,8 +4,18 @@ const debug = @import("../debug.zig");
 const crash_screen = @import("crash_screen.zig");
 
 pub inline fn exceptionHandler(frame: *TrapFrame) noreturn {
-    const causeStr = getCause(frame);
-    debug.print("Interrupt Handler\n", .{});
+    debug.panic_depth += 1;
+    if (debug.panic_depth > 1) while (true) {};
+    const cop0 = @import("../cpu/cp0.zig");
+    const badvaddr = cop0.regRead(.BadVAddr);
+    const code = ExceptionCode.fromCauseReg(frame.cause);
+    const pc = exceptionPc(frame);
+    const instruction: ?u32 = if ((code == .FloatingPoint or code == .Trap or code == .Breakpoint) and debug.backtrace.isValidCodeAddr(pc))
+        @as(*const volatile u32, @ptrFromInt(pc)).*
+    else
+        null;
+    const causeStr = describe(.{ .cause = frame.cause, .epc = frame.epc, .badvaddr = badvaddr, .fcsr = frame.fcsr, .fpr = &frame.fpr, .instruction = instruction, .cache_error = if (code == .Emux) cop0.regRead(.CacheErr) else 0 });
+    debug.print("CPU Exception\n", .{});
     debug.print("Addr: 0x{X:0>8}\n", .{frame.epc});
     debug.writeStr(causeStr);
     debug.writeStr("\n");
@@ -17,6 +27,7 @@ pub inline fn exceptionHandler(frame: *TrapFrame) noreturn {
     debug.print("Backtrace\n", .{});
     debug.backtrace.printTrace(trace);
     debug.print("General Purpose Registers\n", .{});
+    debug.print("HI: 0x{x:0>16} LO: 0x{x:0>16} FCSR: 0x{x:0>8}\n", .{ frame.hi, frame.lo, frame.fcsr });
     var i: u8 = 0;
     while (i < frame.gpr.len) : (i += 4) {
         const n0 = @tagName(@as(GprIndex, @enumFromInt(i)));
@@ -29,78 +40,13 @@ pub inline fn exceptionHandler(frame: *TrapFrame) noreturn {
         const v3: u32 = @truncate(frame.gpr[i + 3]);
         debug.print("  {s}: 0x{X:0>8} {s}: 0x{X:0>8} {s}: 0x{X:0>8} {s}: 0x{X:0>8}\n", .{ n0, v0, n1, v1, n2, v2, n3, v3 });
     }
-    crash_screen.show(.exception, causeStr, trace);
-    while (true) {}
+    crash_screen.showException(causeStr, trace, frame, badvaddr);
+    crash_screen.waitForInput();
 }
 
-fn exceptionPc(frame: *TrapFrame) u32 {
-    var epc = frame.epc;
-    if ((frame.cause & (1 << 31)) > 0)
-        epc += 4;
-    return epc;
+pub fn exceptionPc(frame: *const TrapFrame) u32 {
+    return @import("exception_codes.zig").faultPc(frame.cause, frame.epc);
 }
 
-fn getCause(frame: *TrapFrame) []const u8 {
-    const cop0 = @import("../cpu/cp0.zig");
-    const badVAddr = cop0.regRead(.BadVAddr);
-    const epc = exceptionPc(frame);
-
-    const code = ExceptionCode.fromCauseReg(frame.cause);
-    switch (code) {
-        // TODO: Finish strings
-        .TlbModification => return "Write to read-only memory",
-        .TlbLoad => {
-            if (epc == badVAddr) {
-                return "Invalid program counter address";
-            } else if (badVAddr < 120) {
-                return "NULL pointer dereference (read)";
-            } else {
-                if (badVAddr >= TLS_INVALID_MIN and badVAddr < (TLS_INVALID_MIN + TP_OFFSET)) {
-                    return "Read from TLS in interrupt handler";
-                } else {
-                    return "Read from invalid memory address";
-                }
-            }
-        },
-        .TlbStore => {
-            if (badVAddr < 120) {
-                return "NULL pointer dereference (write)";
-            } else {
-                if (badVAddr >= TLS_INVALID_MIN and badVAddr < (TLS_INVALID_MIN + TP_OFFSET)) {
-                    return "Write to TLS in interrupt handler";
-                } else {
-                    return "Write to invalid memory address";
-                }
-            }
-        },
-        else => return @tagName(code),
-    }
-}
-
-pub const ExceptionCode = enum(u5) {
-    Interrupt = 0,
-    TlbModification = 1,
-    TlbLoad = 2,
-    TlbStore = 3,
-    AddrLoad = 4,
-    AddrStore = 5,
-    BusInst = 6,
-    BusData = 7,
-    SysCall = 8,
-    Breakpoint = 9,
-    CoProcessorUnusable = 11,
-    ArithmaticOverflow = 12,
-    Trap = 13,
-    FloatingPoint = 15,
-    Watch = 23,
-    Cache = 30,
-
-    pub fn fromCauseReg(cause: u32) ExceptionCode {
-        const shifted = cause >> 2;
-        return @enumFromInt(@as(u5, @truncate(shifted)));
-    }
-};
-
-const KERNEL_TP_INVALID = 0x5FFF8001;
-const TLS_INVALID_MIN = KERNEL_TP_INVALID - TP_OFFSET;
-const TP_OFFSET = 0x7000;
+pub const ExceptionCode = @import("exception_codes.zig").ExceptionCode;
+pub const describe = @import("exception_codes.zig").describe;
