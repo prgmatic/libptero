@@ -165,10 +165,16 @@ fn renderedModels() !void {
             const actual = try drawModel(value.withModel(mesh.model()));
             try expectVisible(&actual);
             var expected_mesh = try n64.graphics.model.SkinnedModel.init(allocator, reference.model);
-            expected_mesh.update(&skeleton);
+            var expected_skeleton = try n64.graphics.animation.Skeleton.init(allocator, reference.model.nodes);
+            var expected_player: n64.graphics.animation.Player = .{ .clip = reference.model.findAnimation("move").? };
+            expected_player.seek(0.5);
+            expected_player.apply(&expected_skeleton);
+            expected_skeleton.update();
+            expected_mesh.update(&expected_skeleton);
             const expected = try drawModel(reference.withModel(expected_mesh.model()));
             try testing.expect(std.mem.eql(u32, &expected, &actual));
             expected_mesh.deinit(allocator);
+            expected_skeleton.deinit(allocator);
             mesh.deinit(allocator);
         } else {
             skeleton.writeMatrices(&poses);
