@@ -72,3 +72,59 @@ silence, looping/resampling, both cores, four-buffer AI draining, first-use
 priority startup, and sustained preemption of clipped geometry across queue
 refills. The benchmark pair compares startup smoothing, a volume transition,
 PCM output and address-normalized channel state across 24 identical workloads.
+
+## ROM-streamed PCM
+
+Set `.storage = .rom` on `AssetBundle.addAudio` to emit a `StreamSample` instead
+of a resident `Sample`. Input support remains mono/stereo PCM8/PCM16 WAV; the
+converter emits signed PCM8 or big-endian PCM16. The payload stays in cartridge
+ROM. Streamed assets can exceed the resident 512 KiB position limit and RAM size.
+The initial port is uncompressed PCM; codec decoding remains future work.
+
+```zig
+// Build: assets.addAudio("music", b.path("music.wav"),
+//                        .{ .loop = true, .storage = .rom });
+var storage: [16 * 1024]u8 align(16) = undefined;
+var music: n64.audio.Stream = undefined;
+// After initializing mixer/output:
+music = try .init(assets.music, &storage);
+try mixer.playStream(0, &music, output.timing.frequency);
+try mixer.seek(0, assets.music.frequency * 30); // 30 seconds
+try mixer.setVolume(0, 0.5, 0.5);
+_ = try mixer.tryPlay(&output, 1_000_000);
+```
+
+Keep Stream and its storage at stable addresses until it is detached. Stereo
+uses two mixer slots. Separate Stream instances and windows can play the same
+asset independently. Volume, frequency and stop controls are shared with resident
+voices; `Mixer.seek` operates on an attached streamed voice, measured in source
+frames. Seeking retains the volume filter. Stop releases the stream; play starts
+it at frame zero. EOF clamps its cursor to the logical end and detaches it.
+`positionFrames` reports the source position and preserves fractional progression
+internally. Tail loops are supported through `loop_frames` metadata; the build
+option generates a full-track loop. Windows expand loop crossings and zero-pad
+finite EOF, including the microcode's 64-byte DMA overread. Tiny loops are repeated
+in RAM after their first read. The PCM microcode is unchanged.
+
+Windows must be a multiple of 16 bytes, at least 80 bytes and smaller than
+512 KiB. Actual minimum size depends on output batch length, playback frequency,
+channels, and format. A too-small window returns `StreamBufferTooSmall` before
+submission. For 1912-frame output batches, stereo16 at 22050/47986 Hz fits easily
+in 16 KiB. Each Stream additionally owns a fixed 4 KiB ROM reader. No allocation
+happens during mixing. Refill is synchronous before RSP submission; existing
+window data is reused until a batch plus overread no longer fits.
+
+`Mixer.stream_read_attempts` bounds each reader wait. On a PI timeout, no output
+is submitted to the RSP. The stream reader retains its window destination;
+complete `stream.reader.wait` before stopping/freeing it, then retry submission.
+A subsequent `submit` first finishes a pending read and refills the window.
+The existing RSP timeout contract still applies after submission. Do not mutate
+Stream metadata, cursors, storage or mixer settings while a batch is pending.
+
+`Output.underruns()` counts AI FIFO exhaustion after playback starts. Startup
+before the first buffer and intentional `deinit` drain are excluded. It requires
+regular service or AI interrupts; it reports scheduling gaps, not audio quality.
+Stream `refills`, reader byte/transfer counts, and batch Count timings support
+memory/refill benchmarks. Exact hardware comparisons cover all four PCM formats,
+half/native/double and fractional rates, volume transitions, looping, seek, EOF,
+independent voices, PI retry, and forced geometry preemption with clipping.

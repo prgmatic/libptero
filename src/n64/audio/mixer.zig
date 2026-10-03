@@ -2,6 +2,7 @@ const std = @import("std");
 const rsp = @import("../rsp/rsp.zig");
 const cache = @import("../cpu/cache.zig");
 const Sample = @import("sample.zig").Sample;
+const Stream = @import("stream.zig").Stream;
 
 pub const max_channels = 32;
 pub const position_fraction_bits = 12;
@@ -41,6 +42,10 @@ pub const Mixer = struct {
     pending_output: ?[]align(4) i16,
     runtime: *rsp.Runtime,
     stereo_secondary: [max_channels]bool,
+    streams: [max_channels]?*Stream,
+    /// Bounded PI polling budget for stream refill. Retry a timeout by calling
+    /// submit again; complete stream.reader.wait before releasing its storage.
+    stream_read_attempts: u32 = 1_000_000,
 
     pub fn init(self: *Mixer, runtime: *rsp.Runtime, channel_count: u16) !void {
         if (channel_count == 0 or channel_count > max_channels) return error.InvalidChannelCount;
@@ -54,6 +59,8 @@ pub const Mixer = struct {
         self.pending_output = null;
         self.runtime = runtime;
         self.stereo_secondary = @splat(false);
+        self.streams = @splat(null);
+        self.stream_read_attempts = 1_000_000;
         runtime.mixer_attached = true;
     }
 
@@ -85,6 +92,11 @@ pub const Mixer = struct {
 
     pub fn stop(self: *Mixer, channel: usize) !void {
         try self.editable(channel);
+        if (self.streams[channel]) |stream| {
+            if (stream.reader.destination != null) return error.StreamBusy;
+            stream.attached = false;
+            self.streams[channel] = null;
+        }
         if (self.settings.channels[channel].flags & Channel.stereo != 0) {
             self.stereo_secondary[channel + 1] = false;
             self.settings.volume_right[channel + 1] = 0;
@@ -92,6 +104,38 @@ pub const Mixer = struct {
         self.settings.channels[channel] = .{};
         self.settings.volume_left[channel] = 0;
         self.settings.volume_right[channel] = 0;
+    }
+
+    /// Attach caller-owned fixed storage. Multiple streams may use the same
+    /// ROM sample with independent positions, windows and playback controls.
+    pub fn playStream(self: *Mixer, channel: usize, stream: *Stream, output_frequency: u32) !void {
+        try self.editable(channel);
+        if (stream.attached and self.streams[channel] != stream) return error.StreamAttached;
+        if (stream.reader.destination != null) return error.StreamBusy;
+        const sample = stream.sample;
+        try sample.validate();
+        if (sample.channels == 2 and (channel + 1 >= self.configured_channels or self.settings.channels[channel + 1].address != 0)) return error.StereoChannelUnavailable;
+        const step = try frequencyStep(sample.frequency, output_frequency, sample.bytesPerFrame());
+        try self.stop(channel);
+        stream.cursor = 0;
+        stream.window_valid = false;
+        stream.attached = true;
+        self.streams[channel] = stream;
+        self.settings.channels[channel] = .{
+            .step = step,
+            .address = rsp.physicalAddress(@intFromPtr(stream.storage.ptr)),
+            .flags = (if (sample.format == .pcm16) @as(u32, Channel.pcm16) else 0) | (if (sample.channels == 2) @as(u32, Channel.stereo) else 0),
+        };
+        if (sample.channels == 2) self.stereo_secondary[channel + 1] = true;
+        try self.setVolume(channel, 1, 1);
+    }
+
+    pub fn seek(self: *Mixer, channel: usize, frame: u32) !void {
+        try self.editable(channel);
+        const stream = self.streams[channel] orelse return error.NotStreamedChannel;
+        stream.attached = false;
+        defer stream.attached = true;
+        try stream.seek(frame);
     }
 
     /// Signed volumes preserve libdragon's .15 fixed-point truncation.
@@ -135,6 +179,14 @@ pub const Mixer = struct {
     pub fn submit(self: *Mixer, output: []align(4) i16) !void {
         if (self.pending_output != null) return error.MixerBusy;
         if (output.len == 0 or output.len % 2 != 0 or output.len / 2 > 32767) return error.InvalidOutputLength;
+        for (0..self.configured_channels) |channel| {
+            if (self.streams[channel]) |stream| {
+                const window = try stream.prepare(@intCast(output.len / 2), self.settings.channels[channel].step, self.stream_read_attempts);
+                self.settings.channels[channel].position = window.position;
+                self.settings.channels[channel].length = window.length;
+                cache.writebackData(stream.storage);
+            }
+        }
         cache.writebackData(&self.settings);
         // Preserve neighboring bytes during cache invalidation and the RSP's
         // unaligned-output merge. No cached stores are allowed until wait.
@@ -159,12 +211,22 @@ pub const Mixer = struct {
         self.pending_output = null;
         for (0..self.configured_channels) |channel| {
             const voice = self.settings.channels[channel];
+            if (self.streams[channel]) |stream| {
+                if (stream.finish(voice.position)) try self.stop(channel);
+                continue;
+            }
             if (voice.address != 0 and voice.loop_length == 0 and voice.position >= voice.length) try self.stop(channel);
         }
     }
 
     pub fn deinit(self: *Mixer) !void {
         if (self.pending_output != null) return error.MixerBusy;
+        for (self.streams) |stream| if (stream) |active| {
+            if (active.reader.destination != null) return error.StreamBusy;
+        };
+        for (self.streams) |stream| if (stream) |active| {
+            active.attached = false;
+        };
         rsp.unregisterOverlay(&self.overlay);
         self.runtime.mixer_attached = false;
         self.* = undefined;

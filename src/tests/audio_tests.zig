@@ -20,6 +20,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "Audio: end of waveform silence and stop", .run = finitePcm },
     .{ .name = "Audio: AI FIFO drains and releases all buffers", .run = aiOutput },
     .{ .name = "Audio: geometry preemption, clipping and queue refills", .run = geometryPreemption },
+    .{ .name = "Stream PCM: geometry preemption, clipping and queue refills", .run = streamedGeometryPreemption },
 };
 
 fn idleSilence() !void {
@@ -142,12 +143,20 @@ fn aiOutput() !void {
 var renderer: n64.graphics.Renderer = undefined;
 var geometry: n64.graphics.geometry.Context = undefined;
 var viewport = n64.graphics.geometry.Viewport.init(8, 8);
-var pixels: [64]n64.graphics.color.Rgba32 align(16) = undefined;
+var pixels: [64]n64.graphics.color.Rgba32 align(64) = undefined;
 const vertices align(16) = [_]n64.graphics.geometry.VertexPair{
     .{ .pos_a = .{ -2, -1, 0 }, .pos_b = .{ 1, -1, 0 }, .normal_a = 0, .normal_b = 0, .color_a = .green, .color_b = .green },
     .{ .pos_a = .{ 0, 1, 0 }, .pos_b = .{ 0, 1, 0 }, .normal_a = 0, .normal_b = 0, .color_a = .green, .color_b = .green },
 };
+var stream: n64.audio.Stream = undefined;
+var stream_storage: [384]u8 align(16) = undefined;
 fn geometryPreemption() !void {
+    try geometryPreemptionCase(false);
+}
+fn streamedGeometryPreemption() !void {
+    try geometryPreemptionCase(true);
+}
+fn geometryPreemptionCase(streamed: bool) !void {
     runtime.init();
     defer runtime.deinit();
     renderer.init(&runtime);
@@ -156,7 +165,10 @@ fn geometryPreemption() !void {
     defer geometry.deinit();
     try mixer.init(&runtime, 32);
     defer mixer.deinit() catch {};
-    try mixer.play(0, assets.mono16, assets.mono16.frequency);
+    if (streamed) {
+        stream = try .init(assets.mono16_stream, &stream_storage);
+        try mixer.playStream(0, &stream, assets.mono16.frequency);
+    } else try mixer.play(0, assets.mono16, assets.mono16.frequency);
     setSteadyVolume(0, 32766, 32766);
     const image: n64.graphics.image.ImgRgba32 = .{ .width = 8, .height = 8, .texel_data = &pixels };
     viewport = .init(8, 8);

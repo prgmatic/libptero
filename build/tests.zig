@@ -41,6 +41,13 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     }) });
     instrumentTests(audio_cli_tests, coverage, coverage_runtime);
     test_step.dependOn(&b.addRunArtifact(audio_cli_tests).step);
+    const rom_cli_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/rom_assets/main.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "rom_assets", .module = b.createModule(.{ .root_source_file = b.path("tools/rom_assets/root.zig"), .target = b.graph.host }) }},
+    }) });
+    instrumentTests(rom_cli_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(rom_cli_tests).step);
     const png = b.createModule(.{
         .root_source_file = b.path("tools/imgparse/png.zig"),
         .target = b.graph.host,
@@ -134,6 +141,8 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     test_step.dependOn(&b.addRunArtifact(font_compiler_tests).step);
     inline for (.{
         .{ "audio-compiler-tests", "tools/audio_compiler/root.zig" },
+        .{ "rom-assets-tests", "tools/rom_assets/root.zig" },
+        .{ "elf-pack-tests", "tools/build/elf_pack.zig" },
         .{ "png-decoder-tests", "tools/imgparse/png.zig" },
         .{ "runtime-host-tests", "src/n64/n64.zig" },
         .{ "zsp-tests", "tools/zsp/tests.zig" },

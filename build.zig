@@ -30,6 +30,7 @@ pub fn build(b: *std.Build) void {
     var sdk = init(b, .{ .root = b.path("") });
     b.installArtifact(sdk.tools.font_compiler);
     b.installArtifact(sdk.tools.audio_compiler);
+    b.installArtifact(sdk.tools.rom_assets);
     b.installArtifact(sdk.tools.gltf_compiler);
     const capture_module = b.createModule(.{
         .root_source_file = b.path("tools/framebuffer_capture/root.zig"),
@@ -60,6 +61,10 @@ pub fn build(b: *std.Build) void {
     });
 
     var audio_assets = sdk.createAssets("audio_test_assets");
+    var rom_bytes: [5003]u8 = undefined;
+    for (&rom_bytes, 0..) |*byte, index| byte.* = @truncate(index * 37 + 11);
+    audio_assets.addRomFile("raw_rom", b.addWriteFiles().add("raw-rom.bin", &rom_bytes));
+    audio_assets.addRomFile("empty_rom", b.addWriteFiles().add("empty-rom.bin", ""));
     const wav_fixture = @import("tools/audio_compiler/wav.zig");
     inline for (.{ .{ "mono8", 8, 1 }, .{ "mono16", 16, 1 }, .{ "stereo8", 8, 2 }, .{ "stereo16", 16, 2 } }) |fixture| {
         var bytes: [64 * fixture[2] * (fixture[1] / 8)]u8 = undefined;
@@ -72,18 +77,20 @@ pub fn build(b: *std.Build) void {
             }
         }
         const wave = wav_fixture.fixture(fixture[1], fixture[2], &bytes, b.allocator) catch @panic("OOM");
+        audio_assets.addAudio(fixture[0] ++ "_stream", b.addWriteFiles().add(fixture[0] ++ "-stream.wav", wave), .{ .loop = true, .storage = .rom });
         audio_assets.addAudio(fixture[0], b.addWriteFiles().add(fixture[0] ++ ".wav", wave), .{ .loop = true });
     }
     const finite_wave = wav_fixture.fixture(16, 1, &([_]u8{ 0, 4 } ** 64), b.allocator) catch @panic("OOM");
+    audio_assets.addAudio("finite_stream", b.addWriteFiles().add("finite-stream.wav", finite_wave), .{ .storage = .rom });
     audio_assets.addAudio("finite", b.addWriteFiles().add("finite.wav", finite_wave), .{});
     const test_rom = sdk.addRom(.{
         .name = "tests",
         .title = "Libptero Tests",
         .root_source_file = b.path("src/tests/entry.zig"),
         .assembly_files = &.{},
+        .assets = &audio_assets,
         .imports = &.{
             .{ .name = "zsp_test_programs", .module = zsp_test_programs },
-            .{ .name = "audio_test_assets", .module = audio_assets.createModule() },
         },
         .install = .{
             .outputs = .{ .rom = true, .packed_elf = true, .debug_elf = true, .source_map = true },

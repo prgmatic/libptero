@@ -6,6 +6,8 @@ const Entry = struct {
     path: std.Build.LazyPath,
     alignment: u29,
 };
+const RomEntry = struct { name: []const u8, path: std.Build.LazyPath, audio: bool = false };
+const AudioEntry = struct { name: []const u8, source: std.Build.LazyPath, data: std.Build.LazyPath, streamed: bool = false };
 const SourceEntry = struct { name: []const u8, path: std.Build.LazyPath };
 
 const TextureEntry = struct {
@@ -26,7 +28,7 @@ const ModelEntry = struct {
     data: std.Build.LazyPath,
 };
 
-pub const AudioOptions = struct { loop: bool = false };
+pub const AudioOptions = struct { loop: bool = false, storage: enum { resident, rom } = .resident };
 
 pub const TextureFormat = enum {
     ci4,
@@ -79,6 +81,12 @@ pub const AssetBundle = struct {
 
     pub fn embedFile(self: *AssetBundle, name: []const u8, path: std.Build.LazyPath) void {
         self.asset_module.embedFile(name, path);
+    }
+
+    /// Store raw bytes in cartridge ROM without loading them at boot.
+    pub fn addRomFile(self: *AssetBundle, name: []const u8, path: std.Build.LazyPath) void {
+        self.asset_module.validateName(name);
+        self.asset_module.rom_entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = path }) catch @panic("OOM");
     }
 
     pub fn embedGeneratedFile(self: *AssetBundle, name: []const u8, path: std.Build.LazyPath) void {
@@ -149,7 +157,11 @@ pub const AssetBundle = struct {
         const generated = convert.addOutputFileArg(self.b.fmt("{s}.audio.zig", .{name}));
         convert.addArg(name);
         if (options.loop) convert.addArg("--loop");
-        self.asset_module.audio.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = generated, .data = data }) catch @panic("OOM");
+        if (options.storage == .rom) {
+            convert.addArg("--stream");
+            self.asset_module.rom_entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = data, .audio = true }) catch @panic("OOM");
+        }
+        self.asset_module.audio.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = generated, .data = data, .streamed = options.storage == .rom }) catch @panic("OOM");
     }
 
     pub fn buildZspProgram(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {
@@ -224,7 +236,10 @@ pub const AssetModule = struct {
     textures: std.ArrayList(TextureEntry) = .empty,
     fonts: std.ArrayList(FontEntry) = .empty,
     models: std.ArrayList(ModelEntry) = .empty,
-    audio: std.ArrayList(ModelEntry) = .empty,
+    audio: std.ArrayList(AudioEntry) = .empty,
+    rom_entries: std.ArrayList(RomEntry) = .empty,
+    rom_packer: *std.Build.Step.Compile,
+    rom_payload: ?std.Build.LazyPath = null,
     finalized: bool = false,
     module: ?*std.Build.Module = null,
 
@@ -239,6 +254,7 @@ pub const AssetModule = struct {
     pub fn createModule(self: *AssetModule) *std.Build.Module {
         if (self.module) |module| return module;
         self.finalized = true;
+        const handles = self.packRom();
 
         var source: std.ArrayList(u8) = .empty;
         for (self.entries.items) |entry| {
@@ -274,8 +290,12 @@ pub const AssetModule = struct {
             "pub const {s} = @import(\"audio_{s}\").{s};\n",
             .{ entry.name, entry.name, entry.name },
         )) catch @panic("OOM");
+        for (self.rom_entries.items) |entry| {
+            if (!entry.audio) source.appendSlice(self.b.allocator, self.b.fmt("pub const {s} = @import(\"rom_handles\").{s};\n", .{ entry.name, entry.name })) catch @panic("OOM");
+        }
         const root_source = self.b.addWriteFiles().add(self.b.fmt("{s}.zig", .{self.name}), source.items);
         const module = self.b.createModule(.{ .root_source_file = root_source, .target = self.target });
+        if (handles) |manifest| module.addImport("rom_handles", manifest);
         for (self.entries.items) |entry| {
             module.addAnonymousImport(self.b.fmt("asset_{s}", .{entry.name}), .{ .root_source_file = entry.path });
         }
@@ -316,11 +336,23 @@ pub const AssetModule = struct {
                 .target = self.target,
                 .imports = &.{.{ .name = "n64", .module = self.n64_module }},
             });
-            audio_module.addAnonymousImport("audio_data", .{ .root_source_file = entry.data });
+            if (entry.streamed) audio_module.addImport("rom_data", handles.?) else audio_module.addAnonymousImport("audio_data", .{ .root_source_file = entry.data });
             module.addImport(self.b.fmt("audio_{s}", .{entry.name}), audio_module);
         }
         self.module = module;
         return module;
+    }
+
+    fn packRom(self: *AssetModule) ?*std.Build.Module {
+        if (self.rom_entries.items.len == 0) return null;
+        const pack = self.b.addRunArtifact(self.rom_packer);
+        self.rom_payload = pack.addOutputFileArg(self.b.fmt("{s}.rom.bin", .{self.name}));
+        const source = pack.addOutputFileArg(self.b.fmt("{s}.rom.zig", .{self.name}));
+        for (self.rom_entries.items) |entry| {
+            pack.addArg(entry.name);
+            pack.addFileArg(entry.path);
+        }
+        return self.b.createModule(.{ .root_source_file = source, .target = self.target, .imports = &.{.{ .name = "n64", .module = self.n64_module }} });
     }
 
     fn addEntry(self: *AssetModule, name: []const u8, path: std.Build.LazyPath, alignment: u29) void {
@@ -353,6 +385,8 @@ pub const AssetModule = struct {
         if (self.finalized) std.debug.panic("cannot add '{s}' after asset bundle '{s}' was finalized", .{ name, self.name });
         if (!std.zig.isValidId(name)) std.debug.panic("asset name '{s}' is not a valid Zig identifier", .{name});
         for (self.entries.items) |entry|
+            if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
+        for (self.rom_entries.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});
         for (self.sources.items) |entry|
             if (std.mem.eql(u8, entry.name, name)) std.debug.panic("duplicate asset name '{s}'", .{name});

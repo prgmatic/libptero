@@ -28,6 +28,8 @@ export fn __start() linksection(".text.startup") noreturn {
     // map's location. Referencing them keeps the metadata in a minimal ROM.
     _ = @as(*volatile u32, @ptrCast(&n64.debug.srcmap.__srcmap_rom_offset)).*;
     _ = @as(*volatile u32, @ptrCast(&n64.debug.srcmap.__srcmap_rom_size)).*;
+    _ = @as(*volatile u32, @ptrCast(&n64.rom.__rom_assets_rom_offset)).*;
+    _ = @as(*volatile u32, @ptrCast(&n64.rom.__rom_assets_rom_size)).*;
 
     const bss_len = @intFromPtr(&__bss_end) - @intFromPtr(&__bss_start);
     @memset(@as([*]u8, @ptrCast(&__bss_start))[0..bss_len], 0);

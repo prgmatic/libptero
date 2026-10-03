@@ -9,6 +9,7 @@ comptime {
     if (!@typeInfo(@TypeOf(assets.fixture_ci4.palette)).pointer.is_const) @compileError("embedded palette must be read-only");
     if (assets.raw_data.len != 10) @compileError("raw asset was not embedded");
     if (assets.generated_data.len != 15) @compileError("generated asset was not embedded");
+    if (@TypeOf(assets.rom_data) != n64.rom.Asset or assets.rom_data.size != 15) @compileError("ROM handle was not generated");
     if (assets.custom_rsp.len == 0) @compileError("ZSP asset was not embedded");
     if (!@typeInfo(@TypeOf(assets.fixture_font.atlases[0].texel_data)).pointer.is_const)
         @compileError("embedded font atlas must be read-only");
@@ -22,8 +23,12 @@ comptime {
 
 var renderer: n64.graphics.geometry.Renderer = undefined;
 var pixels: [8 * 8]n64.graphics.color.Rgba16 align(64) = undefined;
+var reader: n64.rom.Reader = .{};
+var rom_bytes: [15]u8 = undefined;
 
 pub fn main() !void {
+    try reader.read(assets.rom_data, 0, &rom_bytes, 1_000_000);
+    if (!std.mem.eql(u8, &rom_bytes, &assets.generated_data)) return error.RomReadMismatch;
     var memory: [1024]u8 align(64) = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&memory);
     const allocator = fixed.allocator();

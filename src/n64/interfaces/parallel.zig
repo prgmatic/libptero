@@ -1,8 +1,15 @@
-const dma_dram_addr:    *volatile u32 = @ptrFromInt(0xa4600000);
+const dma_dram_addr: *volatile u32 = @ptrFromInt(0xa4600000);
 const dma_address: *volatile u32 = @ptrFromInt(0xa4600004);
-const dma_read_len:     *volatile u32 = @ptrFromInt(0xa4600008);
-const dma_write_len:    *volatile u32 = @ptrFromInt(0xa460000C);
-const status:           *volatile u32 = @ptrFromInt(0xa4600010);
+const dma_read_len: *volatile u32 = @ptrFromInt(0xa4600008);
+const dma_write_len: *volatile u32 = @ptrFromInt(0xa460000C);
+const status: *volatile u32 = @ptrFromInt(0xa4600010);
+
+pub fn readStatus() u32 {
+    return status.*;
+}
+pub fn writeStatus(value: u32) void {
+    status.* = value;
+}
 
 /// Start DMA from PI bus (eg. cartridge) to RDRAM.
 pub fn dmaToDram(dram_addr: u32, cart_addr: u32, write_len: u32) void {
@@ -19,13 +26,13 @@ pub fn dmaFromDram(dram_addr: u32, cart_addr: u32, read_len: u32) void {
 }
 
 pub fn waitDmaIo() void {
-    while(status.* & 0b11 > 0) { }
+    while (status.* & 0b11 > 0) {}
 }
 
 pub fn waitDma() void {
-    while(status.* & 1 > 0) { }
+    while (status.* & 1 > 0) {}
 }
 
 pub fn waitIo() void {
-    while(status.* & 0b10 > 0) { }
+    while (status.* & 0b10 > 0) {}
 }

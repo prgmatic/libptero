@@ -7,6 +7,7 @@ pub const graphics = @import("graphics.zig");
 pub const display = @import("display.zig");
 pub const time = @import("time.zig");
 pub const audio = @import("audio.zig");
+pub const rom = @import("rom.zig");
 
 test {
     _ = graphics.image;
@@ -20,6 +21,8 @@ test {
     _ = io.joypad;
     _ = time;
     _ = audio;
+    _ = rom;
+    _ = io.pi;
     _ = graphics.rdp.RenderQueue;
     _ = graphics.rdp.Completion;
     _ = display;

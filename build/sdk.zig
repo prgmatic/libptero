@@ -86,6 +86,7 @@ pub const Sdk = struct {
                 .target = self.target,
                 .n64_module = self.n64_module,
                 .name = name,
+                .rom_packer = self.tools.rom_assets,
             },
         };
     }
@@ -156,6 +157,7 @@ pub const Sdk = struct {
             .boot = options.boot,
             .metadata = options.metadata,
             .imports = root_imports,
+            .rom_assets = if (options.assets) |assets| assets.asset_module.rom_payload else null,
         });
         if (options.install) |install| _ = rom.configureInstall(self.b, install);
         return rom;

@@ -12,6 +12,7 @@ pub const Tools = struct {
     font_compiler: *std.Build.Step.Compile,
     gltf_compiler: *std.Build.Step.Compile,
     audio_compiler: *std.Build.Step.Compile,
+    rom_assets: *std.Build.Step.Compile,
 };
 
 pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
@@ -34,6 +35,9 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
         .imports = &.{.{ .name = "texture_compiler", .module = texture_compiler }},
     });
     return .{
+        .rom_assets = addTool(b, root, "rom-assets", "tools/rom_assets/main.zig", &.{
+            .{ .name = "rom_assets", .module = b.createModule(.{ .root_source_file = root.path(b, "tools/rom_assets/root.zig"), .target = b.graph.host }) },
+        }),
         .srcmap = addTool(b, root, "srcmap", "tools/n64srcmap/main.zig", &.{
             .{ .name = "srcmap_format", .module = srcmap_format },
         }),

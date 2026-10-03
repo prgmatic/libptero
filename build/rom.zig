@@ -16,6 +16,7 @@ pub const Options = struct {
     boot: BootOptions,
     metadata: MetadataOptions,
     imports: []const std.Build.Module.Import = &.{},
+    rom_assets: ?std.Build.LazyPath = null,
 };
 
 pub const MemoryLayout = struct {
@@ -162,6 +163,10 @@ pub fn build(b: *std.Build, options: Options) Rom {
     pack_step.addArtifactArg(debug_elf);
     pack_step.addFileArg(srcmap);
     const elf = pack_step.addOutputFileArg(b.fmt("{s}.elf", .{options.name}));
+    if (options.rom_assets) |assets| {
+        pack_step.addFileArg(assets);
+        pack_step.addFileArg(boot);
+    }
 
     const make_rom_step = b.addRunArtifact(options.tools.ipl3_cat);
     make_rom_step.addFileArg(boot);

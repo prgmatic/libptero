@@ -5,7 +5,7 @@ const std = @import("std");
 //   - removes section headers, symbols, DWARF, and other non-loadable data
 //   - appends srcmap as raw ROM data and patches its ROM offset/size into RAM
 //
-// Usage: elf_pack <input.elf> <input.srcmap> <output.elf>
+// Usage: elf_pack <input.elf> <input.srcmap> <output.elf> [<rom-assets.bin> <boot.bin>]
 
 pub fn main(init: std.process.Init) !void {
     const alloc = std.heap.smp_allocator;
@@ -16,8 +16,8 @@ pub fn main(init: std.process.Init) !void {
     const stderr = &err_writer.interface;
 
     const args = try init.minimal.args.toSlice(alloc);
-    if (args.len != 4) {
-        try stderr.print("Usage: elf_pack <input.elf> <input.srcmap> <output.elf>\n", .{});
+    if (args.len != 4 and args.len != 6) {
+        try stderr.print("Usage: elf_pack <input.elf> <input.srcmap> <output.elf> [<rom-assets.bin> <boot.bin>]\n", .{});
         try stderr.flush();
         std.process.exit(1);
     }
@@ -27,7 +27,13 @@ pub fn main(init: std.process.Init) !void {
     const srcmap_data = try readAll(io, alloc, args[2]);
     defer alloc.free(srcmap_data);
 
-    const out = try pack(alloc, elf_data, srcmap_data);
+    const assets = if (args.len == 6) try readAll(io, alloc, args[4]) else &.{};
+    defer if (args.len == 6) alloc.free(assets);
+    const boot = if (args.len == 6) try readAll(io, alloc, args[5]) else &.{};
+    defer if (args.len == 6) alloc.free(boot);
+    // ipl3_cat pads to the NEXT 256-byte boundary, even when already aligned.
+    const rom_base: u32 = @intCast(boot.len + 256 - boot.len % 256);
+    const out = try pack(alloc, elf_data, srcmap_data, assets, rom_base);
     defer alloc.free(out);
 
     const f = try std.Io.Dir.cwd().createFile(io, args[3], .{});
@@ -53,7 +59,7 @@ const Error = error{
     ProgramHeaderTableTooLarge,
 };
 
-fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8) ![]u8 {
+fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8, assets: []const u8, rom_base: u32) ![]u8 {
     if (elf.len < 52) return Error.BadElf;
     if (!std.mem.eql(u8, elf[0..4], "\x7fELF")) return Error.BadElf;
     if (elf[4] != 1 or elf[5] != 2) return Error.UnsupportedElf; // ELF32, big-endian
@@ -91,6 +97,11 @@ fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8) ![]u8 {
     cursor = std.mem.alignForward(u32, cursor, 4);
     const srcmap_offset = cursor;
     cursor += @intCast(srcmap.len);
+    const assets_offset = std.mem.alignForward(u32, cursor, 16);
+    if (assets.len != 0) {
+        if (@as(u64, rom_base) + assets_offset + assets.len > 64 * 1024 * 1024) return error.RomTooLarge;
+        cursor = assets_offset + @as(u32, @intCast(assets.len));
+    }
 
     const out = try alloc.alloc(u8, cursor);
     @memset(out, 0);
@@ -131,6 +142,13 @@ fn pack(alloc: std.mem.Allocator, elf: []const u8, srcmap: []const u8) ![]u8 {
     patchU32AtVaddr(out, phoff, new_phnum, phent, srcmap_rom_size_vaddr, @intCast(srcmap.len)) catch return Error.BadElf;
     @memcpy(out[@as(usize, srcmap_offset)..@as(usize, srcmap_offset + srcmap.len)], srcmap);
 
+    if (assets.len != 0) {
+        const address = try findSymbol(elf, "__rom_assets_rom_offset");
+        const size = try findSymbol(elf, "__rom_assets_rom_size");
+        try patchU32AtVaddr(out, phoff, new_phnum, phent, address, rom_base + assets_offset);
+        try patchU32AtVaddr(out, phoff, new_phnum, phent, size, @intCast(assets.len));
+        @memcpy(out[assets_offset..][0..assets.len], assets);
+    }
     return out;
 }
 
@@ -240,3 +258,46 @@ const ST_VALUE = 4;
 
 const PT_LOAD: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
+
+test "ROM payload stays outside loaded segments and metadata uses final ROM addresses" {
+    var elf = [_]u8{0} ** 640;
+    @memcpy(elf[0..6], "\x7fELF\x01\x02");
+    w32(&elf, EH_PHOFF, 64);
+    w16(&elf, EH_PHNUM, 1);
+    w16(&elf, EH_PHENT, 32);
+    w32(&elf, EH_SHOFF, 400);
+    w16(&elf, EH_SHNUM, 3);
+    w16(&elf, EH_SHENT, 40);
+    w32(&elf, 64 + PH_TYPE, PT_LOAD);
+    w32(&elf, 64 + PH_OFFSET, 128);
+    w32(&elf, 64 + PH_VADDR, 0x80000000);
+    w32(&elf, 64 + PH_FILESZ, 16);
+    w32(&elf, 64 + PH_MEMSZ, 32);
+    w32(&elf, 64 + PH_ALIGN, 8);
+    w32(&elf, 440 + SH_TYPE, SHT_SYMTAB);
+    w32(&elf, 440 + SH_OFFSET, 192);
+    w32(&elf, 440 + SH_SIZE, 64);
+    w32(&elf, 440 + SH_ENTSIZE, 16);
+    w32(&elf, 440 + SH_LINK, 2);
+    w32(&elf, 480 + SH_OFFSET, 256);
+    var offset: u32 = 0;
+    for ([_][]const u8{ "__srcmap_rom_offset", "__srcmap_rom_size", "__rom_assets_rom_offset", "__rom_assets_rom_size" }, 0..) |name, i| {
+        w32(&elf, 192 + i * 16 + ST_NAME, offset);
+        w32(&elf, 192 + i * 16 + ST_VALUE, 0x80000000 + @as(u32, @intCast(i * 4)));
+        @memcpy(elf[256 + offset ..][0..name.len], name);
+        offset += @intCast(name.len + 1);
+    }
+    w32(&elf, 480 + SH_SIZE, offset);
+    const out = try pack(std.testing.allocator, &elf, "srcmap", "ROM asset", 0x5000);
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqual(@as(u32, 16), r32(out, 64 + PH_FILESZ));
+    try std.testing.expectEqual(@as(u32, 32), r32(out, 64 + PH_MEMSZ));
+    const asset_offset = r32(out, 104) - 0x5000;
+    try std.testing.expectEqual(@as(u32, 0), asset_offset % 16);
+    try std.testing.expectEqualSlices(u8, "ROM asset", out[asset_offset..]);
+    try std.testing.expectEqual(@as(u32, 9), r32(out, 108));
+    try std.testing.expectEqual(@as(u16, 0), r16(out, EH_SHNUM));
+    const minimal = try pack(std.testing.allocator, &elf, "srcmap", &.{}, 0);
+    defer std.testing.allocator.free(minimal);
+    try std.testing.expectEqual(@as(usize, 118), minimal.len);
+}

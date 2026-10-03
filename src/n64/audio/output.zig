@@ -36,10 +36,13 @@ const Ring = struct {
     writing: u6 = 0,
     queued: u2 = 0,
     acquired: bool = false,
+    draining: bool = false,
+    underruns: u32 = 0,
     fn next(self: Ring, index: u6) u6 {
         return @intCast((@as(u32, index) + 1) % self.count);
     }
     fn retire(self: *Ring, status: u32) void {
+        if (!self.draining and self.queued != 0 and status & ai.busy == 0) self.underruns +%= 1;
         if (self.queued > 1 and status & ai.full == 0) self.retireOne();
         if (self.queued > 0 and status & ai.busy == 0) self.retireOne();
     }
@@ -93,6 +96,14 @@ pub const Output = struct {
     timing: Timing,
     ring: Ring,
     submitted_buffers: u32 = 0,
+
+    /// Counts AI FIFO exhaustion after playback starts; intentional shutdown
+    /// drain is excluded. Poll/service regularly or enable AI interrupts.
+    pub fn underruns(self: *Output) u32 {
+        const status = lock();
+        defer unlock(status);
+        return self.ring.underruns;
+    }
 
     pub fn init(self: *Output, allocator: std.mem.Allocator, options: Options) !void {
         if (owner != null) return error.AudioAlreadyInitialized;
@@ -157,6 +168,7 @@ pub const Output = struct {
     /// Waits for queued AI buffers. A timeout retains storage for retry.
     pub fn deinit(self: *Output, allocator: std.mem.Allocator, max_attempts: u32) !void {
         if (self.ring.acquired) return error.BufferAlreadyAcquired;
+        self.ring.draining = true;
         var remaining = max_attempts;
         while (self.ring.full_mask != 0) {
             self.service();
@@ -207,4 +219,22 @@ test "ring preserves AI-owned buffers through FIFO drain and restart" {
     try std.testing.expectEqual(@as(?u6, 0), ring.enqueue());
     ring.retire(0);
     try std.testing.expectEqual(@as(u32, 0), ring.full_mask);
+}
+
+test "FIFO exhaustion counts once and intentional draining is excluded" {
+    var ring: Ring = .{ .count = 4 };
+    _ = (try ring.acquire()).?;
+    ring.commit();
+    _ = ring.enqueue();
+    ring.retire(ai.busy);
+    try std.testing.expectEqual(@as(u32, 0), ring.underruns);
+    ring.retire(0);
+    ring.retire(0);
+    try std.testing.expectEqual(@as(u32, 1), ring.underruns);
+    _ = (try ring.acquire()).?;
+    ring.commit();
+    _ = ring.enqueue();
+    ring.draining = true;
+    ring.retire(0);
+    try std.testing.expectEqual(@as(u32, 1), ring.underruns);
 }
