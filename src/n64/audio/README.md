@@ -1,4 +1,4 @@
-# PCM audio
+# Audio
 
 The PCM command in `../rsp/ucode/audio_mixer.zsp` ports libdragon's
 `src/audio/rsp_mixer.S` command 0 at commit
@@ -62,7 +62,7 @@ DMA padding for an address that is 4 modulo 8. Sample memory includes 64 readabl
 bytes after its logical end. The built asset pipeline supplies that padding.
 
 Resident samples must be smaller than 512 KiB; larger sources use the ROM-streamed
-path below. wav64 loading, VADPCM or Opus decoding, tracker playback, and event
+path below. wav64 loading, Opus decoding, tracker playback, and event
 sequencing remain unsupported. The original mixertest uses compressed assets;
 these examples deliberately play its original WAV PCM instead.
 
@@ -79,7 +79,7 @@ Set `.storage = .rom` on `AssetBundle.addAudio` to emit a `StreamSample` instead
 of a resident `Sample`. Input support remains mono/stereo PCM8/PCM16 WAV; the
 converter emits signed PCM8 or big-endian PCM16. The payload stays in cartridge
 ROM. Streamed assets can exceed the resident 512 KiB position limit and RAM size.
-The initial port is uncompressed PCM; codec decoding remains future work.
+VADPCM assets use the same Stream API, as described below.
 
 ```zig
 // Build: assets.addAudio("music", b.path("music.wav"),
@@ -128,3 +128,51 @@ Stream `refills`, reader byte/transfer counts, and batch Count timings support
 memory/refill benchmarks. Exact hardware comparisons cover all four PCM formats,
 half/native/double and fractional rates, volume transitions, looping, seek, EOF,
 independent voices, PI retry, and forced geometry preemption with clipping.
+
+## VADPCM compression
+
+```zig
+assets.addAudio("music", b.path("music.wav"),
+    .{ .compression = .vadpcm, .storage = .rom, .loop = true });
+```
+
+Compression selects a ROM-backed `StreamSample`. It accepts the same mono/stereo
+PCM8/PCM16 WAV inputs and decodes to PCM16 at the original sample rate. VADPCM is
+lossy: sixteen PCM16 samples become nine bytes per channel. The host converter
+uses the same four-predictor, order-two encoder as libdragon, vendored under
+MPL-2.0 in `tools/audio_compiler/vendor/vadpcm`. The installed CLI's `--vadpcm`
+switch implies ROM storage. Generated metadata contains a 256-byte aligned
+codebook; compressed blocks and seek histories remain in cartridge ROM.
+
+`audio_vadpcm.zsp` ports libdragon's VADPCM_Decompress and VADPCM_SetState
+commands as **184 identical instructions**, with verified address
+relocations and normal ZSP only. The decoder has its own shared-DMEM overlay;
+its scratch ends at `0xFE8`, leaving 24 bytes. Codebook banks are aligned so the
+reference's stereo XOR toggle works. Maximum batches are 94 mono or 47 stereo
+blocks (1504 source frames mono, 752 stereo). Decoder state is a caller-owned
+32-byte RDRAM history, so voices remain independent across overlay switches.
+
+Mixer lazily registers the decoder when a compressed stream starts. Refill
+reads encoded blocks, runs decoder commands on the high-priority queue, waits,
+and copies PCM into the existing stream window. The unchanged PCM overlay then
+mixes that window. Every 1024 source frames has a 32-byte history checkpoint.
+An arbitrary seek restores the preceding checkpoint and discards at most 1023
+frames before the requested position. Loops and EOF preserve exact logical
+frame counts, including boundaries inside a sixteen-sample encoded block.
+
+No allocation happens during refill. Each Stream owns an additional 3072-byte
+RDRAM decode workspace and 32-byte history; its existing PCM window and 4 KiB
+ROM reader remain caller/fixed storage. Uncompressed voices also carry this
+fixed codec storage in the current Stream type. Refills and `compressed.decoded_blocks`
+can be used to measure workload. VADPCM's payload ratio excludes checkpoint and
+codebook overhead. Huffman-packed VADPCM and wav64 container loading are not
+implemented; generated assets use native metadata and plain VADPCM blocks.
+
+A PI timeout retains the Reader destination. An RSP decoder timeout retains the
+workspace/history and rejects mixer controls/deinitialization with `MixerBusy`.
+Retry `Mixer.submit`/`tryPlay` to finish the pending decode and refill; to abandon
+playback, first complete `stream.reader.wait` and `mixer.decoder.wait`, then stop.
+The raw `n64.audio.vadpcm.Decoder` also exposes asynchronous `submit`,
+`submitState`, and `wait`; keep it and its borrowed buffers stable, and destroy
+it before the runtime. Raw output may have any even byte alignment, provided the
+caller owns complete DMA/cache lines and eight trailing padding bytes.

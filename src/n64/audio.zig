@@ -1,3 +1,4 @@
+pub const vadpcm = @import("audio/vadpcm.zig");
 pub const mixer = @import("audio/mixer.zig");
 pub const output = @import("audio/output.zig");
 pub const Output = output.Output;
@@ -6,6 +7,7 @@ pub const StreamSample = @import("audio/stream.zig").Sample;
 pub const Stream = @import("audio/stream.zig").Stream;
 
 test {
+    _ = vadpcm;
     _ = mixer;
     _ = output;
     _ = @import("audio/sample.zig");

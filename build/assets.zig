@@ -28,7 +28,7 @@ const ModelEntry = struct {
     data: std.Build.LazyPath,
 };
 
-pub const AudioOptions = struct { loop: bool = false, storage: enum { resident, rom } = .resident };
+pub const AudioOptions = struct { loop: bool = false, storage: enum { resident, rom } = .resident, compression: enum { none, vadpcm } = .none };
 
 pub const TextureFormat = enum {
     ci4,
@@ -147,21 +147,23 @@ pub const AssetBundle = struct {
         self.asset_module.addModelEntry(name, generated_source, data);
     }
 
-    /// Convert unsigned PCM8 or little-endian PCM16 WAV to a native resident
-    /// Sample, including the microcode's silence/loop overread padding.
+    /// Convert mono/stereo PCM8/16 WAV to native Sample or ROM StreamSample.
+    /// VADPCM selects ROM streaming; PCM includes silence/loop DMA padding.
     pub fn addAudio(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath, options: AudioOptions) void {
         self.asset_module.validateName(name);
         const convert = self.b.addRunArtifact(self.tools.audio_compiler);
         convert.addFileArg(source);
-        const data = convert.addOutputFileArg(self.b.fmt("{s}.pcm", .{name}));
+        const streamed = options.storage == .rom or options.compression == .vadpcm;
+        const data = convert.addOutputFileArg(self.b.fmt("{s}.audio.bin", .{name}));
         const generated = convert.addOutputFileArg(self.b.fmt("{s}.audio.zig", .{name}));
         convert.addArg(name);
         if (options.loop) convert.addArg("--loop");
-        if (options.storage == .rom) {
+        if (options.compression == .vadpcm) convert.addArg("--vadpcm");
+        if (streamed) {
             convert.addArg("--stream");
             self.asset_module.rom_entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = data, .audio = true }) catch @panic("OOM");
         }
-        self.asset_module.audio.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = generated, .data = data, .streamed = options.storage == .rom }) catch @panic("OOM");
+        self.asset_module.audio.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = generated, .data = data, .streamed = streamed }) catch @panic("OOM");
     }
 
     pub fn buildZspProgram(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath) std.Build.LazyPath {

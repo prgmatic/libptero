@@ -21,6 +21,7 @@ pub const tests = [_]runner.Test{
     .{ .name = "Audio: AI FIFO drains and releases all buffers", .run = aiOutput },
     .{ .name = "Audio: geometry preemption, clipping and queue refills", .run = geometryPreemption },
     .{ .name = "Stream PCM: geometry preemption, clipping and queue refills", .run = streamedGeometryPreemption },
+    .{ .name = "VADPCM: decoder and mixer preempt clipped geometry", .run = decoderGeometryPreemption },
 };
 
 fn idleSilence() !void {
@@ -151,12 +152,18 @@ const vertices align(16) = [_]n64.graphics.geometry.VertexPair{
 var stream: n64.audio.Stream = undefined;
 var stream_storage: [384]u8 align(16) = undefined;
 fn geometryPreemption() !void {
-    try geometryPreemptionCase(false);
+    try geometryPreemptionCase(false, false);
 }
 fn streamedGeometryPreemption() !void {
-    try geometryPreemptionCase(true);
+    try geometryPreemptionCase(true, false);
 }
-fn geometryPreemptionCase(streamed: bool) !void {
+var decode_workspace: [n64.audio.vadpcm.workspace_bytes]u8 align(16) = undefined;
+var decode_history: n64.audio.vadpcm.State align(16) = @splat(0);
+const decode_book align(16) = @as(n64.audio.vadpcm.Codebook, @splat(0));
+fn decoderGeometryPreemption() !void {
+    try geometryPreemptionCase(true, true);
+}
+fn geometryPreemptionCase(streamed: bool, compressed: bool) !void {
     runtime.init();
     defer runtime.deinit();
     renderer.init(&runtime);
@@ -165,6 +172,7 @@ fn geometryPreemptionCase(streamed: bool) !void {
     defer geometry.deinit();
     try mixer.init(&runtime, 32);
     defer mixer.deinit() catch {};
+    if (compressed) mixer.decoder.init();
     if (streamed) {
         stream = try .init(assets.mono16_stream, &stream_storage);
         try mixer.playStream(0, &stream, assets.mono16.frequency);
@@ -197,10 +205,26 @@ fn geometryPreemptionCase(streamed: bool) !void {
                 if (attempts == 0) return error.RspTimeout;
                 attempts -= 1;
             }
+            if (compressed) {
+                const encoded = try n64.audio.vadpcm.inputSlice(&decode_workspace, 1, 1);
+                encoded[0] = 0x80;
+                @memset(encoded[1..], 0x12);
+                @memset(&decode_history, 0);
+                try mixer.decoder.submit(&decode_workspace, &decode_history, &decode_book, 1, 1);
+                try expectFailure(error.RspTimeout, mixer.decoder.wait(0));
+                try expectFailure(error.MixerBusy, mixer.stop(0));
+                rsp.io.status_register_write.* = rsp.io.status_clear_signal0;
+                try mixer.decoder.wait(timeout);
+                try testing.expect(rsp.io.status_register_read.signal0);
+                const decoded = std.mem.bytesAsSlice(i16, decode_workspace[0..32]);
+                for (decoded, 0..) |value, sample| try testing.expectEqual(@as(i16, if (sample % 2 == 0) 256 else 512), value);
+            }
             try mixer.submit(output[0..64]);
             rsp.io.status_register_write.* = rsp.io.status_clear_signal0;
             try mixer.wait(timeout);
-            try testing.expect(rsp.io.status_register_read.signal0);
+            // Decoder consumed the first gate; the mix then releases the final
+            // draw gate. PCM-only work resumes through the first gate here.
+            try testing.expect(rsp.io.status_register_read.signal0 != compressed);
             for (0..32) |frame| try testing.expectEqual((@as(i16, @intCast(frame)) - 16) * 256, output[frame * 2]);
             rsp.io.status_register_write.* = rsp.io.status_clear_signal0;
         }
@@ -243,4 +267,8 @@ fn finitePcm() !void {
     try mixer.submit(output[0..64]);
     try mixer.wait(timeout);
     for (output[0..64]) |value| try testing.expectEqual(@as(i16, 0), value);
+}
+
+fn expectFailure(expected: anyerror, actual: anyerror!void) !void {
+    if (actual) |_| return error.ExpectedFailure else |err| try testing.expect(err == expected);
 }

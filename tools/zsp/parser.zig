@@ -2107,6 +2107,10 @@ fn vectorMemoryOperationForBuiltin(name: []const u8) ?ast.VectorMemoryOperation 
         .{ "store64", ast.VectorMemoryOperation.store64 },
         .{ "load128", ast.VectorMemoryOperation.load128 },
         .{ "store128", ast.VectorMemoryOperation.store128 },
+        .{ "loadQuad", ast.VectorMemoryOperation.load_quad_lane },
+        .{ "loadRight", ast.VectorMemoryOperation.load_right },
+        .{ "storeRight", ast.VectorMemoryOperation.store_right },
+        .{ "loadTranspose", ast.VectorMemoryOperation.load_transpose },
         .{ "loadPackedSigned", ast.VectorMemoryOperation.load_packed_signed },
         .{ "loadPackedUnsigned", ast.VectorMemoryOperation.load_packed_unsigned },
         .{ "storePackedSigned", ast.VectorMemoryOperation.store_packed_signed },
@@ -2118,8 +2122,8 @@ fn vectorMemoryOperationForBuiltin(name: []const u8) ?ast.VectorMemoryOperation 
 
 fn vectorMemoryOperationHasLane(operation: ast.VectorMemoryOperation) bool {
     return switch (operation) {
-        .load16, .store16, .load32, .store32, .load64, .store64, .store_packed_signed, .store_packed_unsigned => true,
-        .load128, .store128, .load_packed_signed, .load_packed_unsigned => false,
+        .load16, .store16, .load32, .store32, .load64, .store64, .store_packed_signed, .store_packed_unsigned, .load_quad_lane, .load_transpose => true,
+        .load128, .store128, .load_packed_signed, .load_packed_unsigned, .load_right, .store_right => false,
     };
 }
 

@@ -34,6 +34,7 @@ pub const Settings = extern struct {
 /// address and complete submissions before changing settings or sample data.
 /// Only one high-priority queue may be outstanding across the runtime.
 pub const Mixer = struct {
+    decoder: @import("vadpcm.zig").Decoder = .{},
     overlay: rsp.Overlay,
     queue: rsp.Queue,
     settings: Settings align(16),
@@ -50,6 +51,7 @@ pub const Mixer = struct {
     pub fn init(self: *Mixer, runtime: *rsp.Runtime, channel_count: u16) !void {
         if (channel_count == 0 or channel_count > max_channels) return error.InvalidChannelCount;
         if (runtime.mixer_attached) return error.MixerAlreadyInitialized;
+        self.decoder = .{};
         self.overlay.init(rsp.programs.audio_mixer);
         _ = rsp.registerOverlay(&self.overlay);
         self.queue.init(.high);
@@ -65,7 +67,7 @@ pub const Mixer = struct {
     }
 
     fn editable(self: *Mixer, channel: usize) !void {
-        if (self.pending_output != null) return error.MixerBusy;
+        if (self.pending_output != null or self.decoder.pending) return error.MixerBusy;
         if (channel >= self.configured_channels) return error.InvalidChannel;
         if (self.stereo_secondary[channel]) return error.StereoSecondaryChannel;
     }
@@ -117,6 +119,7 @@ pub const Mixer = struct {
         if (sample.channels == 2 and (channel + 1 >= self.configured_channels or self.settings.channels[channel + 1].address != 0)) return error.StereoChannelUnavailable;
         const step = try frequencyStep(sample.frequency, output_frequency, sample.bytesPerFrame());
         try self.stop(channel);
+        if (sample.vadpcm != null and !self.decoder.initialized) self.decoder.init();
         stream.cursor = 0;
         stream.window_valid = false;
         stream.attached = true;
@@ -179,9 +182,10 @@ pub const Mixer = struct {
     pub fn submit(self: *Mixer, output: []align(4) i16) !void {
         if (self.pending_output != null) return error.MixerBusy;
         if (output.len == 0 or output.len % 2 != 0 or output.len / 2 > 32767) return error.InvalidOutputLength;
+        try self.decoder.wait(self.stream_read_attempts);
         for (0..self.configured_channels) |channel| {
             if (self.streams[channel]) |stream| {
-                const window = try stream.prepare(@intCast(output.len / 2), self.settings.channels[channel].step, self.stream_read_attempts);
+                const window = try stream.prepareWithDecoder(@intCast(output.len / 2), self.settings.channels[channel].step, self.stream_read_attempts, &self.decoder);
                 self.settings.channels[channel].position = window.position;
                 self.settings.channels[channel].length = window.length;
                 cache.writebackData(stream.storage);
@@ -220,13 +224,14 @@ pub const Mixer = struct {
     }
 
     pub fn deinit(self: *Mixer) !void {
-        if (self.pending_output != null) return error.MixerBusy;
+        if (self.pending_output != null or self.decoder.pending) return error.MixerBusy;
         for (self.streams) |stream| if (stream) |active| {
             if (active.reader.destination != null) return error.StreamBusy;
         };
         for (self.streams) |stream| if (stream) |active| {
             active.attached = false;
         };
+        try self.decoder.deinit();
         rsp.unregisterOverlay(&self.overlay);
         self.runtime.mixer_attached = false;
         self.* = undefined;

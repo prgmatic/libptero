@@ -5318,3 +5318,60 @@ test "symbolic address addition distinguishes trapping and wrapping operators" {
     try testing.expect(std.mem.indexOf(u8, bytes, "addi $t0, $t0, %lo(target)") != null);
     try testing.expect(std.mem.indexOf(u8, bytes, "addiu $t0, $t0, %lo(target)") != null);
 }
+
+test "VADPCM quad lane, reverse and transpose transfers preserve hardware encodings" {
+    try expectAsm(
+        \\fn test() noreturn {
+        \\  reg($t0) ptr: dmem = 8;
+        \\  reg($v08) value: vec16 = undefined;
+        \\  exact {
+        \\    rsp.vector.loadQuad(value, 3, ptr, 16);
+        \\    rsp.vector.loadRight(value, ptr, 16);
+        \\    rsp.vector.storeRight(value, ptr, 16);
+        \\    rsp.vector.loadTranspose(value, 0, ptr, 0);
+        \\    rsp.halt();
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 8
+        \\# zsp exact block begin
+        \\  .word 0xc9082301 # lqv $v08[3], 16($t0)
+        \\  .word 0xc9082801 # lrv $v08[0], 16($t0)
+        \\  .word 0xe9082801 # srv $v08[0], 16($t0)
+        \\  .word 0xc9085800 # ltv $v08[0], 0($t0)
+        \\  break
+        \\# zsp exact block end
+        \\
+        \\
+    );
+}
+
+test "transpose interfaces include the complete register bank and reject invalid banks" {
+    const source =
+        \\pub export fn transpose(reg($t0) ptr: dmem) noreturn {
+        \\  reg($v08) bank: vec16 = undefined;
+        \\  rsp.vector.loadTranspose(bank, 0, ptr, 0);
+        \\  rsp.halt();
+        \\}
+    ;
+    var parser = try parser_mod.Parser.init(testing.allocator, source);
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    var interface = std.Io.Writer.Allocating.init(testing.allocator);
+    defer interface.deinit();
+    try asm_writer.writeInterface(&interface.writer, functions, null);
+    try testing.expect(std.mem.indexOf(u8, interface.written(), "writes($v08, $v09, $v10, $v11, $v12, $v13, $v14, $v15)") != null);
+    try expectAsmError(
+        \\fn test() noreturn {
+        \\  reg($t0) ptr: dmem = 8;
+        \\  reg($v09) bank: vec16 = undefined;
+        \\  rsp.vector.loadTranspose(bank, 0, ptr, 0);
+        \\  rsp.halt();
+        \\}
+    , error.TransposeRequiresRegisterBank);
+}

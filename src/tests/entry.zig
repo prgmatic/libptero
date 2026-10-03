@@ -8,6 +8,7 @@ const tests = [_]runner.Test{} ++
     @import("zsp_tests.zig").tests ++
     @import("rsp_tests.zig").tests ++
     @import("rom_tests.zig").tests ++
+    @import("audio_vadpcm_tests.zig").tests ++
     @import("audio_stream_tests.zig").tests ++
     @import("audio_tests.zig").tests ++
     @import("render_api_tests.zig").tests ++

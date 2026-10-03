@@ -181,6 +181,13 @@ pub const Sdk = struct {
             0x0220,
             0x0220,
         );
+        assets.addZspOverlayWithLayout(
+            "audio_vadpcm",
+            self.root.path(self.b, "src/n64/rsp/ucode/audio_vadpcm.zsp"),
+            resident,
+            0x0220,
+            0x0220,
+        );
         assets.addZspOverlayWithStateStart(
             "geometry_overlay",
             self.root.path(self.b, "src/n64/rsp/ucode/geometry_overlay.zsp"),

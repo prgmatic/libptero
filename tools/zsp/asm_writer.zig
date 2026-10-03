@@ -924,6 +924,15 @@ fn simulateAutomaticRegisters(
             .ordered_block => |items| try simulateAutomaticRegisters(context, items, clobber),
             .call => |call| if (call.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
             .builtin => |builtin| switch (builtin) {
+                .vector_memory => |memory| switch (memory.operation) {
+                    .load16, .load32, .load64, .load128, .load_quad_lane, .load_right, .load_packed_signed, .load_packed_unsigned, .load_transpose => {
+                        const symbol = try context.lookup(memory.vector.name);
+                        const reg = try vectorRegisterForView(symbol, memory.vector.view);
+                        const mask = if (memory.operation == .load_transpose) try reserveTransposeBank(context, symbol, reg) else vectorRegisterBit(reg);
+                        clobber.vector |= mask;
+                    },
+                    else => {},
+                },
                 .jump => |jump| if (jump.delay_slot) |delay| try simulateAutomaticRegisters(context, delay, clobber),
                 .return_from_function => |delay| if (delay) |items| try simulateAutomaticRegisters(context, items, clobber),
                 else => {},
@@ -2026,8 +2035,8 @@ fn scanBuiltinLifetime(context: *FunctionContext, builtin: ast.Builtin, position
         .write_vector_control => |item| scanValueRefLifetime(context, item.value, position),
         .vector_memory => |item| {
             switch (item.operation) {
-                .load16, .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned => context.writeLifetime(item.vector.name, position),
-                .store16, .store32, .store64, .store128, .store_packed_signed, .store_packed_unsigned => context.touchLifetime(item.vector.name, position),
+                .load16, .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned, .load_quad_lane, .load_right, .load_transpose => context.writeLifetime(item.vector.name, position),
+                .store16, .store32, .store64, .store128, .store_packed_signed, .store_packed_unsigned, .store_right => context.touchLifetime(item.vector.name, position),
             }
             scanValueRefLifetime(context, item.address, position);
         },
@@ -2275,7 +2284,7 @@ fn statementsWriteParameter(
         .ordered_block => |items| if (statementsWriteParameter(functions, items, name, visited, visited_count)) return true,
         .builtin => |builtin| switch (builtin) {
             .vector_memory => |item| switch (item.operation) {
-                .load16, .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned => if (std.mem.eql(u8, item.vector.name, name)) return true,
+                .load16, .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned, .load_quad_lane, .load_right, .load_transpose => if (std.mem.eql(u8, item.vector.name, name)) return true,
                 else => {},
             },
             .jump => |jump| if (jump.delay_slot) |delay| if (statementsWriteParameter(functions, delay, name, visited, visited_count)) return true,
@@ -4426,6 +4435,55 @@ fn writeVectorReverseLoad(
     });
 }
 
+fn reserveTransposeBank(context: *FunctionContext, bank: Symbol, reg: ast.VectorRegister) !u32 {
+    if (bank.automatic or @intFromEnum(reg) % 8 != 0) return error.TransposeRequiresRegisterBank;
+    const mask = @as(u32, 0xff) << @as(u5, @intCast(@intFromEnum(reg)));
+    for (context.symbols[0..context.symbol_count]) |symbol| {
+        if (!symbol.automatic or symbol.last_use < context.statement_position) continue;
+        if (symbol.vector_reg) |other| {
+            var occupied = vectorRegisterBit(other);
+            if (symbol.data_type == .vec32) occupied |= vectorRegisterBit(nextVectorRegister(other).?);
+            if (occupied & mask != 0) return error.RegisterAlreadyInUse;
+        }
+    }
+    // Explicit bank bindings remain usable; automatic allocation must leave
+    // all eight implicitly written registers available after the transpose.
+    context.function_forbidden_vector |= mask;
+    return mask;
+}
+
+fn writeSpecialVectorMemory(
+    writer: *std.Io.Writer,
+    operation: ast.VectorMemoryOperation,
+    vector: ast.VectorRegister,
+    lane: u3,
+    address: Register,
+    offset: i64,
+) !void {
+    if (@mod(offset, 16) != 0) return error.VectorMemoryOffsetUnaligned;
+    const scaled = @divExact(offset, 16);
+    if (scaled < -64 or scaled > 63) return error.VectorMemoryOffsetOutOfRange;
+    if (operation == .load_transpose and @intFromEnum(vector) % 8 != 0) return error.TransposeRequiresRegisterBank;
+    const store = operation == .store_right;
+    const op: u32 = switch (operation) {
+        .load_quad_lane => 4,
+        .load_right, .store_right => 5,
+        .load_transpose => 11,
+        else => unreachable,
+    };
+    const mnemonic = switch (operation) {
+        .load_quad_lane => "lqv",
+        .load_right => "lrv",
+        .store_right => "srv",
+        .load_transpose => "ltv",
+        else => unreachable,
+    };
+    const word = (@as(u32, if (store) 0x3a else 0x32) << 26) |
+        (@as(u32, @intFromEnum(address)) << 21) | (@as(u32, @intFromEnum(vector)) << 16) |
+        (op << 11) | (@as(u32, lane) << 8) | @as(u7, @bitCast(@as(i7, @intCast(scaled))));
+    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], {d}({s})\n", .{ word, mnemonic, vectorRegName(vector), lane, offset, regName(address) });
+}
+
 fn writeVectorMemory(
     writer: *std.Io.Writer,
     load: bool,
@@ -4759,6 +4817,7 @@ fn writeBuiltin(
             if (vector.data_type != .vec16 and memory.vector.view == null) {
                 return error.PartialVectorMemoryRequiresVec16;
             }
+            if (memory.operation == .load_transpose) _ = try reserveTransposeBank(context, vector, vector_reg);
             const address_reg = try valueAsDmemReg(writer, context, memory.address);
             switch (memory.operation) {
                 .load16 => try writeVectorLaneMemory(writer, true, vector_reg, memory.lane, address_reg, memory.offset),
@@ -4767,6 +4826,7 @@ fn writeBuiltin(
                 .store32 => try writeQuarterVectorMemory(writer, false, vector_reg, memory.lane, address_reg, memory.offset),
                 .load64 => try writeHalfVectorMemory(writer, true, vector_reg, memory.lane, address_reg, memory.offset),
                 .store64 => try writeHalfVectorMemory(writer, false, vector_reg, memory.lane, address_reg, memory.offset),
+                .load_quad_lane, .load_right, .store_right, .load_transpose => try writeSpecialVectorMemory(writer, memory.operation, vector_reg, memory.lane, address_reg, memory.offset),
                 .load128 => try writeVectorMemory(writer, true, vector_reg, address_reg, memory.offset),
                 .store128 => try writeVectorMemory(writer, false, vector_reg, address_reg, memory.offset),
                 .load_packed_signed, .load_packed_unsigned => try writeVectorLoad(writer, context, vector_reg, .{

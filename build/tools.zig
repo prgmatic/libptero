@@ -55,10 +55,7 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
             .{ .name = "png", .module = png },
         }),
         .audio_compiler = addTool(b, root, "audio-compiler", "tools/audio_compiler/main.zig", &.{
-            .{ .name = "audio_compiler", .module = b.createModule(.{
-                .root_source_file = root.path(b, "tools/audio_compiler/root.zig"),
-                .target = b.graph.host,
-            }) },
+            .{ .name = "audio_compiler", .module = audioCompilerModule(b, root) },
         }),
         .gltf_compiler = addTool(b, root, "gltf-compiler", "tools/gltf_compiler/main.zig", &.{
             .{ .name = "gltf_compiler", .module = b.createModule(.{
@@ -85,4 +82,18 @@ fn addTool(
             .imports = imports,
         }),
     });
+}
+
+pub fn audioCompilerModule(b: *std.Build, root: std.Build.LazyPath) *std.Build.Module {
+    const module = b.createModule(.{
+        .root_source_file = root.path(b, "tools/audio_compiler/root.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+    });
+    module.addIncludePath(root.path(b, "tools/audio_compiler/vendor/vadpcm"));
+    module.addCSourceFile(.{
+        .file = root.path(b, "tools/audio_compiler/vendor/vadpcm/codec.c"),
+        .flags = &.{ "-std=c11", "-O2" },
+    });
+    return module;
 }

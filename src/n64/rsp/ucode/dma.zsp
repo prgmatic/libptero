@@ -27,7 +27,7 @@ pub export fn outAsync(
     jump exec(size, pitch, rdram, dmem, flags);
 }
 
-pub fn inAsync(
+pub export fn inAsync(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,

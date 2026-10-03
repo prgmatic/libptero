@@ -2,6 +2,7 @@
 //! logical source cursor remains wide enough for tracks larger than RAM.
 const std = @import("std");
 const rom = @import("../rom.zig");
+const vadpcm = @import("vadpcm.zig");
 const Format = @import("sample.zig").Format;
 pub const Sample = struct {
     asset: rom.Asset,
@@ -10,12 +11,20 @@ pub const Sample = struct {
     channels: u2 = 1,
     format: Format = .pcm16,
     loop_frames: u32 = 0,
+    vadpcm: ?vadpcm.Metadata = null,
     pub fn bytesPerFrame(self: Sample) u32 {
         return @as(u32, self.channels) * (if (self.format == .pcm16) @as(u32, 2) else 1);
     }
     pub fn validate(self: Sample) !void {
         if (self.channels < 1 or self.channels > 2 or self.frequency == 0 or self.frames == 0 or self.loop_frames > self.frames) return error.InvalidSample;
-        if (@as(u64, self.frames) * self.bytesPerFrame() > self.asset.size) return error.IncompletePcm;
+        if (self.vadpcm) |metadata| {
+            if (self.format != .pcm16) return error.InvalidSample;
+            const blocks = (@as(u64, self.frames) + 15) / 16;
+            const data_bytes = blocks * 9 * self.channels;
+            const checkpoints = (blocks + vadpcm.checkpoint_blocks - 1) / vadpcm.checkpoint_blocks;
+            if (metadata.checkpoint_offset < data_bytes or metadata.checkpoint_offset % 16 != 0 or
+                @as(u64, metadata.checkpoint_offset) + checkpoints * 32 > self.asset.size) return error.IncompleteVadpcm;
+        } else if (@as(u64, self.frames) * self.bytesPerFrame() > self.asset.size) return error.IncompletePcm;
     }
 };
 pub const Window = struct { position: u32, length: u32 };
@@ -33,6 +42,7 @@ pub const Stream = struct {
     submitted_position: u32 = 0,
     attached: bool = false,
     refills: u64 = 0,
+    compressed: @import("vadpcm_stream.zig").Storage = .{},
 
     pub fn init(sample: Sample, storage: []align(16) u8) !Stream {
         try sample.validate();
@@ -50,7 +60,12 @@ pub const Stream = struct {
         self.window_valid = false;
     }
     pub fn prepare(self: *Stream, output_frames: u32, step: u32, max_attempts: u32) !Window {
-        // A prior timeout can still own the window. Complete it before refill.
+        return self.prepareWithDecoder(output_frames, step, max_attempts, null);
+    }
+    pub fn prepareWithDecoder(self: *Stream, output_frames: u32, step: u32, max_attempts: u32, decoder: ?*vadpcm.Decoder) !Window {
+        // A prior timeout can still own decoded history or the window.
+        // Finish both before resetting checkpoints or refilling storage.
+        if (decoder) |active| try active.wait(max_attempts);
         try self.reader.wait(max_attempts);
         self.cursor = normalize(self.sample, self.cursor);
         const frame_bytes = self.sample.bytesPerFrame();
@@ -59,7 +74,7 @@ pub const Stream = struct {
         if (minimum > self.storage.len) return error.StreamBufferTooSmall;
         if (!self.window_valid or begin < self.window_start or minimum + (begin - self.window_start) > self.storage.len) {
             self.window_valid = false;
-            try self.fill(begin, max_attempts);
+            try self.fill(begin, max_attempts, decoder);
             self.window_start = begin;
             self.window_valid = true;
             self.refills += 1;
@@ -79,7 +94,7 @@ pub const Stream = struct {
         self.cursor = wrapped;
         return ended;
     }
-    fn fill(self: *Stream, start: u64, max_attempts: u32) !void {
+    fn fill(self: *Stream, start: u64, max_attempts: u32, decoder: ?*vadpcm.Decoder) !void {
         const length = @as(u64, self.sample.frames) * self.sample.bytesPerFrame();
         const loop_bytes = @as(u64, self.sample.loop_frames) * self.sample.bytesPerFrame();
         var copied: usize = 0;
@@ -102,7 +117,9 @@ pub const Stream = struct {
                 position = length - loop_bytes + (position - length) % loop_bytes;
             }
             const count: usize = @intCast(@min(length - position, self.storage.len - copied));
-            try self.reader.read(self.sample.asset, @intCast(position), self.storage[copied..][0..count], max_attempts);
+            if (self.sample.vadpcm) |metadata| {
+                try self.compressed.read(&self.reader, decoder orelse return error.CompressedDecoderRequired, self.sample.asset, metadata, self.sample.channels, position, self.storage[copied..][0..count], max_attempts);
+            } else try self.reader.read(self.sample.asset, @intCast(position), self.storage[copied..][0..count], max_attempts);
             position += count;
             copied += count;
         }

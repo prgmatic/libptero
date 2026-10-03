@@ -762,11 +762,20 @@ rsp.vector.store16(vector, lane, address, offset);
 rsp.vector.store32(vector, lane, address, offset);
 rsp.vector.store64(vector, lane, address, offset);
 rsp.vector.store128(vector, address, offset);
+rsp.vector.loadQuad(vector, lane, address, offset); // lqv starting at lane
+rsp.vector.loadRight(vector, address, offset);      // lrv unaligned suffix
+rsp.vector.storeRight(vector, address, offset);     // srv unaligned suffix
+rsp.vector.loadTranspose(bank, lane, address, offset); // ltv: bank is v00/v08/v16/v24
 rsp.vector.loadPackedSigned(vector, address, offset);
 rsp.vector.loadPackedUnsigned(vector, address, offset);
 rsp.vector.storePackedSigned(vector, lane, address, offset);
 rsp.vector.storePackedUnsigned(vector, lane, address, offset);
 ```
+
+`loadTranspose` writes one lane in each of the eight registers starting at the
+selected bank. Bind the bank explicitly and keep its registers available; its
+exported clobber contract includes all eight. Quad, right and transpose offsets
+are multiples of 16, matching their hardware encodings.
 
 Use `reserved reg($v1) name: u32 = undefined;` to give an ABI-reserved scalar
 register a name while preventing the backend from silently using `$v1` as its

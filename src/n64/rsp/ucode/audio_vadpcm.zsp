@@ -1,0 +1,245 @@
+// libdragon rsp_mixer.S VADPCM decoder, Giovanni Bajo, public domain.
+// Instruction order and register allocation match the production reference.
+const dma = import("resident_api.zsp");
+const queue = import("resident_api.zsp");
+data { identity: [8]u16 = .{2048,2048,2048,2048,2048,2048,2048,2048}; }
+state { reserved_state: [16]u8; }
+bss {
+    // Codebook bank zero must have address bit 7 clear for stereo XOR switching.
+    padding: [192]u8;
+    pub codebook: [128]u16;
+    pub decoder_state: [16]u16;
+    pub buffer: [1504]u16;
+    pub buffer_end: [8]u8;
+}
+
+@rspq.command(0) fn _start() @rspq.commandSize(16) noreturn {
+    reg($at) mask: u32 = undefined;
+    reg($v0) input_size: u32 = undefined;
+    reserved reg($v1) output_size: u32 = undefined;
+    reg($a0) input_rdram: u32 = undefined;
+    reg($a1) output_rdram: u32 = undefined;
+    reg($a2) state_rdram: u32 = undefined;
+    reg($a3) codebook_rdram: u32 = undefined;
+    reg($t0) scratch0: u32 = undefined;
+    reg($t1) scratch1: u32 = undefined;
+    reg($t6) frame_count: i32 = undefined;
+    reg($t7) predictor: dmem = undefined;
+    reg($s0) dma_rdram: dmem = undefined;
+    reg($s1) state_dmem: dmem = undefined;
+    reg($s2) codebook_dmem: dmem = undefined;
+    reg($s3) output_dmem: dmem = undefined;
+    reg($s4) dma_dmem: dmem = undefined;
+    reg($s5) input_dmem: dmem = undefined;
+    reg($t8) sample_address: u32 = undefined;
+    reserved reg($k1) stereo_toggle: u32 = undefined;
+    reg($v00) vector0: vec16 = undefined;
+    reg($v01) vector1: vec16 = undefined;
+    reg($v02) vector2: vec16 = undefined;
+    reg($v06) vector6: vec16 = undefined;
+    reg($v07) vector7: vec16 = undefined;
+    reg($v08) vector8: vec16 = undefined;
+    reg($v09) vector9: vec16 = undefined;
+    reg($v10) vector10: vec16 = undefined;
+    reg($v11) vector11: vec16 = undefined;
+    reg($v12) vector12: vec16 = undefined;
+    reg($v13) vector13: vec16 = undefined;
+    reg($v14) vector14: vec16 = undefined;
+    reg($v15) vector15: vec16 = undefined;
+    reg($v16) vector16: vec16 = undefined;
+    reg($v17) vector17: vec16 = undefined;
+    reg($v18) vector18: vec16 = undefined;
+    reg($v19) vector19: vec16 = undefined;
+    reg($v20) vector20: vec16 = undefined;
+    reg($v21) vector21: vec16 = undefined;
+    reg($v29) vector29: vec16 = undefined;
+    reg($v30) vector30: vec16 = undefined;
+    exact {
+        codebook_dmem = dmem.addressOf(codebook);
+        state_dmem = dmem.addressOf(decoder_state);
+        dma_dmem = bitCast(codebook_dmem);
+        dma_rdram = bitCast(codebook_rdram);
+        dma.inAsync(scratch0, scratch1, dma_rdram, dma_dmem) slot { scratch0 = 255; }
+        dma_dmem = bitCast(state_dmem);
+        dma_rdram = bitCast(state_rdram);
+        dma.inAsync(scratch0, scratch1, dma_rdram, dma_dmem) slot { scratch0 = 31; }
+        vector8 = vector8 ^ vector8;
+        vector9 = vector9 ^ vector9;
+        vector10 = vector10 ^ vector10;
+        vector11 = vector11 ^ vector11;
+        vector12 = vector12 ^ vector12;
+        vector13 = vector13 ^ vector13;
+        vector14 = vector14 ^ vector14;
+        vector15 = vector15 ^ vector15;
+        dma_rdram = dmem.addressOf(identity);
+        rsp.vector.loadTranspose(vector8, 0, dma_rdram, 0);
+        frame_count = bitCast(output_rdram) >>> 24;
+        if (state_rdram < 2147483648) goto Forward0 slot { frame_count = frame_count +% 1; }
+        frame_count = frame_count << 1;
+    Forward0:
+        output_dmem = dmem.addressOf(buffer);
+        mask = 16777215;
+        input_rdram = input_rdram & mask;
+        mask = 16777215;
+        output_rdram = output_rdram & mask;
+        scratch0 = input_rdram - output_rdram;
+        input_dmem = bitCast(scratch0) + output_dmem;
+        scratch1 = output_rdram & 7;
+        output_dmem = output_dmem + bitCast(scratch1);
+        input_dmem = input_dmem + bitCast(scratch1);
+        if (scratch1 == 0) goto Forward1 slot { output_size = bitCast(frame_count) << 5; }
+        output_size = output_size +% 8;
+    Forward1:
+        input_size = bitCast(frame_count) << 3;
+        scratch1 = input_rdram & 7;
+        if (scratch1 == 0) goto Forward2 slot { input_size = input_size + bitCast(frame_count); }
+        input_size = input_size +% 8;
+    Forward2:
+        dma_rdram = bitCast(input_rdram);
+        scratch0 = input_size +% -1;
+        dma.in(scratch0, scratch1, dma_rdram, dma_dmem) slot { dma_dmem = bitCast(input_dmem); }
+        stereo_toggle = bitCast(state_rdram);
+        vector19 = load(vec16, state_dmem, 0);
+        vector21 = load(vec16, state_dmem, 16);
+        input_dmem = input_dmem +% 1;
+    VADPCM_DecompressLoop:
+    VADPCM_DecompressMono:
+        scratch0 = load(u8, input_dmem, -1);
+        rsp.vector.loadPackedSigned(vector16, input_dmem, 0);
+        rsp.vector.loadPackedSigned(vector17, input_dmem, 0);
+        scratch1 = 1;
+        sample_address = scratch0 >>> 4;
+        sample_address = scratch1 << sample_address;
+        vector1[0] = sample_address;
+        predictor = bitCast(scratch0) & 15;
+        predictor = predictor << 5;
+        predictor = predictor + codebook_dmem;
+        vector16 = vmudm(vector16, vector30.wwwwwwww);
+        vector17 = vmudn(vector17, vector30.wwwwwwww);
+        vector17 = vmudm(vector17, vector30.wwwwwwww);
+        vector16 = vmudh(vector16, vector1.xxxxxxxx);
+        vector17 = vmudh(vector17, vector1.xxxxxxxx);
+        rsp.vector.loadQuad(vector6, 0, predictor, 0);
+        rsp.vector.loadQuad(vector7, 0, predictor, 16);
+        rsp.vector.loadQuad(vector8, 1, predictor, 16);
+        rsp.vector.loadQuad(vector9, 2, predictor, 16);
+        rsp.vector.loadQuad(vector10, 3, predictor, 16);
+        rsp.vector.loadQuad(vector11, 4, predictor, 16);
+        rsp.vector.loadQuad(vector12, 5, predictor, 16);
+        rsp.vector.loadQuad(vector13, 6, predictor, 16);
+        rsp.vector.loadQuad(vector14, 7, predictor, 16);
+        vector29 = vmudh(vector6, vector19.ZZZZZZZZ);
+        vector29 = vmadh(vector7, vector19.WWWWWWWW);
+        vector29 = vmadh(vector8, vector16.xxxxxxxx);
+        vector29 = vmadh(vector9, vector17.xxxxxxxx);
+        vector29 = vmadh(vector10, vector16.yyyyyyyy);
+        vector29 = vmadh(vector11, vector17.yyyyyyyy);
+        vector29 = vmadh(vector12, vector16.zzzzzzzz);
+        vector29 = vmadh(vector13, vector17.zzzzzzzz);
+        vector29 = vmadh(vector14, vector16.wwwwwwww);
+        vector29 = vmadh(vector15, vector17.wwwwwwww);
+        vector2 = accumulator(.middle);
+        vector18 = accumulator(.high);
+        vector29 = vmudn(vector2, vector30.zzzzzzzz);
+        vector18 = vmadh(vector18, vector30.zzzzzzzz);
+        vector29 = vmudh(vector6, vector18.ZZZZZZZZ);
+        vector29 = vmadh(vector7, vector18.WWWWWWWW);
+        vector29 = vmadh(vector8, vector16.XXXXXXXX);
+        vector29 = vmadh(vector9, vector17.XXXXXXXX);
+        vector29 = vmadh(vector10, vector16.YYYYYYYY);
+        vector29 = vmadh(vector11, vector17.YYYYYYYY);
+        vector29 = vmadh(vector12, vector16.ZZZZZZZZ);
+        vector29 = vmadh(vector13, vector17.ZZZZZZZZ);
+        vector29 = vmadh(vector14, vector16.WWWWWWWW);
+        vector29 = vmadh(vector15, vector17.WWWWWWWW);
+        vector2 = accumulator(.middle);
+        vector19 = accumulator(.high);
+        vector29 = vmudn(vector2, vector30.zzzzzzzz);
+        vector19 = vmadh(vector19, vector30.zzzzzzzz);
+        store(vec16, output_dmem, vector18, 0);
+        rsp.vector.storeRight(vector18, output_dmem, 16);
+        store(vec16, output_dmem, vector19, 16);
+        rsp.vector.storeRight(vector19, output_dmem, 32);
+        frame_count = frame_count +% -1;
+        input_dmem = input_dmem +% 9;
+        if (state_rdram < 2147483648) goto VADPCM_Output slot { output_dmem = output_dmem +% 32; }
+        vector19 = vector0 | vector21;
+        codebook_dmem = codebook_dmem ^ 128;
+        if (stereo_toggle >= 2147483648) goto VADPCM_DecompressMono slot { stereo_toggle = stereo_toggle ^ state_rdram; }
+        output_dmem = output_dmem +% -64;
+        vector18 = load(vec16, output_dmem, 0);
+        rsp.vector.loadRight(vector18, output_dmem, 16);
+        vector19 = load(vec16, output_dmem, 16);
+        rsp.vector.loadRight(vector19, output_dmem, 32);
+        vector20 = load(vec16, output_dmem, 32);
+        rsp.vector.loadRight(vector20, output_dmem, 48);
+        vector21 = load(vec16, output_dmem, 48);
+        rsp.vector.loadRight(vector21, output_dmem, 64);
+    VADPCM_InterleaveStereo:
+        store(vec16, output_dmem, vector18[0], 0);
+        store(vec16, output_dmem, vector20[0], 2);
+        store(vec16, output_dmem, vector18[1], 4);
+        store(vec16, output_dmem, vector20[1], 6);
+        store(vec16, output_dmem, vector18[2], 8);
+        store(vec16, output_dmem, vector20[2], 10);
+        store(vec16, output_dmem, vector18[3], 12);
+        store(vec16, output_dmem, vector20[3], 14);
+        store(vec16, output_dmem, vector18[4], 16);
+        store(vec16, output_dmem, vector20[4], 18);
+        store(vec16, output_dmem, vector18[5], 20);
+        store(vec16, output_dmem, vector20[5], 22);
+        store(vec16, output_dmem, vector18[6], 24);
+        store(vec16, output_dmem, vector20[6], 26);
+        store(vec16, output_dmem, vector18[7], 28);
+        store(vec16, output_dmem, vector20[7], 30);
+        vector18 = vector0 | vector19;
+        vector20 = vector0 | vector21;
+        output_dmem = output_dmem +% 32;
+        if (stereo_toggle >= 2147483648) goto VADPCM_InterleaveStereo slot { stereo_toggle = stereo_toggle ^ state_rdram; }
+    VADPCM_Output:
+        if (frame_count > 0) goto VADPCM_DecompressLoop;
+        store(vec16, state_dmem, vector19, 0);
+        store(vec16, state_dmem, vector21, 16);
+        dma_dmem = bitCast(state_dmem);
+        dma_rdram = bitCast(state_rdram);
+        dma.outAsync(scratch0, scratch1, dma_rdram, dma_dmem) slot { scratch0 = 31; }
+        scratch0 = output_rdram & 7;
+        if (scratch0 == 0) goto VADPM_OutputDma;
+        dma_rdram = bitCast(output_rdram);
+        dma.in(scratch0, scratch1, dma_rdram, dma_dmem) slot { dma_dmem = bitCast(state_dmem); }
+        dma_rdram = dmem.addressOf(buffer);
+        dma_dmem = bitCast(state_dmem);
+    VADPCM_OutputMergeLoop:
+        scratch1 = load(u16, dma_dmem, 0);
+        dma_dmem = dma_dmem +% 2;
+        scratch0 = scratch0 +% -2;
+        store(u16, dma_rdram, scratch1, 0);
+        if (scratch0 != 0) goto VADPCM_OutputMergeLoop slot { dma_rdram = dma_rdram +% 2; }
+    VADPM_OutputDma:
+        dma_dmem = dmem.addressOf(buffer);
+        dma_rdram = bitCast(output_rdram);
+        dma.out(scratch0, scratch1, dma_rdram, dma_dmem) slot { scratch0 = output_size +% -1; }
+        jump queue.commandLoop();
+    }
+}
+
+@rspq.command(1) fn setState() @rspq.commandSize(8) noreturn {
+    reg($t1) scratch1: u32 = undefined;
+    reg($at) mask: u32 = undefined;
+    reg($a0) input_rdram: u32 = undefined;
+    reg($a1) output_rdram: u32 = undefined;
+    reg($t0) scratch0: u32 = undefined;
+    reg($s0) dma_rdram: dmem = undefined;
+    reg($s4) dma_dmem: dmem = undefined;
+    reg($v00) vector0: vec16 = undefined;
+    exact {
+        dma_dmem = dmem.addressOf(decoder_state);
+        store(vec16, dma_dmem, vector0, 0);
+        store(vec16, dma_dmem, vector0, 16);
+        if (output_rdram == 0) goto VADPCM_SetState_Write slot { scratch0 = 31; }
+        dma.in(scratch0, scratch1, dma_rdram, dma_dmem) slot { dma_rdram = bitCast(output_rdram); }
+    VADPCM_SetState_Write:
+        dma_rdram = bitCast(input_rdram);
+        jump dma.out(scratch0, scratch1, dma_rdram, dma_dmem) slot { reg($ra) return_address: fn() = &queue.commandLoop; }
+    }
+}

@@ -37,7 +37,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     const audio_cli_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tools/audio_compiler/main.zig"),
         .target = b.graph.host,
-        .imports = &.{.{ .name = "audio_compiler", .module = b.createModule(.{ .root_source_file = b.path("tools/audio_compiler/root.zig"), .target = b.graph.host }) }},
+        .imports = &.{.{ .name = "audio_compiler", .module = @import("tools.zig").audioCompilerModule(b, b.path(".")) }},
     }) });
     instrumentTests(audio_cli_tests, coverage, coverage_runtime);
     test_step.dependOn(&b.addRunArtifact(audio_cli_tests).step);
@@ -158,7 +158,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     }) |test_config| {
         const test_artifact = b.addTest(.{
             .name = test_config[0],
-            .root_module = b.createModule(.{
+            .root_module = if (comptime std.mem.eql(u8, test_config[0], "audio-compiler-tests")) @import("tools.zig").audioCompilerModule(b, b.path(".")) else b.createModule(.{
                 .root_source_file = b.path(test_config[1]),
                 .target = b.graph.host,
             }),
