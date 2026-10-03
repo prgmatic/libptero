@@ -108,7 +108,7 @@ pub const Font = struct {
         return self.draw(render_queue, x, baseline_y, text, options);
     }
 
-    fn layout(self: Font, render_queue: anytype, origin_x: f32, baseline_y: f32, utf8: []const u8, options: TextOptions) Error!TextMetrics {
+    fn layout(self: *const Font, render_queue: anytype, origin_x: f32, baseline_y: f32, utf8: []const u8, options: TextOptions) Error!TextMetrics {
         if (options.scale <= 0) return .{};
         const view = @import("std").unicode.Utf8View.init(utf8) catch return Error.InvalidUtf8;
         var iterator = view.iterator();
@@ -166,7 +166,7 @@ const TextCursor = struct {
         self.metrics.lines += 1;
         self.metrics.height = self.y - self.origin_y + @as(f32, @floatFromInt(self.line_height)) * self.options.scale;
     }
-    fn place(self: *TextCursor, font: Font, render_queue: anytype, index: u16) void {
+    fn place(self: *TextCursor, font: *const Font, render_queue: anytype, index: u16) void {
         const glyph = font.glyphs[index];
         if (self.previous) |prior| self.x += @as(f32, @floatFromInt(font.kerning(prior, index))) * self.options.scale;
         if (render_queue) |queue| {
