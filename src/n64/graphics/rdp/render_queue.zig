@@ -58,6 +58,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
         tex_cache: [8]TexCacheEntry = [_]TexCacheEntry{.{}} ** 8,
         tex_cache_len: usize = 0,
         palette_ptr: usize = 0,
+        palette_content_id: u64 = 0,
         tmem_next: u10 = 0, // next free TMEM word offset (8-byte words, max 512)
         next_tile: u3 = 0, // next render tile; load tile = next_tile +% 1
         /// Most recently bound material texture, consumed by geometry draws.
@@ -335,18 +336,19 @@ pub fn RenderQueue(comptime QueueType: type) type {
         fn ensureTexture(rq: *Self, image: anytype, sampler: texture.Sampler) u3 {
             rq.configureTexture(image);
             const ptr = @intFromPtr(image.texel_data.ptr);
+            const content_id = imageContentId(image);
             for (rq.tex_cache[0..rq.tex_cache_len]) |entry| {
-                if (entry.ptr == ptr and entry.sampler.eql(sampler)) return entry.tile;
+                if (entry.ptr == ptr and entry.content_id == content_id and entry.sampler.eql(sampler)) return entry.tile;
             }
             // A different CI4 palette bank can share already resident texels.
             for (rq.tex_cache[0..rq.tex_cache_len]) |entry| {
                 var existing = entry.sampler;
                 existing.palette = sampler.palette;
-                if (entry.ptr == ptr and existing.eql(sampler) and rq.tex_cache_len < 4) {
+                if (entry.ptr == ptr and entry.content_id == content_id and existing.eql(sampler) and rq.tex_cache_len < 4) {
                     const tile = rq.next_tile;
                     rq.cmd_queue.tileSync();
                     texture.configureTile(&rq.cmd_queue, image, tile, @intCast(entry.tmem_addr), sampler);
-                    rq.tex_cache[rq.tex_cache_len] = .{ .ptr = ptr, .tile = tile, .tmem_addr = entry.tmem_addr, .sampler = sampler };
+                    rq.tex_cache[rq.tex_cache_len] = .{ .ptr = ptr, .content_id = content_id, .tile = tile, .tmem_addr = entry.tmem_addr, .sampler = sampler };
                     rq.tex_cache_len += 1;
                     rq.next_tile +%= 2;
                     return tile;
@@ -364,7 +366,7 @@ pub fn RenderQueue(comptime QueueType: type) type {
             const tmem_addr: u9 = @intCast(rq.tmem_next);
             rq.loadTexture(image, tile, tmem_addr, sampler);
             rq.cmd_queue.tileSync();
-            rq.tex_cache[rq.tex_cache_len] = .{ .ptr = ptr, .tile = tile, .tmem_addr = tmem_addr, .sampler = sampler };
+            rq.tex_cache[rq.tex_cache_len] = .{ .ptr = ptr, .content_id = content_id, .tile = tile, .tmem_addr = tmem_addr, .sampler = sampler };
             rq.tex_cache_len += 1;
             rq.tmem_next += tmem_words;
             rq.next_tile +%= 2;
@@ -389,10 +391,11 @@ pub fn RenderQueue(comptime QueueType: type) type {
                 const palette = image.palette;
                 std.debug.assert(palette.len > 0 and palette.len <= 256);
                 const address = @intFromPtr(palette.ptr);
-                if (rq.palette_ptr == address) return;
+                if (rq.palette_ptr == address and rq.palette_content_id == imageContentId(image)) return;
                 rq.resetTextureCache();
                 rq.loadPalette(palette);
                 rq.palette_ptr = address;
+                rq.palette_content_id = imageContentId(image);
             } else if (rq.palette_ptr != 0) {
                 rq.resetTextureCache();
                 rq.palette_ptr = 0;
@@ -475,7 +478,12 @@ pub fn RenderQueue(comptime QueueType: type) type {
     };
 }
 
+fn imageContentId(image: anytype) u64 {
+    return if (@hasField(@TypeOf(image), "content_id")) image.content_id else 0;
+}
+
 const TexCacheEntry = struct {
+    content_id: u64 = 0,
     ptr: usize = 0,
     tile: u3 = 0,
     tmem_addr: usize = 0,
@@ -702,4 +710,38 @@ test "font palette banks reuse texels and retain IA16 TLUT interpretation" {
         uploads += 1;
     };
     try std.testing.expectEqual(@as(usize, 2), uploads); // One TLUT, one atlas.
+}
+
+test "new residency identities reload texels and palettes at recycled addresses" {
+    const images = @import("../image.zig");
+    const colors = @import("../color.zig");
+    const texels: [32]colors.Ci4Pair align(16) = @splat(@bitCast(@as(u8, 0x11)));
+    const palette: [16]colors.Rgba16 align(16) = @splat(.red);
+    var image: images.PalettedImage(colors.Ci4Pair) = .{ .width = 8, .height = 8, .texel_data = &texels, .palette = &palette, .content_id = 1 };
+    var commands: [256]u64 = undefined;
+    var render = FixedRenderQueue.init(.{ .buffer = &commands });
+    _ = render.useTextureSampler(image, .{});
+    const initial = render.cmd_queue.queue.index;
+    _ = render.useTextureSampler(image, .{});
+    try std.testing.expectEqual(initial, render.cmd_queue.queue.index);
+    image.content_id = 2;
+    _ = render.useTextureSampler(image, .{});
+    var uploads: usize = 0;
+    var palettes: usize = 0;
+    for (commands[initial..render.cmd_queue.queue.index]) |command| {
+        if (command >> 56 == 0xfd) uploads += 1;
+        if (command >> 56 == 0xf0) palettes += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), uploads);
+    try std.testing.expectEqual(@as(usize, 1), palettes);
+
+    var direct: images.ConstImage(colors.I8) = .{ .width = 8, .height = 8, .texel_data = @as([*]const colors.I8, @ptrFromInt(0x80402000))[0..64], .content_id = 3 };
+    _ = render.useTextureSampler(direct, .{});
+    const before_reload = render.cmd_queue.queue.index;
+    direct.content_id = 4;
+    _ = render.useTextureSampler(direct, .{});
+    try std.testing.expect(render.cmd_queue.queue.index > before_reload);
+    const after_reload = render.cmd_queue.queue.index;
+    _ = render.useTextureSampler(direct, .{});
+    try std.testing.expectEqual(after_reload, render.cmd_queue.queue.index);
 }

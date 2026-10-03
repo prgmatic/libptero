@@ -6,7 +6,7 @@ const Entry = struct {
     path: std.Build.LazyPath,
     alignment: u29,
 };
-const RomEntry = struct { name: []const u8, path: std.Build.LazyPath, audio: bool = false };
+const RomEntry = struct { name: []const u8, path: std.Build.LazyPath, typed: bool = false };
 const AudioEntry = struct { name: []const u8, source: std.Build.LazyPath, data: std.Build.LazyPath, streamed: bool = false };
 const SourceEntry = struct { name: []const u8, path: std.Build.LazyPath };
 
@@ -14,6 +14,7 @@ const TextureEntry = struct {
     name: []const u8,
     source: std.Build.LazyPath,
     texels: std.Build.LazyPath,
+    storage: Storage,
 };
 
 const FontEntry = struct {
@@ -26,9 +27,12 @@ const ModelEntry = struct {
     name: []const u8,
     source: std.Build.LazyPath,
     data: std.Build.LazyPath,
+    storage: Storage,
 };
 
-pub const AudioOptions = struct { loop: bool = false, storage: enum { resident, rom } = .resident, compression: enum { none, vadpcm } = .none };
+pub const Storage = enum { resident, rom };
+
+pub const AudioOptions = struct { loop: bool = false, storage: Storage = .resident, compression: enum { none, vadpcm } = .none };
 
 pub const TextureFormat = enum {
     ci4,
@@ -44,6 +48,7 @@ pub const TextureFormat = enum {
 };
 
 pub const TextureOptions = struct {
+    storage: Storage = .resident,
     format: TextureFormat = .rgba16,
 };
 
@@ -55,6 +60,7 @@ pub const FontOptions = struct {
 };
 
 pub const ModelOptions = struct {
+    storage: Storage = .resident,
     scale: f32 = 64,
     max_vertices_per_batch: usize = 70,
     preserve_triangle_order: bool = false,
@@ -107,7 +113,8 @@ pub const AssetBundle = struct {
         const generated_source = convert.addOutputFileArg(self.b.fmt("{s}.zig", .{name}));
         convert.addArg(name);
         convert.addArg(@tagName(options.format));
-        self.asset_module.addTextureEntry(name, generated_source, texels);
+        if (options.storage == .rom) convert.addArg("--rom");
+        self.asset_module.addTextureEntry(name, generated_source, texels, options.storage);
     }
 
     /// Convert a text BMFont and its PNG pages into a typed native Font asset.
@@ -144,7 +151,8 @@ pub const AssetBundle = struct {
         convert.addArg(self.b.fmt("{d}", .{options.max_vertices_per_batch}));
         convert.addArg(if (options.preserve_triangle_order) "true" else "false");
         convert.addArg(@tagName(options.skinning));
-        self.asset_module.addModelEntry(name, generated_source, data);
+        if (options.storage == .rom) convert.addArg("--rom");
+        self.asset_module.addModelEntry(name, generated_source, data, options.storage);
     }
 
     /// Convert mono/stereo PCM8/16 WAV to native Sample or ROM StreamSample.
@@ -161,7 +169,7 @@ pub const AssetBundle = struct {
         if (options.compression == .vadpcm) convert.addArg("--vadpcm");
         if (streamed) {
             convert.addArg("--stream");
-            self.asset_module.rom_entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = data, .audio = true }) catch @panic("OOM");
+            self.asset_module.rom_entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = data, .typed = true }) catch @panic("OOM");
         }
         self.asset_module.audio.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = generated, .data = data, .streamed = streamed }) catch @panic("OOM");
     }
@@ -293,7 +301,7 @@ pub const AssetModule = struct {
             .{ entry.name, entry.name, entry.name },
         )) catch @panic("OOM");
         for (self.rom_entries.items) |entry| {
-            if (!entry.audio) source.appendSlice(self.b.allocator, self.b.fmt("pub const {s} = @import(\"rom_handles\").{s};\n", .{ entry.name, entry.name })) catch @panic("OOM");
+            if (!entry.typed) source.appendSlice(self.b.allocator, self.b.fmt("pub const {s} = @import(\"rom_handles\").{s};\n", .{ entry.name, entry.name })) catch @panic("OOM");
         }
         const root_source = self.b.addWriteFiles().add(self.b.fmt("{s}.zig", .{self.name}), source.items);
         const module = self.b.createModule(.{ .root_source_file = root_source, .target = self.target });
@@ -311,7 +319,7 @@ pub const AssetModule = struct {
                 .target = self.target,
                 .imports = &.{.{ .name = "n64", .module = self.n64_module }},
             });
-            texture_module.addAnonymousImport("texture_data", .{ .root_source_file = entry.texels });
+            if (entry.storage == .rom) texture_module.addImport("rom_data", handles.?) else texture_module.addAnonymousImport("texture_data", .{ .root_source_file = entry.texels });
             module.addImport(self.b.fmt("texture_{s}", .{entry.name}), texture_module);
         }
         for (self.fonts.items) |entry| {
@@ -329,7 +337,7 @@ pub const AssetModule = struct {
                 .target = self.target,
                 .imports = &.{.{ .name = "n64", .module = self.n64_module }},
             });
-            model_module.addAnonymousImport("model_data", .{ .root_source_file = entry.data });
+            if (entry.storage == .rom) model_module.addImport("rom_data", handles.?) else model_module.addAnonymousImport("model_data", .{ .root_source_file = entry.data });
             module.addImport(self.b.fmt("model_{s}", .{entry.name}), model_module);
         }
         for (self.audio.items) |entry| {
@@ -367,11 +375,13 @@ pub const AssetModule = struct {
         self.sources.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = path }) catch @panic("OOM");
     }
 
-    fn addTextureEntry(self: *AssetModule, name: []const u8, source: std.Build.LazyPath, texels: std.Build.LazyPath) void {
+    fn addTextureEntry(self: *AssetModule, name: []const u8, source: std.Build.LazyPath, texels: std.Build.LazyPath, storage: Storage) void {
+        if (storage == .rom) self.rom_entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = texels, .typed = true }) catch @panic("OOM");
         self.textures.append(self.b.allocator, .{
             .name = self.b.dupe(name),
             .source = source,
             .texels = texels,
+            .storage = storage,
         }) catch @panic("OOM");
     }
 
@@ -379,8 +389,9 @@ pub const AssetModule = struct {
         self.fonts.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = source, .texels = texels }) catch @panic("OOM");
     }
 
-    fn addModelEntry(self: *AssetModule, name: []const u8, source: std.Build.LazyPath, data: std.Build.LazyPath) void {
-        self.models.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = source, .data = data }) catch @panic("OOM");
+    fn addModelEntry(self: *AssetModule, name: []const u8, source: std.Build.LazyPath, data: std.Build.LazyPath, storage: Storage) void {
+        if (storage == .rom) self.rom_entries.append(self.b.allocator, .{ .name = self.b.dupe(name), .path = data, .typed = true }) catch @panic("OOM");
+        self.models.append(self.b.allocator, .{ .name = self.b.dupe(name), .source = source, .data = data, .storage = storage }) catch @panic("OOM");
     }
 
     fn validateName(self: *AssetModule, name: []const u8) void {

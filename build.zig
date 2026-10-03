@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "crash_smoke_options", .module = crash_options.createModule() }},
         .install = .{ .outputs = .{ .rom = true, .debug_elf = true }, .step_name = "crash-screen-smoke", .description = "Build a deliberate real panic or CPU exception" },
     });
+    b.installArtifact(sdk.tools.texture_compiler);
     b.installArtifact(sdk.tools.font_compiler);
     b.installArtifact(sdk.tools.audio_compiler);
     b.installArtifact(sdk.tools.rom_assets);
@@ -70,6 +71,24 @@ pub fn build(b: *std.Build) void {
     });
 
     var audio_assets = sdk.createAssets("audio_test_assets");
+    const fixtures = @import("build/asset_fixtures.zig");
+    const texture_fixture = fixtures.texture(b, "red.png", .{ 255, 0, 0, 255 } ** 4);
+    const blue_fixture = fixtures.texture(b, "blue.png", .{ 0, 0, 255, 255 } ** 4);
+    inline for (.{ "rgba16", "rgba32", "yuv16", "ci4", "ci8", "ia4", "ia8", "ia16", "i4", "i8" }) |format| {
+        const selected = std.meta.stringToEnum(@import("build/assets.zig").TextureFormat, format).?;
+        audio_assets.addTexture("texture_rom_" ++ format, texture_fixture, .{ .storage = .rom, .format = selected });
+        audio_assets.addTexture("texture_resident_" ++ format, texture_fixture, .{ .format = selected });
+    }
+    audio_assets.addTexture("blue_rom", blue_fixture, .{ .storage = .rom });
+    audio_assets.addTexture("blue_palette_rom", blue_fixture, .{ .storage = .rom, .format = .ci4 });
+    const model_fixture = fixtures.model(b);
+    audio_assets.addModel("model_rom", model_fixture, .{ .storage = .rom });
+    audio_assets.addModel("model_resident", model_fixture, .{});
+    const skinned_fixture = fixtures.skinnedModel(b);
+    audio_assets.addModel("weighted_rom", skinned_fixture, .{ .storage = .rom });
+    audio_assets.addModel("weighted_resident", skinned_fixture, .{});
+    audio_assets.addModel("joint_rom", skinned_fixture, .{ .storage = .rom, .skinning = .first_joint });
+    audio_assets.addModel("joint_resident", skinned_fixture, .{ .skinning = .first_joint });
     var rom_bytes: [5003]u8 = undefined;
     for (&rom_bytes, 0..) |*byte, index| byte.* = @truncate(index * 37 + 11);
     audio_assets.addRomFile("raw_rom", b.addWriteFiles().add("raw-rom.bin", &rom_bytes));

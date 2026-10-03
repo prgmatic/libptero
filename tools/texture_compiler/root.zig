@@ -9,6 +9,9 @@ pub const Format = types.Format;
 pub const Mipmap = types.Mipmap;
 pub const Options = types.Options;
 pub const Result = types.Result;
+pub const textureData = @import("source.zig").textureData;
+pub const generateSource = @import("source.zig").generateSource;
+pub const generateSourceWithStorage = @import("source.zig").generateSourceWithStorage;
 
 pub fn convertPng(allocator: std.mem.Allocator, source: []const u8, options: Options) !Result {
     const decoded = try png.readRgba(allocator, source);
@@ -51,6 +54,7 @@ pub fn convertRgba(
 }
 
 test {
+    _ = @import("source.zig");
     _ = @import("tests.zig");
     _ = @import("quantize.zig");
 }

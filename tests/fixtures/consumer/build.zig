@@ -16,6 +16,9 @@ pub fn build(b: *std.Build) void {
     assets.embedGeneratedFile("generated_data", generated);
     assets.addRomFile("rom_data", generated);
     assets.addTexture("fixture_ci4", b.path("../../../assets/console_font.png"), .{ .format = .ci4 });
+    assets.addTexture("fixture_rom", b.path("../../../assets/console_font.png"), .{ .storage = .rom });
+    assets.addTexture("fixture_rom_ci4", b.path("../../../assets/console_font.png"), .{ .storage = .rom, .format = .ci4 });
+    assets.addModel("fixture_rom_model", @import("model_fixture.zig").create(b), .{ .storage = .rom });
     assets.addFont("fixture_font", b.path("assets/font.fnt"), .{});
     assets.addModel("fixture_model", @import("model_fixture.zig").create(b), .{});
     _ = assets.addZspProgram("custom_rsp", b.path("assets/custom.zsp"));

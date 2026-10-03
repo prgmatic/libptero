@@ -10,6 +10,15 @@ var assets = sdk.createAssets("assets");
 assets.addModel("scene", b.path("assets/scene.glb"), .{ .scale = 64 });
 ```
 
+Add `.storage = .rom` to keep the geometry and image blob on cartridge until
+explicitly loaded. The generated handle provides `init(allocator)`,
+`initBuffer(memory)` and `storageSize()`. The resulting stable-address owner
+provides `load`, asynchronous `begin`/`poll`/`wait`, `view`, `unload`, and `deinit`.
+Its view is the same native model asset used below. Material, skeleton, animation
+and weighted-influence definitions remain resident Zig metadata. See
+[typed ROM assets](../../src/n64/ROM_ASSETS.md#typed-textures-and-models) for
+ownership, timeout recovery and direct-DMA behavior.
+
 The resulting value pairs a native `n64.graphics.model.Model` with a typed
 material provider. Draw it with `geometry_context.drawModel(asset)` or
 `geometry_context.drawModelWithTransform(asset, &matrix)`. Mesh primitives are remapped into batches that fit
@@ -69,7 +78,7 @@ to request cache writeback on every draw.
 The standalone CLI is:
 
 ```text
-gltf-compiler input.glb model.bin model.zig asset_name scale
+gltf-compiler input.glb model.bin model.zig asset_name scale max_vertices preserve_order [weighted|first_joint] [--rom]
 ```
 
 Implementation layout:
@@ -77,6 +86,7 @@ Implementation layout:
 - `main.zig` owns CLI arguments, diagnostics, and file IO.
 - `root.zig` is the small public conversion facade used by builds and tests.
 - `compiler.zig` owns GLB decoding, mesh conversion, packing, and Zig emission.
+- `rom_source.zig` emits native model bindings over explicitly loaded storage.
 
 Skeletons and animation are native metadata on `asset.model`: `nodes`, `skins`,
 and `animations`. Conversion preserves local SRT hierarchies, inverse bind

@@ -10,7 +10,17 @@ pub const Asset = struct {
     pub fn validateRange(self: Asset, offset: u32, length: usize) !void {
         if (offset > self.size or length > self.size - offset) return error.AssetOutOfBounds;
     }
+
+    /// Absolute cartridge offset, including validation of the padded DMA tail.
+    pub fn romOffset(self: Asset) !u32 {
+        if (__rom_assets_rom_offset == 0xffffffff or __rom_assets_rom_size == 0xffffffff) return error.RomAssetsUnavailable;
+        if (__rom_assets_rom_offset % 16 != 0 or @as(u64, __rom_assets_rom_offset) + __rom_assets_rom_size > 64 * 1024 * 1024) return error.InvalidAsset;
+        if (self.offset % 16 != 0 or @as(u64, self.offset) + std.mem.alignForward(u64, self.size, 16) > __rom_assets_rom_size) return error.InvalidAsset;
+        return __rom_assets_rom_offset + self.offset;
+    }
 };
+
+pub const TypedAsset = @import("rom/typed_asset.zig").TypedAsset;
 
 /// Reads arbitrary byte ranges using an owned aligned staging buffer. Keep the
 /// Reader and destination stable until poll/wait returns completion. Timeouts
@@ -30,10 +40,7 @@ pub const Reader = struct {
     pub fn begin(self: *Reader, asset: Asset, offset: u32, destination: []u8) !void {
         if (self.destination != null) return error.ReaderBusy;
         try asset.validateRange(offset, destination.len);
-        if (__rom_assets_rom_offset == 0xffffffff or __rom_assets_rom_size == 0xffffffff) return error.RomAssetsUnavailable;
-        if (__rom_assets_rom_offset % 16 != 0 or @as(u64, __rom_assets_rom_offset) + __rom_assets_rom_size > 64 * 1024 * 1024) return error.InvalidAsset;
-        if (asset.offset % 16 != 0 or @as(u64, asset.offset) + std.mem.alignForward(u64, asset.size, 16) > __rom_assets_rom_size) return error.InvalidAsset;
-        self.rom_offset = __rom_assets_rom_offset + asset.offset + offset;
+        self.rom_offset = try asset.romOffset() + offset;
         self.destination = destination;
         self.copied = 0;
         self.chunk = 0;
@@ -90,4 +97,8 @@ test "logical asset bounds reject overflow and allow empty end reads" {
     try std.testing.expectError(error.AssetOutOfBounds, asset.validateRange(20, 0));
     try std.testing.expectError(error.AssetOutOfBounds, asset.validateRange(0, std.math.maxInt(usize)));
     try std.testing.expectError(error.AssetOutOfBounds, asset.validateRange(std.math.maxInt(u32), 1));
+}
+
+test {
+    _ = @import("rom/typed_asset.zig");
 }

@@ -272,6 +272,10 @@ pub const Generated = struct {
     }
 };
 
+pub fn generateWithStorage(allocator: std.mem.Allocator, model: ConvertedModel, document: Document, binary: []const u8, name: []const u8, storage: enum { resident, rom }) !Generated {
+    return if (storage == .resident) generate(allocator, model, document, binary, name) else @import("rom_source.zig").generate(allocator, model, document, binary, name);
+}
+
 /// Emit a native model module plus a compact hardware-endian vertex blob.
 pub fn generate(allocator: std.mem.Allocator, model: ConvertedModel, document: Document, binary: []const u8, name: []const u8) !Generated {
     if (!std.zig.isValidId(name)) return error.InvalidAssetName;
@@ -287,6 +291,7 @@ pub fn generate(allocator: std.mem.Allocator, model: ConvertedModel, document: D
         \\const model_data align(8) = @embedFile("model_data").*;
         \\
     );
+    try emitInfluences(allocator, &source, model.batches);
     try emitBatchData(allocator, &data, &source, model.batches);
     try emitImages(allocator, &data, &source, document, binary);
     try rig.emit(allocator, &source, document, binary, model.scale);
@@ -295,7 +300,7 @@ pub fn generate(allocator: std.mem.Allocator, model: ConvertedModel, document: D
     return .{ .data = try data.toOwnedSlice(allocator), .source = try source.toOwnedSlice(allocator) };
 }
 
-fn emitBatchData(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *std.ArrayList(u8), batches: []const Batch) !void {
+pub fn emitBatchData(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *std.ArrayList(u8), batches: []const Batch) !void {
     for (batches, 0..) |batch, batch_index| try emitBatch(allocator, data, source, batch, batch_index);
 }
 
@@ -321,13 +326,18 @@ fn emitBatch(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *st
         "const vertices_{d} = std.mem.bytesAsSlice(VertexPair, model_data[{d}..{d}]);\nconst indices_{d} = std.mem.bytesAsSlice(i16, model_data[{d}..{d}]);\n",
         .{ batch_index, data_offset, vertices_end, batch_index, indices_offset, data.items.len },
     );
-    if (batch.skin != null and batch.groups.len == 0) {
-        try appendFormat(allocator, source, "const influences_{d} = [_]n64.graphics.animation.Influence{{\n", .{batch_index});
-        for (batch.vertices) |vertex| {
-            const i = vertex.influence;
-            try appendFormat(allocator, source, ".{{ .joints = .{{ {d}, {d}, {d}, {d} }}, .weights = .{{ {e}, {e}, {e}, {e} }} }},\n", .{ i.joints[0], i.joints[1], i.joints[2], i.joints[3], i.weights[0], i.weights[1], i.weights[2], i.weights[3] });
+}
+
+pub fn emitInfluences(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: []const Batch) !void {
+    for (batches, 0..) |batch, batch_index| {
+        if (batch.skin != null and batch.groups.len == 0) {
+            try appendFormat(allocator, source, "const influences_{d} = [_]n64.graphics.animation.Influence{{\n", .{batch_index});
+            for (batch.vertices) |vertex| {
+                const i = vertex.influence;
+                try appendFormat(allocator, source, ".{{ .joints = .{{ {d}, {d}, {d}, {d} }}, .weights = .{{ {e}, {e}, {e}, {e} }} }},\n", .{ i.joints[0], i.joints[1], i.joints[2], i.joints[3], i.weights[0], i.weights[1], i.weights[2], i.weights[3] });
+            }
+            try source.appendSlice(allocator, "};\n");
         }
-        try source.appendSlice(allocator, "};\n");
     }
 }
 
@@ -456,6 +466,10 @@ fn continuationVertex(triangle: Triangle, edge: [2]u8) ?u8 {
 }
 
 fn emitImages(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *std.ArrayList(u8), document: Document, binary: []const u8) !void {
+    return emitImagesWithStorage(allocator, data, source, document, binary, false);
+}
+
+pub fn emitImagesWithStorage(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *std.ArrayList(u8), document: Document, binary: []const u8, comptime rom_storage: bool) !void {
     for (document.images, 0..) |image, image_index| {
         const png = try imageBytes(document, binary, image);
         const format = textureFormat(image.name) orelse return error.UnsupportedTextureFormat;
@@ -465,17 +479,37 @@ fn emitImages(allocator: std.mem.Allocator, data: *std.ArrayList(u8), source: *s
         const offset = data.items.len;
         try data.appendSlice(allocator, converted.texels[0..converted.base_texel_bytes]);
         const image_type = imageType(converted.format) orelse return error.UnsupportedTextureFormat;
-        try appendFormat(
-            allocator,
-            source,
-            "const texture_{d}: n64.graphics.image.ConstImage(n64.graphics.image.{s}.Pixel) = .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.image.{s}.Pixel, model_data[{d}..{d}]) }};\n",
-            .{ image_index, image_type, converted.width, converted.height, image_type, offset, data.items.len },
-        );
+        if (rom_storage) {
+            try appendFormat(allocator, source, "fn texture_{d}(model_data: []align(16) const u8, content_id: u64) n64.graphics.image.ConstImage(n64.graphics.image.{s}.Pixel) {{\nreturn .{{ .width = {d}, .height = {d}, .content_id = content_id, .texel_data = std.mem.bytesAsSlice(n64.graphics.image.{s}.Pixel, model_data[{d}..{d}]) }};\n}}\n", .{ image_index, image_type, converted.width, converted.height, image_type, offset, data.items.len });
+        } else {
+            try appendFormat(
+                allocator,
+                source,
+                "const texture_{d}: n64.graphics.image.ConstImage(n64.graphics.image.{s}.Pixel) = .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.image.{s}.Pixel, model_data[{d}..{d}]) }};\n",
+                .{ image_index, image_type, converted.width, converted.height, image_type, offset, data.items.len },
+            );
+        }
     }
 }
 
 fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: []const Batch, name: []const u8) !void {
     try source.appendSlice(allocator, "const parts = [_]Part{\n");
+    try emitPartEntries(allocator, source, batches);
+    try appendFormat(allocator, source,
+        \\}};
+        \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts, .nodes = &nodes, .skins = &skins, .animations = &animations }}, .materials = .{{}} }};
+        \\pub const ModelAsset = n64.graphics.model.Asset(Materials);
+        \\pub const Materials = struct {{
+        \\    pub fn apply(self: @This(), context: anytype, index: u16) void {{
+        \\        self.bind(context, index, self.get(index));
+        \\    }}
+        \\    pub fn bind(_: @This(), context: anytype, index: u16, material: n64.graphics.model.Material) void {{
+        \\        switch (index) {{
+        \\
+    , .{name});
+}
+
+pub fn emitPartEntries(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: []const Batch) !void {
     for (batches, 0..) |batch, batch_index| {
         if (batch.groups.len != 0) {
             for (batch.groups, 0..) |group, index| {
@@ -494,28 +528,20 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
         if (batch.skin) |skin| try appendFormat(allocator, source, ", .skin = {d}, .influences = &influences_{d}", .{ skin, batch_index });
         try source.appendSlice(allocator, " },\n");
     }
-    try appendFormat(allocator, source,
-        \\}};
-        \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts, .nodes = &nodes, .skins = &skins, .animations = &animations }}, .materials = .{{}} }};
-        \\pub const ModelAsset = n64.graphics.model.Asset(Materials);
-        \\pub const Materials = struct {{
-        \\    pub fn apply(self: @This(), context: anytype, index: u16) void {{
-        \\        self.bind(context, index, self.get(index));
-        \\    }}
-        \\    pub fn bind(_: @This(), context: anytype, index: u16, material: n64.graphics.model.Material) void {{
-        \\        switch (index) {{
-        \\
-    , .{name});
 }
 
 fn emitMaterials(allocator: std.mem.Allocator, source: *std.ArrayList(u8), document: Document, binary: []const u8) !void {
+    return emitMaterialsWithStorage(allocator, source, document, binary, false);
+}
+
+pub fn emitMaterialsWithStorage(allocator: std.mem.Allocator, source: *std.ArrayList(u8), document: Document, binary: []const u8, comptime rom_storage: bool) !void {
     for (document.materials, 0..) |material, material_index| {
         const texture_index = materialImageIndex(document, material);
         if (texture_index) |image_index| {
             try appendFormat(
                 allocator,
                 source,
-                "            {d} => material.bind(context, texture_{d}),\n",
+                if (rom_storage) "            {d} => material.bind(context, texture_{d}(self.data, self.content_id)),\n" else "            {d} => material.bind(context, texture_{d}),\n",
                 .{ material_index, image_index },
             );
         } else {
@@ -635,7 +661,7 @@ fn imageType(format: texture_compiler.Format) ?[]const u8 {
     return if (result.len == 0) null else result;
 }
 
-fn materialImageIndex(document: Document, material: Material) ?u32 {
+pub fn materialImageIndex(document: Document, material: Material) ?u32 {
     const pbr = material.pbrMetallicRoughness orelse return null;
     const reference = pbr.baseColorTexture orelse return null;
     if (reference.index >= document.textures.len) return null;
@@ -670,7 +696,7 @@ fn writeU16(allocator: std.mem.Allocator, output: *std.ArrayList(u8), value: u16
     try output.appendSlice(allocator, &bytes);
 }
 
-fn appendFormat(allocator: std.mem.Allocator, output: *std.ArrayList(u8), comptime format: []const u8, args: anytype) !void {
+pub fn appendFormat(allocator: std.mem.Allocator, output: *std.ArrayList(u8), comptime format: []const u8, args: anytype) !void {
     const value = try std.fmt.allocPrint(allocator, format, args);
     defer allocator.free(value);
     try output.appendSlice(allocator, value);
@@ -1156,6 +1182,14 @@ test "generated model uses packed big-endian vertex data" {
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x00, 0x24, 0x40, 0x00 }, generated.data[32..38]);
     try std.testing.expect(std.mem.indexOf(u8, generated.source, "pub const fixture_model") != null);
     try std.testing.expect(std.mem.indexOf(u8, generated.source, ".material_index = 3") != null);
+    const cartridge = try generateWithStorage(std.testing.allocator, model, document, &.{}, "fixture_model", .rom);
+    defer cartridge.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, generated.data, cartridge.data);
+    try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "@embedFile") == null);
+    try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "n64.rom.TypedAsset(Definition)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "parts: [1]Part") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "metadata.parts = .{") != null);
+    try std.testing.expectError(error.InvalidAssetName, generateWithStorage(std.testing.allocator, model, document, &.{}, "not-valid", .rom));
 }
 
 test "stripifier preserves winding and marks disconnected strips" {

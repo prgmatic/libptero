@@ -50,3 +50,81 @@ support uncompressed, read-only cartridge payloads and generated handles. They
 provide no runtime filename lookup, decompression, writable filesystem or SD IO.
 
 Streamed PCM builds on these handles; see [audio](audio/README.md).
+
+## Typed textures and models
+
+`addTexture` and `addModel` accept `.storage = .rom`. Their converted texels,
+palettes, packed vertices and triangle indices remain on cartridge until loaded.
+The default `.resident` preserves the embedded startup-loaded API.
+
+```zig
+// build.zig
+assets.addTexture("crate", b.path("crate.png"), .{ .storage = .rom, .format = .ci8 });
+assets.addModel("room", b.path("room.glb"), .{ .storage = .rom });
+// Pass .assets = &assets to sdk.addRom, as for addRomFile.
+
+// Runtime: initialization allocates storage, loading fills it.
+var room = try assets.room.init(allocator);
+try room.load(1_000_000);
+const model = try room.view();
+renderer.geometry.drawModel(model);
+try renderer.submit().wait(.{});
+try room.deinit(allocator);
+```
+
+`view()` returns the same borrowed native `model.Asset(Materials)`, `ConstImage`
+or `PalettedImage` used by the embedded path. Existing material overrides,
+recorded models, CPU skinning and first-joint RSP poses work with loaded assets.
+Bindings are established once when DMA completes; `view()` does not traverse
+model parts or allocate. The hot drawing path needs no asset lookup or loader.
+Model material and rig definitions (including animation tracks and weighted
+influences) remain generated native Zig metadata resident in the program. The
+ROM option moves the binary geometry and image payload, rather than every byte
+of model metadata. Fonts currently retain their embedded path.
+
+For an allocation-free load, supply complete, aligned DMA cache lines:
+
+```zig
+var memory: [assets.crate.storageSize()]u8 align(16) = undefined;
+var crate = try assets.crate.initBuffer(&memory);
+try crate.begin();
+// Service application work between polls; PI DMA continues independently.
+if (try crate.poll()) {
+    render.drawSprite(try crate.view(), 0, 0, .{});
+}
+// Before returning memory or destroying the owner, finish any pending load:
+try crate.wait(1_000_000);
+```
+
+`storageSize()` includes the cartridge's 16-byte DMA tail padding. Larger supplied
+buffers are accepted; extra bytes are untouched. `init` owns one aligned payload
+allocation. `initBuffer` borrows its storage; `deinit(allocator)` never frees it.
+Each owner also contains its transfer record and native model-part bindings.
+Loading uses one PI DMA directly into the final storage, without a Reader's
+staging buffer, copy, allocation, decompression or serialized-pointer relocation.
+
+Keep the owner at a stable address from `begin` until it is deinitialized, and
+never copy it. Keep its storage unchanged and alive until all RSP/RDP work and
+other consumers of its views complete. Recorded command blocks must be discarded
+before their asset is unloaded. `deinit` and `unload` do not wait for rendering.
+Use the same allocator for owning initialization and teardown.
+
+`begin` returns `PiBusy` if another transfer owns PI; retry admission later.
+`poll` returns false while DMA is pending. `wait` and `load` use bounded polling
+budgets, measured in attempts rather than elapsed time. `PiTimeout` retains the
+pending transfer and destination: retry `wait` or `load` at the same owner address.
+`view` returns `NotLoaded` until completion. `unload` and `deinit` return
+`AssetBusy` during pending DMA. A completed load is idempotent: another `load`
+does not read again. `begin` on a completed owner returns `AlreadyLoaded`.
+
+After all consumers finish, `unload` drops its view while retaining the buffer
+for another load; `deinit` frees owned storage. A successful new load receives
+a fresh texture-content identity. The renderer uses that identity alongside
+the address to reload recycled texels and palettes without discarding unrelated
+texture residency. Embedded images retain identity zero and their normal caching.
+Like Reader and Transfer, the loading API is single-threaded and used outside
+interrupt handlers. Callers coordinate PI use and never access pending DMA
+destinations through cached or uncached aliases.
+
+This API loads complete converted assets. Automatic eviction, partial model
+streaming, background scheduling and graphics-asset compression are future work.

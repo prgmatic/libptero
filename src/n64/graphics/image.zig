@@ -49,6 +49,8 @@ fn ImageView(comptime PixelFormat: type, comptime read_only: bool) type {
         width: u16,
         height: u16,
         texel_data: Storage,
+        /// Residency identity; zero is ordinary caller-managed/embedded storage.
+        content_id: u64 = 0,
 
         /// Four-bit images store two logical pixels per element, across row boundaries.
         pub fn elementCount(width: u16, height: u16) usize {
@@ -64,7 +66,7 @@ fn ImageView(comptime PixelFormat: type, comptime read_only: bool) type {
         }
 
         pub fn asConst(self: Self) ConstImage(Pixel) {
-            return .{ .width = self.width, .height = self.height, .texel_data = self.texel_data };
+            return .{ .width = self.width, .height = self.height, .texel_data = self.texel_data, .content_id = self.content_id };
         }
 
         pub fn get(self: Self, x: u16, y: u16) Value {
@@ -186,6 +188,8 @@ pub fn PalettedImage(comptime PixelFormat: type) type {
         height: u16,
         texel_data: []const Pixel,
         palette: []const colors.Rgba16,
+        /// Changes when ROM-backed storage is reloaded at the same address.
+        content_id: u64 = 0,
         /// IA16 palettes use the same raw16-bit storage; bits are interpreted by TLUT.
         palette_format: enum { rgba16, ia16 } = .rgba16,
     };

@@ -25,13 +25,25 @@ var renderer: n64.graphics.geometry.Renderer = undefined;
 var pixels: [8 * 8]n64.graphics.color.Rgba16 align(64) = undefined;
 var reader: n64.rom.Reader = .{};
 var rom_bytes: [15]u8 = undefined;
+var rom_model_storage: [assets.fixture_rom_model.storageSize()]u8 align(16) = undefined;
+var rom_texture_storage: [assets.fixture_rom.storageSize()]u8 align(16) = undefined;
+var rom_ci_storage: [assets.fixture_rom_ci4.storageSize()]u8 align(16) = undefined;
 
 pub fn main() !void {
-    try reader.read(assets.rom_data, 0, &rom_bytes, 1_000_000);
-    if (!std.mem.eql(u8, &rom_bytes, &assets.generated_data)) return error.RomReadMismatch;
     var memory: [1024]u8 align(64) = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&memory);
     const allocator = fixed.allocator();
+    var rom_model = try assets.fixture_rom_model.initBuffer(&rom_model_storage);
+    defer rom_model.deinit(allocator) catch unreachable;
+    try rom_model.load(1_000_000);
+    var rom_texture = try assets.fixture_rom.initBuffer(&rom_texture_storage);
+    defer rom_texture.deinit(allocator) catch unreachable;
+    try rom_texture.load(1_000_000);
+    var rom_ci = try assets.fixture_rom_ci4.initBuffer(&rom_ci_storage);
+    defer rom_ci.deinit(allocator) catch unreachable;
+    try rom_ci.load(1_000_000);
+    try reader.read(assets.rom_data, 0, &rom_bytes, 1_000_000);
+    if (!std.mem.eql(u8, &rom_bytes, &assets.generated_data)) return error.RomReadMismatch;
     var mesh = try n64.graphics.model.MutableModel.init(allocator, assets.fixture_model.model);
     defer mesh.deinit(allocator);
     mesh.vertices(0).get(0).position[0] = 0;
@@ -47,6 +59,8 @@ pub fn main() !void {
     var viewport = n64.graphics.geometry.Viewport.init(8, 8);
     renderer.geometry.attachViewport(&viewport);
     renderer.geometry.drawModel(model);
+    renderer.geometry.drawModel((try rom_model.view()).withOverrides(.{.{ .texture = assets.fixture_font.atlases[0] }}));
+    if ((try rom_texture.view()).width == 0 or (try rom_ci.view()).palette.len == 0) return error.InvalidLoadedTexture;
     renderer.rdp.render.setState(.textured_sprite);
     var text: [16]u8 = undefined;
     _ = try assets.fixture_font.drawPrint(&renderer.rdp.render, 0, 0, &text, .{}, "{s}", .{"AB"});

@@ -10,6 +10,7 @@ pub const parseGlb = compiler.parseGlb;
 pub const parseDocument = compiler.parseDocument;
 pub const convert = compiler.convert;
 pub const generate = compiler.generate;
+pub const generateWithStorage = compiler.generateWithStorage;
 
 test {
     _ = compiler;

@@ -9,7 +9,9 @@ fn run(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(allocator);
     defer allocator.free(args);
-    if (args.len != 8 and args.len != 9) return error.InvalidArguments;
+    const rom = args.len > 1 and std.mem.eql(u8, args[args.len - 1], "--rom");
+    const count = args.len - @intFromBool(rom);
+    if (count != 8 and count != 9) return error.InvalidArguments;
     const source = try readFile(init.io, allocator, args[1]);
     defer allocator.free(source);
     const glb = try gltf.parseGlb(source);
@@ -23,10 +25,10 @@ fn run(init: std.process.Init) !void {
         .scale = scale,
         .max_vertices_per_batch = max_vertices,
         .preserve_triangle_order = preserve_triangle_order,
-        .skinning = if (args.len == 9) std.meta.stringToEnum(@FieldType(gltf.ConvertOptions, "skinning"), args[8]) orelse return error.InvalidArguments else .weighted,
+        .skinning = if (count == 9) std.meta.stringToEnum(@FieldType(gltf.ConvertOptions, "skinning"), args[8]) orelse return error.InvalidArguments else .weighted,
     });
     defer model.deinit(allocator);
-    const generated = try gltf.generate(allocator, model, document.value, glb.binary, args[4]);
+    const generated = try gltf.generateWithStorage(allocator, model, document.value, glb.binary, args[4], if (rom) .rom else .resident);
     defer generated.deinit(allocator);
     try writeFile(init.io, args[2], generated.data);
     try writeFile(init.io, args[3], generated.source);
@@ -51,6 +53,6 @@ fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
     std.debug.print("gltf-compiler: " ++ format ++ "\n", args);
-    std.debug.print("usage: gltf-compiler <input.glb> <model.bin> <model.zig> <name> <scale> <max-vertices-per-batch> <preserve-triangle-order> [weighted|first_joint]\n", .{});
+    std.debug.print("usage: gltf-compiler <input.glb> <model.bin> <model.zig> <name> <scale> <max-vertices-per-batch> <preserve-triangle-order> [weighted|first_joint] [--rom]\n", .{});
     std.process.exit(1);
 }

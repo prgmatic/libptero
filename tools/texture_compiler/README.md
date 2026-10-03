@@ -5,7 +5,7 @@ borrowed images. Supported formats are RGBA16/32, YUV16, IA4/8/16, I4/8, and
 CI4/8. Standalone invocation is:
 
 ```text
-texture-compiler input.png texture.bin texture.zig name format
+texture-compiler input.png texture.bin texture.zig name format [--rom]
 ```
 
 Direct textures contain raw hardware texels. Indexed textures place an RGBA16
@@ -13,6 +13,18 @@ palette after the texels at an eight-byte boundary in the same binary blob.
 Generated Zig exposes `image.PalettedImage(Pixel)` with read-only texel and palette
 slices. No runtime parser or pointer fixup is required. The public conversion API
 also returns texels and palette separately for programmatic consumers.
+
+The default build option `.storage = .resident` embeds those bytes at startup.
+Set `.storage = .rom` for a typed cartridge handle supporting allocator-owned
+`init` or caller-owned `initBuffer`, followed by `load` and `view`. All formats
+and palettes use direct DMA into final aligned storage. Views retain normal
+image APIs and receive a content identity so reloading a reused address does
+not hit stale TMEM or TLUT entries. See [typed ROM assets](../../src/n64/ROM_ASSETS.md#typed-textures-and-models)
+for loading, polling, ownership and retry contracts. The CLI's `--rom` emits
+source importing generated `rom_data` handles instead of embedded `texture_data`.
+
+`source.zig` exposes testable `textureData`, `generateSource` and
+`generateSourceWithStorage` functions through `root.zig`.
 
 CI4 uses up to 16 colors; CI8 uses up to 256. Images already within that limit
 retain their colors. Larger images use deterministic median cut weighted by
