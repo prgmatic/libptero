@@ -49,6 +49,8 @@ pub const Axis = struct {
 };
 pub const Settings = struct {
     g_zbuffer: Flag = .on,
+    rendermode_preset_cycle_1: u8 = 1,
+    rendermode_preset_cycle_2: u8 = 1,
     g_shade: Flag = .on,
     g_cull_front: Flag = .off,
     g_cull_back: Flag = .off,
@@ -70,6 +72,8 @@ pub const Cycle = struct {
 };
 
 pub const Sampler = struct {
+    offset_s: u12 = 0,
+    offset_t: u12 = 0,
     clamp_s: bool = false,
     clamp_t: bool = false,
     mirror_s: bool = false,
@@ -87,9 +91,18 @@ pub fn legacy(material: anytype) ?Fast64 {
 pub fn sampler(tex: ?Texture) !Sampler {
     const value = tex orelse return .{};
     var result: Sampler = .{};
+    result.offset_s = try axisOffset(value.S);
+    result.offset_t = try axisOffset(value.T);
     try axisSampler(value.S, &result.clamp_s, &result.mirror_s, &result.mask_s, &result.shift_s);
     try axisSampler(value.T, &result.clamp_t, &result.mirror_t, &result.mask_t, &result.shift_t);
     return result;
+}
+
+fn axisOffset(axis: ?Axis) !u12 {
+    const value = axis orelse return 0;
+    const scaled = value.low * 4;
+    if (!std.math.isFinite(scaled) or scaled < 0 or scaled > 4095) return error.UnsupportedFast64Sampler;
+    return @intFromFloat(scaled);
 }
 
 fn axisSampler(axis: ?Axis, clamp: *bool, mirror: *bool, mask: *u4, shift: *u4) !void {
@@ -124,7 +137,10 @@ pub fn emit(allocator: std.mem.Allocator, output: *std.ArrayList(u8), material: 
     try emitMask(allocator, output, material);
     if (f) |value| try emitVertexEffect(allocator, output, value, flags.textured);
     try emitCombiner(allocator, output, f, flags.textured, blended or material.alphaMode == .MASK);
-    if (f) |value| try emitRegisters(allocator, output, value);
+    if (f) |value| {
+        try emitRegisters(allocator, output, value);
+        try emitDepthMode(allocator, output, value.rdp_settings);
+    }
     try output.appendSlice(allocator, "}");
 }
 
@@ -163,9 +179,10 @@ fn sphereDimension(axis: ?Axis) !u10 {
 }
 
 fn emitSampler(allocator: std.mem.Allocator, output: *std.ArrayList(u8), name: []const u8, value: Sampler) !void {
-    try append(allocator, output, ".{s} = .{{ .clamp_s = {}, .clamp_t = {}, .mirror_s = {}, .mirror_t = {}, .mask_s = {d}, .mask_t = {d}, .shift_s = {d}, .shift_t = {d} }}, ", .{
-        name,         value.clamp_s, value.clamp_t, value.mirror_s, value.mirror_t,
-        value.mask_s, value.mask_t,  value.shift_s, value.shift_t,
+    try append(allocator, output, ".{s} = .{{ .clamp_s = {}, .clamp_t = {}, .mirror_s = {}, .mirror_t = {}, .mask_s = {d}, .mask_t = {d}, .shift_s = {d}, .shift_t = {d}, .offset_s = {d}, .offset_t = {d} }}, ", .{
+        name,           value.clamp_s, value.clamp_t, value.mirror_s, value.mirror_t,
+        value.mask_s,   value.mask_t,  value.shift_s, value.shift_t,  value.offset_s,
+        value.offset_t,
     });
 }
 
@@ -201,6 +218,19 @@ fn emitCycle(allocator: std.mem.Allocator, output: *std.ArrayList(u8), cycle: Cy
     try append(allocator, output, ".{{ .rgb_a = @enumFromInt({d}), .rgb_b = @enumFromInt({d}), .rgb_c = @enumFromInt({d}), .rgb_d = @enumFromInt({d}), .alpha_a = @enumFromInt({d}), .alpha_b = @enumFromInt({d}), .alpha_c = @enumFromInt({d}), .alpha_d = @enumFromInt({d}) }}", .{
         cycle.A, cycle.B, cycle.C, cycle.D, cycle.A_alpha, cycle.B_alpha, cycle.C_alpha, cycle.D_alpha,
     });
+}
+
+fn emitDepthMode(allocator: std.mem.Allocator, output: *std.ArrayList(u8), settings: Settings) !void {
+    if (depthMode(settings)) |name| try append(allocator, output, ".z_mode = .{s}, ", .{name});
+}
+
+fn depthMode(settings: Settings) ?[]const u8 {
+    const two = settings.g_mdsft_cycletype == 1;
+    const preset = if (two) settings.rendermode_preset_cycle_2 else settings.rendermode_preset_cycle_1;
+    const decals = [2][4]u8{ .{ 2, 6, 14, 16 }, .{ 2, 6, 11, 13 } };
+    if (std.mem.indexOfScalar(u8, &decals[@intFromBool(two)], preset) != null) return "decal";
+    if (preset == 3 or preset == 7) return "interpenetrating";
+    return null;
 }
 
 fn emitRegisters(allocator: std.mem.Allocator, output: *std.ArrayList(u8), f: Fast64) !void {
@@ -274,4 +304,28 @@ test "sphere maps and lighting alpha masks retain Fast64 material intent" {
     try std.testing.expectError(error.MissingSphereMapDimensions, emitVertexEffect(allocator, &output, .{ .rdp_settings = .{ .g_tex_gen = .on } }, true));
     try std.testing.expectError(error.InvalidSphereMapDimensions, sphereDimension(.{ .high = 1023 }));
     try std.testing.expectError(error.InvalidSphereMapDimensions, sphereDimension(.{ .high = -1 }));
+}
+
+test "legacy tile origins preserve quarter-texel translations" {
+    const result = try sampler(.{ .S = .{ .low = 4, .high = 63 }, .T = .{ .low = 0.25, .high = 31 } });
+    try std.testing.expectEqual(@as(u12, 16), result.offset_s);
+    try std.testing.expectEqual(@as(u12, 1), result.offset_t);
+    try std.testing.expectEqual(@as(u12, 0), try axisOffset(null));
+    try std.testing.expectError(error.UnsupportedFast64Sampler, axisOffset(.{ .low = -1, .high = 31 }));
+    try std.testing.expectError(error.UnsupportedFast64Sampler, axisOffset(.{ .low = 1024, .high = 31 }));
+    try std.testing.expectError(error.UnsupportedFast64Sampler, axisOffset(.{ .low = std.math.inf(f32), .high = 31 }));
+}
+
+test "legacy depth presets distinguish coplanar decals from transparent surfaces" {
+    try std.testing.expectEqualStrings("decal", depthMode(.{ .g_mdsft_cycletype = 1, .rendermode_preset_cycle_2 = 6 }).?);
+    try std.testing.expectEqualStrings("decal", depthMode(.{ .rendermode_preset_cycle_1 = 14 }).?);
+    try std.testing.expectEqualStrings("decal", depthMode(.{ .g_mdsft_cycletype = 1, .rendermode_preset_cycle_2 = 13 }).?);
+    try std.testing.expectEqualStrings("interpenetrating", depthMode(.{ .rendermode_preset_cycle_1 = 3 }).?);
+    try std.testing.expectEqual(@as(?[]const u8, null), depthMode(.{ .rendermode_preset_cycle_1 = 11 }));
+    try std.testing.expectEqual(@as(?[]const u8, null), depthMode(.{}));
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(std.testing.allocator);
+    try emitDepthMode(std.testing.allocator, &output, .{});
+    try emitDepthMode(std.testing.allocator, &output, .{ .g_mdsft_cycletype = 1, .rendermode_preset_cycle_2 = 6 });
+    try std.testing.expectEqualStrings(".z_mode = .decal, ", output.items);
 }

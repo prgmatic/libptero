@@ -702,7 +702,26 @@ pub fn appendFormat(allocator: std.mem.Allocator, output: *std.ArrayList(u8), co
     try output.appendSlice(allocator, value);
 }
 
+pub const TextureSize = struct { material: u16, width: u16, height: u16 };
+
+pub fn parseTextureSize(text: []const u8) !TextureSize {
+    var fields = std.mem.splitScalar(u8, text, ':');
+    const material = try std.fmt.parseInt(u16, fields.next() orelse return error.InvalidTextureSize, 10);
+    const width = try parseTextureDimension(fields.next() orelse return error.InvalidTextureSize);
+    const height = try parseTextureDimension(fields.next() orelse return error.InvalidTextureSize);
+    if (fields.next() != null) return error.InvalidTextureSize;
+    return .{ .material = material, .width = width, .height = height };
+}
+
+fn parseTextureDimension(text: []const u8) !u16 {
+    const value = try std.fmt.parseInt(u16, text, 10);
+    if (value == 0 or value > 1024) return error.InvalidTextureSize;
+    return value;
+}
+
 pub const ConvertOptions = struct {
+    /// Actual externally bound image dimensions, independent of tile bounds.
+    texture_sizes: []const TextureSize = &.{},
     scale: f32 = 64,
     max_vertices_per_batch: usize = 70,
     preserve_triangle_order: bool = false,
@@ -712,6 +731,7 @@ pub const ConvertOptions = struct {
 
 pub fn convert(allocator: std.mem.Allocator, document: Document, binary: []const u8, options: ConvertOptions) !ConvertedModel {
     try validateConvertOptions(options);
+    for (options.texture_sizes) |size| try validateTextureSize(size);
     var batches: std.ArrayList(Batch) = .empty;
     errdefer {
         for (batches.items) |batch| batch.deinit(allocator);
@@ -719,6 +739,10 @@ pub fn convert(allocator: std.mem.Allocator, document: Document, binary: []const
     }
     try convertMeshes(allocator, document, binary, options, &batches);
     return .{ .batches = try batches.toOwnedSlice(allocator), .scale = options.scale };
+}
+
+fn validateTextureSize(size: TextureSize) !void {
+    if (size.width == 0 or size.height == 0 or size.width > 1024 or size.height > 1024) return error.InvalidTextureSize;
 }
 
 fn validateConvertOptions(options: ConvertOptions) !void {
@@ -790,7 +814,10 @@ fn convertPrimitive(
     options: ConvertOptions,
     output: *std.ArrayList(Batch),
 ) !void {
-    const views = try PrimitiveViews.init(document, binary, primitive);
+    var views = try PrimitiveViews.init(document, binary, primitive);
+    for (options.texture_sizes) |size| {
+        if (primitive.material == @as(u32, size.material)) views.texture_size = .{ size.width, size.height };
+    }
     var pool = try @import("vertex_remap.zig").Pool.init(allocator, views.positions.count);
     defer pool.deinit();
     try prepareVertices(&pool, views, options);
@@ -1543,4 +1570,40 @@ test "quantized duplicate source indices share a batch vertex without reordering
     try std.testing.expectEqualDeep(&[_]Triangle{ .{ 0, 1, 2 }, .{ 0, 1, 2 } }, result.batches[0].triangles);
     binary[48] = 4;
     try std.testing.expectError(error.InvalidVertexIndex, convert(std.testing.allocator, document, &binary, .{}));
+}
+
+test "external texture dimensions parse independently of sampler bounds" {
+    try std.testing.expectEqual(TextureSize{ .material = 1, .width = 32, .height = 44 }, try parseTextureSize("1:32:44"));
+    try std.testing.expectError(error.InvalidTextureSize, parseTextureSize("1:0:44"));
+    try std.testing.expectError(error.InvalidTextureSize, parseTextureSize("1:32"));
+    try std.testing.expectError(error.InvalidTextureSize, parseTextureSize("1:32:44:5"));
+    try std.testing.expectError(error.InvalidTextureSize, parseTextureSize("1:1025:44"));
+    try std.testing.expectError(error.InvalidCharacter, parseTextureSize("x:32:44"));
+    try std.testing.expectError(error.InvalidCharacter, parseTextureSize("1:x:44"));
+    try validateTextureSize(.{ .material = 0, .width = 32, .height = 32 });
+    try std.testing.expectError(error.InvalidTextureSize, validateTextureSize(.{ .material = 0, .width = 0, .height = 32 }));
+    try std.testing.expectError(error.InvalidTextureSize, validateTextureSize(.{ .material = 0, .width = 32, .height = 1025 }));
+}
+
+test "external image dimensions control packed UVs without changing tile bounds" {
+    const positions = [_]f32{ 0, 0, 0, 1, 0, 0, 0, 1, 0 };
+    const uvs = [_]f32{ 0.5, 0.25, 0, 0, 1, 1 };
+    var binary: [66]u8 = undefined;
+    @memcpy(binary[0..36], std.mem.asBytes(&positions));
+    @memcpy(binary[36..60], std.mem.asBytes(&uvs));
+    @memcpy(binary[60..], &[_]u8{ 0, 0, 1, 0, 2, 0 });
+    const document: Document = .{
+        .accessors = &.{
+            .{ .bufferView = 0, .componentType = 5126, .count = 3, .type = "VEC3" },
+            .{ .bufferView = 1, .componentType = 5126, .count = 3, .type = "VEC2" },
+            .{ .bufferView = 2, .componentType = 5123, .count = 3, .type = "SCALAR" },
+        },
+        .bufferViews = &.{ .{ .buffer = 0, .byteLength = 36 }, .{ .buffer = 0, .byteOffset = 36, .byteLength = 24 }, .{ .buffer = 0, .byteOffset = 60, .byteLength = 6 } },
+        .materials = &.{.{ .extras = .{ .f3d_mat = .{ .tex0 = .{ .S = .{ .high = 43 }, .T = .{ .high = 43 } } } } }},
+        .meshes = &.{.{ .primitives = &.{.{ .attributes = .{ .POSITION = 0, .TEXCOORD_0 = 1 }, .indices = 2, .material = 0 }} }},
+    };
+    const model = try convert(std.testing.allocator, document, &binary, .{ .scale = 1, .texture_sizes = &.{.{ .material = 0, .width = 32, .height = 32 }} });
+    defer model.deinit(std.testing.allocator);
+    try std.testing.expectEqual([2]i16{ 496, 240 }, model.batches[0].vertices[0].uv);
+    try std.testing.expectEqual([2]u32{ 44, 44 }, materialTextureSize(document, &binary, 0));
 }

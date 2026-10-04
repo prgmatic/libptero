@@ -59,7 +59,10 @@ pub const FontOptions = struct {
     ellipsis_repetitions: u16 = 3,
 };
 
+pub const TextureSize = struct { material: u16, width: u16, height: u16 };
+
 pub const ModelOptions = struct {
+    texture_sizes: []const TextureSize = &.{},
     storage: Storage = .resident,
     scale: f32 = 64,
     max_vertices_per_batch: usize = 70,
@@ -151,6 +154,7 @@ pub const AssetBundle = struct {
         convert.addArg(self.b.fmt("{d}", .{options.max_vertices_per_batch}));
         convert.addArg(if (options.preserve_triangle_order) "true" else "false");
         convert.addArg(@tagName(options.skinning));
+        for (options.texture_sizes) |size| convert.addArg(self.b.fmt("{d}:{d}:{d}", .{ size.material, size.width, size.height }));
         if (options.storage == .rom) convert.addArg("--rom");
         self.asset_module.addModelEntry(name, generated_source, data, options.storage);
     }

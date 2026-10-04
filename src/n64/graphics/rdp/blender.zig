@@ -22,7 +22,7 @@ pub const BlendMode = struct {
     /// Two-cycle opaque rendering must preserve color through the first
     /// blender cycle, even when combiner alpha encodes a lighting effect.
     pub const opaque_two_cycle: BlendMode = .{
-        .pass1 = .{ .p = .pixel, .a = .zero, .m = .pixel, .b = .one },
+        .pass1 = .{ .m = .pixel },
     };
     /// Standard src-alpha blend against the framebuffer.
     pub const alpha: BlendMode = .{
@@ -37,7 +37,7 @@ pub const BlendMode = struct {
     pub const alpha_two_cycle: BlendMode = .{
         .force_blend = true,
         .image_read_en = true,
-        .pass1 = .{ .p = .pixel, .a = .zero, .m = .pixel, .b = .one },
+        .pass1 = .{ .m = .pixel },
         .pass2 = .{},
     };
     /// Blend pixel with the fog color register using fog alpha.

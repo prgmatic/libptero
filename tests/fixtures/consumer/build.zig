@@ -20,7 +20,7 @@ pub fn build(b: *std.Build) void {
     assets.addTexture("fixture_rom_ci4", b.path("../../../assets/console_font.png"), .{ .storage = .rom, .format = .ci4 });
     assets.addModel("fixture_rom_model", @import("model_fixture.zig").create(b), .{ .storage = .rom });
     assets.addFont("fixture_font", b.path("assets/font.fnt"), .{});
-    assets.addModel("fixture_model", @import("model_fixture.zig").create(b), .{});
+    assets.addModel("fixture_model", @import("model_fixture.zig").create(b), .{ .texture_sizes = &.{.{ .material = 0, .width = 32, .height = 32 }} });
     _ = assets.addZspProgram("custom_rsp", b.path("assets/custom.zsp"));
     const rom = if (no_assets)
         sdk.addRom(.{

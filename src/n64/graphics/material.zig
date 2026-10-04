@@ -12,6 +12,7 @@ pub const Material = struct {
     second_sampler: texture.Sampler = .{},
     filter: modes.TextureSample = .point,
     translucent: bool = false,
+    z_mode: ?rdp.ZMode = null,
     alpha_cutoff: ?u8 = null,
     /// null inherits the context's current geometry fog setting.
     fog: ?bool = null,
@@ -24,25 +25,50 @@ pub const Material = struct {
     blend: ?rdp.BlendMode = null,
 
     pub fn apply(self: Material, context: anytype) void {
-        context.setDrawFlags(self.flags);
-        context.setVertexEffect(self.vertex_effect);
-        if (self.fog) |enabled| context.setFogEnabled(enabled);
+        self.applyGeometry(context);
         const fog = self.fog orelse context.fog_enabled;
         const rq = if (@typeInfo(@TypeOf(context.render)) == .pointer) context.render else &context.render;
         // Material registers can be read by primitives still in the pipeline.
         rq.cmd_queue.pipeSync();
+        self.applyDepth(rq);
+        self.applyPipeline(rq, fog);
+        self.applyCombiner(rq, fog);
+        self.applyColors(rq);
+    }
+
+    fn applyGeometry(self: Material, context: anytype) void {
+        context.setDrawFlags(self.flags);
+        context.setVertexEffect(self.vertex_effect);
+        if (self.fog) |enabled| context.setFogEnabled(enabled);
+    }
+
+    fn applyDepth(self: Material, rq: anytype) void {
         rq.setDepthState(self.flags.depth, self.flags.depth and !self.translucent);
+        rq.setSurfaceType(self.translucent);
+        if (self.z_mode) |z_mode| {
+            var mode = rq.getModes();
+            mode.z_mode = z_mode;
+            rq.setModes(mode);
+        }
+    }
+
+    fn applyPipeline(self: Material, rq: anytype, fog: bool) void {
         rq.setPerspectiveTexture(self.flags.textured);
         rq.setTextureFilter(self.filter);
         rq.setCycleType(if (fog and self.translucent) .two_cycle else self.cycle_type);
         rq.setBlendMode(self.blend orelse self.blendMode(fog));
-        rq.setSurfaceType(self.translucent);
         rq.setAlphaCompare(if (self.alpha_cutoff != null) .threshold else .disabled);
         if (self.alpha_cutoff) |cutoff| rq.setBlendColor(.fromBytes(0, 0, 0, cutoff));
+    }
+
+    fn applyCombiner(self: Material, rq: anytype, fog: bool) void {
         var combine = self.combine;
         if (fog and self.translucent and self.cycle_type == .one_cycle)
             combine.cycle1 = .{ .rgb_d = .combined, .alpha_d = .combined };
         rq.setCombineMode(combine);
+    }
+
+    fn applyColors(self: Material, rq: anytype) void {
         if (self.primitive) |color| rq.setPrimColor(color);
         if (self.environment) |color| rq.setEnvironmentColor(color);
     }
@@ -55,8 +81,13 @@ pub const Material = struct {
 
     /// Apply state and bind an externally supplied, typed texture.
     pub fn bind(self: Material, context: anytype, image: anytype) void {
-        self.apply(context);
-        _ = context.render.useTextureSampler(image, self.sampler);
+        var resolved = self;
+        if (self.vertex_effect == .spherical)
+            resolved.vertex_effect = .{ .spherical = .{ .width = @intCast(image.width), .height = @intCast(image.height) } };
+        resolved.sampler.mask_s = boundedMask(self.sampler.mask_s, image.width);
+        resolved.sampler.mask_t = boundedMask(self.sampler.mask_t, image.height);
+        resolved.apply(context);
+        _ = context.render.useTextureSampler(image, resolved.sampler);
     }
 };
 
@@ -104,11 +135,28 @@ test "fogged alpha materials restore opaque state and preserve combiner alpha" {
     two_cycle.cycle_type = .two_cycle;
     two_cycle.apply(&context);
     try std.testing.expectEqual(rdp.BlendColorSrc.memory, context.render.mode.blend_m1);
-    try std.testing.expectEqual(rdp.BlendAlphaSrc.zero, context.render.mode.blend_a0);
+    try std.testing.expectEqual(rdp.BlendAlphaSrc.pixel_alpha, context.render.mode.blend_a0);
     (Material{ .cycle_type = .two_cycle, .combine = .shade }).apply(&context);
     try std.testing.expect(!context.render.mode.force_blend);
     try std.testing.expect(context.render.mode.z_update_en);
-    try std.testing.expectEqual(rdp.BlendAlphaSrc.zero, context.render.mode.blend_a0);
+    try std.testing.expectEqual(rdp.BlendAlphaSrc.pixel_alpha, context.render.mode.blend_a0);
     try std.testing.expectEqual(rdp.BlendColorSrc.pixel, context.render.mode.blend_m0);
-    try std.testing.expectEqual(rdp.BlendInvSrc.one, context.render.mode.blend_b0);
+    try std.testing.expectEqual(rdp.BlendInvSrc.inv_a, context.render.mode.blend_b0);
+    (Material{ .translucent = true, .z_mode = .decal }).apply(&context);
+    try std.testing.expectEqual(rdp.ZMode.decal, context.render.mode.z_mode);
+    try std.testing.expect(!context.render.mode.z_update_en);
+}
+
+fn boundedMask(mask: u4, size: u32) u4 {
+    const std = @import("std");
+    if (!std.math.isPowerOfTwo(size)) return mask;
+    return @min(mask, @as(u4, @intCast(std.math.log2_int(u32, size))));
+}
+
+test "external images bound legacy wrap masks to actual texel dimensions" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(u4, 5), boundedMask(6, 32));
+    try std.testing.expectEqual(@as(u4, 4), boundedMask(4, 32));
+    try std.testing.expectEqual(@as(u4, 0), boundedMask(0, 32));
+    try std.testing.expectEqual(@as(u4, 6), boundedMask(6, 44));
 }

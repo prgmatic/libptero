@@ -11,7 +11,7 @@ fn run(init: std.process.Init) !void {
     defer allocator.free(args);
     const rom = args.len > 1 and std.mem.eql(u8, args[args.len - 1], "--rom");
     const count = args.len - @intFromBool(rom);
-    if (count != 8 and count != 9) return error.InvalidArguments;
+    if (count < 8) return error.InvalidArguments;
     const source = try readFile(init.io, allocator, args[1]);
     defer allocator.free(source);
     const glb = try gltf.parseGlb(source);
@@ -21,11 +21,15 @@ fn run(init: std.process.Init) !void {
     const max_vertices = try std.fmt.parseInt(usize, args[6], 10);
     const preserve_triangle_order = std.mem.eql(u8, args[7], "true");
     if (!preserve_triangle_order and !std.mem.eql(u8, args[7], "false")) return error.InvalidArguments;
+    const sizes = try allocator.alloc(gltf.TextureSize, count - @min(count, 9));
+    defer allocator.free(sizes);
+    for (sizes, args[@min(count, 9)..count]) |*size, arg| size.* = try gltf.parseTextureSize(arg);
     const model = try gltf.convert(allocator, document.value, glb.binary, .{
         .scale = scale,
+        .texture_sizes = sizes,
         .max_vertices_per_batch = max_vertices,
         .preserve_triangle_order = preserve_triangle_order,
-        .skinning = if (count == 9) std.meta.stringToEnum(@FieldType(gltf.ConvertOptions, "skinning"), args[8]) orelse return error.InvalidArguments else .weighted,
+        .skinning = if (count >= 9) std.meta.stringToEnum(@FieldType(gltf.ConvertOptions, "skinning"), args[8]) orelse return error.InvalidArguments else .weighted,
     });
     defer model.deinit(allocator);
     const generated = try gltf.generateWithStorage(allocator, model, document.value, glb.binary, args[4], if (rom) .rom else .resident);
@@ -53,6 +57,6 @@ fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 fn fatal(comptime format: []const u8, args: anytype) noreturn {
     std.debug.print("gltf-compiler: " ++ format ++ "\n", args);
-    std.debug.print("usage: gltf-compiler <input.glb> <model.bin> <model.zig> <name> <scale> <max-vertices-per-batch> <preserve-triangle-order> [weighted|first_joint] [--rom]\n", .{});
+    std.debug.print("usage: gltf-compiler <input.glb> <model.bin> <model.zig> <name> <scale> <max-vertices-per-batch> <preserve-triangle-order> [weighted|first_joint [material:width:height ...]] [--rom]\n", .{});
     std.process.exit(1);
 }

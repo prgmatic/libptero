@@ -494,3 +494,9 @@ All allocator-owned runtime image/model/skeleton types now accept the original
 allocator in `deinit(allocator)`; they do not retain an allocator internally.
 Renderers/runtime retain their allocation-free in-place initialization and
 stable-address requirement.
+
+
+`Material.z_mode` can override the surface depth comparison (for example, a
+coplanar translucent decal). `Material.bind` resolves spherical-map dimensions
+and bounds power-of-two wrap masks to the externally supplied image. Explicit
+low-level `useTextureSampler` bindings retain the caller's exact tile settings.

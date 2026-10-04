@@ -140,3 +140,13 @@ material lighting rigs remain unsupported. Native `Material.blend` overrides
 accept explicit blender equations; `Material.vertex_effect` controls spherical
 UV generation or restores ordinary mesh UVs. These limitations do not prevent conversion of the GLBs used by Tiny3D's
 skeleton, animation, animation viewer, point-light, light-clipping, and Fresnel demos.
+
+
+External image dimensions can differ from legacy tile bounds. Pass actual sizes
+through `AssetBundle.addModel`'s `.texture_sizes`, e.g.
+`&.{.{ .material = 0, .width = 32, .height = 32 }}`. The compiler uses these
+sizes for packed mesh UVs while retaining the original sampler bounds. The CLI
+accepts `material:width:height` arguments after the skinning mode. At binding,
+`Material.bind` resolves spherical UV dimensions from the typed image and bounds
+power-of-two wrap masks to its texels, preventing reads into adjacent TMEM.
+Legacy tile translations and decal/interpenetrating depth presets are preserved.
