@@ -77,6 +77,19 @@ pub const Mat4 = extern struct {
         };
         return result;
     }
+    /// Multiply affine transforms with final row `(0, 0, 0, 1)`.
+    /// Skeleton SRT hierarchies need only the upper three rows.
+    pub fn mulAffine(a: *const Mat4, b: *const Mat4) Mat4 {
+        var result = Mat4.identity;
+        for (0..4) |column| {
+            inline for (0..3) |row| {
+                result.m[column][row] = a.m[0][row] * b.m[column][0] +
+                    a.m[1][row] * b.m[column][1] + a.m[2][row] * b.m[column][2];
+                if (column == 3) result.m[column][row] += a.m[3][row];
+            }
+        }
+        return result;
+    }
     pub fn transformPoint(self: *const Mat4, point: Vec3) Vec4 {
         return .init(
             self.m[0][0] * point.x + self.m[1][0] * point.y + self.m[2][0] * point.z + self.m[3][0],
@@ -151,6 +164,17 @@ test "optimized affine conversion matches the generic fixed matrix" {
     const generic = matrix.toFixed();
     const optimized = matrix.toFixed3x4();
     try std.testing.expectEqualDeep(generic, optimized);
+}
+
+test "affine multiplication preserves rotated nonuniform and reflected hierarchies" {
+    const parent = Mat4.fromSrt(.init(2, -3, 0.5), .fromAxisAngle(.init(0, 1, 0), 0.7), .init(12, -8, 4));
+    const local = Mat4.fromSrt(.init(0.25, 4, 2), .fromAxisAngle(.init(1, 0, 0), -0.3), .init(-3, 7, 2));
+    const expected = parent.mul(&local);
+    const actual = parent.mulAffine(&local);
+    try std.testing.expectEqualDeep(expected, actual);
+    try std.testing.expectEqualDeep(expected.toFixed(), actual.toFixed3x4());
+    try std.testing.expectEqualDeep(parent, parent.mulAffine(&Mat4.identity));
+    try std.testing.expectEqualDeep(local, Mat4.identity.mulAffine(&local));
 }
 
 test "SRT ignores tiny imported quaternion components before their products" {

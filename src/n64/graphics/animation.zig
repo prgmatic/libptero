@@ -136,7 +136,7 @@ pub const Skeleton = struct {
     /// an in-flight destination; use one pose buffer per outstanding frame.
     pub fn writeMatrices(self: *const Skeleton, destination: []math.FixedMat4) void {
         std.debug.assert(destination.len == self.matrices.len);
-        for (destination, self.matrices) |*fixed, matrix| fixed.* = matrix.toFixed();
+        for (destination, self.matrices) |*fixed, matrix| fixed.* = matrix.toFixed3x4();
     }
 
     pub fn reset(self: *Skeleton) void {
@@ -151,7 +151,7 @@ pub const Skeleton = struct {
     pub fn update(self: *Skeleton) void {
         for (self.order) |i| {
             const local = self.bones[i].matrix();
-            self.matrices[i] = if (self.nodes[i].parent) |parent| self.matrices[parent].mul(&local) else local;
+            self.matrices[i] = if (self.nodes[i].parent) |parent| self.matrices[parent].mulAffine(&local) else local;
         }
     }
 
