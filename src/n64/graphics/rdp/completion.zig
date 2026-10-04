@@ -31,6 +31,8 @@ pub const Completion = struct {
     /// A timeout leaves the completion valid for polling or retrying. Do not
     /// release borrowed resources merely because a wait timed out.
     pub fn wait(self: Completion, options: WaitOptions) WaitError!void {
+        const trace_scope = @import("../../debug/profiler.zig").scope("Render completion wait CPU");
+        defer trace_scope.end();
         try waitFor(self, options);
     }
 };

@@ -74,6 +74,8 @@ pub const Stream = struct {
         if (minimum > self.storage.len) return error.StreamBufferTooSmall;
         if (!self.window_valid or begin < self.window_start or minimum + (begin - self.window_start) > self.storage.len) {
             self.window_valid = false;
+            const trace_scope = @import("../debug/profiler.zig").scope("Audio refill CPU");
+            defer trace_scope.end();
             try self.fill(begin, max_attempts, decoder);
             self.window_start = begin;
             self.window_valid = true;

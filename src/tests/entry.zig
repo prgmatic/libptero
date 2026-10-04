@@ -15,6 +15,7 @@ const tests = [_]runner.Test{} ++
     @import("render_api_tests.zig").tests ++
     @import("display_tests.zig").tests ++
     @import("input_time_tests.zig").tests ++
+    @import("profiler_tests.zig").tests ++
     @import("crash_memory_tests.zig").tests;
 
 export fn __start() linksection(".text.startup") noreturn {

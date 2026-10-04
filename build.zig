@@ -55,6 +55,20 @@ pub fn build(b: *std.Build) void {
         }),
     }));
 
+    const profiler_trace = b.createModule(.{ .root_source_file = b.path("src/n64/debug/profiler/trace.zig"), .target = b.graph.host });
+    const profiler_module = b.createModule(.{
+        .root_source_file = b.path("tools/profiler/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "profiler_trace", .module = profiler_trace }},
+    });
+    b.installArtifact(b.addExecutable(.{
+        .name = "ptero-profiler",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/profiler/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "profiler", .module = profiler_module }},
+        }),
+    }));
     tests_build.addToolTests(b, coverage, coverage_runtime);
     tests_build.addConsumerFixtureTests(b);
     const zsp_test_programs = tests_build.addZspPrograms(b, &sdk);

@@ -163,6 +163,8 @@ pub const Mixer = struct {
 
     /// Poll one writable AI buffer, mix at high priority, then enqueue it.
     pub fn tryPlay(self: *Mixer, output: *@import("output.zig").Output, max_attempts: u32) !bool {
+        const trace_scope = @import("../debug/profiler.zig").scope("Audio service CPU");
+        defer trace_scope.end();
         const buffer = (try output.acquire()) orelse return false;
         // A timeout keeps the acquired AI buffer and RSP resources borrowed;
         // callers may retry wait, then commit after it succeeds.

@@ -4,9 +4,11 @@ const std = @import("std");
 const raw = @import("../interfaces/parallel.zig");
 const cache = @import("../cpu/cache.zig");
 const cp0 = @import("../cpu/cp0.zig");
+const profiler = @import("../debug/profiler.zig");
 var owner: ?*Transfer = null;
 pub const Transfer = struct {
     destination: ?[]align(16) u8 = null,
+    trace_dma: profiler.Scope = .{},
 
     pub fn begin(self: *Transfer, rom_offset: u32, destination: []align(16) u8) !void {
         if (self.destination != null) return error.TransferBusy;
@@ -24,6 +26,7 @@ pub const Transfer = struct {
         cache.invalidateData(destination);
         self.destination = destination;
         owner = self;
+        self.trace_dma = profiler.begin(.pi, "PI DMA (observed)", @intCast(destination.len));
         raw.dmaToDram(@intCast(address & 0x1fffffff), 0x10000000 + rom_offset, @intCast(destination.len - 1));
     }
 
@@ -33,6 +36,8 @@ pub const Transfer = struct {
         const failed = raw.readStatus() & 4 != 0;
         cache.invalidateData(destination);
         raw.writeStatus(2); // acknowledge PI completion without resetting it
+        self.trace_dma.endValue(if (failed) 1 else 0);
+        self.trace_dma = .{};
         self.destination = null;
         owner = null;
         if (failed) return error.PiError;

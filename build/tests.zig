@@ -17,6 +17,34 @@ pub fn addConsumerFixtureTests(b: *std.Build) void {
 
 pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8) void {
     const test_step = b.step("test", "Run host tool tests");
+    if (b.findProgram(&.{"node"}, &.{}) catch null) |node| {
+        const viewer_tests = b.addSystemCommand(&.{ node, b.pathFromRoot("tools/profiler/viewer_test.mjs") });
+        test_step.dependOn(&viewer_tests.step);
+        b.step("test-profiler-viewer", "Exercise the embedded timeline viewer without a browser").dependOn(&viewer_tests.step);
+    }
+    const profiler_trace = b.createModule(.{ .root_source_file = b.path("src/n64/debug/profiler/trace.zig"), .target = b.graph.host });
+    const profiler_module = b.createModule(.{
+        .root_source_file = b.path("tools/profiler/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "profiler_trace", .module = profiler_trace }},
+    });
+    const profiler_tests = b.addTest(.{ .name = "profiler-tests", .root_module = profiler_module });
+    instrumentTests(profiler_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(profiler_tests).step);
+    const profiler_cli_tests = b.addTest(.{
+        .name = "profiler-cli-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/profiler/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{ .{ .name = "profiler_trace", .module = profiler_trace }, .{ .name = "profiler", .module = b.createModule(.{
+                .root_source_file = b.path("tools/profiler/root.zig"),
+                .target = b.graph.host,
+                .imports = &.{.{ .name = "profiler_trace", .module = profiler_trace }},
+            }) } },
+        }),
+    });
+    instrumentTests(profiler_cli_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(profiler_cli_tests).step);
     const gltf_compiler_tests = b.addTest(.{
         .name = "gltf-compiler-tests",
         .root_module = b.createModule(.{

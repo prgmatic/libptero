@@ -1,6 +1,8 @@
 const mi = @import("interfaces/mips.zig");
 const vi = @import("interfaces/video.zig");
 const rsp_io = @import("rsp/io.zig");
+const profiler = @import("debug/profiler.zig");
+var trace_fence: profiler.Scope = .{};
 const print = @import("debug.zig").print;
 
 var lock: u8 = 0;
@@ -72,6 +74,7 @@ pub fn armRdpFence() RdpFence {
     const completed = @atomicLoad(u32, &rdp_fences_completed, .acquire);
     if (scheduled != completed) @panic("only one RDP completion fence may be outstanding");
     const target = scheduled +% 1;
+    trace_fence = profiler.begin(.rdp, "RDP fence (observed)", target);
     @atomicStore(u32, &rdp_fences_scheduled, target, .release);
     return .{ .target = target };
 }
@@ -91,6 +94,8 @@ fn serviceRdpInterrupt() void {
     const scheduled = @atomicLoad(u32, &rdp_fences_scheduled, .acquire);
     const completed = @atomicLoad(u32, &rdp_fences_completed, .acquire);
     if (scheduled != completed) {
+        trace_fence.end();
+        trace_fence = .{};
         @atomicStore(u32, &rdp_fences_completed, scheduled, .release);
     }
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const cache = @import("../cpu/cache.zig");
 const cpu = @import("../cpu.zig");
+const profiler = @import("../debug/profiler.zig");
 const rdp_io = @import("../graphics/rdp/io.zig");
 
 pub const io = @import("io.zig");
@@ -27,6 +28,8 @@ pub const Queue = struct {
     recording: ?*CommandQueue,
     syncpoints_scheduled: u32,
     syncpoints_completed: u32,
+    trace_sync: profiler.Scope = .{},
+    trace_high: profiler.Scope = .{},
 
     pub fn init(self: *Queue, priority: Priority) void {
         self.storage.init();
@@ -34,6 +37,8 @@ pub const Queue = struct {
         self.recording = null;
         self.syncpoints_scheduled = 0;
         self.syncpoints_completed = 0;
+        self.trace_sync = .{};
+        self.trace_high = .{};
     }
 
     pub fn writeDmem(self: *Queue, offset: u32, value: u32) void {
@@ -200,6 +205,7 @@ pub const Queue = struct {
         io.status_register_write.* = io.status_clear_signal2;
         self.syncpoints_scheduled +%= 1;
         self.current().waitThenWriteStatus(io.status_signal2, io.status_set_signal2);
+        self.trace_sync = profiler.begin(.rsp_low, "RSP syncpoint (observed)", self.syncpoints_scheduled);
         flush(self);
         self.storage.syncpoint_pending = true;
         return .{ .queue = self, .target = self.syncpoints_scheduled };
@@ -218,6 +224,8 @@ pub const Queue = struct {
     fn pollSyncpoint(self: *Queue) void {
         if (!self.storage.syncpoint_pending or !io.status_register_read.signal2) return;
         io.status_register_write.* = io.status_clear_signal2;
+        self.trace_sync.end();
+        self.trace_sync = .{};
         self.syncpoints_completed = self.syncpoints_scheduled;
         self.storage.syncpoint_pending = false;
     }
@@ -365,6 +373,8 @@ fn writebackCommandGraph(queue: *const CommandQueue, depth: usize) void {
 }
 
 pub fn flush(queue: *Queue) void {
+    const trace_scope = profiler.scope("RSP low submit CPU");
+    defer trace_scope.end();
     if (queue.priority != .low) @panic("use submitHighPriority for a high-priority RSP queue");
     if (queue.recording != null) @panic("cannot flush while recording an RSP command block");
     const storage = &queue.storage;
@@ -382,6 +392,7 @@ pub fn flush(queue: *Queue) void {
         next.clearStreaming();
     }
 
+    profiler.instant(.rsp_low, "RSP queue submit", @intCast(current.index));
     current.writeRawCommand(
         @intFromEnum(command_queue.InternalCommand.write_status),
         io.status_set_signal6,
@@ -413,6 +424,8 @@ pub fn wait(queue: *const Queue) void {
 }
 
 pub fn waitTimeout(queue: *const Queue, max_attempts: u32) bool {
+    const trace_scope = profiler.scope("RSP low wait CPU");
+    defer trace_scope.end();
     if (queue.priority != .low) @panic("use waitHighPriorityTimeout for a high-priority RSP queue");
     if (!queue.storage.submitted) return true;
     var remaining = max_attempts;
@@ -424,6 +437,8 @@ pub fn waitTimeout(queue: *const Queue, max_attempts: u32) bool {
 }
 
 pub fn submitHighPriority(queue: *Queue) void {
+    const trace_scope = profiler.scope("RSP high submit CPU");
+    defer trace_scope.end();
     if (queue.priority != .high) @panic("high-priority submission requires a high-priority RSP queue");
     if (queue.storage.submitted) @panic("high-priority RSP queue is already submitted");
     queue.ensureCapacity(0);
@@ -451,12 +466,15 @@ pub fn submitHighPriority(queue: *Queue) void {
     io.status_register_write.* = io.status_clear_signal5;
     io.readDmem(u32, pointer_stack_dmem + 9 * @sizeOf(u32)).* =
         physicalAddress(@intFromPtr(current.buffer.ptr));
+    queue.trace_high = profiler.begin(.rsp_high, "RSP high batch (observed)", @intCast(current.index));
     io.status_register_write.* = io.status_set_signal4;
     wakeContinuous();
     queue.storage.submitted = true;
 }
 
 pub fn waitHighPriorityTimeout(queue: *Queue, max_attempts: u32) bool {
+    const trace_scope = profiler.scope("RSP high wait CPU");
+    defer trace_scope.end();
     if (queue.priority != .high) @panic("high-priority wait requires a high-priority RSP queue");
     if (!queue.storage.submitted) return true;
     var remaining = max_attempts;
@@ -467,6 +485,8 @@ pub fn waitHighPriorityTimeout(queue: *Queue, max_attempts: u32) bool {
         remaining -= 1;
     }
     io.status_register_write.* = io.status_clear_signal5;
+    queue.trace_high.end();
+    queue.trace_high = .{};
     queue.current().clear();
     queue.storage.submitted = false;
     return true;

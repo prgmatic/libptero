@@ -5,6 +5,7 @@ const vi = @import("../interfaces/video.zig");
 const mi = @import("../interfaces/mips.zig");
 const cp0 = @import("../cpu/cp0.zig");
 const interrupts = @import("../interrupt.zig");
+const profiler = @import("../debug/profiler.zig");
 const cache = @import("../cpu/cache.zig");
 
 pub const Options = struct { frequency: u32 = 48000, buffer_count: u6 = 4, tv: vi.TvType = .ntsc };
@@ -151,10 +152,16 @@ pub const Output = struct {
     }
 
     fn serviceLocked(self: *Output) void {
+        const previous_underruns = self.ring.underruns;
+        const previous_queued = self.ring.queued;
         self.ring.retire(ai.readStatus());
+        if (previous_queued != self.ring.queued) profiler.counter(.audio, "AI queued buffers", self.ring.queued);
+        if (previous_underruns != self.ring.underruns) profiler.counter(.audio, "AI underruns", self.ring.underruns);
         while (self.ring.enqueue()) |index| {
             self.submitted_buffers +%= 1;
             ai.enqueue(@truncate(@intFromPtr(self.buffer(index).ptr) & 0x1fffffff), self.timing.frames * 4);
+            profiler.instant(.audio, "AI enqueue", self.submitted_buffers);
+            profiler.counter(.audio, "AI queued buffers", self.ring.queued);
         }
     }
 

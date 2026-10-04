@@ -10,6 +10,7 @@ pub const audio = @import("audio.zig");
 pub const rom = @import("rom.zig");
 
 test {
+    _ = debug.profiler;
     _ = debug.crash_screen.model;
     _ = debug.crash_screen.model.memory;
     _ = debug.crash_screen.font;

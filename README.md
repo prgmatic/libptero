@@ -12,3 +12,6 @@ explicit typed texture/model loading, and direct DMA into caller-owned storage.
 
 Resident and streamed PCM assets, AI output buffers, and the instruction-identical libdragon
 RSP mixer are documented in [PCM audio](src/n64/audio/README.md).
+
+Bounded hardware traces and the standalone timeline viewer are documented in
+[Hardware profiler](tools/profiler/README.md).
