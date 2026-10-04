@@ -1607,3 +1607,34 @@ test "external image dimensions control packed UVs without changing tile bounds"
     try std.testing.expectEqual([2]i16{ 496, 240 }, model.batches[0].vertices[0].uv);
     try std.testing.expectEqual([2]u32{ 44, 44 }, materialTextureSize(document, &binary, 0));
 }
+
+test "first-joint deduplication retains distinct bind positions below native quantization" {
+    const positions = [_]f32{ 0.001, 2, 3, 0.002, 2, 3 };
+    const normals = [_]f32{ 0, 1, 0.001, 0, 1, 0.002 };
+    const position_view: AccessorView = .{ .bytes = std.mem.asBytes(&positions), .count = 2, .stride = 12, .component_type = 5126, .component_count = 3, .normalized = false };
+    var views: PrimitiveViews = .{
+        .positions = position_view,
+        .normals = .{ .bytes = std.mem.asBytes(&normals), .count = 2, .stride = 12, .component_type = 5126, .component_count = 3, .normalized = false },
+        .colors = null,
+        .uvs = null,
+        .joints = null,
+        .weights = null,
+        .indices = position_view,
+        .texture_size = .{ 32, 32 },
+        .uv_adjust = false,
+    };
+    const first = try primitiveVertex(views, .{ .scale = 1, .skinning = .first_joint }, 0);
+    const second = try primitiveVertex(views, .{ .scale = 1, .skinning = .first_joint }, 1);
+    try std.testing.expectEqual(first.position, second.position);
+    try std.testing.expectEqual(first.normal, second.normal);
+    try std.testing.expectEqual([3]f32{ 0.001, 2, 3 }, first.source_position.?);
+    try std.testing.expectEqual([3]f32{ 0, 1, 0.002 }, second.source_normal.?);
+    var pool = try @import("vertex_remap.zig").Pool.init(std.testing.allocator, 2);
+    defer pool.deinit();
+    try pool.intern(0, first);
+    try pool.intern(1, second);
+    try std.testing.expectEqual(@as(usize, 2), pool.vertices.items.len);
+    views.normals = null;
+    const unshaded = try primitiveVertex(views, .{ .scale = 1, .skinning = .first_joint }, 0);
+    try std.testing.expectEqual(@as(?[3]f32, null), unshaded.source_normal);
+}
