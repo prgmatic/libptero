@@ -19,6 +19,11 @@ pub const BlendMode = struct {
 
     /// Pixel color passes straight through; blender is disabled.
     pub const opaque_surface: BlendMode = .{};
+    /// Two-cycle opaque rendering must preserve color through the first
+    /// blender cycle, even when combiner alpha encodes a lighting effect.
+    pub const opaque_two_cycle: BlendMode = .{
+        .pass1 = .{ .p = .pixel, .a = .zero, .m = .pixel, .b = .one },
+    };
     /// Standard src-alpha blend against the framebuffer.
     pub const alpha: BlendMode = .{
         .force_blend = true,

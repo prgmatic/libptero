@@ -729,15 +729,55 @@ fn validateConvertOptions(options: ConvertOptions) !void {
 
 fn convertMeshes(allocator: std.mem.Allocator, document: Document, binary: []const u8, options: ConvertOptions, batches: *std.ArrayList(Batch)) !void {
     try rig.validate(document, binary);
-    for (document.meshes, 0..) |mesh, mesh_index| for (mesh.primitives) |primitive| {
+    for (document.meshes, 0..) |mesh, mesh_index| {
+        var referenced = false;
+        for (document.nodes, 0..) |node, node_index| {
+            if (node.mesh != @as(u32, @intCast(mesh_index))) continue;
+            referenced = true;
+            try convertMeshNode(allocator, document, binary, options, batches, mesh, mesh_index, node_index);
+        }
+        if (!referenced) try convertMeshNode(allocator, document, binary, options, batches, mesh, mesh_index, null);
+    }
+}
+
+fn convertMeshNode(allocator: std.mem.Allocator, document: Document, binary: []const u8, options: ConvertOptions, batches: *std.ArrayList(Batch), mesh: Mesh, mesh_index: usize, node_index: ?usize) !void {
+    for (mesh.primitives) |primitive| {
         if (primitive.mode != 4) return error.UnsupportedPrimitiveMode;
         const start = batches.items.len;
         try convertPrimitive(allocator, document, binary, primitive, options, batches);
         const skin = try rig.meshSkin(document, mesh_index);
         for (batches.items[start..]) |*batch| batch.skin = skin;
-        try @import("node_transforms.zig").bake(document, mesh_index, batches.items[start..], options.scale);
+        if (node_index) |node| try @import("node_transforms.zig").bakeNode(document, node, batches.items[start..], options.scale);
         if (options.skinning == .first_joint) try @import("rigid_skin.zig").prepare(allocator, document, binary, batches.items[start..], options.scale);
-    };
+    }
+}
+
+fn prepareVertices(pool: *@import("vertex_remap.zig").Pool, views: PrimitiveViews, options: ConvertOptions) !void {
+    for (0..views.indices.count) |corner| {
+        const index = try views.indices.index(corner);
+        if (index >= views.positions.count) return error.InvalidVertexIndex;
+        if (pool.sources[index] != null) continue;
+        try pool.intern(index, try primitiveVertex(views, options, index));
+    }
+}
+
+fn primitiveVertex(views: PrimitiveViews, options: ConvertOptions, index: u32) !Vertex {
+    var vertex = try convertVertex(views.positions, views.normals, views.colors, views.uvs, index, views.texture_size, options.scale);
+    vertex.influence = try rig.readInfluence(views.joints, views.weights, index);
+    if (options.skinning == .first_joint) try captureBindSource(&vertex, views, index, options.scale);
+    if (views.uv_adjust and views.uvs != null) try centerUv(&vertex.uv);
+    return vertex;
+}
+
+fn captureBindSource(vertex: *Vertex, views: PrimitiveViews, index: u32, scale: f32) !void {
+    var position: [3]f32 = undefined;
+    for (0..3) |component| position[component] = try views.positions.float(index, component) * scale;
+    vertex.source_position = position;
+    if (views.normals) |normals| {
+        var normal: [3]f32 = undefined;
+        for (0..3) |component| normal[component] = try normals.float(index, component);
+        vertex.source_normal = normal;
+    }
 }
 
 const Remap = struct { source: u32, local: u8 };
@@ -751,9 +791,13 @@ fn convertPrimitive(
     output: *std.ArrayList(Batch),
 ) !void {
     const views = try PrimitiveViews.init(document, binary, primitive);
+    var pool = try @import("vertex_remap.zig").Pool.init(allocator, views.positions.count);
+    defer pool.deinit();
+    try prepareVertices(&pool, views, options);
     var builder: BatchBuilder = .{
         .allocator = allocator,
         .views = views,
+        .pool = &pool,
         .options = options,
         .material = primitive.material,
         .preserve_order = options.preserve_triangle_order or materialPreservesOrder(document, primitive.material),
@@ -823,7 +867,7 @@ const PrimitiveViews = struct {
             .positions = positions,
             .normals = try optionalAccessor(document, binary, primitive.attributes.NORMAL),
             .colors = try optionalAccessor(document, binary, primitive.attributes.COLOR_0),
-            .uvs = try optionalAccessor(document, binary, primitive.attributes.TEXCOORD_0),
+            .uvs = if (materialGeneratesUv(document, primitive.material)) null else try optionalAccessor(document, binary, primitive.attributes.TEXCOORD_0),
             .joints = try optionalAccessor(document, binary, primitive.attributes.JOINTS_0),
             .weights = try optionalAccessor(document, binary, primitive.attributes.WEIGHTS_0),
             .indices = indices,
@@ -832,6 +876,13 @@ const PrimitiveViews = struct {
         };
     }
 };
+
+fn materialGeneratesUv(document: Document, index: ?u32) bool {
+    const material = index orelse return false;
+    if (material >= document.materials.len) return false;
+    const fast64 = materials.legacy(document.materials[material]) orelse return false;
+    return fast64.rdp_settings.g_tex_gen == .on;
+}
 
 fn optionalAccessor(document: Document, binary: []const u8, index: ?u32) !?AccessorView {
     return if (index) |value| try accessorView(document, binary, value) else null;
@@ -847,6 +898,7 @@ const BatchBuilder = struct {
     allocator: std.mem.Allocator,
     views: PrimitiveViews,
     options: ConvertOptions,
+    pool: *const @import("vertex_remap.zig").Pool,
     material: ?u32,
     preserve_order: bool,
     output: *std.ArrayList(Batch),
@@ -870,9 +922,9 @@ const BatchBuilder = struct {
 
     fn sourceTriangle(self: *const BatchBuilder, triangle_index: usize) ![3]u32 {
         return .{
-            try self.views.indices.index(triangle_index),
-            try self.views.indices.index(triangle_index + 1),
-            try self.views.indices.index(triangle_index + 2),
+            self.pool.sources[try self.views.indices.index(triangle_index)].?,
+            self.pool.sources[try self.views.indices.index(triangle_index + 1)].?,
+            self.pool.sources[try self.views.indices.index(triangle_index + 2)].?,
         };
     }
 
@@ -900,19 +952,7 @@ const BatchBuilder = struct {
         if (index >= self.views.positions.count) return error.InvalidVertexIndex;
         if (findRemap(self.remap.items, index)) |local| return local;
         const local: u8 = @intCast(self.vertices.items.len);
-        var vertex = try convertVertex(self.views.positions, self.views.normals, self.views.colors, self.views.uvs, index, self.views.texture_size, self.options.scale);
-        vertex.influence = try rig.readInfluence(self.views.joints, self.views.weights, index);
-        if (self.options.skinning == .first_joint) {
-            var position: [3]f32 = undefined;
-            for (0..3) |component| position[component] = try self.views.positions.float(index, component) * self.options.scale;
-            vertex.source_position = position;
-            if (self.views.normals) |normals| {
-                var normal: [3]f32 = undefined;
-                for (0..3) |component| normal[component] = try normals.float(index, component);
-                vertex.source_normal = normal;
-            }
-        }
-        if (self.views.uv_adjust and self.views.uvs != null) try centerUv(&vertex.uv);
+        const vertex = self.pool.vertices.items[index];
         try self.vertices.append(self.allocator, vertex);
         try self.remap.append(self.allocator, .{ .source = index, .local = local });
         return local;
@@ -1449,4 +1489,58 @@ test "generated materials preserve mask, legacy sampler, culling and two cycles"
     try emitMaterials(std.testing.allocator, &output, parsed.value, &.{});
     for ([_][]const u8{ ".alpha_cutoff = 32", ".mirror_t = true", ".shift_t = 15", ".cull_back = true", ".no_light = true", ".fog = true", ".cycle_type = .two_cycle", ".alpha_d = @enumFromInt(1)", ".primitive = .fromBytes", ".environment = .fromBytes" }) |fragment|
         try std.testing.expect(std.mem.indexOf(u8, output.items, fragment) != null);
+}
+
+test "static mesh instances bake independently and sphere maps discard unused oversized UVs" {
+    var binary: [66]u8 = @splat(0);
+    for ([_]f32{ 0, 0, 0, 1, 0, 0, 0, 1, 0 }, 0..) |value, index|
+        std.mem.writeInt(u32, binary[index * 4 ..][0..4], @bitCast(value), .little);
+    for (0..3) |index| {
+        std.mem.writeInt(u16, binary[36 + index * 2 ..][0..2], @intCast(index), .little);
+        std.mem.writeInt(u32, binary[42 + index * 8 ..][0..4], @bitCast(@as(f32, 2000)), .little);
+    }
+    var material: Material = .{ .extras = .{ .f3d_mat = .{
+        .tex0 = .{ .S = .{ .high = 31 }, .T = .{ .high = 31 } },
+        .rdp_settings = .{ .g_tex_gen = .on },
+    } } };
+    const document: Document = .{
+        .accessors = &.{
+            .{ .bufferView = 0, .componentType = 5126, .count = 3, .type = "VEC3" },
+            .{ .bufferView = 1, .componentType = 5123, .count = 3, .type = "SCALAR" },
+            .{ .bufferView = 2, .componentType = 5126, .count = 3, .type = "VEC2" },
+        },
+        .bufferViews = &.{ .{ .buffer = 0, .byteLength = 36 }, .{ .buffer = 0, .byteOffset = 36, .byteLength = 6 }, .{ .buffer = 0, .byteOffset = 42, .byteLength = 24 } },
+        .meshes = &.{.{ .primitives = &.{.{ .attributes = .{ .POSITION = 0, .TEXCOORD_0 = 2 }, .indices = 1, .material = 0 }} }},
+        .nodes = &.{ .{ .mesh = 0, .translation = .{ 2, 0, 0 } }, .{ .mesh = 0, .translation = .{ -2, 0, 0 } } },
+        .materials = @as(*const [1]Material, @ptrCast(&material)),
+    };
+    const result = try convert(std.testing.allocator, document, &binary, .{ .scale = 1, .preserve_triangle_order = true });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), result.batches.len);
+    try std.testing.expectEqual([3]i16{ 2, 0, 0 }, result.batches[0].vertices[0].position);
+    try std.testing.expectEqual([3]i16{ -2, 0, 0 }, result.batches[1].vertices[0].position);
+    material.extras.?.f3d_mat.?.rdp_settings.g_tex_gen = .off;
+    try std.testing.expectError(error.UvOutOfRange, convert(std.testing.allocator, document, &binary, .{ .scale = 1 }));
+}
+
+test "quantized duplicate source indices share a batch vertex without reordering triangles" {
+    var binary: [54]u8 = @splat(0);
+    for ([_]f32{ 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.001, 0, 0 }, 0..) |value, index|
+        std.mem.writeInt(u32, binary[index * 4 ..][0..4], @bitCast(value), .little);
+    @memcpy(binary[48..], &[_]u8{ 0, 1, 2, 3, 1, 2 });
+    const document: Document = .{
+        .accessors = &.{
+            .{ .bufferView = 0, .componentType = 5126, .count = 4, .type = "VEC3" },
+            .{ .bufferView = 1, .componentType = 5121, .count = 6, .type = "SCALAR" },
+        },
+        .bufferViews = &.{ .{ .buffer = 0, .byteLength = 48 }, .{ .buffer = 0, .byteOffset = 48, .byteLength = 6 } },
+        .meshes = &.{.{ .primitives = &.{.{ .attributes = .{ .POSITION = 0 }, .indices = 1 }} }},
+    };
+    const result = try convert(std.testing.allocator, document, &binary, .{ .scale = 1, .preserve_triangle_order = true });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.batches.len);
+    try std.testing.expectEqual(@as(usize, 3), result.batches[0].vertices.len);
+    try std.testing.expectEqualDeep(&[_]Triangle{ .{ 0, 1, 2 }, .{ 0, 1, 2 } }, result.batches[0].triangles);
+    binary[48] = 4;
+    try std.testing.expectError(error.InvalidVertexIndex, convert(std.testing.allocator, document, &binary, .{}));
 }

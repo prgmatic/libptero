@@ -28,10 +28,10 @@ pub fn meshSkin(document: compiler.Document, mesh: usize) !?u16 {
     var occurrences: usize = 0;
     for (document.nodes) |node| if (node.mesh == @as(u32, @intCast(mesh))) {
         occurrences += 1;
-        found = node.skin;
+        if (node.skin) |skin| found = skin;
     };
     // Instanced meshes need separate geometry records and distinct bindings.
-    if (occurrences > 1) return error.InstancedMeshUnsupported;
+    if (occurrences > 1 and found != null) return error.InstancedMeshUnsupported;
     return found;
 }
 

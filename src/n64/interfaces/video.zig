@@ -61,6 +61,7 @@ pub const VideoInitOptions = struct {
     tv: TvType = .ntsc,
     resolution: Resolution = .@"320x240p",
     anti_alias_mode: AntiAliasMode = .Resample,
+    divot_enabled: bool = false,
     de_dither_enabled: bool = false,
     color_depth: ColorDepth = .Rgba5551,
     gamma_enabled: bool = false,
@@ -76,6 +77,7 @@ pub fn init(options: VideoInitOptions) void {
     
     control.* = .{
         .anti_alias_mode = options.anti_alias_mode,
+        .divot_enable = options.divot_enabled,
         .de_dither_enable = options.de_dither_enabled,
         .color_depth = options.color_depth,
         .gamma_enable = options.gamma_enabled,

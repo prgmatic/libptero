@@ -62,7 +62,9 @@ with the caller responsible for separately finishing RSP work.
 may tear. Acquisition uses free buffers immediately and waits only when recycling
 a buffer whose scanout has not retired. A retrace during rendering already
 satisfies retirement. The default `.vsync` finishes retirement during present.
-Both modes poll VI directly and work without enabling CPU interrupts. Polling
+Both modes poll VI directly and work without enabling CPU interrupts.
+`Options.anti_alias_mode` selects VI resampling/fetch behavior, and
+`divot_enabled` enables the VI divot filter independently. Polling
 does not consume interrupt events. `max_attempts` limits polls, not elapsed time.
 A presentation timeout retains the acquisition for retry; complete outstanding
 work before releasing it. An acquire timeout does not acquire a frame.
@@ -237,6 +239,37 @@ Complete all borrowed-resource work before teardown. It does not own display,
 images, vertices, or application matrices. The individual `rsp.Runtime`,
 `graphics.Renderer`, and `geometry.Context` types remain available for applications
 that need separate lifetimes or an RDP-only renderer.
+
+## Point lights and generated UVs
+
+Attach the viewport before configuring view-dependent lights. Directional and
+point lights share seven consecutively numbered slots, in addition to ambient:
+
+```zig
+const g = &renderer.geometry;
+g.attachViewport(&viewport);
+g.setAmbientLight(.fromBytes(20, 20, 20, 0));
+g.setPointLightAt(0, .fromBytes(255, 100, 40, 0), position, 50, false);
+g.setPointLightAt(1, .fromBytes(0, 0, 0, 255), camera_position, 1000, false);
+g.setLightCount(2);
+```
+
+Positions are world-space. Strength uses Tiny3D's distance/falloff parameter,
+clamped to 0..4096. Normal-dependent point lighting produces directional falloff;
+`ignore_normals = true` instead produces a spherical field. Lighting alpha is
+independent of lighting RGB and can drive cutouts, reveals, and Fresnel in the
+combiner.
+`Viewport.setOrthographic(left, right, bottom, top, near, far)` supports
+orthographic camera projection alongside perspective.
+
+`Material.vertex_effect = .{ .spherical = .{ .width = 32, .height = 32 } }`
+generates reflection UVs in the RSP. `.none` restores source UVs. Imported legacy
+Fast64 texture-generation metadata sets this automatically, including a reset
+when the following material uses ordinary UVs. Custom draws can call
+`Context.setVertexEffect` directly. `Material.blend` accepts an explicit
+`rdp.BlendMode` override for effects such as blending against the blend-color
+register. A texture pair can reuse the same texels in TMEM with separate tile
+shifts and offsets; `useTexturePair` uploads identical images once.
 
 ## Drawing model data
 

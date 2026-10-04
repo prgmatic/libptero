@@ -33,6 +33,8 @@ pub const Fast64 = struct {
     rdp_settings: Settings = .{},
     set_prim: Flag = .off,
     set_env: Flag = .off,
+    set_blend: Flag = .off,
+    blend_color: [4]f32 = .{ 0, 0, 0, 1 },
     prim_color: [4]f32 = .{ 1, 1, 1, 1 },
     env_color: [4]f32 = .{ 1, 1, 1, 1 },
 };
@@ -51,6 +53,7 @@ pub const Settings = struct {
     g_cull_front: Flag = .off,
     g_cull_back: Flag = .off,
     g_lighting: Flag = .on,
+    g_tex_gen: Flag = .off,
     g_fog: ?Flag = null,
     g_mdsft_text_filt: u8 = 2,
     g_mdsft_cycletype: u8 = 0,
@@ -119,6 +122,7 @@ pub fn emit(allocator: std.mem.Allocator, output: *std.ArrayList(u8), material: 
     try emitSampler(allocator, output, "sampler", first_sampler);
     try emitSampler(allocator, output, "second_sampler", second_sampler);
     try emitMask(allocator, output, material);
+    if (f) |value| try emitVertexEffect(allocator, output, value, flags.textured);
     try emitCombiner(allocator, output, f, flags.textured, blended or material.alphaMode == .MASK);
     if (f) |value| try emitRegisters(allocator, output, value);
     try output.appendSlice(allocator, "}");
@@ -136,9 +140,26 @@ fn nativeFlags(f: ?Fast64, culling: anytype, image: bool) NativeFlags {
 
 fn emitMask(allocator: std.mem.Allocator, output: *std.ArrayList(u8), material: anytype) !void {
     if (material.alphaMode != .MASK) return;
-    if (!std.math.isFinite(material.alphaCutoff)) return error.InvalidAlphaCutoff;
-    const cutoff: u8 = @intFromFloat(@round(std.math.clamp(material.alphaCutoff, 0, 1) * 255));
+    const cutoff_value = if (legacy(material)) |f| (if (f.set_blend == .on) f.blend_color[3] else material.alphaCutoff) else material.alphaCutoff;
+    if (!std.math.isFinite(cutoff_value)) return error.InvalidAlphaCutoff;
+    const cutoff: u8 = @intFromFloat(@round(std.math.clamp(cutoff_value, 0, 1) * 255));
     try append(allocator, output, ".alpha_cutoff = {d}, ", .{cutoff});
+}
+
+fn emitVertexEffect(allocator: std.mem.Allocator, output: *std.ArrayList(u8), f: Fast64, textured: bool) !void {
+    if (f.rdp_settings.g_tex_gen == .off or !textured) return;
+    const tex = f.tex0 orelse return error.MissingSphereMapDimensions;
+    const width = try sphereDimension(tex.S);
+    const height = try sphereDimension(tex.T);
+    try append(allocator, output, ".vertex_effect = .{{ .spherical = .{{ .width = {d}, .height = {d} }} }}, ", .{ width, height });
+}
+
+fn sphereDimension(axis: ?Axis) !u10 {
+    const a = axis orelse return error.MissingSphereMapDimensions;
+    const dimension = a.high + 1;
+    if (!std.math.isFinite(dimension) or dimension < 1 or dimension > 1023 or @floor(dimension) != dimension)
+        return error.InvalidSphereMapDimensions;
+    return @intFromFloat(dimension);
 }
 
 fn emitSampler(allocator: std.mem.Allocator, output: *std.ArrayList(u8), name: []const u8, value: Sampler) !void {
@@ -228,9 +249,29 @@ test "unsupported material states fail during conversion rather than generating 
     try std.testing.expectError(error.MissingFast64SecondCombiner, secondCycle(.{ .rdp_settings = .{ .g_mdsft_cycletype = 1 } }, .{}));
     try std.testing.expectError(error.UnsupportedFast64CycleType, emitCombiner(allocator, &output, .{ .combiner1 = .{}, .rdp_settings = .{ .g_mdsft_cycletype = 2 } }, true, false));
     try std.testing.expectError(error.InvalidMaterialColor, emitColor(allocator, &output, "primitive", .{ std.math.nan(f32), 0, 0, 1 }));
-    const Mask = struct { alphaMode: enum { MASK } = .MASK, alphaCutoff: f32 = std.math.nan(f32) };
+    const Mask = struct { alphaMode: enum { MASK } = .MASK, alphaCutoff: f32 = std.math.nan(f32), extras: ?Extras = null };
     try std.testing.expectError(error.InvalidAlphaCutoff, emitMask(allocator, &output, Mask{}));
     try std.testing.expectError(error.InvalidMaterialCulling, validateFlags(.{ .textured = true, .cull_front = true, .cull_back = true }));
     const fixture = struct { extras: ?Extras = .{ .f3d_mat = .{ .rdp_settings = .{ .g_mdsft_text_filt = 3 } } } }{};
     try std.testing.expectError(error.UnsupportedFast64Filter, filter(fixture, false));
+}
+
+test "sphere maps and lighting alpha masks retain Fast64 material intent" {
+    const allocator = std.testing.allocator;
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    const f: Fast64 = .{
+        .tex0 = .{ .S = .{ .high = 31 }, .T = .{ .high = 63 } },
+        .rdp_settings = .{ .g_tex_gen = .on },
+        .set_blend = .on,
+        .blend_color = .{ 0, 0, 0, 0.6 },
+    };
+    try emitVertexEffect(allocator, &output, f, true);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, ".width = 32, .height = 64") != null);
+    const Mask = struct { alphaMode: enum { MASK } = .MASK, alphaCutoff: f32 = 0.5, extras: ?Extras };
+    try emitMask(allocator, &output, Mask{ .extras = .{ .f3d_mat = f } });
+    try std.testing.expect(std.mem.indexOf(u8, output.items, ".alpha_cutoff = 153") != null);
+    try std.testing.expectError(error.MissingSphereMapDimensions, emitVertexEffect(allocator, &output, .{ .rdp_settings = .{ .g_tex_gen = .on } }, true));
+    try std.testing.expectError(error.InvalidSphereMapDimensions, sphereDimension(.{ .high = 1023 }));
+    try std.testing.expectError(error.InvalidSphereMapDimensions, sphereDimension(.{ .high = -1 }));
 }

@@ -230,6 +230,9 @@ test "asset overrides preserve embedded bindings, compose, and bind typed textur
             pub fn setDrawFlags(self: *@This(), flags: geometry.DrawFlags) void {
                 self.flags = flags;
             }
+            pub fn setVertexEffect(self: *@This(), _: geometry.VertexEffect) void {
+                _ = self;
+            }
             pub fn setFogEnabled(self: *@This(), enabled: bool) void {
                 self.fog_enabled = enabled;
             }

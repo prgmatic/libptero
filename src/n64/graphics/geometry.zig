@@ -9,6 +9,11 @@ const Rgba32 = @import("color.zig").Rgba32;
 
 const vertex_output_size = 36;
 pub const max_lights = 7;
+pub const VertexEffect = union(enum) {
+    none,
+    /// Sphere-map dimensions in texels. Generated coordinates replace mesh UVs.
+    spherical: struct { width: u10, height: u10 },
+};
 
 /// An immutable, reusable RSP command block containing a model draw.
 pub const RecordedModel = struct {
@@ -44,15 +49,17 @@ pub const RecordedModel = struct {
 const MaterialState = struct {
     flags: DrawFlags,
     fog: bool,
+    effect: VertexEffect,
     tile: u3,
     mode: rdp.OtherModes,
     combine: rdp.CombineMode,
     fn read(context: *const Context) MaterialState {
-        return .{ .flags = context.draw_flags, .fog = context.fog_enabled, .tile = context.render.material_tile, .mode = context.render.getModes(), .combine = context.render.getState().combine };
+        return .{ .flags = context.draw_flags, .fog = context.fog_enabled, .effect = context.vertex_effect, .tile = context.render.material_tile, .mode = context.render.getModes(), .combine = context.render.getState().combine };
     }
     fn restore(self: MaterialState, context: *Context) void {
         context.draw_flags = self.flags;
         context.fog_enabled = self.fog;
+        context.vertex_effect = self.effect;
         context.render.material_tile = self.tile;
         context.render.setState(.{ .modes = self.mode, .combine = self.combine });
         context.last_draw_flags = null;
@@ -110,6 +117,10 @@ pub const Viewport = struct {
         self.camera_float = math.Mat4.lookAt(eye, target, up);
         self.camera = self.camera_float.toFixed();
     }
+    pub fn setOrthographic(self: *Viewport, left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) void {
+        self.projection = math.Mat4.orthographic(left, right, bottom, top, near, far).toFixed();
+        self.w_normalization = 2.0 / (far + near);
+    }
 };
 
 pub const Context = struct {
@@ -121,6 +132,7 @@ pub const Context = struct {
     view_matrix: math.Mat4,
     draw_flags: DrawFlags = .{},
     fog_enabled: bool = false,
+    vertex_effect: VertexEffect = .none,
     last_draw_flags: ?DrawFlags = null,
     last_material_tile: u3 = 0,
 
@@ -140,6 +152,7 @@ pub const Context = struct {
         self.view_matrix = .identity;
         self.draw_flags = .{};
         self.fog_enabled = false;
+        self.vertex_effect = .none;
         self.last_draw_flags = null;
         self.last_material_tile = 0;
         cache.writebackData(&self.matrix_stack);
@@ -289,6 +302,37 @@ pub const Context = struct {
         // enabled its high byte replaces shade alpha; otherwise UV is scratch
         // until the vertex effect writes the final texture coordinates.
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 9, if (enabled) 0x0b else 0x0c, &.{});
+    }
+    /// Configure a shared light slot using a world-space position. Strength is
+    /// Tiny3D's distance/falloff parameter, clamped to 0..4096. Ignoring normals
+    /// produces a spherical light field, useful for alpha reveals. Attach the
+    /// viewport first and activate slots with setLightCount.
+    pub fn setPointLightAt(self: *Context, index: u8, color: Rgba32, position: math.Vec3, strength: f32, ignore_normals: bool) void {
+        if (index >= max_lights) @panic("invalid light index");
+        const words = @import("lighting.zig").point(&self.view_matrix, position, strength, ignore_normals);
+        const address = rsp.programs.geometry_overlay_symbols.directional_light_color + @as(u32, index) * 16;
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, address, &.{ @as(u32, @bitCast(color)), words[0], words[1] });
+        // The shared light command treats a zero first position word as a
+        // color-only update. Preserve points on the view-space Z axis too.
+        if (words[0] == 0) {
+            self.queue.writeDmem(address + 8, 0);
+            self.queue.writeDmem(address + 12, words[1]);
+        }
+    }
+
+    pub fn setVertexEffect(self: *Context, effect: VertexEffect) void {
+        self.vertex_effect = effect;
+        const symbols = rsp.programs.geometry_overlay_symbols;
+        const function: u16 = switch (effect) {
+            .none => symbols.VertexFX_None,
+            .spherical => symbols.VertexFX_Spherical,
+        };
+        const args: u32 = switch (effect) {
+            .none => 0,
+            .spherical => |size| @as(u32, size.width) * 16 << 16 | @as(u16, @bitCast(-@as(i16, size.height) * 16)),
+        };
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, 0x8000 | symbols.vertex_effect_function, &.{function});
+        self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, symbols.uv_generation_parameters, &.{args});
     }
     pub fn setFogRange(self: *Context, near: f32, far: f32) void {
         const address = rsp.programs.geometry_overlay_symbols.fog_scale_offset;
@@ -443,4 +487,8 @@ test "recorded material snapshots restore CPU trackers without claiming TMEM res
     try std.testing.expectEqual(rdp.CycleType.two_cycle, context.render.mode.cycle_type);
     try std.testing.expect(std.meta.eql(rdp.CombineMode.decal_rgba, context.render.combine_mode));
     try std.testing.expect(context.last_draw_flags == null);
+}
+
+test {
+    _ = @import("lighting.zig");
 }

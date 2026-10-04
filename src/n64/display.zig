@@ -23,6 +23,7 @@ pub const Options = struct {
     buffer_count: usize = 2,
     tv: video.TvType = .ntsc,
     anti_alias_mode: video.AntiAliasMode = .Resample,
+    divot_enabled: bool = false,
     gamma_enabled: bool = false,
     de_dither_enabled: bool = false,
     present_mode: PresentMode = .vsync,
@@ -216,6 +217,7 @@ const Hardware = struct {
             .tv = options.tv,
             .color_depth = if (Pixel == color.Rgba16) .Rgba5551 else .Rgba32,
             .anti_alias_mode = options.anti_alias_mode,
+            .divot_enabled = options.divot_enabled,
             .gamma_enabled = options.gamma_enabled,
             .de_dither_enabled = options.de_dither_enabled,
         });

@@ -5,12 +5,7 @@ const rig = @import("rig.zig");
 const Matrix = [4][4]f32;
 const identity: Matrix = .{ .{ 1, 0, 0, 0 }, .{ 0, 1, 0, 0 }, .{ 0, 0, 1, 0 }, .{ 0, 0, 0, 1 } };
 
-pub fn bake(document: compiler.Document, mesh: usize, batches: []compiler.Batch, scale: f32) !void {
-    var node_index: ?usize = null;
-    for (document.nodes, 0..) |node, index| if (node.mesh == @as(u32, @intCast(mesh))) {
-        node_index = index;
-    };
-    const index = node_index orelse return;
+pub fn bakeNode(document: compiler.Document, index: usize, batches: []compiler.Batch, scale: f32) !void {
     // Skinned vertices are in the source mesh's local coordinates. Global joint
     // matrices and inverse binds perform the complete skin transform at runtime.
     if (document.nodes[index].skin != null) return;

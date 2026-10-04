@@ -42,3 +42,11 @@ test "projection matrix produces usable frustum planes" {
     try std.testing.expect(frustum.containsSphere(.init(0, 0, -5), 1));
     try std.testing.expect(!frustum.containsSphere(.init(1000, 0, -5), 1));
 }
+
+test "orthographic projection maps an asymmetric box to clip coordinates" {
+    const matrix = math.Mat4.orthographic(-2, 6, -3, 5, 2, 10);
+    const near = matrix.transformPoint(.init(-2, -3, -2));
+    const far = matrix.transformPoint(.init(6, 5, -10));
+    try std.testing.expectEqualDeep(math.Vec4.init(-1, -1, -1, 1), near);
+    try std.testing.expectEqualDeep(math.Vec4.init(1, 1, 1, 1), far);
+}

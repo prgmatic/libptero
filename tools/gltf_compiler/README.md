@@ -21,7 +21,9 @@ ownership, timeout recovery and direct-DMA behavior.
 
 The resulting value pairs a native `n64.graphics.model.Model` with a typed
 material provider. Draw it with `geometry_context.drawModel(asset)` or
-`geometry_context.drawModelWithTransform(asset, &matrix)`. Mesh primitives are remapped into batches that fit
+`geometry_context.drawModelWithTransform(asset, &matrix)`. Identical native vertices are merged before batching, including their UVs,
+colors, normals, skin influences, and bind-local source attributes so seams are
+preserved. Mesh primitives are remapped into batches that fit
 the shared RSP vertex/index workspace, preserving as much vertex reuse as that
 workspace allows. It reorders triangles for vertex-cache locality and emits
 winding-preserving strips. Positions, 5.6.5 normals, gamma-adjusted vertex
@@ -53,8 +55,11 @@ it implements `apply(context, material_index)`. Asset values contain borrowed ge
 and their provider, with no drawing methods or hidden renderer ownership.
 The legacy Fast64 subset preserves front/back culling, unlit shading, fog enable,
 sampler masks/clamping/mirroring/signed shifts for both texture units, point/median/
-bilinear filtering, one/two-cycle combiners, and primitive/environment colors.
-glTF `MASK` preserves its alpha cutoff; `BLEND` preserves alpha and disables depth
+bilinear filtering, one/two-cycle combiners, primitive/environment colors, and
+spherical UV generation (`g_tex_gen`). Generated coordinates replace source
+UVs; dimensions come from `tex0.S/T.high + 1` and must fit 1..1023 texels.
+glTF `MASK` preserves its alpha cutoff (or the explicitly set legacy Fast64
+blend-color alpha); `BLEND` preserves alpha and disables depth
 writes. Unsupported sampler/filter/combiner values are conversion errors.
 
 Filtered UVs receive the half-texel adjustment at conversion (subtract 16 in 10.5
@@ -87,6 +92,7 @@ Implementation layout:
 - `root.zig` is the small public conversion facade used by builds and tests.
 - `compiler.zig` owns GLB decoding, mesh conversion, packing, and Zig emission.
 - `rom_source.zig` emits native model bindings over explicitly loaded storage.
+- `vertex_remap.zig` merges identical native vertex attributes before batching.
 
 Skeletons and animation are native metadata on `asset.model`: `nodes`, `skins`,
 and `animations`. Conversion preserves local SRT hierarchies, inverse bind
@@ -95,7 +101,8 @@ rotation, and scale channels with STEP, LINEAR, or CUBICSPLINE interpolation.
 Integer normalized skin weights are decoded and normalized. Bone translations,
 animation translations/tangents, and inverse-bind translations use the same
 position scale as packed geometry. Skinned source vertices remain in bind space;
-rigid mesh node transforms and inherited transforms are baked into geometry with
+static mesh node instances are converted independently; their rigid transforms
+and inherited transforms are baked into geometry with
 inverse-transpose normals. See [runtime animation](../../src/n64/README.md#skeletons-and-animation)
 for mutable skeletons, independent playback, blending, attachments, and CPU
 skinning through `model.SkinnedModel`.
@@ -119,14 +126,17 @@ construction protect against the same issue after interpolation.
 
 Remaining limitations are explicit: only embedded-buffer GLB files, triangle
 primitives, one base-color texture per material, and PNG images are supported.
-Node matrix transforms, instanced mesh nodes, animated rigid meshes, morph
+Node matrix transforms, instanced skinned mesh nodes, animated rigid meshes, morph
 targets, sparse accessors, external buffers/images, embedded texture palettes, automatic
 loading of multiple texture units, and the full modern Fast64
 combiner/render-mode extension are not implemented. External textures can be
 bound with declarative asset overrides or a custom typed material provider.
 External CI4/CI8 textures and their palettes are supported by the public texture SDK.
-Two external textures can be bound with `render.useTexturePair`; generated legacy
-materials expose both samplers and both combiner cycles. Key/conversion
-constants, arbitrary advanced blender equations, texture generation, and material
-lighting rigs remain unsupported. These limitations do not prevent conversion
-of the GLBs used by Tiny3D's skeleton, animation, and animation viewer demos.
+Two external textures can be bound with `render.useTexturePair`; identical
+images share their TMEM storage while retaining separate sampler settings.
+Generated legacy materials expose both samplers and both combiner cycles. Key/conversion
+constants, automatic advanced blender import, non-spherical vertex effects, and
+material lighting rigs remain unsupported. Native `Material.blend` overrides
+accept explicit blender equations; `Material.vertex_effect` controls spherical
+UV generation or restores ordinary mesh UVs. These limitations do not prevent conversion of the GLBs used by Tiny3D's
+skeleton, animation, animation viewer, point-light, light-clipping, and Fresnel demos.

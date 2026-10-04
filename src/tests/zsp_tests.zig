@@ -243,6 +243,23 @@ fn geometryLightingApi() !void {
     try expectDmemWord(u32, 0x398, 0x81000000);
     try expectDmemWord(u32, 0x39c, 0x81000000);
     try expectDmemWord(u16, 0x3fa, 0x2000);
+    // Reuse directional slots as points, including the zero-XY view-space case.
+    geometry_api_context.view_matrix = .identity;
+    geometry_api_context.setPointLightAt(1, .fromBytes(0, 0, 0, 255), .init(0, 0, -10), 50, true);
+    geometry_api_context.setVertexEffect(.{ .spherical = .{ .width = 32, .height = 64 } });
+    rsp.flush(geometry_api_context.queue);
+    try waitQueueTimeout(geometry_api_context.queue);
+    try expectDmemWord(u32, geometry_symbols.directional_light_color + 24, 0);
+    try expectDmemWord(u32, geometry_symbols.directional_light_color + 28, 0xffd8818f);
+    try expectDmemWord(u16, geometry_symbols.vertex_effect_function, geometry_symbols.VertexFX_Spherical);
+    try expectDmemWord(u16, geometry_symbols.uv_generation_parameters, 0x0200);
+    try expectDmemWord(u16, geometry_symbols.uv_generation_parameters + 2, 0xfc00);
+    geometry_api_context.setVertexEffect(.none);
+    geometry_api_context.setDirectionalLightAt(1, .fromBytes(255, 255, 255, 0), .init(0, 0, 1));
+    rsp.flush(geometry_api_context.queue);
+    try waitQueueTimeout(geometry_api_context.queue);
+    try expectDmemWord(u32, geometry_symbols.directional_light_color + 28, 0x00007f00);
+    try expectDmemWord(u16, geometry_symbols.vertex_effect_function, geometry_symbols.VertexFX_None);
     rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
 }
 

@@ -151,6 +151,13 @@ pub const OverlayQueue = struct {
         rsp.flush(self.rsp_queue);
     }
 
+    /// Overlay packets are already streamed. Append the marker before flushing
+    /// so submission does not rotate the resident buffers twice.
+    pub fn submitSyncpoint(self: *OverlayQueue) rsp.Syncpoint {
+        if (self.packet_len != 0) @panic("incomplete RDP command packet");
+        return self.rsp_queue.insertSyncpoint();
+    }
+
     pub fn prepare(self: *OverlayQueue) void {
         self.ensureConfigured();
     }

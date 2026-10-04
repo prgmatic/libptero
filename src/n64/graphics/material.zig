@@ -19,9 +19,13 @@ pub const Material = struct {
     combine: rdp.CombineMode = .shade,
     primitive: ?Rgba32 = null,
     environment: ?Rgba32 = null,
+    vertex_effect: geometry.VertexEffect = .none,
+    /// Explicit blender override, e.g. blending against the blend-color register.
+    blend: ?rdp.BlendMode = null,
 
     pub fn apply(self: Material, context: anytype) void {
         context.setDrawFlags(self.flags);
+        context.setVertexEffect(self.vertex_effect);
         if (self.fog) |enabled| context.setFogEnabled(enabled);
         const fog = self.fog orelse context.fog_enabled;
         const rq = if (@typeInfo(@TypeOf(context.render)) == .pointer) context.render else &context.render;
@@ -31,7 +35,7 @@ pub const Material = struct {
         rq.setPerspectiveTexture(self.flags.textured);
         rq.setTextureFilter(self.filter);
         rq.setCycleType(if (fog and self.translucent) .two_cycle else self.cycle_type);
-        rq.setBlendMode(self.blendMode(fog));
+        rq.setBlendMode(self.blend orelse self.blendMode(fog));
         rq.setSurfaceType(self.translucent);
         rq.setAlphaCompare(if (self.alpha_cutoff != null) .threshold else .disabled);
         if (self.alpha_cutoff) |cutoff| rq.setBlendColor(.fromBytes(0, 0, 0, cutoff));
@@ -45,7 +49,7 @@ pub const Material = struct {
 
     fn blendMode(self: Material, fog: bool) rdp.BlendMode {
         if (fog) return rdp.BlendMode.fogVisibility(self.translucent);
-        if (!self.translucent) return .opaque_surface;
+        if (!self.translucent) return if (self.cycle_type == .two_cycle) .opaque_two_cycle else .opaque_surface;
         return if (self.cycle_type == .two_cycle) .alpha_two_cycle else .alpha;
     }
 
@@ -64,6 +68,9 @@ test "fogged alpha materials restore opaque state and preserve combiner alpha" {
         flags: geometry.DrawFlags = .{},
         pub fn setDrawFlags(self: *@This(), flags: geometry.DrawFlags) void {
             self.flags = flags;
+        }
+        pub fn setVertexEffect(self: *@This(), _: geometry.VertexEffect) void {
+            _ = self;
         }
         pub fn setFogEnabled(self: *@This(), enabled: bool) void {
             self.fog_enabled = enabled;
@@ -98,4 +105,10 @@ test "fogged alpha materials restore opaque state and preserve combiner alpha" {
     two_cycle.apply(&context);
     try std.testing.expectEqual(rdp.BlendColorSrc.memory, context.render.mode.blend_m1);
     try std.testing.expectEqual(rdp.BlendAlphaSrc.zero, context.render.mode.blend_a0);
+    (Material{ .cycle_type = .two_cycle, .combine = .shade }).apply(&context);
+    try std.testing.expect(!context.render.mode.force_blend);
+    try std.testing.expect(context.render.mode.z_update_en);
+    try std.testing.expectEqual(rdp.BlendAlphaSrc.zero, context.render.mode.blend_a0);
+    try std.testing.expectEqual(rdp.BlendColorSrc.pixel, context.render.mode.blend_m0);
+    try std.testing.expectEqual(rdp.BlendInvSrc.one, context.render.mode.blend_b0);
 }

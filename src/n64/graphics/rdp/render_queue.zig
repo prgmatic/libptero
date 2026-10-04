@@ -107,11 +107,15 @@ pub fn RenderQueue(comptime QueueType: type) type {
         pub fn submit(rq: *Self) @import("completion.zig").Completion {
             const fence = @import("../../interrupt.zig").armRdpFence();
             rq.fullSync();
-            rq.execute();
-            const point = if (@hasField(QueueType, "rsp_queue"))
-                rq.cmd_queue.queue.rsp_queue.insertSyncpoint()
-            else
-                null;
+            const point = if (@hasDecl(QueueType, "submitSyncpoint"))
+                rq.cmd_queue.queue.submitSyncpoint()
+            else blk: {
+                rq.execute();
+                break :blk if (@hasField(QueueType, "rsp_queue"))
+                    rq.cmd_queue.queue.rsp_queue.insertSyncpoint()
+                else
+                    null;
+            };
             return .{ .rdp = fence, .rsp = point };
         }
 
@@ -198,24 +202,24 @@ pub fn RenderQueue(comptime QueueType: type) type {
 
         /// Bind two textures to adjacent tiles 0/1 for a two-cycle combiner.
         /// Replaces TMEM residency and selects tile 0 for geometry draws.
+        /// Identical texels share TMEM while retaining independent tile state.
         /// The pair must fit in TMEM; 32-bit formats are not supported here.
         pub fn useTexturePair(rq: *Self, first: anytype, second: anytype, first_sampler: texture.Sampler, second_sampler: texture.Sampler) void {
-            // RGBA32 occupies both TMEM banks and needs a different allocator.
-            if (@TypeOf(first).bit_depth == .@"32" or @TypeOf(second).bit_depth == .@"32")
-                @panic("32-bit texture pairs are not supported");
+            validateTexturePair(first, second);
             const first_indexed = @TypeOf(first).format == .color_indexed;
             const second_indexed = @TypeOf(second).format == .color_indexed;
-            if (first_indexed and second_indexed) {
-                if (first.palette.ptr != second.palette.ptr) @panic("texture pairs require a shared palette");
-            }
             if (first_indexed) rq.configureTexture(first) else rq.configureTexture(second);
             const capacity: u32 = if (first_indexed or second_indexed) 256 else 512;
             const first_words = textureWords(first);
-            const second_words = textureWords(second);
+            const shared = sharesTexels(first, second);
+            const second_words = if (shared) 0 else textureWords(second);
             if (first_words + second_words > capacity) @panic("texture pair exceeds TMEM");
             rq.tex_cache_len = 0;
             rq.loadTexture(first, 0, 0, first_sampler);
-            rq.loadTexture(second, 1, @intCast(first_words), second_sampler);
+            if (shared) {
+                rq.cmd_queue.tileSync();
+                texture.configureTile(&rq.cmd_queue, second, 1, 0, second_sampler);
+            } else rq.loadTexture(second, 1, @intCast(first_words), second_sampler);
             rq.cmd_queue.tileSync();
             rq.tmem_next = @intCast(first_words + second_words);
             rq.next_tile = 2;
@@ -482,6 +486,26 @@ fn imageContentId(image: anytype) u64 {
     return if (@hasField(@TypeOf(image), "content_id")) image.content_id else 0;
 }
 
+fn sharesTexels(first: anytype, second: anytype) bool {
+    if (@TypeOf(first).Pixel != @TypeOf(second).Pixel) return false;
+    if (first.width != second.width or first.height != second.height) return false;
+    return @intFromPtr(first.texel_data.ptr) == @intFromPtr(second.texel_data.ptr) and
+        imageContentId(first) == imageContentId(second);
+}
+
+fn validateTexturePair(first: anytype, second: anytype) void {
+    // RGBA32 occupies both TMEM banks and needs a different allocator.
+    if (@TypeOf(first).bit_depth == .@"32" or @TypeOf(second).bit_depth == .@"32")
+        @panic("32-bit texture pairs are not supported");
+    validatePairPalette(first, second);
+}
+
+fn validatePairPalette(first: anytype, second: anytype) void {
+    if (@TypeOf(first).format == .color_indexed and @TypeOf(second).format == .color_indexed) {
+        if (first.palette.ptr != second.palette.ptr) @panic("texture pairs require a shared palette");
+    }
+}
+
 const TexCacheEntry = struct {
     content_id: u64 = 0,
     ptr: usize = 0,
@@ -527,7 +551,7 @@ test "texture pair binds adjacent tiles with independent scale and scroll" {
                 try std.testing.expectEqual(@as(u64, 0), command & 15);
             } else {
                 try std.testing.expectEqual(@as(u64, 1), tile);
-                try std.testing.expectEqual(@as(u64, 256), (command >> 32) & 0x1ff);
+                try std.testing.expectEqual(@as(u64, 0), (command >> 32) & 0x1ff);
                 try std.testing.expectEqual(@as(u64, 15), command & 15);
                 try std.testing.expectEqual(@as(u64, 15), (command >> 10) & 15);
             }
@@ -542,7 +566,7 @@ test "texture pair binds adjacent tiles with independent scale and scroll" {
     }
     try std.testing.expectEqual(@as(usize, 2), render_tiles);
     try std.testing.expectEqual(@as(usize, 2), tile_sizes);
-    try std.testing.expectEqual(@as(u10, 512), render.tmem_next);
+    try std.testing.expectEqual(@as(u10, 256), render.tmem_next);
     try std.testing.expect(!texture.Sampler.eql(.{}, .{ .shift_s = 15 }));
     try std.testing.expect(!texture.Sampler.eql(.{}, .{ .offset_t = 8 }));
 }
@@ -744,4 +768,37 @@ test "new residency identities reload texels and palettes at recycled addresses"
     const after_reload = render.cmd_queue.queue.index;
     _ = render.useTextureSampler(direct, .{});
     try std.testing.expectEqual(after_reload, render.cmd_queue.queue.index);
+}
+
+test "full-TMEM texture pairs share one upload and distinct images remain separate" {
+    const images = @import("../image.zig");
+    const colors = @import("../color.zig");
+    const shared: images.ConstImage(colors.I8) = .{ .width = 64, .height = 64, .texel_data = @as([*]const colors.I8, @ptrFromInt(0x80400000))[0..4096], .content_id = 1 };
+    var commands: [64]u64 = undefined;
+    var render = FixedRenderQueue.init(.{ .buffer = &commands });
+    render.useTexturePair(shared, shared, .{}, .{ .shift_s = 15, .offset_t = 8 });
+    try std.testing.expectEqual(@as(u10, 512), render.tmem_next);
+    var uploads: usize = 0;
+    for (commands[0..render.cmd_queue.queue.index]) |word| if (word >> 56 == 0xfd) {
+        uploads += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), uploads);
+    var changed = shared;
+    changed.content_id += 1;
+    try std.testing.expect(!sharesTexels(shared, changed));
+    changed = shared;
+    changed.width = 32;
+    try std.testing.expect(!sharesTexels(shared, changed));
+    const first: images.ImgRgba16 = .{ .width = 32, .height = 32, .texel_data = @as([*]colors.Rgba16, @ptrFromInt(0x80404000))[0..1024] };
+    var second = first;
+    second.texel_data = @as([*]colors.Rgba16, @ptrFromInt(0x80405000))[0..1024];
+    render.clear();
+    render.useTexturePair(first, second, .{}, .{});
+    uploads = 0;
+    for (commands[0..render.cmd_queue.queue.index]) |word| if (word >> 56 == 0xfd) {
+        uploads += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), uploads);
+    try std.testing.expectEqual(@as(u10, 512), render.tmem_next);
+    try std.testing.expect(!sharesTexels(shared, first));
 }

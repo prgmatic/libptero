@@ -58,6 +58,14 @@ pub const Mat4 = extern struct {
         result.m[3][2] = -2.0 * far * near / (far - near);
         return result;
     }
+    pub fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) Mat4 {
+        var result = identity;
+        result.m[0][0] = 2 / (right - left);
+        result.m[1][1] = 2 / (top - bottom);
+        result.m[2][2] = -2 / (far - near);
+        result.m[3] = .{ -(right + left) / (right - left), -(top + bottom) / (top - bottom), -(far + near) / (far - near), 1 };
+        return result;
+    }
     pub fn lookAt(eye: Vec3, target: Vec3, up: Vec3) Mat4 {
         const forward = target.sub(eye).normalized();
         const side = forward.cross(up).normalized();
