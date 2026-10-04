@@ -80,15 +80,21 @@ pub const Mat4 = extern struct {
     /// Multiply affine transforms with final row `(0, 0, 0, 1)`.
     /// Skeleton SRT hierarchies need only the upper three rows.
     pub fn mulAffine(a: *const Mat4, b: *const Mat4) Mat4 {
-        var result = Mat4.identity;
+        var result: Mat4 = undefined;
+        a.writeAffineProduct(b, &result);
+        return result;
+    }
+    /// Write an affine product without copying a returned matrix. Destination
+    /// must be distinct from both inputs.
+    pub fn writeAffineProduct(a: *const Mat4, b: *const Mat4, destination: *Mat4) void {
         for (0..4) |column| {
             inline for (0..3) |row| {
-                result.m[column][row] = a.m[0][row] * b.m[column][0] +
+                destination.m[column][row] = a.m[0][row] * b.m[column][0] +
                     a.m[1][row] * b.m[column][1] + a.m[2][row] * b.m[column][2];
-                if (column == 3) result.m[column][row] += a.m[3][row];
+                if (column == 3) destination.m[column][row] += a.m[3][row];
             }
+            destination.m[column][3] = if (column == 3) 1 else 0;
         }
-        return result;
     }
     pub fn transformPoint(self: *const Mat4, point: Vec3) Vec4 {
         return .init(
@@ -114,11 +120,17 @@ pub const Mat4 = extern struct {
     /// three coefficients at a time matches Tiny3D's optimized SRT path.
     pub fn toFixed3x4(self: *const Mat4) FixedMat4 {
         var result: FixedMat4 = undefined;
+        self.writeFixed3x4(&result);
+        return result;
+    }
+    /// Pack directly into caller-owned pose storage, avoiding aggregate copies
+    /// in size-optimized freestanding builds.
+    pub fn writeFixed3x4(self: *const Mat4, destination: *FixedMat4) void {
         for (0..4) |column| {
             const fixed0: i32 = @intFromFloat(self.m[column][0] * 65536.0);
             const fixed1: i32 = @intFromFloat(self.m[column][1] * 65536.0);
             const fixed2: i32 = @intFromFloat(self.m[column][2] * 65536.0);
-            result.columns[column] = .{
+            destination.columns[column] = .{
                 .integer = .{
                     @truncate(fixed0 >> 16),
                     @truncate(fixed1 >> 16),
@@ -133,7 +145,6 @@ pub const Mat4 = extern struct {
                 },
             };
         }
-        return result;
     }
 };
 
