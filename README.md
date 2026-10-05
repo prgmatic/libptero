@@ -1,5 +1,49 @@
 # Libptero
-Libptero is an attempt to create an open-soure SDK for the Nentendo 64 written in zig. It borrows a ton from Libdragon.
+Libptero is a Nintendo 64 SDK written in Zig, with native generated assets, explicit memory ownership, and RSP/RDP rendering. It builds on ideas and code from libdragon and Tiny3D.
+
+Start with [Game loops](src/n64/app/README.md) for the optional frame API, or
+[Runtime APIs](src/n64/README.md) for independently managed subsystems. The examples
+repository's `collect` game demonstrates movement, pause/restart, audio and HUD.
+
+## Building a game
+
+Use Zig 0.16. Add a pinned libptero dependency to `build.zig.zon`, then use the
+public SDK from `build.zig`:
+
+```zig
+const std = @import("std");
+const libptero = @import("libptero");
+
+pub fn build(b: *std.Build) void {
+    var sdk = libptero.init(b, .{ .optimize = libptero.standardOptimizeOption(b) });
+    var assets = sdk.createAssets("assets");
+    assets.addTexture("player", b.path("assets/player.png"), .{ .format = .rgba16 });
+    _ = sdk.addRom(.{
+        .name = "game",
+        .title = "My Game",
+        .app_source_file = b.path("src/main.zig"),
+        .assets = &assets,
+        .install = .{ .outputs = .{ .rom = true, .debug_elf = true } },
+    });
+}
+```
+
+`zig build` converts assets and installs the ROM and debug ELF in `zig-out/`.
+Application code imports `n64` and `assets`; `assets.player` is a native typed
+image. Conversion is cached, including bitmap-font page dependencies. No
+runtime parsing or path lookup is required for generated embedded assets.
+
+The default is `ReleaseSmall`. `zig build -Doptimize=ReleaseFast` changes the
+SDK modules and ROM together; individual ROMs can override `.optimize`.
+`ReleaseSafe` and `Debug` retain Zig safety checks and cost more CPU time and
+ROM space. Host tools target the build machine independently of the N64 target.
+
+In this repository, `zig build test` runs host tests, `zig build tests` builds
+the hardware suite, and `zig build install` installs the asset compilers and
+diagnostic tools. `zig build test-consumer` checks the public build SDK and
+`zig build test-asset-cache` checks font page invalidation (requires Python 3).
+
+## Runtime documentation
 
 Opt-in framebuffer capture, vertex cache probes, and render-timeout snapshots are
 documented in [Render diagnostics](tools/framebuffer_capture/README.md).

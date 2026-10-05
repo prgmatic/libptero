@@ -36,9 +36,13 @@ fn idleSilence() !void {
     try testing.expect(!rsp.io.status_register_read.signal3);
     try testing.expect(!rsp.io.status_register_read.signal4);
     // The queue is reusable and completed tokens do not leave a stale request.
-    for (0..16) |_| {
+    for (0..128) |_| {
         try mixer.submit(output[0..64]);
         try mixer.wait(timeout);
+        // Completion includes the outgoing pointer save, so an immediate
+        // submission cannot be overwritten by the preceding queue epilogue.
+        const slot = rsp.programs.command_dispatcher_symbols.pointer_stack + 9 * @sizeOf(u32);
+        try testing.expectEqual(mixer.queue.high_return_address, rsp.io.readDmem(u32, slot).*);
     }
 }
 

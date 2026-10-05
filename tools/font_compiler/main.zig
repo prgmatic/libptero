@@ -7,6 +7,7 @@ const usage =
     \\
     \\Options:
     \\  --mono-outline           Pack monochrome fill/outline into layered CI4
+    \\  --depfile <path>         Write dependencies for incremental builds
     \\  --no-kerning             Omit kerning pairs
     \\  --ellipsis <hex>,<reps>  Ellipsis glyph and repetitions (default: 2E,3)
     \\  -h, --help               Show this help
@@ -14,32 +15,53 @@ const usage =
     \\Input must be a text-format AngelCode BMFont file with PNG pages.
 ;
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) void {
+    run(init) catch |err| fatal("{s}", .{@errorName(err)});
+}
+
+fn run(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(allocator);
     defer allocator.free(args);
-    if (args.len == 2 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help"))) {
+    if (args.len == 1 or (args.len == 2 and (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help")))) {
         std.debug.print("{s}", .{usage});
         return;
     }
     if (args.len < 5) fatal("{s}", .{usage});
-    var options: font_compiler.Options = .{};
-    parseOptions(args[5..], &options);
-    try compileOne(init.io, allocator, args[1], args[2], args[3], args[4], options);
+    const options = parseOptions(args[5..]) catch |err| fatal("options: {s}", .{@errorName(err)});
+    try compileOne(init.io, allocator, args[1], args[2], args[3], args[4], options.font, options.depfile);
 }
 
-fn parseOptions(args: []const []const u8, options: *font_compiler.Options) void {
+const CliOptions = struct { font: font_compiler.Options = .{}, depfile: ?[]const u8 = null };
+const Option = enum { @"--depfile", @"--mono-outline", @"--no-kerning", @"--ellipsis" };
+fn parseOptions(args: []const []const u8) !CliOptions {
+    var options: CliOptions = .{};
+    var seen: u8 = 0;
     var index: usize = 0;
     while (index < args.len) : (index += 1) {
-        if (std.mem.eql(u8, args[index], "--mono-outline")) options.format = .mono_outline else if (std.mem.eql(u8, args[index], "--no-kerning")) options.kerning = false else if (std.mem.eql(u8, args[index], "--ellipsis")) {
-            index += 1;
-            if (index == args.len) fatal("missing argument for --ellipsis", .{});
-            parseEllipsis(args[index], options) catch fatal("invalid ellipsis specification: {s}", .{args[index]});
-        } else fatal("unknown option: {s}", .{args[index]});
+        const option = std.meta.stringToEnum(Option, args[index]) orelse return error.UnknownOption;
+        try claimOption(&seen, option);
+        switch (option) {
+            .@"--depfile" => options.depfile = try nextArgument(args, &index),
+            .@"--mono-outline" => options.font.format = .mono_outline,
+            .@"--no-kerning" => options.font.kerning = false,
+            .@"--ellipsis" => try parseEllipsis(try nextArgument(args, &index), &options.font),
+        }
     }
+    return options;
+}
+fn claimOption(seen: *u8, option: Option) !void {
+    const bit = @as(u8, 1) << @intFromEnum(option);
+    if (seen.* & bit != 0) return error.DuplicateOption;
+    seen.* |= bit;
+}
+fn nextArgument(args: []const []const u8, index: *usize) ![]const u8 {
+    index.* += 1;
+    if (index.* == args.len) return error.MissingArgument;
+    return args[index.*];
 }
 
-fn compileOne(io: std.Io, allocator: std.mem.Allocator, input: []const u8, texel_output: []const u8, source_output: []const u8, name: []const u8, options: font_compiler.Options) !void {
+fn compileOne(io: std.Io, allocator: std.mem.Allocator, input: []const u8, texel_output: []const u8, source_output: []const u8, name: []const u8, options: font_compiler.Options, depfile: ?[]const u8) !void {
     if (!std.zig.isValidId(name)) fatal("'{s}' is not a valid Zig identifier", .{name});
     const description = try readFile(io, allocator, input);
     defer allocator.free(description);
@@ -59,6 +81,24 @@ fn compileOne(io: std.Io, allocator: std.mem.Allocator, input: []const u8, texel
     defer allocator.free(source);
     try writeFile(io, texel_output, result.texels);
     try writeFile(io, source_output, source);
+    if (depfile) |path| try writeDependencies(io, allocator, path, texel_output, input, specs);
+}
+
+fn writeDependencies(io: std.Io, allocator: std.mem.Allocator, output: []const u8, target: []const u8, input: []const u8, specs: []const PageSpec) !void {
+    var dependencies: std.Io.Writer.Allocating = .init(allocator);
+    defer dependencies.deinit();
+    const writer = &dependencies.writer;
+    try @import("depfile.zig").path(writer, target);
+    try writer.writeAll(": ");
+    try @import("depfile.zig").path(writer, input);
+    for (specs) |spec| {
+        const page_path = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(input) orelse ".", spec.name });
+        defer allocator.free(page_path);
+        try writer.writeByte(' ');
+        try @import("depfile.zig").path(writer, page_path);
+    }
+    try writer.writeByte('\n');
+    try writeFile(io, output, dependencies.written());
 }
 
 const PageSpec = struct { id: u16, name: []u8 };
@@ -152,14 +192,14 @@ fn parseEllipsis(value: []const u8, options: *font_compiler.Options) !void {
     options.ellipsis_repetitions = try std.fmt.parseInt(u16, value[comma + 1 ..], 10);
 }
 fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| fatal("{s}: {s}", .{ path, @errorName(err) });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);
     return reader.interface.allocRemaining(allocator, .unlimited);
 }
 fn writeFile(io: std.Io, path: []const u8, bytes: []const u8) !void {
-    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    var file = std.Io.Dir.cwd().createFile(io, path, .{}) catch |err| fatal("{s}: {s}", .{ path, @errorName(err) });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var writer = file.writer(io, &buffer);
@@ -187,4 +227,33 @@ test "outlined source binds layered CI4 atlas and ellipsis metrics" {
     try std.testing.expect(std.mem.indexOf(u8, source, ".palette_format = .ia16") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".outline_atlases = &atlases") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".width = 17") != null);
+}
+
+test {
+    _ = @import("depfile.zig");
+}
+
+test "font CLI parses conversion controls and rejects malformed or repeated switches" {
+    const options = try parseOptions(&.{ "--depfile", "font.d", "--mono-outline", "--no-kerning", "--ellipsis", "2026,1" });
+    try std.testing.expectEqualStrings("font.d", options.depfile.?);
+    try std.testing.expect(options.font.format == .mono_outline and !options.font.kerning);
+    try std.testing.expectEqual(@as(u32, 0x2026), options.font.ellipsis_codepoint);
+    try std.testing.expectError(error.MissingArgument, parseOptions(&.{"--depfile"}));
+    try std.testing.expectError(error.DuplicateOption, parseOptions(&.{ "--depfile", "a", "--depfile", "b" }));
+    try std.testing.expectError(error.UnknownOption, parseOptions(&.{"--unknown"}));
+    try std.testing.expectError(error.Invalid, parseOptions(&.{ "--ellipsis", "bad" }));
+}
+
+test "font page discovery preserves filenames for conversion and dependency tracking" {
+    const allocator = std.testing.allocator;
+    const specs = try parsePages(allocator, "info face=demo\npage id=1 file=\"font page.png\"\npage id=3 file=other.png\nchars count=0\n");
+    defer {
+        for (specs) |spec| allocator.free(spec.name);
+        allocator.free(specs);
+    }
+    try std.testing.expectEqual(@as(usize, 2), specs.len);
+    try std.testing.expectEqual(@as(u16, 1), specs[0].id);
+    try std.testing.expectEqualStrings("font page.png", specs[0].name);
+    try std.testing.expectEqualStrings("other.png", specs[1].name);
+    try std.testing.expectError(error.InvalidBmFont, parsePages(allocator, "page id=0\n"));
 }

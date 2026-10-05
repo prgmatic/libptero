@@ -30,10 +30,14 @@ fn run(init: std.process.Init) !void {
     const a = init.gpa;
     const args = try init.minimal.args.toSlice(a);
     defer a.free(args);
+    if (args.len == 1 or (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")))) {
+        std.debug.print("usage: audio-compiler <input.wav> <pcm.bin> <sample.zig> <name> [--loop] [--stream] [--vadpcm]\n", .{});
+        return;
+    }
     const options = try parseArguments(args);
     const bytes = try readFile(init.io, a, options.input);
     defer a.free(bytes);
-    const result = try audio.convert(a, bytes, conversionOptions(options));
+    const result = audio.convert(a, bytes, conversionOptions(options)) catch |err| fatal("{s}: converting audio: {s}", .{ options.input, @errorName(err) });
     defer result.deinit(a);
     const source = try audio.generateSource(a, options.name, result);
     defer a.free(source);
@@ -42,7 +46,7 @@ fn run(init: std.process.Init) !void {
 }
 
 fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| fatal("{s}: {s}", .{ path, @errorName(err) });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);
@@ -50,7 +54,7 @@ fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 }
 
 fn writeFile(io: std.Io, path: []const u8, bytes: []const u8) !void {
-    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    var file = std.Io.Dir.cwd().createFile(io, path, .{}) catch |err| fatal("{s}: {s}", .{ path, @errorName(err) });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var writer = file.writer(io, &buffer);

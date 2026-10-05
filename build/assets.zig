@@ -133,6 +133,8 @@ pub const AssetBundle = struct {
         const texels = compile.addOutputFileArg(self.b.fmt("{s}.font.texels", .{name}));
         const generated_source = compile.addOutputFileArg(self.b.fmt("{s}.font.zig", .{name}));
         compile.addArg(name);
+        compile.addArg("--depfile");
+        _ = compile.addDepFileOutputArg(self.b.fmt("{s}.font.d", .{name}));
         if (options.format == .mono_outline) compile.addArg("--mono-outline");
         if (!options.kerning) compile.addArg("--no-kerning");
         if (options.ellipsis_repetitions != 3 or options.ellipsis_codepoint != '.') {

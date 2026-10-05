@@ -9,13 +9,17 @@ fn run(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(allocator);
     defer allocator.free(args);
+    if (args.len == 1 or (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")))) {
+        std.debug.print("usage: gltf-compiler <input.glb> <model.bin> <model.zig> <name> <scale> <max-vertices-per-batch> <preserve-triangle-order> [weighted|first_joint [material:width:height ...]] [--rom]\n", .{});
+        return;
+    }
     const rom = args.len > 1 and std.mem.eql(u8, args[args.len - 1], "--rom");
     const count = args.len - @intFromBool(rom);
     if (count < 8) return error.InvalidArguments;
     const source = try readFile(init.io, allocator, args[1]);
     defer allocator.free(source);
-    const glb = try gltf.parseGlb(source);
-    var document = try gltf.parseDocument(allocator, glb.json);
+    const glb = gltf.parseGlb(source) catch |err| fatal("{s}: decoding GLB: {s}", .{ args[1], @errorName(err) });
+    var document = gltf.parseDocument(allocator, glb.json) catch |err| fatal("{s}: parsing glTF: {s}", .{ args[1], @errorName(err) });
     defer document.deinit();
     const scale = try std.fmt.parseFloat(f32, args[5]);
     const max_vertices = try std.fmt.parseInt(usize, args[6], 10);
@@ -24,13 +28,13 @@ fn run(init: std.process.Init) !void {
     const sizes = try allocator.alloc(gltf.TextureSize, count - @min(count, 9));
     defer allocator.free(sizes);
     for (sizes, args[@min(count, 9)..count]) |*size, arg| size.* = try gltf.parseTextureSize(arg);
-    const model = try gltf.convert(allocator, document.value, glb.binary, .{
+    const model = gltf.convert(allocator, document.value, glb.binary, .{
         .scale = scale,
         .texture_sizes = sizes,
         .max_vertices_per_batch = max_vertices,
         .preserve_triangle_order = preserve_triangle_order,
         .skinning = if (count >= 9) std.meta.stringToEnum(@FieldType(gltf.ConvertOptions, "skinning"), args[8]) orelse return error.InvalidArguments else .weighted,
-    });
+    }) catch |err| fatal("{s}: converting model: {s}", .{ args[1], @errorName(err) });
     defer model.deinit(allocator);
     const generated = try gltf.generateWithStorage(allocator, model, document.value, glb.binary, args[4], if (rom) .rom else .resident);
     defer generated.deinit(allocator);
@@ -39,7 +43,7 @@ fn run(init: std.process.Init) !void {
 }
 
 fn writeFile(io: std.Io, path: []const u8, bytes: []const u8) !void {
-    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    var file = std.Io.Dir.cwd().createFile(io, path, .{}) catch |err| fatal("{s}: {s}", .{ path, @errorName(err) });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var writer = file.writer(io, &buffer);
@@ -48,7 +52,7 @@ fn writeFile(io: std.Io, path: []const u8, bytes: []const u8) !void {
 }
 
 fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| fatal("{s}: {s}", .{ path, @errorName(err) });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);

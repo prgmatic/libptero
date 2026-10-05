@@ -38,12 +38,27 @@ pub const State = packed struct {
     }
 };
 
+pub const StickOptions = struct { deadzone: f32 = 0.15, range: f32 = 80 };
+pub const Stick = struct { x: f32, y: f32 };
+
 /// A value snapshot. Edges are relative to the preceding poll and remain stable
 /// until the next poll. A failed read releases previously held buttons.
 pub const Snapshot = struct {
     style: Style = .none,
     state: State = .{},
     previous: State = .{},
+
+    /// Radial deadzone and unit-length clamping. Raw axes remain in state.
+    pub fn stick(self: Snapshot, options: StickOptions) Stick {
+        std.debug.assert(std.math.isFinite(options.range) and options.range > 0);
+        std.debug.assert(options.deadzone >= 0 and options.deadzone < 1);
+        const x = @as(f32, @floatFromInt(self.state.stick_x)) / options.range;
+        const y = @as(f32, @floatFromInt(self.state.stick_y)) / options.range;
+        const length = @sqrt(x * x + y * y);
+        if (length <= options.deadzone) return .{ .x = 0, .y = 0 };
+        const magnitude = (@min(length, 1) - options.deadzone) / (1 - options.deadzone);
+        return .{ .x = x * magnitude / length, .y = y * magnitude / length };
+    }
 
     pub fn held(self: Snapshot, button: Button) bool {
         return self.state.held(button);
@@ -149,4 +164,12 @@ test "controller identities and independent port snapshots" {
     try std.testing.expect(system.get(.one).pressed(.a));
     try std.testing.expect(!system.get(.two).held(.a));
     try std.testing.expectEqual(@as(usize, 64), @alignOf(System));
+}
+
+test "normalized stick has a radial deadzone and bounded diagonals" {
+    try std.testing.expectEqual(Stick{ .x = 0, .y = 0 }, (Snapshot{ .state = .{ .stick_x = 8 } }).stick(.{}));
+    try std.testing.expectEqual(Stick{ .x = 1, .y = 0 }, (Snapshot{ .state = .{ .stick_x = 80 } }).stick(.{}));
+    const diagonal = (Snapshot{ .state = .{ .stick_x = 127, .stick_y = -128 } }).stick(.{});
+    try std.testing.expectApproxEqAbs(@as(f32, 1), diagonal.x * diagonal.x + diagonal.y * diagonal.y, 0.0001);
+    try std.testing.expect(diagonal.y < 0);
 }

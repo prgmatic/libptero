@@ -3,6 +3,10 @@
 The public `n64` module exposes hardware interfaces, graphics, RSP queues,
 input, math, cache operations, debugging, and display buffer management.
 
+For a coordinated game loop with bounded uploads, input snapshots and explicit
+submission, see [Game loops](app/README.md). The APIs below remain independently
+usable.
+
 ## Display buffers
 
 `n64.display.Swapchain(Pixel)` manages RGBA16 or RGBA32 framebuffers. It owns

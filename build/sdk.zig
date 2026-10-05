@@ -9,6 +9,7 @@ pub const Options = struct {
     target: ?std.Build.ResolvedTarget = null,
     builtin_rsp_programs: bool = true,
     console_font: bool = true,
+    optimize: std.builtin.OptimizeMode = .ReleaseSmall,
 };
 
 pub const RomOptions = struct {
@@ -19,7 +20,7 @@ pub const RomOptions = struct {
     overrides: HandlerOverrides = .{},
     linker_script: ?std.Build.LazyPath = null,
     assembly_files: ?[]const std.Build.LazyPath = null,
-    optimize: std.builtin.OptimizeMode = .ReleaseSmall,
+    optimize: ?std.builtin.OptimizeMode = null,
     layout: MemoryLayout = .{},
     boot: BootOptions = .{},
     metadata: MetadataOptions = .{},
@@ -54,6 +55,7 @@ pub const Sdk = struct {
     n64_module: *std.Build.Module,
     tools: tools_build.Tools,
     console_font: bool,
+    optimize: std.builtin.OptimizeMode,
 
     pub fn init(b: *std.Build, options: Options) Sdk {
         const target = options.target orelse b.resolveTargetQuery(target_query);
@@ -68,6 +70,7 @@ pub const Sdk = struct {
             .n64_module = n64_module,
             .tools = tools,
             .console_font = options.console_font,
+            .optimize = options.optimize,
         };
         if (options.console_font) addConsoleFont(b, options.root, n64_module, tools);
         if (options.builtin_rsp_programs) sdk.addBuiltinRspPrograms();
@@ -121,7 +124,7 @@ pub const Sdk = struct {
             const app_module = self.b.createModule(.{
                 .root_source_file = app_source_file,
                 .target = self.target,
-                .optimize = options.optimize,
+                .optimize = options.optimize orelse self.optimize,
                 .strip = false,
                 .imports = app_imports,
             });
@@ -152,7 +155,7 @@ pub const Sdk = struct {
             .n64_module = self.n64_module,
             .tools = self.tools,
             .libptero_root = self.root,
-            .optimize = options.optimize,
+            .optimize = options.optimize orelse self.optimize,
             .layout = options.layout,
             .boot = options.boot,
             .metadata = options.metadata,

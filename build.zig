@@ -8,6 +8,7 @@ pub const InitOptions = struct {
     target: ?std.Build.ResolvedTarget = null,
     builtin_rsp_programs: bool = true,
     console_font: bool = true,
+    optimize: std.builtin.OptimizeMode = .ReleaseSmall,
 };
 
 pub fn init(b: *std.Build, options: InitOptions) Sdk {
@@ -17,7 +18,17 @@ pub fn init(b: *std.Build, options: InitOptions) Sdk {
         .target = options.target,
         .builtin_rsp_programs = options.builtin_rsp_programs,
         .console_font = options.console_font,
+        .optimize = options.optimize,
     });
+}
+
+/// Standard optimization spelling with the SDK's size-oriented default.
+pub fn standardOptimizeOption(b: *std.Build) std.builtin.OptimizeMode {
+    return b.option(std.builtin.OptimizeMode, "optimize", "Prioritize performance, safety, or binary size") orelse switch (b.release_mode) {
+        .off, .any, .small => .ReleaseSmall,
+        .fast => .ReleaseFast,
+        .safe => .ReleaseSafe,
+    };
 }
 
 pub fn build(b: *std.Build) void {
@@ -27,7 +38,7 @@ pub fn build(b: *std.Build) void {
 
     const coverage = b.option(bool, "coverage", "Enable zcov instrumentation") orelse false;
     const coverage_runtime = b.option([]const u8, "coverage-rt", "Path to zcov runtime object");
-    var sdk = init(b, .{ .root = b.path("") });
+    var sdk = init(b, .{ .root = b.path(""), .optimize = standardOptimizeOption(b) });
     const crash_options = b.addOptions();
     crash_options.addOption(bool, "exception", b.option(bool, "crash-screen-exception", "Trigger a CPU breakpoint instead of a Zig panic in the crash-screen smoke ROM") orelse false);
     _ = sdk.addRom(.{

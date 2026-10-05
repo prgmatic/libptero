@@ -34,6 +34,9 @@ pub fn poll(self: anytype) !bool {
 /// address; deinit/unload reject pending DMA. Call outside interrupts.
 pub fn wait(self: anytype, max_attempts: u32) !void {
     if (!self.loading and self.value == null) return error.NotLoaded;
+    if (@hasDecl(@TypeOf(self.transfer), "isScheduled")) {
+        if (self.transfer.isScheduled()) return error.ScheduledLoadRequiresService;
+    }
     var remaining = max_attempts;
     while (!try self.poll()) {
         if (remaining == 0) return error.PiTimeout;

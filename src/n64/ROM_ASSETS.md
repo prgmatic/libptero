@@ -128,3 +128,62 @@ destinations through cached or uncached aliases.
 
 This API loads complete converted assets. Automatic eviction, partial model
 streaming, background scheduling and graphics-asset compression are future work.
+
+## Cooperative loading and typed slots
+
+`n64.rom.Scheduler` holds eight jobs and owns one PI transfer at a stable address.
+It allocates nothing. Jobs transfer directly into final caller-owned aligned
+storage, in 4 KiB chunks by default. `init(.{ .chunk_bytes = ... })` accepts
+16-byte multiples up to 64 KiB. Higher priorities run first; equal priorities
+rotate between chunks. An already running DMA is never preempted.
+
+```zig
+var loads = try n64.rom.Scheduler.init(.{});
+var room = try assets.room.init(allocator);
+try room.beginScheduled(&loads, .background);
+// Each iteration:
+try loads.serviceAudio(&player, .{});
+if (try room.poll()) {
+    // Native view is ready; drawing uses the existing public geometry API.
+}
+```
+
+`serviceAudio` retires a completed background DMA, services AI, fills available
+audio buffers while PI is free, then admits one background chunk. Without audio,
+use `service`. The separate `poll` and `dispatch` operations allow custom
+scheduling. Continue servicing and polling each owner until completion before
+freeing its destination or destroying the scheduler. A completed job retains
+its queue slot until its owner consumes the ticket. `isIdle` means all tickets
+have been released. `bytes_transferred`, `transfers`, and `pi_busy` expose costs.
+This is cooperative scheduling: service frequency and chunk size still belong
+in the application's audio budget.
+
+Scheduled owners use `poll`; blocking `wait/load` returns
+`ScheduledLoadRequiresService` while a scheduler ticket is outstanding, avoiding
+a wait that starves the driver. Direct `begin/load` behavior is unchanged after
+scheduled completion. PI failures retain releasable tickets; poll the affected
+owner to observe failure and release its ticket before reusing storage.
+
+For several different generated models sharing storage, declare:
+
+```zig
+const RoomSlot = n64.rom.Slot(.{
+    .atrium = assets.atrium,
+    .gallery = assets.gallery,
+});
+var slot: RoomSlot = .{};
+var bytes: [RoomSlot.storageSize()]u8 align(16) = undefined;
+// After both are at stable addresses:
+try slot.request(.atrium, &bytes, &loads);
+// After scheduler service and slot.poll() return ready:
+try slot.draw(&geometry);
+// After all GPU users complete:
+try slot.retire();
+```
+
+The slot generates a tagged union of concrete owners, keeps native material
+providers, and allocates no memory. `request` rejects occupied slots; `retire`
+rejects pending loads. The caller determines when GPU borrowers have finished.
+Use two slots for background loading while an active room renders, as shown in
+the `room-stream` example. Queue tickets can be cancelled only between chunks;
+the typed-slot interface deliberately requires pending loads to finish.

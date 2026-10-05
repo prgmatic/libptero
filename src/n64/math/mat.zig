@@ -121,8 +121,12 @@ pub const Mat4 = extern struct {
     }
     pub fn toFixed(self: *const Mat4) FixedMat4 {
         var result = FixedMat4.identity;
-        for (0..4) |column| for (0..4) |row| result.set(column, row, self.m[column][row]);
+        self.writeFixed(&result);
         return result;
+    }
+    /// Pack a complete matrix directly into caller-owned GPU upload storage.
+    pub fn writeFixed(self: *const Mat4, destination: *FixedMat4) void {
+        for (0..4) |column| for (0..4) |row| destination.set(column, row, self.m[column][row]);
     }
     /// Convert an affine matrix whose final row is `(0, 0, 0, 1)`. Packing
     /// three coefficients at a time matches Tiny3D's optimized SRT path.

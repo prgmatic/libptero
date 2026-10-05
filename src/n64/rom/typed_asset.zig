@@ -1,13 +1,13 @@
 //! Typed cartridge payloads with explicit, stable-address RAM ownership.
 const std = @import("std");
 const rom = @import("../rom.zig");
-const pi = @import("../io/pi.zig");
+const scheduling = @import("scheduler.zig");
 
 /// Generated Definition provides byte_len, Storage, Value and bind(). Metadata
 /// stays native Zig; payloads contain hardware-ready bytes without pointer fixups.
 pub fn TypedAsset(comptime Definition: type) type {
     return struct {
-        pub const Loaded = LoadedAsset(Definition, pi.Transfer);
+        pub const Loaded = LoadedAsset(Definition, scheduling.Transfer);
         pub const Value = Definition.Value;
         asset: rom.Asset,
 
@@ -45,6 +45,16 @@ fn LoadedAsset(comptime Definition: type, comptime Transfer: type) type {
         loading: bool = false,
 
         pub const Layout = Definition;
+        /// Enqueue a bounded load. Drive queue.service()/serviceAudio(), then
+        /// poll this owner. Scheduled waits reject blocking to avoid starving audio.
+        pub fn beginScheduled(self: *@This(), queue: *scheduling.Scheduler, priority: scheduling.Priority) !void {
+            if (self.loading) return error.AssetBusy;
+            if (self.value != null) return error.AlreadyLoaded;
+            self.transfer.scheduler = if (self.bytes.len == 0) null else queue;
+            self.transfer.priority = priority;
+            errdefer self.transfer.scheduler = null;
+            try @import("load.zig").begin(self);
+        }
         pub const begin = @import("load.zig").begin;
         pub const poll = @import("load.zig").poll;
         pub const wait = @import("load.zig").wait;

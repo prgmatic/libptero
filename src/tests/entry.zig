@@ -14,6 +14,7 @@ const tests = [_]runner.Test{} ++
     @import("audio_tests.zig").tests ++
     @import("render_api_tests.zig").tests ++
     @import("display_tests.zig").tests ++
+    @import("app_tests.zig").tests ++
     @import("input_time_tests.zig").tests ++
     @import("profiler_tests.zig").tests ++
     @import("crash_memory_tests.zig").tests;

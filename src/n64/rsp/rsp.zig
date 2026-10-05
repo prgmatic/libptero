@@ -30,6 +30,7 @@ pub const Queue = struct {
     syncpoints_completed: u32,
     trace_sync: profiler.Scope = .{},
     trace_high: profiler.Scope = .{},
+    high_return_address: u32 = 0,
 
     pub fn init(self: *Queue, priority: Priority) void {
         self.storage.init();
@@ -39,6 +40,7 @@ pub const Queue = struct {
         self.syncpoints_completed = 0;
         self.trace_sync = .{};
         self.trace_high = .{};
+        self.high_return_address = 0;
     }
 
     pub fn writeDmem(self: *Queue, offset: u32, value: u32) void {
@@ -449,14 +451,18 @@ pub fn submitHighPriority(queue: *Queue) void {
         &.{},
     );
     current.swapBuffersToCaller(io.status_clear_signal3);
+    queue.high_return_address = physicalAddress(@intFromPtr(current.buffer.ptr)) + @as(u32, @intCast(current.index * 4));
     current.stop();
     cache.writebackData(current.buffer[0..]);
 
+    // Publish the DMEM handoff while scalar execution is stopped. Back-to-back
+    // batches can otherwise race the dispatcher's accesses to pointer_stack.
+    // Preserve the PC: low-priority work resumes immediately after publication.
+    halt();
+    waitHalted();
     // Audio may be the first user of the resident runtime. Give the priority
     // switch a valid low-priority return stream before waking the dispatcher.
     if (!resident_queue_started) {
-        halt();
-        waitHalted();
         cache.writebackData(&idle_queue_buffer);
         io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(&idle_queue_buffer));
         setProgramCounter(programs.command_dispatcher.pc_start);
@@ -480,7 +486,12 @@ pub fn waitHighPriorityTimeout(queue: *Queue, max_attempts: u32) bool {
     var remaining = max_attempts;
     while (true) {
         const status = io.status_register_read.*;
-        if (status.signal5 and !status.signal3 and !status.signal4) break;
+        // swapBuffers clears signal3 before saving the outgoing high pointer.
+        // Wait for that final store too: otherwise the CPU's next submission
+        // can publish a new slot 9 pointer which the old epilogue overwrites.
+        if (status.signal5 and !status.signal3 and !status.signal4) {
+            if (io.readDmem(u32, pointer_stack_dmem + 9 * @sizeOf(u32)).* == queue.high_return_address) break;
+        }
         if (remaining == 0) return false;
         remaining -= 1;
     }

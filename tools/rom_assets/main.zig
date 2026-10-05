@@ -10,6 +10,10 @@ fn run(init: std.process.Init) !void {
     const a = init.gpa;
     const args = try init.minimal.args.toSlice(a);
     defer a.free(args);
+    if (args.len == 1 or (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")))) {
+        std.debug.print("usage: rom-assets <payload.bin> <handles.zig> [<name> <file>]...\n", .{});
+        return;
+    }
     const count = try inputCount(args);
     const inputs = try a.alloc(assets.Input, count);
     defer a.free(inputs);

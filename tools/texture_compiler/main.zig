@@ -1,10 +1,18 @@
 const std = @import("std");
 const texture_compiler = @import("texture_compiler");
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) void {
+    run(init) catch |err| fatal("{s}", .{@errorName(err)});
+}
+
+fn run(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(allocator);
     defer allocator.free(args);
+    if (args.len == 1 or (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")))) {
+        std.debug.print("usage: texture-compiler <input.png> <texels.bin> <texture.zig> <name> <format> [--rom]\n", .{});
+        return;
+    }
     if (args.len != 6 and args.len != 7) fatal("usage: texture-compiler <input.png> <texels.bin> <texture.zig> <name> <format> [--rom]", .{});
 
     const rom = args.len == 7;
@@ -26,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch |err| fatal("{s}: {s}", .{ path, @errorName(err) });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &buffer);
@@ -34,7 +42,7 @@ fn readFile(io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 }
 
 fn writeFile(io: std.Io, path: []const u8, bytes: []const u8) !void {
-    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    var file = std.Io.Dir.cwd().createFile(io, path, .{}) catch |err| fatal("{s}: {s}", .{ path, @errorName(err) });
     defer file.close(io);
     var buffer: [4096]u8 = undefined;
     var writer = file.writer(io, &buffer);

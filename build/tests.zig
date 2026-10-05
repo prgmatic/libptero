@@ -17,6 +17,11 @@ pub fn addConsumerFixtureTests(b: *std.Build) void {
 
 pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8) void {
     const test_step = b.step("test", "Run host tool tests");
+    if (b.findProgram(&.{"python3"}, &.{}) catch null) |python| {
+        const fonts = b.addSystemCommand(&.{ python, b.pathFromRoot("tests/integration/font_dependencies.py"), b.graph.zig_exe, b.pathFromRoot(".") });
+        b.step("test-asset-cache", "Verify font page edits invalidate converted assets").dependOn(&fonts.step);
+    }
+
     if (b.findProgram(&.{"node"}, &.{}) catch null) |node| {
         const viewer_tests = b.addSystemCommand(&.{ node, b.pathFromRoot("tools/profiler/viewer_test.mjs") });
         test_step.dependOn(&viewer_tests.step);

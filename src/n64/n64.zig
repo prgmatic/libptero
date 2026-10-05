@@ -1,3 +1,4 @@
+pub const app = @import("app.zig");
 pub const debug = @import("debug.zig");
 pub const io = @import("io.zig");
 pub const interfaces = @import("interfaces.zig");
@@ -10,6 +11,7 @@ pub const audio = @import("audio.zig");
 pub const rom = @import("rom.zig");
 
 test {
+    _ = app;
     _ = debug.profiler;
     _ = debug.crash_screen.model;
     _ = debug.crash_screen.model.memory;

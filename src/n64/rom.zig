@@ -1,5 +1,8 @@
 //! ROM-only payloads are appended after all ELF load segments. Generated
 //! handles contain relative offsets and logical sizes, never RDRAM pointers.
+pub const Slot = @import("rom/slot.zig").Slot;
+pub const Scheduler = @import("rom/scheduler.zig").Scheduler;
+pub const scheduling = @import("rom/scheduler.zig");
 const std = @import("std");
 const pi = @import("io/pi.zig");
 pub export var __rom_assets_rom_offset: u32 = 0xffffffff;
@@ -100,5 +103,7 @@ test "logical asset bounds reject overflow and allow empty end reads" {
 }
 
 test {
+    _ = scheduling;
+    _ = @import("rom/slot.zig");
     _ = @import("rom/typed_asset.zig");
 }
