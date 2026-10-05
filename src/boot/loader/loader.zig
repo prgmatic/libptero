@@ -6,6 +6,7 @@ const pi = n64.interfaces.parallel;
 const si = n64.interfaces.serial;
 
 export fn __start() linksection(".loader") callconv(.c) noreturn {
+    initFpu();
     if (config.debug_logging) {
         n64.debug.init();
     }
@@ -35,6 +36,24 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
         : .{ .r25 = true });
 
     unreachable;
+}
+
+fn initFpu() void {
+    // IPL2 enables COP1. Establish its control state before entering either
+    // the SDK runtime or a custom ELF entry point. FS flushes subnormal
+    // results to zero; without it even ordinary mul.s can trap on VR4300.
+    // Reset rounding, flags, causes and enables, including state from reset.
+    // Underflow/inexact exceptions must stay masked for FS to take effect.
+    asm volatile (
+        \\ .set push
+        \\ .set noreorder
+        \\ ctc1 %[control], $31
+        \\ nop
+        \\ nop
+        \\ .set pop
+        :
+        : [control] "r" (@as(u32, 1 << 24)),
+    );
 }
 
 fn print(comptime fmt: []const u8, args: anytype) void {

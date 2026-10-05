@@ -5,6 +5,7 @@ extern var __bss_start: u8;
 extern const __bss_end: u8;
 
 const tests = [_]runner.Test{} ++
+    @import("fpu_tests.zig").tests ++
     @import("zsp_tests.zig").tests ++
     @import("rsp_tests.zig").tests ++
     @import("rom_tests.zig").tests ++
