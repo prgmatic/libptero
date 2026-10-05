@@ -34,6 +34,9 @@ pub const Queue = struct {
 
     pub fn init(self: *Queue, priority: Priority) void {
         self.storage.init();
+        if (priority == .low) for (&self.storage.queues) |*commands| {
+            commands.defer_head = true;
+        };
         self.priority = priority;
         self.recording = null;
         self.syncpoints_scheduled = 0;
@@ -403,6 +406,8 @@ pub fn flush(queue: *Queue) void {
     current.jump(next);
     cache.writebackData(current.buffer[0..current.index]);
     cache.writebackData(next.buffer[0..command_queue.batch_word_count]);
+    current.publishHead();
+    cache.writebackData(current.buffer[0..1]);
 
     if (!storage.submitted) {
         halt();

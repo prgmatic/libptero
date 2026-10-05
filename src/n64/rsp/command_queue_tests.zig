@@ -34,6 +34,27 @@ test "clear reopens and empties a command queue" {
     try testing.expectEqualSlices(u32, &expected, queue.buffer);
 }
 
+test "live cached batches keep their first header invalid until sealed publication" {
+    var buffer: [command_queue.batch_word_count]u32 align(8) = undefined;
+    var queue = CommandQueue.init(&buffer);
+    queue.defer_head = true;
+    queue.writeDmem(0x90, 2);
+    queue.writeDmem(0x94, 3);
+    try testing.expectEqual(@as(u32, 0), buffer[0]);
+    try testing.expectEqual(@as(u32, 2), buffer[1]);
+    try testing.expectEqual(@as(u32, 0x01000094), buffer[2]);
+    queue.stop();
+    try testing.expectEqual(@as(u32, 0), buffer[0]);
+    queue.publishHead();
+    try testing.expectEqual(@as(u32, 0x01000090), buffer[0]);
+    queue.clearStreaming();
+    queue.writeDmem(0x98, 4);
+    try testing.expectEqual(@as(u32, 0), buffer[0]);
+    queue.stop();
+    queue.publishHead();
+    try testing.expectEqual(@as(u32, 0x01000098), buffer[0]);
+}
+
 test "streaming clear invalidates the resident fetch window" {
     var buffer: [command_queue.batch_word_count * 2]u32 align(8) =
         [_]u32{0xdeadbeef} ** (command_queue.batch_word_count * 2);

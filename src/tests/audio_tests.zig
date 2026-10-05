@@ -14,6 +14,7 @@ var output: [128]i16 align(16) = undefined;
 
 pub const tests = [_]runner.Test{
     .{ .name = "Audio: high-priority mixer starts idle runtime", .run = idleSilence },
+    .{ .name = "Audio: resuming graphics cannot execute unpublished commands", .run = unpublishedCommands },
     .{ .name = "Audio: 8-channel PCM core", .run = pcm8 },
     .{ .name = "Audio: 32-channel PCM core and DMA alignment", .run = pcm32 },
     .{ .name = "Audio: generated mono/stereo PCM and loop/resampling", .run = generatedPcm },
@@ -23,6 +24,31 @@ pub const tests = [_]runner.Test{
     .{ .name = "Stream PCM: geometry preemption, clipping and queue refills", .run = streamedGeometryPreemption },
     .{ .name = "VADPCM: decoder and mixer preempt clipped geometry", .run = decoderGeometryPreemption },
 };
+
+var publication_queue: rsp.Queue = undefined;
+fn unpublishedCommands() !void {
+    runtime.init();
+    defer runtime.deinit();
+    try mixer.init(&runtime, 8);
+    defer mixer.deinit() catch {};
+    publication_queue.init(.low);
+    const marker = rsp.programs.command_dispatcher_symbols.resident_scratch + 16;
+    publication_queue.writeDmem(marker, 1);
+    _ = publication_queue.insertSyncpoint();
+    try testing.expect(publication_queue.waitSyncpointTimeout(timeout));
+
+    publication_queue.writeDmem(marker, 2);
+    // Model eviction of cached command words before an explicit submission.
+    n64.cache.writebackData(&publication_queue.storage.buffers[publication_queue.storage.write_index]);
+    try mixer.submit(output[0..64]);
+    try mixer.wait(timeout);
+    n64.cpu.waitCycles(2000);
+    try testing.expectEqual(@as(u32, 1), rsp.io.readDmem(u32, marker).*);
+
+    _ = publication_queue.insertSyncpoint();
+    try testing.expect(publication_queue.waitSyncpointTimeout(timeout));
+    try testing.expectEqual(@as(u32, 2), rsp.io.readDmem(u32, marker).*);
+}
 
 fn idleSilence() !void {
     runtime.init();

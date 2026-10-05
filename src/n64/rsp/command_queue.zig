@@ -34,6 +34,10 @@ pub const CommandQueue = struct {
     next: ?*const CommandQueue,
     call_target: ?*const CommandQueue,
     swap_target: ?*const CommandQueue,
+    /// Live cached streams retain an invalid first word until the entire batch
+    /// has been written back. Recorded/direct queues publish normally.
+    defer_head: bool = false,
+    pending_head: ?u32 = null,
 
     pub fn init(buffer: []align(8) u32) CommandQueue {
         var queue = CommandQueue{
@@ -55,6 +59,7 @@ pub const CommandQueue = struct {
         self.next = null;
         self.call_target = null;
         self.swap_target = null;
+        self.pending_head = null;
     }
 
     pub fn clearStreaming(self: *CommandQueue) void {
@@ -67,6 +72,17 @@ pub const CommandQueue = struct {
         self.next = null;
         self.call_target = null;
         self.swap_target = null;
+        self.pending_head = null;
+    }
+
+    /// Call after writing back the sealed batch, then write back its first word.
+    /// An RSP refetch must never observe a header before its arguments/epilogue.
+    pub fn publishHead(self: *CommandQueue) void {
+        if (!self.sealed) @panic("cannot publish an open RSP command batch");
+        if (self.pending_head) |header| {
+            self.buffer[0] = header;
+            self.pending_head = null;
+        }
     }
 
     pub fn writeDmem(self: *CommandQueue, offset: u32, value: u32) void {
@@ -96,7 +112,10 @@ pub const CommandQueue = struct {
             @panic("RSP command queue is full");
         }
 
-        self.buffer[self.index] = @as(u32, command_id) << 24 | inline_argument;
+        const header = @as(u32, command_id) << 24 | inline_argument;
+        if (self.defer_head and self.index == 0) {
+            self.pending_head = header;
+        } else self.buffer[self.index] = header;
         @memcpy(self.buffer[self.index + 1 ..][0..arguments.len], arguments);
         self.index += command_words;
 
