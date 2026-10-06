@@ -1,5 +1,6 @@
 //! Legacy Fast64 metadata and native material source emission.
 const std = @import("std");
+const fast = @import("fast_math");
 
 /// Fast64 versions serialize checkboxes as either booleans or 0/1 numbers.
 pub const Flag = enum(u1) {
@@ -173,7 +174,7 @@ fn emitVertexEffect(allocator: std.mem.Allocator, output: *std.ArrayList(u8), f:
 fn sphereDimension(axis: ?Axis) !u10 {
     const a = axis orelse return error.MissingSphereMapDimensions;
     const dimension = a.high + 1;
-    if (!std.math.isFinite(dimension) or dimension < 1 or dimension > 1023 or @floor(dimension) != dimension)
+    if (!std.math.isFinite(dimension) or dimension < 1 or dimension > 1023 or fast.floor(dimension) != dimension)
         return error.InvalidSphereMapDimensions;
     return @intFromFloat(dimension);
 }

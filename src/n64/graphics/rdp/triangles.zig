@@ -1,6 +1,8 @@
+const fast = @import("../../math/fast.zig");
+
 pub inline fn drawRotatedSprite(cmd_queue: anytype, tile: u3, x: f32, y: f32, s0: u8, t0: u8, width: f32, height: f32, flip_x: bool, flip_y: bool, rotation: f32, scale_x: f32, scale_y: f32, cx: f32, cy: f32) void {
-    const sin_theta = @sin(rotation);
-    const cos_theta = @cos(rotation);
+    const sin_theta = fast.sin(rotation);
+    const cos_theta = fast.cos(rotation);
 
     // 2D affine transform matrix (column-major): maps texel coords → screen.
     // Screen coords are in screen-pixel units (not sub-pixel).
@@ -92,14 +94,14 @@ pub inline fn texturedTriangle(cmd_queue: anytype, tile: u3, v1_in: TexVertex, v
 
     // ── Edge coefficients ─────────────────────────────────────────
     // Y values floored to 1/4-pixel (the RDP rasterises at 1/4-pixel precision).
-    const y1 = @floor(v1.y * 4.0) / 4.0;
-    const y2 = @floor(v2.y * 4.0) / 4.0;
-    const y3 = @floor(v3.y * 4.0) / 4.0;
+    const y1 = fast.floor(v1.y * 4.0) / 4.0;
+    const y2 = fast.floor(v2.y * 4.0) / 4.0;
+    const y3 = fast.floor(v3.y * 4.0) / 4.0;
 
     // Y in 11.2 fixed-point, clamped to 14-bit signed range.
-    const y1f = @as(i32, @intFromFloat(@max(-16384.0, @min(16383.0, @floor(v1.y * 4.0)))));
-    const y2f = @as(i32, @intFromFloat(@max(-16384.0, @min(16383.0, @floor(v2.y * 4.0)))));
-    const y3f = @as(i32, @intFromFloat(@max(-16384.0, @min(16383.0, @floor(v3.y * 4.0)))));
+    const y1f = @as(i32, @intFromFloat(@max(-16384.0, @min(16383.0, fast.floor(v1.y * 4.0)))));
+    const y2f = @as(i32, @intFromFloat(@max(-16384.0, @min(16383.0, fast.floor(v2.y * 4.0)))));
+    const y3f = @as(i32, @intFromFloat(@max(-16384.0, @min(16383.0, fast.floor(v3.y * 4.0)))));
 
     const x1 = v1.x;
     const x2 = v2.x;
@@ -124,7 +126,7 @@ pub inline fn texturedTriangle(cmd_queue: anytype, tile: u3, v1_in: TexVertex, v
     const isl = if (ly != 0.0) lx / ly else 0.0;
 
     // Fractional scanline offset for the top vertex.
-    const fy = @floor(y1) - y1;
+    const fy = fast.floor(y1) - y1;
 
     // Initial X positions for each edge at the top scanline.
     const xh = x1 + fy * ish;
@@ -237,7 +239,7 @@ pub const TexVertex = struct {
 fn f32ToFp(f: f32) i32 {
     if (f >= 32768.0) return 0x7FFFFFFF;
     if (f < -32768.0) return @bitCast(@as(u32, 0x80000000));
-    return @intFromFloat(@floor(f * 65536.0));
+    return @intFromFloat(fast.floor(f * 65536.0));
 }
 
 // Pack two S16.16 values into one 64-bit word: hi in [63:32], lo in [31:0].

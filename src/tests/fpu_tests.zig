@@ -5,6 +5,7 @@ const testing = @import("assert.zig");
 pub const tests = [_]runner.Test{
     .{ .name = "FPU: boot flushes underflowing products to signed zero", .run = underflow },
     .{ .name = "FPU: decaying animation blend reaches idle without trapping", .run = animationDecay },
+    .{ .name = "FPU: native math floors, wraps and rotates", .run = nativeMath },
 };
 
 // Volatile reads keep the products on the console's FPU, not the compiler's.
@@ -46,4 +47,22 @@ fn animationDecay() !void {
     try testing.expectEqual(@as(f32, 0), pose.rotation.x);
     try testing.expectEqual(@as(f32, 0), pose.rotation.y);
     try testing.expectEqual(@as(f32, 1), pose.rotation.w);
+}
+
+var math_inputs = [_]f32{ -1.25, 1.75, -0.25, 1.57079637, 2147483520.0, -2147483648.0 };
+
+fn nativeMath() !void {
+    const inputs: *volatile [6]f32 = &math_inputs;
+    try testing.expectEqual(@as(f32, -2), n64.math.fast.floor(inputs[0]));
+    try testing.expectEqual(@as(f32, 1), n64.math.fast.floor(inputs[1]));
+    try testing.expectEqual(@as(f32, 0.75), n64.math.fastMod(inputs[2], 1));
+    try testing.expectEqual(inputs[4], n64.math.fast.floor(inputs[4]));
+    try testing.expectEqual(inputs[5], n64.math.fast.floor(inputs[5]));
+    try testing.expect(@abs(n64.math.fastSin(inputs[3]) - 1) < 0.000002);
+    try testing.expect(@abs(n64.math.fastCos(inputs[3])) < 0.000002);
+    const rotation = n64.math.Quat.fromAxisAngle(.init(0, 1, 0), inputs[3]);
+    const matrix = n64.math.Mat4.fromSrt(.one, rotation, .zero);
+    const point = matrix.transformPoint(.init(1, 0, 0));
+    try testing.expect(@abs(point.x) < 0.00001);
+    try testing.expect(@abs(point.z + 1) < 0.00001);
 }

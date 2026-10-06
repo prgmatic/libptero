@@ -137,7 +137,7 @@ fn initStarTexture() !void {
 
             xf = xp + yp * 2;
             yf = yp;
-            const cf = smoothstep(0, 0.1, @cos(xf * std.math.pi * 1.93) * 0.1 - yf + 0.4);
+            const cf = smoothstep(0, 0.1, n64.math.fastCos(xf * std.math.pi * 1.93) * 0.1 - yf + 0.4);
             const d: u8 = @intFromFloat(dist * 255);
             const c: u8 = @intFromFloat(cf * 255);
 
@@ -201,8 +201,8 @@ const Star = struct {
             .x = width / 2,
             .y = height / 2,
             .color = color,
-            .dir_x = @cos(rot),
-            .dir_y = @sin(rot),
+            .dir_x = n64.math.fastCos(rot),
+            .dir_y = n64.math.fastSin(rot),
         };
     }
 

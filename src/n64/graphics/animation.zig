@@ -208,7 +208,7 @@ pub const Player = struct {
             self.time = 0;
             self.playing = false;
         } else if (self.looping) {
-            self.time = @mod(self.time, self.clip.duration);
+            self.time = math.fastMod(self.time, self.clip.duration);
         } else if (self.reachedEnd()) {
             self.time = std.math.clamp(self.time, 0, self.clip.duration);
             self.playing = false;
@@ -247,9 +247,9 @@ fn slerp(a: math.Quat, input_b: math.Quat, t: f32) math.Quat {
     }
     if (dot > 0.9995) return a.nlerp(b, t);
     const angle = std.math.acos(std.math.clamp(dot, -1, 1));
-    const denominator = @sin(angle);
-    const x = @sin((1 - t) * angle) / denominator;
-    const y = @sin(t * angle) / denominator;
+    const denominator = math.fastSin(angle);
+    const x = math.fastSin((1 - t) * angle) / denominator;
+    const y = math.fastSin(t * angle) / denominator;
     return .{ .x = a.x * x + b.x * y, .y = a.y * x + b.y * y, .z = a.z * x + b.z * y, .w = a.w * x + b.w * y };
 }
 

@@ -55,14 +55,17 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/gltf_compiler/root.zig"),
             .target = b.graph.host,
-            .imports = &.{.{ .name = "texture_compiler", .module = b.createModule(.{
+            .imports = &.{ .{ .name = "fast_math", .module = b.createModule(.{
+                .root_source_file = b.path("src/n64/math/fast.zig"),
+                .target = b.graph.host,
+            }) }, .{ .name = "texture_compiler", .module = b.createModule(.{
                 .root_source_file = b.path("tools/texture_compiler/root.zig"),
                 .target = b.graph.host,
                 .imports = &.{.{ .name = "png", .module = b.createModule(.{
                     .root_source_file = b.path("tools/imgparse/png.zig"),
                     .target = b.graph.host,
                 }) }},
-            }) }},
+            }) } },
         }),
     });
     instrumentTests(gltf_compiler_tests, coverage, coverage_runtime);

@@ -1,3 +1,4 @@
+const fast = @import("fast.zig");
 const Vec3 = @import("vec.zig").Vec3;
 
 pub const Quat = extern struct {
@@ -9,12 +10,12 @@ pub const Quat = extern struct {
     pub const identity: Quat = .{ .x = 0, .y = 0, .z = 0, .w = 1 };
 
     pub fn fromEuler(euler: Vec3) Quat {
-        const c1 = @cos(euler.x * 0.5);
-        const s1 = @sin(euler.x * 0.5);
-        const c2 = @cos(euler.y * 0.5);
-        const s2 = @sin(euler.y * 0.5);
-        const c3 = @cos(euler.z * 0.5);
-        const s3 = @sin(euler.z * 0.5);
+        const c1 = fast.cos(euler.x * 0.5);
+        const s1 = fast.sin(euler.x * 0.5);
+        const c2 = fast.cos(euler.y * 0.5);
+        const s2 = fast.sin(euler.y * 0.5);
+        const c3 = fast.cos(euler.z * 0.5);
+        const s3 = fast.sin(euler.z * 0.5);
         return .{
             .x = c1 * c2 * s3 - s1 * s2 * c3,
             .y = s1 * c2 * c3 - c1 * s2 * s3,
@@ -23,8 +24,8 @@ pub const Quat = extern struct {
         };
     }
     pub fn fromAxisAngle(axis: Vec3, angle: f32) Quat {
-        const sine = @sin(angle * 0.5);
-        return .{ .x = axis.x * sine, .y = axis.y * sine, .z = axis.z * sine, .w = @cos(angle * 0.5) };
+        const sine = fast.sin(angle * 0.5);
+        return .{ .x = axis.x * sine, .y = axis.y * sine, .z = axis.z * sine, .w = fast.cos(angle * 0.5) };
     }
     pub fn mul(a: Quat, b: Quat) Quat {
         return .{

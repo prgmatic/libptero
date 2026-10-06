@@ -61,7 +61,13 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
             .{ .name = "gltf_compiler", .module = b.createModule(.{
                 .root_source_file = root.path(b, "tools/gltf_compiler/root.zig"),
                 .target = b.graph.host,
-                .imports = &.{.{ .name = "texture_compiler", .module = texture_compiler }},
+                .imports = &.{
+                    .{ .name = "texture_compiler", .module = texture_compiler },
+                    .{ .name = "fast_math", .module = b.createModule(.{
+                        .root_source_file = root.path(b, "src/n64/math/fast.zig"),
+                        .target = b.graph.host,
+                    }) },
+                },
             }) },
         }),
     };

@@ -50,3 +50,20 @@ test "orthographic projection maps an asymmetric box to clip coordinates" {
     try std.testing.expectEqualDeep(math.Vec4.init(-1, -1, -1, 1), near);
     try std.testing.expectEqualDeep(math.Vec4.init(1, 1, 1, 1), far);
 }
+
+test "quaternion rotations preserve quarter turns across wrapped angles" {
+    for ([_]f32{ std.math.pi / 2.0, -3 * std.math.pi / 2.0, 5 * std.math.pi / 2.0 }) |angle| {
+        const rotations = [_]math.Quat{
+            .fromAxisAngle(.init(0, 1, 0), angle),
+            .fromEuler(.init(angle, 0, 0)),
+        };
+        for (rotations) |rotation| {
+            try std.testing.expectApproxEqAbs(@as(f32, 1), rotation.dot(rotation), 0.00001);
+            const matrix = math.Mat4.fromSrt(.one, rotation, .zero);
+            const point = matrix.transformPoint(.init(1, 0, 0));
+            try std.testing.expectApproxEqAbs(@as(f32, 0), point.x, 0.00001);
+            try std.testing.expectApproxEqAbs(@as(f32, 0), point.y, 0.00001);
+            try std.testing.expectApproxEqAbs(@as(f32, -1), point.z, 0.00001);
+        }
+    }
+}

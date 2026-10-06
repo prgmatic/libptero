@@ -343,7 +343,7 @@ pub const Context = struct {
         }
         var difference = far - near;
         if (@abs(difference) < 1.5) difference = 1.5;
-        const scale_float = std.math.clamp(@floor(16384.0 / difference), -32768.0, 32767.0);
+        const scale_float = std.math.clamp(math.fast.floor(16384.0 / difference), -32768.0, 32767.0);
         const scale: u16 = @bitCast(@as(i16, @intFromFloat(scale_float)));
         const offset: i32 = @intFromFloat(-near * 2.0 * 65536.0);
         self.queue.writeDmem(address, @bitCast(offset));
