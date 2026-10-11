@@ -7,12 +7,10 @@ const data_0: *volatile u32 = @ptrFromInt(0xBFFF0004);
 const data_1: *volatile u32 = @ptrFromInt(0xBFFF0008);
 const identifier: *volatile u32 = @ptrFromInt(0xBFFF000C);
 const key: *volatile u32 = @ptrFromInt(0xBFFF0010);
-const aux: *volatile u32 = @ptrFromInt(0xBFFF0018);
 pub const data_buffer: *[8192 / 4]u32 = @ptrFromInt(0xBFFE0000);
 
 const register_enable_0: u32 = 0x5F554E4C;
 const register_enable_1: u32 = 0x4F434B5F;
-const register_lock: u32 = 0xFFFFFFFF;
 const register_enable_reset: u32 = 0x00000000;
 const identity_value: u32 = 0x53437632;
 const usb_wait_attempts = 1_000_000;

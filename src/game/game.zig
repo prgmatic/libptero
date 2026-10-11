@@ -256,8 +256,3 @@ const Star = struct {
         }
     }
 };
-
-fn forceCrash() void {
-    const null_ptr: *volatile u32 = @ptrFromInt(4);
-    _ = null_ptr.*;
-}

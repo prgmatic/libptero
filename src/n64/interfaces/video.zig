@@ -13,8 +13,6 @@ const vi_v_burst:        *volatile u32     = @ptrFromInt(0xA440002C);
 const vi_x_scale:        *volatile u32     = @ptrFromInt(0xA4400030);
 const vi_y_scale:        *volatile u32     = @ptrFromInt(0xA4400034);
 
-var detected_tv_type: TvType = .ntsc;
-
 pub const TvType = enum(u2) {
     pal,
     ntsc,

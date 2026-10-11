@@ -1285,10 +1285,6 @@ pub const Parser = struct {
         self.type_symbol_count += 1;
     }
 
-    fn lookupTypeSymbol(self: *const Parser, name: []const u8) ?ast.DataType {
-        return if (self.lookupTypeSymbolInfo(name)) |symbol| symbol.data_type else null;
-    }
-
     fn lookupTypeSymbolInfo(self: *const Parser, name: []const u8) ?TypeSymbol {
         var index = self.type_symbol_count;
         while (index > 0) {
@@ -2021,17 +2017,6 @@ fn literalFitsType(value: i64, data_type: ast.DataType) bool {
         .i8 => value >= std.math.minInt(i8) and value <= std.math.maxInt(i8),
         .i16 => value >= std.math.minInt(i16) and value <= std.math.maxInt(i16),
         .i32 => value >= std.math.minInt(i32) and value <= std.math.maxInt(i32),
-        .vec16, .vec32 => false,
-    };
-}
-
-fn abiTypesCompatible(left: ast.DataType, right: ast.DataType) bool {
-    if (left == right) return true;
-    return switch (left) {
-        .u8, .i8 => right == .u8 or right == .i8,
-        .u16, .i16 => right == .u16 or right == .i16,
-        .u32, .i32 => right == .u32 or right == .i32,
-        .dmem => false,
         .vec16, .vec32 => false,
     };
 }

@@ -5,9 +5,7 @@ const CacheOp = enum(u8) { IndexInvalidate, IndexLoadTag, IndexStoreTag, IndecCr
 
 const CacheType = enum(u8) { Instruction, Data };
 
-const instruction_cache_size = 16 * 1024;
 const instruction_cache_linesize = 32;
-const data_cache_size = 8 * 1024;
 const data_cache_linesize = 16;
 
 inline fn cacheOp(op: CacheOp, cache_type: CacheType, addr: u32, length: usize) void {

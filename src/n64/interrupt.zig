@@ -5,7 +5,6 @@ const profiler = @import("debug/profiler.zig");
 var trace_fence: profiler.Scope = .{};
 const print = @import("debug.zig").print;
 
-var lock: u8 = 0;
 var pending_interrupts: u32 = 0;
 var rdp_fences_scheduled: u32 = 0;
 var rdp_fences_completed: u32 = 0;

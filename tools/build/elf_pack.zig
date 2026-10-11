@@ -249,10 +249,8 @@ const EH_SHSTRNDX = 50;
 const PH_TYPE = 0;
 const PH_OFFSET = 4;
 const PH_VADDR = 8;
-const PH_PADDR = 12;
 const PH_FILESZ = 16;
 const PH_MEMSZ = 20;
-const PH_FLAGS = 24;
 const PH_ALIGN = 28;
 
 const SH_TYPE = 4;

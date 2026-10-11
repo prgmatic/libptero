@@ -1,16 +1,12 @@
 const print = @import("debug.zig").dmemPrint;
 const n64 = @import("n64");
 const mi = n64.interfaces.mips;
-const pi = n64.interfaces.parallel;
 
 const mode:         *volatile u32 = @ptrFromInt(0xA4700000);
 const config:       *volatile u32 = @ptrFromInt(0xA4700004);
 const current_load: *volatile u32 = @ptrFromInt(0xA4700008);
 const select:       *volatile u32 = @ptrFromInt(0xA470000C);
 const refresh:      *volatile u32 = @ptrFromInt(0xA4700010);
-const latency:      *volatile u32 = @ptrFromInt(0xA4700014);
-const err_reg:      *volatile u32 = @ptrFromInt(0xA4700018);
-const bank_status:  *volatile u32 = @ptrFromInt(0xA470001C);
 
 const registers: [*]volatile u32 = @ptrFromInt(0xA3F00000);
 const broadcast_registers: [*]volatile u32 = @ptrFromInt(0xA3F80000);
