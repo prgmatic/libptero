@@ -13,6 +13,8 @@ pub const rom = @import("rom.zig");
 test {
     _ = app;
     _ = debug.profiler;
+    _ = debug.everdrive;
+    _ = debug.is_viewer;
     _ = debug.crash_screen.model;
     _ = debug.crash_screen.model.memory;
     _ = debug.crash_screen.font;

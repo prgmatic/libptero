@@ -13,6 +13,7 @@ pub const Tools = struct {
     gltf_compiler: *std.Build.Step.Compile,
     audio_compiler: *std.Build.Step.Compile,
     rom_assets: *std.Build.Step.Compile,
+    deploy: *std.Build.Step.Compile,
 };
 
 pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
@@ -35,6 +36,9 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
         .imports = &.{.{ .name = "texture_compiler", .module = texture_compiler }},
     });
     return .{
+        .deploy = addTool(b, root, "ptero-deploy", "tools/deploy/main.zig", &.{
+            .{ .name = "deploy", .module = deployModule(b, root) },
+        }),
         .rom_assets = addTool(b, root, "rom-assets", "tools/rom_assets/main.zig", &.{
             .{ .name = "rom_assets", .module = b.createModule(.{ .root_source_file = root.path(b, "tools/rom_assets/root.zig"), .target = b.graph.host }) },
         }),
@@ -71,6 +75,18 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
             }) },
         }),
     };
+}
+
+pub fn deployModule(b: *std.Build, root: std.Build.LazyPath) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = root.path(b, "tools/deploy/root.zig"),
+        .target = b.graph.host,
+        .link_libc = true,
+        .imports = &.{.{ .name = "run_protocol", .module = b.createModule(.{
+            .root_source_file = root.path(b, "src/n64/debug/run_protocol.zig"),
+            .target = b.graph.host,
+        }) }},
+    });
 }
 
 fn addTool(

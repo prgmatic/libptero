@@ -59,3 +59,10 @@ RSP mixer are documented in [PCM audio](src/n64/audio/README.md).
 
 Bounded hardware traces and the standalone timeline viewer are documented in
 [Hardware profiler](tools/profiler/README.md).
+
+## Deployment
+
+`zig build install` installs `zig-out/bin/ptero-deploy` for native SC64 and
+EverDrive USB deployment, ares runs, and optional Home Assistant power control.
+ROMs report completion through `n64.debug.finish(...)`. See the
+[deploy guide](tools/deploy/README.md).

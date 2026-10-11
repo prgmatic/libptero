@@ -52,6 +52,13 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(sdk.tools.font_compiler);
     b.installArtifact(sdk.tools.audio_compiler);
     b.installArtifact(sdk.tools.rom_assets);
+    b.installArtifact(sdk.tools.deploy);
+    _ = sdk.addRom(.{
+        .name = "deploy-smoke",
+        .title = "Deploy Smoke Test",
+        .app_source_file = b.path("src/tests/deploy_smoke.zig"),
+        .install = .{ .step_name = "deploy-smoke", .description = "Build a finite deploy/debug transport smoke ROM", .add_to_default = false },
+    });
     b.installArtifact(sdk.tools.gltf_compiler);
     const capture_module = b.createModule(.{
         .root_source_file = b.path("tools/framebuffer_capture/root.zig"),

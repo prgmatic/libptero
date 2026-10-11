@@ -51,9 +51,9 @@ pub fn run(tests: []const Test) Summary {
     }
 
     n64.debug.print(
-        "\n{d} passed, {d} failed\n" ++
-            "@@LIBPTERO_TEST_END@@ {{\"passed\":{d},\"failed\":{d}}}\n",
-        .{ summary.passed, summary.failed, summary.passed, summary.failed },
+        "\n{d} passed, {d} failed\n",
+        .{ summary.passed, summary.failed },
     );
+    n64.debug.finish(.{ .tests = .{ .passed = @intCast(summary.passed), .failed = @intCast(summary.failed) } });
     return summary;
 }

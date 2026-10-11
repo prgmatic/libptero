@@ -17,6 +17,9 @@ pub fn addConsumerFixtureTests(b: *std.Build) void {
 
 pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8) void {
     const test_step = b.step("test", "Run host tool tests");
+    const deploy_tests = b.addTest(.{ .name = "deploy-tests", .root_module = @import("tools.zig").deployModule(b, b.path(".")) });
+    instrumentTests(deploy_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(deploy_tests).step);
     if (b.findProgram(&.{"python3"}, &.{}) catch null) |python| {
         const fonts = b.addSystemCommand(&.{ python, b.pathFromRoot("tests/integration/font_dependencies.py"), b.graph.zig_exe, b.pathFromRoot(".") });
         b.step("test-asset-cache", "Verify font page edits invalidate converted assets").dependOn(&fonts.step);
@@ -186,7 +189,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
         .{ "command-queue-tests", "src/n64/rsp/command_queue_tests.zig" },
         .{ "rsp-overlay-link-tests", "tools/build/rsp_overlay_link.zig" },
         .{ "rsp-pack-tests", "tools/build/rsp_pack.zig" },
-        .{ "test-protocol-tests", "tools/test_protocol.zig" },
+        .{ "run-protocol-tests", "src/n64/debug/run_protocol.zig" },
         .{ "framebuffer-hex-tests", "src/n64/debug/framebuffer_hex.zig" },
         .{ "math-tests", "src/n64/math_tests.zig" },
         .{ "font-tests", "src/n64/graphics/font.zig" },

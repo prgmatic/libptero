@@ -98,7 +98,7 @@ From the epoch workspace:
 (cd core && zig build install tests)
 (cd examples && zig build profiler)
 set -o pipefail
-zig run deploy.zig -- examples/zig-out/profiler.z64 2>&1 | tee /tmp/profile.log
+core/zig-out/bin/ptero-deploy --config deploy.local.json --wait examples/zig-out/profiler.z64 2>&1 | tee /tmp/profile.log
 core/zig-out/bin/ptero-profiler /tmp/profile.log /tmp/profile.html
 core/zig-out/bin/ptero-profiler /tmp/profile.log /tmp/profile.json
 core/zig-out/bin/ptero-profiler /tmp/profile.log /tmp/profile.chrome.json --chrome
