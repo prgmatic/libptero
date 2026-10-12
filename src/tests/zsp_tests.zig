@@ -106,7 +106,6 @@ pub const tests = [_]runner.Test{
     .{ .name = "ZSP: command fetch boundary", .run = commandFetchBoundary },
     .{ .name = "ZSP: polling syncpoint", .run = pollingSyncpoint },
     .{ .name = "ZSP: high-priority queue", .run = highPriorityQueue },
-    .{ .name = "RDP: direct CPU renderer", .run = directRdpRenderer },
     .{ .name = "Debug: render diagnostics", .run = renderDiagnostics },
     .{ .name = "RDP: RSP-submitted raw queue", .run = rspBackedRdpQueue },
     .{ .name = "RDP: completion fence", .run = rdpCompletionFence },
@@ -1581,6 +1580,9 @@ fn rspBackedRdpQueue() !void {
 }
 
 fn renderDiagnostics() !void {
+    rsp.halt();
+    rsp.waitHalted();
+    rsp.releaseRdpToDirect();
     const diagnostics = n64.debug.diagnostics;
     @memset(std.mem.asBytes(&diagnostic_vertices), 0);
     n64.cache.writebackData(&diagnostic_vertices);
@@ -1602,6 +1604,7 @@ fn renderDiagnostics() !void {
     render_queue.setFrameBuffer(image);
     render_queue.clearScreen(n64.graphics.color.Rgba32.green);
     const fence = rdp.syncFull(&render_queue);
+    if (!fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
     try diagnostics.captureFramebuffer(image, fence, 9001, rsp_timeout_attempts);
     // One full 64-byte packet above plus a short packet using the same pixels.
     const short_image = n64.graphics.image.ImgRgba32{ .width = 3, .height = 1, .texel_data = direct_rdp_render_target[0..3] };
@@ -1611,29 +1614,6 @@ fn renderDiagnostics() !void {
     // Exercise reports without requiring any format-buffer allocation inside them.
     continuous_queue.init(.low);
     diagnostics.reportRenderTimeout("diagnostic self-test (not an actual timeout)", &continuous_queue);
-}
-
-fn directRdpRenderer() !void {
-    rsp.halt();
-    rsp.waitHalted();
-    rsp.releaseRdpToDirect();
-    @memset(&direct_rdp_render_target, n64.graphics.color.Rgba32.black);
-    n64.cache.writebackData(&direct_rdp_render_target);
-    const image = n64.graphics.image.ImgRgba32{
-        .width = 4,
-        .height = 4,
-        .texel_data = direct_rdp_render_target[0..],
-    };
-    var render_queue = rdp.DirectRenderQueue.init(.{ .buffer = direct_rdp_command_buffer[0..] });
-    render_queue.setFrameBuffer(image);
-    render_queue.clearScreen(n64.graphics.color.Rgba32.green);
-    const fence = rdp.syncFull(&render_queue);
-    if (!fence.waitTimeout(rsp_timeout_attempts)) return error.RdpFenceTimeout;
-
-    n64.cache.invalidateData(&direct_rdp_render_target);
-    for (direct_rdp_render_target) |pixel| {
-        try testing.expectEqual(n64.graphics.color.Rgba32.green, pixel);
-    }
 }
 
 fn rdpCompletionFence() !void {

@@ -11,6 +11,7 @@ pub const audio = @import("audio.zig");
 pub const rom = @import("rom.zig");
 
 test {
+    _ = @import("math_tests.zig");
     _ = app;
     _ = debug.profiler;
     _ = debug.everdrive;

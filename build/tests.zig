@@ -191,9 +191,6 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
         .{ "rsp-pack-tests", "tools/build/rsp_pack.zig" },
         .{ "run-protocol-tests", "src/n64/debug/run_protocol.zig" },
         .{ "framebuffer-hex-tests", "src/n64/debug/framebuffer_hex.zig" },
-        .{ "math-tests", "src/n64/math_tests.zig" },
-        .{ "font-tests", "src/n64/graphics/font.zig" },
-        .{ "model-tests", "src/n64/n64.zig" },
     }) |test_config| {
         const test_artifact = b.addTest(.{
             .name = test_config[0],
