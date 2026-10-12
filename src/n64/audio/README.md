@@ -136,13 +136,14 @@ assets.addAudio("music", b.path("music.wav"),
     .{ .compression = .vadpcm, .storage = .rom, .loop = true });
 ```
 
-Compression selects a ROM-backed `StreamSample`. It accepts the same mono/stereo
-PCM8/PCM16 WAV inputs and decodes to PCM16 at the original sample rate. VADPCM is
+VADPCM requires explicit `.storage = .rom` and produces a ROM-backed
+`StreamSample`; incompatible resident options fail during build configuration.
+It accepts the same mono/stereo PCM8/PCM16 WAV inputs and decodes to PCM16 at the original sample rate. VADPCM is
 lossy: sixteen PCM16 samples become nine bytes per channel. The host converter
 uses the same four-predictor, order-two encoder as libdragon, vendored under
-MPL-2.0 in `tools/audio_compiler/vendor/vadpcm`. The installed CLI's `--vadpcm`
-switch implies ROM storage. Generated metadata contains a 256-byte aligned
-codebook; compressed blocks and seek histories remain in cartridge ROM.
+MPL-2.0 in `tools/audio_compiler/vendor/vadpcm`. The installed CLI requires
+`--stream --vadpcm`; `--vadpcm` alone is rejected before reading the input.
+Generated metadata contains a 256-byte aligned codebook; compressed blocks and seek histories remain in cartridge ROM.
 
 `audio_vadpcm.zsp` ports libdragon's VADPCM_Decompress and VADPCM_SetState
 commands as **184 identical instructions**, with verified address

@@ -32,7 +32,16 @@ const ModelEntry = struct {
 
 pub const Storage = enum { resident, rom };
 
-pub const AudioOptions = struct { loop: bool = false, storage: Storage = .resident, compression: enum { none, vadpcm } = .none };
+pub const AudioOptions = struct {
+    loop: bool = false,
+    storage: Storage = .resident,
+    /// VADPCM requires explicit .storage = .rom; it never changes storage implicitly.
+    compression: enum { none, vadpcm } = .none,
+
+    pub fn validate(self: AudioOptions) error{CompressionRequiresRom}!void {
+        if (self.compression == .vadpcm and self.storage != .rom) return error.CompressionRequiresRom;
+    }
+};
 
 pub const TextureFormat = enum {
     ci4,
@@ -162,12 +171,16 @@ pub const AssetBundle = struct {
     }
 
     /// Convert mono/stereo PCM8/16 WAV to native Sample or ROM StreamSample.
-    /// VADPCM selects ROM streaming; PCM includes silence/loop DMA padding.
+    /// VADPCM requires explicit ROM storage; PCM includes silence/loop DMA padding.
     pub fn addAudio(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath, options: AudioOptions) void {
+        options.validate() catch {
+            std.debug.print("libptero: audio asset '{s}': VADPCM requires .storage = .rom\n", .{name});
+            std.process.exit(1);
+        };
         self.asset_module.validateName(name);
         const convert = self.b.addRunArtifact(self.tools.audio_compiler);
         convert.addFileArg(source);
-        const streamed = options.storage == .rom or options.compression == .vadpcm;
+        const streamed = options.storage == .rom;
         const data = convert.addOutputFileArg(self.b.fmt("{s}.audio.bin", .{name}));
         const generated = convert.addOutputFileArg(self.b.fmt("{s}.audio.zig", .{name}));
         convert.addArg(name);
@@ -478,3 +491,11 @@ const rsp_target: std.Target.Query = .{
     .os_tag = .freestanding,
     .abi = .none,
 };
+
+test "audio storage is explicit for PCM and VADPCM" {
+    try (AudioOptions{}).validate();
+    try (AudioOptions{ .storage = .rom }).validate();
+    try (AudioOptions{ .compression = .vadpcm, .storage = .rom }).validate();
+    try std.testing.expectError(error.CompressionRequiresRom, (AudioOptions{ .compression = .vadpcm }).validate());
+    try std.testing.expectError(error.CompressionRequiresRom, (AudioOptions{ .compression = .vadpcm, .storage = .resident }).validate());
+}

@@ -295,7 +295,7 @@ pub fn generate(allocator: std.mem.Allocator, model: ConvertedModel, document: D
     try emitBatchData(allocator, &data, &source, model.batches);
     try emitImages(allocator, &data, &source, document, binary);
     try rig.emit(allocator, &source, document, binary, model.scale);
-    try emitParts(allocator, &source, model.batches, name);
+    try emitParts(allocator, &source, model.batches, name, document);
     try emitMaterials(allocator, &source, document, binary);
     return .{ .data = try data.toOwnedSlice(allocator), .source = try source.toOwnedSlice(allocator) };
 }
@@ -492,7 +492,7 @@ pub fn emitImagesWithStorage(allocator: std.mem.Allocator, data: *std.ArrayList(
     }
 }
 
-fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: []const Batch, name: []const u8) !void {
+fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: []const Batch, name: []const u8, document: Document) !void {
     try source.appendSlice(allocator, "const parts = [_]Part{\n");
     try emitPartEntries(allocator, source, batches);
     try appendFormat(allocator, source,
@@ -500,13 +500,16 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
         \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts, .nodes = &nodes, .skins = &skins, .animations = &animations }}, .materials = .{{}} }};
         \\pub const ModelAsset = n64.graphics.model.Asset(Materials);
         \\pub const Materials = struct {{
-        \\    pub fn apply(self: @This(), context: anytype, index: u16) void {{
-        \\        self.bind(context, index, self.get(index));
-        \\    }}
-        \\    pub fn bind(_: @This(), context: anytype, index: u16, material: n64.graphics.model.Material) void {{
-        \\        switch (index) {{
-        \\
     , .{name});
+    try @import("material_ids.zig").emit(allocator, source, document.materials);
+    try source.appendSlice(allocator,
+        \\    pub fn apply(self: @This(), context: anytype, index: u16) void {
+        \\        self.bind(context, index, self.get(index));
+        \\    }
+        \\    pub fn bind(_: @This(), context: anytype, index: u16, material: n64.graphics.model.Material) void {
+        \\        switch (index) {
+        \\
+    );
 }
 
 pub fn emitPartEntries(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: []const Batch) !void {

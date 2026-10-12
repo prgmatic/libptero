@@ -3,6 +3,12 @@ const assets = @import("assets");
 const std = @import("std");
 
 comptime {
+    if (assets.fixture_model.materialIndex("fixture") != 0) @compileError("resident material identifier was not generated");
+    if (assets.fixture_rom_model.materialIndex("fixture") != 0) @compileError("ROM material identifier was not generated");
+    if (assets.fixture_model.materialIndex("trim \"blue\" café") != 1) @compileError("escaped source material name was not preserved");
+    if (assets.fixture_rom_model.materialIndex("trim \"blue\" café") != 1) @compileError("ROM source material name was not preserved");
+    const overridden = assets.fixture_model.withOverrides(.{.{ .index = assets.fixture_model.materialIndex("fixture"), .fog = false }});
+    if (overridden.withOverrides(.{.{ .no_light = true }}).materialIndex("fixture") != 0) @compileError("overrides lost material identifiers");
     if (@TypeOf(assets.fixture_ci4).format != .color_indexed) @compileError("indexed asset was not generated");
     if (assets.fixture_ci4.palette.len == 0 or assets.fixture_ci4.palette.len > 16) @compileError("CI4 palette was not generated");
     if (assets.fixture_ci4.texel_data.len != 4096) @compileError("CI4 texels were not packed");
@@ -59,7 +65,12 @@ pub fn main() !void {
     var viewport = n64.graphics.geometry.Viewport.init(8, 8);
     renderer.geometry.attachViewport(&viewport);
     renderer.geometry.drawModel(model);
-    renderer.geometry.drawModel((try rom_model.view()).withOverrides(.{.{ .texture = assets.fixture_font.atlases[0] }}));
+    const loaded_model = try rom_model.view();
+    const loaded_id = loaded_model.materialIndex("fixture");
+    if (loaded_id != assets.fixture_rom_model.materialIndex("fixture")) return error.MaterialIdentifierMismatch;
+    const loaded_override = loaded_model.withOverrides(.{.{ .index = loaded_id, .texture = assets.fixture_font.atlases[0] }});
+    if (loaded_override.materialIndex("fixture") != loaded_id) return error.MaterialIdentifierMismatch;
+    renderer.geometry.drawModel(loaded_override);
     if ((try rom_texture.view()).width == 0 or (try rom_ci.view()).palette.len == 0) return error.InvalidLoadedTexture;
     renderer.rdp.render.setState(.textured_sprite);
     var text: [16]u8 = undefined;

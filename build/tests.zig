@@ -8,7 +8,14 @@ pub fn addConsumerFixtureTests(b: *std.Build) void {
 
     const full = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
     full.setCwd(fixture_dir);
-    b.step("test-consumer", "Build the external consumer fixture").dependOn(&full.step);
+    const consumer = b.step("test-consumer", "Build the external consumer fixture");
+    consumer.dependOn(&full.step);
+    const invalid_audio = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "-Dinvalid-vadpcm" });
+    invalid_audio.setCwd(fixture_dir);
+    invalid_audio.has_side_effects = true;
+    invalid_audio.expectExitCode(1);
+    invalid_audio.expectStdErrMatch("audio asset 'invalid': VADPCM requires .storage = .rom");
+    consumer.dependOn(&invalid_audio.step);
 
     const minimal = b.addSystemCommand(&.{ b.graph.zig_exe, "build", "-Dno-assets" });
     minimal.setCwd(fixture_dir);
@@ -17,6 +24,7 @@ pub fn addConsumerFixtureTests(b: *std.Build) void {
 
 pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8) void {
     const test_step = b.step("test", "Run host tool tests");
+    addMaterialIdentifierChecks(b, test_step);
     const deploy_tests = b.addTest(.{ .name = "deploy-tests", .root_module = @import("tools.zig").deployModule(b, b.path(".")) });
     instrumentTests(deploy_tests, coverage, coverage_runtime);
     test_step.dependOn(&b.addRunArtifact(deploy_tests).step);
@@ -184,6 +192,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
         .{ "elf-pack-tests", "tools/build/elf_pack.zig" },
         .{ "png-decoder-tests", "tools/imgparse/png.zig" },
         .{ "runtime-host-tests", "src/n64/n64.zig" },
+        .{ "asset-options-tests", "build/assets.zig" },
         .{ "zsp-tests", "tools/zsp/tests.zig" },
         .{ "ucode-tests", "src/n64/rsp/ucode_tests.zig" },
         .{ "command-queue-tests", "src/n64/rsp/command_queue_tests.zig" },
@@ -332,4 +341,22 @@ fn isOverlay(name: []const u8) bool {
         if (std.mem.eql(u8, name, overlay)) return true;
     }
     return false;
+}
+
+fn addMaterialIdentifierChecks(b: *std.Build, test_step: *std.Build.Step) void {
+    const n64 = b.createModule(.{ .root_source_file = b.path("src/n64/n64.zig"), .target = b.graph.host });
+    inline for (.{ .{ "missing", "UnknownMaterialName" }, .{ "body", "AmbiguousMaterialName" } }) |check| {
+        const source = b.addWriteFiles().add(b.fmt("material-id-{s}.zig", .{check[0]}), b.fmt(
+            \\const n64 = @import("n64");
+            \\const Provider = struct {{ pub const material_names = [_][]const u8{{ "body", "body" }}; }};
+            \\comptime {{ _ = @as(n64.graphics.model.Asset(Provider), undefined).materialIndex("{s}"); }}
+        , .{check[0]}));
+        const invalid = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = source,
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "n64", .module = n64 }},
+        }) });
+        invalid.expect_errors = .{ .contains = b.fmt("material '{s}': {s}; use a unique nonempty source name or a numeric index", .{ check[0], check[1] }) };
+        test_step.dependOn(&invalid.step);
+    }
 }

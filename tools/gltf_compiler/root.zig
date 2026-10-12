@@ -16,6 +16,7 @@ pub const generateWithStorage = compiler.generateWithStorage;
 
 test {
     _ = compiler;
+    _ = @import("material_ids.zig");
     _ = @import("rigid_skin.zig");
     _ = @import("rig.zig");
     _ = @import("node_transforms.zig");

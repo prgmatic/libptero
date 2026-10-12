@@ -69,10 +69,20 @@ fn models() !void {
     var fixed = std.heap.FixedBufferAllocator.init(&heap_storage);
     const allocator = fixed.allocator();
     inline for (.{ "model", "weighted", "joint" }) |name| {
-        var loaded = try @field(assets, name ++ "_rom").init(allocator);
+        const source = @field(assets, name ++ "_rom");
+        if (comptime std.mem.eql(u8, name, "model")) try testing.expectEqual(@as(u16, 0), source.materialIndex("triangle"));
+        var loaded = try source.init(allocator);
         try loaded.load(timeout);
         const value = try loaded.view();
         const reference = @field(assets, name ++ "_resident");
+        if (comptime std.mem.eql(u8, name, "model")) {
+            const id = value.materialIndex("triangle");
+            try testing.expectEqual(source.materialIndex("triangle"), id);
+            try testing.expectEqual(reference.materialIndex("triangle"), id);
+            const overridden = value.withOverrides(.{.{ .index = id, .fog = false }});
+            try testing.expectEqual(id, overridden.withModel(value.model).materialIndex("triangle"));
+            try testing.expect(overridden.material(id).fog == false);
+        }
         try testing.expectEqual(reference.model.parts.len, value.model.parts.len);
         for (value.model.parts, reference.model.parts) |part, expected| {
             try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(expected.vertices), std.mem.sliceAsBytes(part.vertices)));

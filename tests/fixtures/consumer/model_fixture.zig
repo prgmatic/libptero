@@ -4,7 +4,7 @@ const std = @import("std");
 /// without checking generated binary assets into the repository.
 pub fn create(b: *std.Build) std.Build.LazyPath {
     const json =
-        \\{"asset":{"version":"2.0"},"buffers":[{"byteLength":42}],"bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]}],"materials":[{"name":"fixture","doubleSided":true}]}
+        \\{"asset":{"version":"2.0"},"buffers":[{"byteLength":42}],"bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]}],"materials":[{"name":"fixture","doubleSided":true},{"name":"trim \"blue\" café","doubleSided":true}]}
     ;
     const json_len = std.mem.alignForward(usize, json.len, 4);
     const binary_len = 44;

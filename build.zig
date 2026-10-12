@@ -137,12 +137,12 @@ pub fn build(b: *std.Build) void {
             }
         }
         const wave = wav_fixture.fixture(fixture[1], fixture[2], &bytes, b.allocator) catch @panic("OOM");
-        audio_assets.addAudio(fixture[0] ++ "_vadpcm", b.addWriteFiles().add(fixture[0] ++ "-vadpcm.wav", wave), .{ .loop = true, .compression = .vadpcm });
+        audio_assets.addAudio(fixture[0] ++ "_vadpcm", b.addWriteFiles().add(fixture[0] ++ "-vadpcm.wav", wave), .{ .loop = true, .compression = .vadpcm, .storage = .rom });
         audio_assets.addAudio(fixture[0] ++ "_stream", b.addWriteFiles().add(fixture[0] ++ "-stream.wav", wave), .{ .loop = true, .storage = .rom });
         audio_assets.addAudio(fixture[0], b.addWriteFiles().add(fixture[0] ++ ".wav", wave), .{ .loop = true });
     }
     const finite_wave = wav_fixture.fixture(16, 1, &([_]u8{ 0, 4 } ** 64), b.allocator) catch @panic("OOM");
-    audio_assets.addAudio("finite_vadpcm", b.addWriteFiles().add("finite-vadpcm.wav", finite_wave), .{ .compression = .vadpcm });
+    audio_assets.addAudio("finite_vadpcm", b.addWriteFiles().add("finite-vadpcm.wav", finite_wave), .{ .compression = .vadpcm, .storage = .rom });
     audio_assets.addAudio("finite_stream", b.addWriteFiles().add("finite-stream.wav", finite_wave), .{ .storage = .rom });
     audio_assets.addAudio("finite", b.addWriteFiles().add("finite.wav", finite_wave), .{});
     var compressed_long_pcm: [1201 * 4]u8 = undefined;
@@ -151,7 +151,7 @@ pub fn build(b: *std.Build) void {
         std.mem.writeInt(i16, compressed_long_pcm[frame * 4 + 2 ..][0..2], @intCast(@as(i32, @intCast(frame % 157)) * 350 - 27000), .little);
     }
     const compressed_wave = wav_fixture.fixture(16, 2, &compressed_long_pcm, b.allocator) catch @panic("OOM");
-    audio_assets.addAudio("long_vadpcm", b.addWriteFiles().add("long-vadpcm.wav", compressed_wave), .{ .compression = .vadpcm, .loop = true });
+    audio_assets.addAudio("long_vadpcm", b.addWriteFiles().add("long-vadpcm.wav", compressed_wave), .{ .compression = .vadpcm, .storage = .rom, .loop = true });
     const test_rom = sdk.addRom(.{
         .name = "tests",
         .title = "Libptero Tests",

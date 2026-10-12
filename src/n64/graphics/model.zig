@@ -29,6 +29,12 @@ pub fn Asset(comptime Materials: type) type {
     return struct {
         model: Model,
         materials: Materials,
+        pub const material_names = if (@hasDecl(Materials, "material_names")) Materials.material_names else [_][]const u8{};
+
+        /// Resolve an exact source material name at compile time, without runtime lookup.
+        pub fn materialIndex(_: @This(), comptime name: []const u8) u16 {
+            return @import("material_ids.zig").index(&material_names, name);
+        }
 
         /// Read native material metadata without drawing or binding it.
         pub fn material(self: @This(), index: u16) Material {
@@ -278,4 +284,8 @@ test "asset overrides preserve embedded bindings, compose, and bind typed textur
     const replacement: Model = .{ .parts = &.{}, .animations = &.{.{ .name = "idle", .duration = 1, .tracks = &.{} }} };
     try std.testing.expect(overridden.withModel(replacement).model.findAnimation("idle") != null);
     try std.testing.expect(replacement.findAnimation("missing") == null);
+}
+
+test {
+    _ = @import("material_ids.zig");
 }

@@ -11,6 +11,12 @@ pub fn TypedAsset(comptime Definition: type) type {
         pub const Value = Definition.Value;
         asset: rom.Asset,
 
+        /// Model material identifiers are available before the cartridge payload is loaded.
+        pub fn materialIndex(_: @This(), comptime name: []const u8) u16 {
+            if (!@hasDecl(Value, "materialIndex")) @compileError("materialIndex requires a typed model asset");
+            return Value.materialIndex(undefined, name);
+        }
+
         pub fn storageSize(_: @This()) usize {
             return std.mem.alignForward(usize, Definition.byte_len, 16);
         }

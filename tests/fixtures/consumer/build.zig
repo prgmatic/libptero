@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
         .console_font = !override_handlers,
     });
     var assets = sdk.createAssets("assets");
+    if (b.option(bool, "invalid-vadpcm", "Exercise the SDK's incompatible audio-options diagnostic") orelse false) {
+        assets.addAudio("invalid", b.path("missing.wav"), .{ .compression = .vadpcm });
+    }
     assets.embedFile("raw_data", b.path("assets/raw.bin"));
     const generated = b.addWriteFiles().add("generated.bin", "generated asset");
     assets.embedGeneratedFile("generated_data", generated);

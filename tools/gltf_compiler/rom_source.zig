@@ -55,6 +55,9 @@ fn emitBinding(allocator: std.mem.Allocator, source: *std.ArrayList(u8), binding
 fn emitMaterialPrefix(allocator: std.mem.Allocator, source: *std.ArrayList(u8), document: compiler.Document) !void {
     try source.appendSlice(allocator,
         \\pub const Materials = struct {
+    );
+    try @import("material_ids.zig").emit(allocator, source, document.materials);
+    try source.appendSlice(allocator,
         \\    data: []align(16) const u8,
         \\    content_id: u64,
         \\    pub fn apply(self: @This(), context: anytype, index: u16) void {

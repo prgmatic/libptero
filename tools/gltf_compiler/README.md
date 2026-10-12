@@ -50,6 +50,27 @@ updates that draw flag without replacing the other flags. `second_texture`
 binds a texture pair. Later entries win; omitting `index` affects all materials.
 `withModel(instance.model())` retains bindings for mutable/skinned geometry.
 
+Material identifiers resolve exact glTF source names at compile time:
+
+```zig
+const body = assets.robot.materialIndex("body");
+const robot = assets.robot.withOverrides(.{.{ .index = body, .texture = assets.paint }});
+const material = robot.material(body);
+```
+
+The result is the native `u16` material index; there is no runtime name lookup,
+allocation, or changed draw ABI. Overrides (including nested overrides) and
+`withModel` preserve identifiers. Typed ROM model handles expose `materialIndex`
+before loading, and their loaded views expose the same identifiers.
+
+Names are case-sensitive and preserved exactly, including spaces, punctuation,
+and UTF-8. Missing, empty, or duplicate-name lookup is a compile error. Unnamed
+and duplicate-named materials still convert and remain addressable by numeric
+index; give a material a unique source name to use an identifier. Identifiers
+follow source material reordering automatically, so game code does not hardcode
+exporter indices. Custom providers may define `pub const material_names` as an
+array of source-name strings in numeric material order to support this API.
+
 Pass a custom provider through `context.drawModelWithMaterials(asset.model, provider)`;
 it implements `apply(context, material_index)`. Asset values contain borrowed geometry
 and their provider, with no drawing methods or hidden renderer ownership.

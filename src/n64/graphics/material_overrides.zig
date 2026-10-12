@@ -8,6 +8,7 @@ pub fn Provider(comptime Base: type, comptime Entries: type) type {
     return struct {
         base: Base,
         entries: Entries,
+        pub const material_names = if (@hasDecl(Base, "material_names")) Base.material_names else [_][]const u8{};
 
         pub fn get(self: @This(), index: u16) Material {
             var material = self.base.get(index);
