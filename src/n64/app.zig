@@ -6,6 +6,15 @@ const rsp = @import("rsp/rsp.zig");
 const joypad = @import("io/joypad.zig");
 const time = @import("time.zig");
 const math = @import("math.zig");
+const passes = @import("app/passes.zig");
+const pass_options = @import("app/pass_options.zig");
+pub const GeometryOptions = pass_options.GeometryOptions;
+pub const GeometryPipeline = pass_options.GeometryPipeline;
+pub const OverlayOptions = pass_options.OverlayOptions;
+pub const SpriteOptions = pass_options.SpriteOptions;
+pub const Lighting = pass_options.Lighting;
+pub const Light = pass_options.Light;
+pub const Fog = pass_options.Fog;
 const Storage = @import("app/frame_storage.zig").Storage;
 
 pub const Config = struct {
@@ -13,6 +22,9 @@ pub const Config = struct {
     /// Independent copied transforms and camera snapshots per frame.
     transforms: usize = 128,
     cameras: usize = 4,
+    /// Optional upload budgets, measured in matrices and packed vertex pairs.
+    pose_matrices: usize = 0,
+    vertex_pairs: usize = 0,
 };
 pub const Options = struct {
     display: display_api.Options = .{ .framebuffer_access = .gpu_only },
@@ -41,11 +53,12 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
         display: Backend.Display = undefined,
         depth: if (config.geometry) Backend.Depth else void = undefined,
         controllers: Backend.Controllers = undefined,
-        uploads: Storage(if (config.geometry) config.transforms else 0, if (config.geometry) config.cameras else 0) = .{},
+        uploads: Storage(if (config.geometry) config.transforms else 0, if (config.geometry) config.cameras else 0, if (config.geometry) config.pose_matrices else 0, if (config.geometry) config.vertex_pairs else 0) = .{},
         options: Options = .{},
         timer: Backend.Timer = undefined,
         state: enum { idle, recording, submitted } = .idle,
         generation: u64 = 0,
+        pass_generation: u64 = 0,
         acquired: Backend.Display.Frame = undefined,
         completion: Backend.Completion = undefined,
         discard_pending: bool = false,
@@ -119,6 +132,9 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
             self.* = undefined;
         }
 
+        pub const GeometryPass = passes.GeometryPass(Self);
+        pub const OverlayPass = passes.OverlayPass(Self);
+
         pub const Frame = struct {
             app: *Self,
             generation: u64,
@@ -133,16 +149,19 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
                 if (self.app.state != .recording) return error.FrameSubmitted;
             }
 
-            /// Copy a camera into frame storage before the RSP borrows it.
+            /// Direct drawing compatibility API. Prefer beginGeometry for explicit state.
+            /// Invalidates pass handles; snapshots a camera before the RSP borrows it.
             pub fn setCamera(self: Frame, viewport: graphics.geometry.Viewport) !void {
                 if (!config.geometry) @compileError("setCamera requires App(.{ .geometry = true })");
                 try self.recording();
+                self.app.pass_generation +%= 1;
                 self.app.geometry.attachViewport(try self.app.uploads.camera(viewport));
             }
 
             pub fn drawModel(self: Frame, asset: anytype, transform: math.Mat4) !void {
                 if (!config.geometry) @compileError("drawModel requires App(.{ .geometry = true })");
                 try self.recording();
+                self.app.pass_generation +%= 1;
                 self.app.geometry.drawModelWithTransform(asset, try self.app.uploads.matrix(transform));
             }
 
@@ -150,23 +169,50 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
             pub fn drawModelBorrowed(self: Frame, asset: anytype, transform: *const math.FixedMat4) !void {
                 if (!config.geometry) @compileError("drawModelBorrowed requires geometry");
                 try self.recording();
+                self.app.pass_generation +%= 1;
                 self.app.geometry.drawModelWithTransform(asset, transform);
             }
 
-            /// Establish HUD state after geometry; call once before HUD draws.
-            pub fn beginOverlay(self: Frame) !void {
+            /// Start a geometry pass. Validate capacity before invalidating the previous pass.
+            pub fn beginGeometry(self: Frame, options: GeometryOptions) !GeometryPass {
+                if (!config.geometry) @compileError("beginGeometry requires App(.{ .geometry = true })");
+                try self.recording();
+                if (options.lighting.lights.len > graphics.geometry.max_lights) return error.TooManyLights;
+                const camera = try self.app.uploads.camera(options.camera);
+                self.app.geometry.syncTriangles();
+                self.app.pass_generation +%= 1;
+                self.app.geometry.attachViewport(camera);
+                options.lighting.apply(&self.app.geometry);
+                options.pipeline.apply(&self.app.geometry);
+                return .{ .frame = self, .generation = self.app.pass_generation, .pipeline = options.pipeline };
+            }
+
+            /// Start a 2D pass, draining pending triangles before changing pipeline state.
+            pub fn beginOverlay(self: Frame, options: OverlayOptions) !OverlayPass {
                 try self.recording();
                 if (config.geometry) self.app.geometry.syncTriangles();
-                self.app.renderer.render.setState(.textured_sprite);
+                self.app.pass_generation +%= 1;
+                self.app.renderer.render.setState(options.state());
+                return .{ .frame = self, .generation = self.app.pass_generation, .options = options };
+            }
+
+            /// Snapshot packed dynamic vertices. Point .dynamic model parts at the result.
+            /// The source can be reused immediately; the returned slice expires with the frame.
+            pub fn uploadVertices(self: Frame, vertices: []const graphics.geometry.VertexPair) ![]const graphics.geometry.VertexPair {
+                if (!config.geometry) @compileError("uploadVertices requires geometry");
+                try self.recording();
+                return self.app.uploads.vertexPairs(vertices);
             }
 
             pub fn drawSprite(self: Frame, image: anytype, x: f32, y: f32, options: graphics.rdp.SpriteDrawOptions) !void {
                 try self.recording();
+                self.app.pass_generation +%= 1;
                 self.app.renderer.render.drawSprite(image, x, y, options);
             }
 
             pub fn drawText(self: Frame, font: graphics.font.Font, x: f32, y: f32, text: []const u8, options: graphics.font.TextOptions) !void {
                 try self.recording();
+                self.app.pass_generation +%= 1;
                 _ = try font.draw(&self.app.renderer.render, x, y, text, options);
             }
 

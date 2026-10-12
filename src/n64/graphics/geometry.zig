@@ -267,6 +267,18 @@ pub const Context = struct {
         @import("model.zig").drawWithTransform(self, asset, matrix);
     }
 
+    /// Record a typed asset's immutable geometry and material commands.
+    pub fn recordModel(self: *Context, recorded: *RecordedModel, asset: anytype) void {
+        recorded.record(self, asset.model, asset.materials);
+    }
+
+    /// Replay recorded commands with a borrowed transform, restoring the matrix stack.
+    pub fn drawRecordedWithTransform(self: *Context, recorded: *const RecordedModel, matrix: *const math.FixedMat4) void {
+        self.pushMatrix(matrix);
+        recorded.draw(self);
+        self.popMatrix();
+    }
+
     pub fn setAmbientLight(self: *Context, color: Rgba32) void {
         self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, rsp.programs.geometry_overlay_symbols.ambient_color, &.{ @as(u32, @bitCast(color)), 0, 0 });
     }
