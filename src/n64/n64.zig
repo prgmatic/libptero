@@ -1,4 +1,4 @@
-pub const app = @import("app.zig");
+pub const context = @import("context.zig");
 pub const debug = @import("debug.zig");
 pub const io = @import("io.zig");
 pub const interfaces = @import("interfaces.zig");
@@ -12,7 +12,7 @@ pub const rom = @import("rom.zig");
 
 test {
     _ = @import("math_tests.zig");
-    _ = app;
+    _ = context;
     _ = debug.profiler;
     _ = debug.everdrive;
     _ = debug.is_viewer;

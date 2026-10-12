@@ -1,5 +1,5 @@
 const std = @import("std");
-const app = @import("../app.zig");
+const context = @import("../context.zig");
 const graphics = @import("../graphics.zig");
 const math = @import("../math.zig");
 
@@ -140,7 +140,7 @@ const Backend = struct {
 };
 
 test "frame tokens borrow caller buffers and reject duplicate acquire and stale copies" {
-    var game: app.testing.create(.{ .geometry = true }, Backend) = undefined;
+    var game: context.testing.create(.{ .geometry = true }, Backend) = undefined;
     try game.init(std.testing.failing_allocator, .{});
     const frame = try game.beginFrame(.{});
     try std.testing.expectEqual(@as(f32, 0.25), frame.delta);
@@ -167,7 +167,7 @@ test "frame tokens borrow caller buffers and reject duplicate acquire and stale 
 }
 
 test "presentation timeouts preserve the submission and caller-buffer lifetime" {
-    var game: app.testing.create(.{ .geometry = true }, Backend) = undefined;
+    var game: context.testing.create(.{ .geometry = true }, Backend) = undefined;
     try game.init(std.testing.failing_allocator, .{});
     const frame = try game.beginFrame(.{});
     var transform = math.FixedMat4.identity;
@@ -187,8 +187,8 @@ test "presentation timeouts preserve the submission and caller-buffer lifetime" 
     try game.deinit(std.testing.failing_allocator);
 }
 
-test "2D app can drain an abandoned frame" {
-    var game: app.testing.create(.{}, Backend) = undefined;
+test "2D context can drain an abandoned frame" {
+    var game: context.testing.create(.{}, Backend) = undefined;
     try std.testing.expectError(error.InvalidDelta, game.init(std.testing.failing_allocator, .{ .max_delta = 0 }));
     try game.init(std.testing.failing_allocator, .{ .input = false });
     const frame = try game.beginFrame(.{});
@@ -200,14 +200,14 @@ test "2D app can drain an abandoned frame" {
 }
 
 test "passes borrow cameras, reset material state and reject earlier handles" {
-    var game: app.testing.create(.{ .geometry = true }, Backend) = undefined;
+    var game: context.testing.create(.{ .geometry = true }, Backend) = undefined;
     try game.init(std.testing.failing_allocator, .{});
     const frame = try game.beginFrame(.{});
     var camera: graphics.geometry.Viewport = .init(320, 240);
     var second_camera: graphics.geometry.Viewport = .init(640, 240);
     var transform = math.FixedMat4.identity;
-    const lights = [_]app.Light{.{ .directional = .{ .direction = .init(1, -1, 1) } }};
-    var pipeline: app.GeometryPipeline = .{};
+    const lights = [_]context.Light{.{ .directional = .{ .direction = .init(1, -1, 1) } }};
+    var pipeline: context.GeometryPipeline = .{};
     pipeline.state.modes.antialias_en = false;
     const world = try frame.beginGeometry(.{ .camera = &camera, .lighting = .{ .lights = &lights }, .pipeline = pipeline });
     try std.testing.expectEqual(&camera, game.geometry.camera.?);
@@ -219,7 +219,7 @@ test "passes borrow cameras, reset material state and reject earlier handles" {
     try world.drawModel({}, &transform);
     try std.testing.expectEqualDeep(pipeline.state, game.renderer.render.getState());
     try std.testing.expect(!game.geometry.fog_enabled);
-    const too_many = [_]app.Light{.{ .directional = .{ .direction = .init(0, 1, 0) } }} ** (graphics.geometry.max_lights + 1);
+    const too_many = [_]context.Light{.{ .directional = .{ .direction = .init(0, 1, 0) } }} ** (graphics.geometry.max_lights + 1);
     const before_failure = game.renderer.render.cmd_queue.queue.index;
     try std.testing.expectError(error.TooManyLights, frame.beginGeometry(.{ .camera = &camera, .lighting = .{ .lights = &too_many } }));
     try std.testing.expectEqual(before_failure, game.renderer.render.cmd_queue.queue.index);
@@ -245,7 +245,7 @@ fn emptyFont() graphics.font.Font {
 }
 
 test "overlay isolates font state and multiplies sprite tint alpha without reloading textures" {
-    var game: app.testing.create(.{}, Backend) = undefined;
+    var game: context.testing.create(.{}, Backend) = undefined;
     try game.init(std.testing.failing_allocator, .{});
     const frame = try game.beginFrame(.{});
     const hud = try frame.beginOverlay(.{});
@@ -259,7 +259,7 @@ test "overlay isolates font state and multiplies sprite tint alpha without reloa
     try hud.drawText(font, 0, 0, "", .{});
     try std.testing.expect(game.renderer.render.getModes().antialias_en);
     try hud.drawSprite(image, .{});
-    try std.testing.expectEqualDeep((app.OverlayOptions{}).state().combine, game.renderer.render.getState().combine);
+    try std.testing.expectEqualDeep((context.OverlayOptions{}).state().combine, game.renderer.render.getState().combine);
     try std.testing.expect(!game.renderer.render.getModes().antialias_en);
     try std.testing.expect(!game.renderer.render.getModes().z_compare_en);
     try std.testing.expectEqual(tex_count, game.renderer.render.tex_cache_len);
@@ -278,7 +278,7 @@ test "overlay isolates font state and multiplies sprite tint alpha without reloa
 }
 
 test "recorded draws and poses borrow final buffers through timeout recovery" {
-    var game: app.testing.create(.{ .geometry = true }, Backend) = undefined;
+    var game: context.testing.create(.{ .geometry = true }, Backend) = undefined;
     try game.init(std.testing.failing_allocator, .{});
     const frame = try game.beginFrame(.{});
     var camera: graphics.geometry.Viewport = .init(320, 240);

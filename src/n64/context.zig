@@ -6,8 +6,8 @@ const rsp = @import("rsp/rsp.zig");
 const joypad = @import("io/joypad.zig");
 const time = @import("time.zig");
 const math = @import("math.zig");
-const passes = @import("app/passes.zig");
-const pass_options = @import("app/pass_options.zig");
+const passes = @import("context/passes.zig");
+const pass_options = @import("context/pass_options.zig");
 pub const GeometryOptions = pass_options.GeometryOptions;
 pub const GeometryPipeline = pass_options.GeometryPipeline;
 pub const OverlayOptions = pass_options.OverlayOptions;
@@ -31,12 +31,12 @@ pub const FrameOptions = struct {
 
 /// Initialize in persistent storage; this owner and its components must not move.
 /// Allocates display/depth only at init. Frame operations never heap allocate.
-/// Audio can borrow &app.runtime and must detach before app.deinit(allocator).
-pub fn App(comptime config: Config) type {
-    return AppImpl(config, Hardware);
+/// Audio can borrow &context.runtime and must detach before context.deinit(allocator).
+pub fn Context(comptime config: Config) type {
+    return ContextImpl(config, Hardware);
 }
 
-fn AppImpl(comptime config: Config, comptime Backend: type) type {
+fn ContextImpl(comptime config: Config, comptime Backend: type) type {
     return struct {
         const Self = @This();
         pub const Pixel = graphics.color.Rgba16;
@@ -90,7 +90,7 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
             self.renderer.render.setState(if (config.geometry) .opaque_geometry else .textured_sprite);
             if (self.options.input) self.controllers.poll();
             return .{
-                .app = self,
+                .context = self,
                 .generation = self.generation,
                 .input = self.controllers.get(.one),
                 .delta = @min(self.timer.lap().seconds(), self.options.max_delta),
@@ -127,92 +127,92 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
         pub const OverlayPass = passes.OverlayPass(Self);
 
         pub const Frame = struct {
-            app: *Self,
+            context: *Self,
             generation: u64,
             input: joypad.Snapshot,
             delta: f32,
 
             fn validate(self: Frame) !void {
-                if (self.generation != self.app.generation or self.app.state == .idle) return error.InvalidFrame;
+                if (self.generation != self.context.generation or self.context.state == .idle) return error.InvalidFrame;
             }
             fn recording(self: Frame) !void {
                 try self.validate();
-                if (self.app.state != .recording) return error.FrameSubmitted;
+                if (self.context.state != .recording) return error.FrameSubmitted;
             }
 
             /// Direct drawing compatibility API. Prefer beginGeometry for explicit state.
             /// Invalidates pass handles; borrows the camera until completion.
             pub fn setCamera(self: Frame, viewport: *const graphics.geometry.Viewport) !void {
-                if (!config.geometry) @compileError("setCamera requires App(.{ .geometry = true })");
+                if (!config.geometry) @compileError("setCamera requires Context(.{ .geometry = true })");
                 try self.recording();
-                self.app.pass_generation +%= 1;
-                self.app.geometry.attachViewport(viewport);
+                self.context.pass_generation +%= 1;
+                self.context.geometry.attachViewport(viewport);
             }
 
             pub fn drawModel(self: Frame, asset: anytype, transform: *const math.FixedMat4) !void {
-                if (!config.geometry) @compileError("drawModel requires App(.{ .geometry = true })");
+                if (!config.geometry) @compileError("drawModel requires Context(.{ .geometry = true })");
                 try self.recording();
-                self.app.pass_generation +%= 1;
-                self.app.geometry.drawModelWithTransform(asset, transform);
+                self.context.pass_generation +%= 1;
+                self.context.geometry.drawModelWithTransform(asset, transform);
             }
 
             /// Start a geometry pass. Camera matrices remain borrowed until completion.
             pub fn beginGeometry(self: Frame, options: GeometryOptions) !GeometryPass {
-                if (!config.geometry) @compileError("beginGeometry requires App(.{ .geometry = true })");
+                if (!config.geometry) @compileError("beginGeometry requires Context(.{ .geometry = true })");
                 try self.recording();
                 if (options.lighting.lights.len > graphics.geometry.max_lights) return error.TooManyLights;
-                self.app.geometry.syncTriangles();
-                self.app.pass_generation +%= 1;
-                self.app.geometry.attachViewport(options.camera);
-                options.lighting.apply(&self.app.geometry);
-                options.pipeline.apply(&self.app.geometry);
-                return .{ .frame = self, .generation = self.app.pass_generation, .pipeline = options.pipeline };
+                self.context.geometry.syncTriangles();
+                self.context.pass_generation +%= 1;
+                self.context.geometry.attachViewport(options.camera);
+                options.lighting.apply(&self.context.geometry);
+                options.pipeline.apply(&self.context.geometry);
+                return .{ .frame = self, .generation = self.context.pass_generation, .pipeline = options.pipeline };
             }
 
             /// Start a 2D pass, draining pending triangles before changing pipeline state.
             pub fn beginOverlay(self: Frame, options: OverlayOptions) !OverlayPass {
                 try self.recording();
-                if (config.geometry) self.app.geometry.syncTriangles();
-                self.app.pass_generation +%= 1;
-                self.app.renderer.render.setState(options.state());
-                return .{ .frame = self, .generation = self.app.pass_generation, .options = options };
+                if (config.geometry) self.context.geometry.syncTriangles();
+                self.context.pass_generation +%= 1;
+                self.context.renderer.render.setState(options.state());
+                return .{ .frame = self, .generation = self.context.pass_generation, .options = options };
             }
 
             pub fn drawSprite(self: Frame, image: anytype, x: f32, y: f32, options: graphics.rdp.SpriteDrawOptions) !void {
                 try self.recording();
-                self.app.pass_generation +%= 1;
-                self.app.renderer.render.drawSprite(image, x, y, options);
+                self.context.pass_generation +%= 1;
+                self.context.renderer.render.drawSprite(image, x, y, options);
             }
 
             pub fn drawText(self: Frame, font: graphics.font.Font, x: f32, y: f32, text: []const u8, options: graphics.font.TextOptions) !void {
                 try self.recording();
-                self.app.pass_generation +%= 1;
-                _ = try font.draw(&self.app.renderer.render, x, y, text, options);
+                self.context.pass_generation +%= 1;
+                _ = try font.draw(&self.context.renderer.render, x, y, text, options);
             }
 
             /// Submit once without waiting or changing VI. A copied Frame cannot
             /// draw afterward. Public renderer/context remain low-level escape hatches.
             pub fn submit(self: Frame) !Backend.Completion {
                 try self.recording();
-                self.app.completion = if (config.geometry) self.app.geometry.submit() else self.app.renderer.submit();
-                self.app.discard_pending = false;
-                self.app.state = .submitted;
-                return self.app.completion;
+                self.context.completion = if (config.geometry) self.context.geometry.submit() else self.context.renderer.submit();
+                self.context.discard_pending = false;
+                self.context.state = .submitted;
+                return self.context.completion;
             }
 
             pub fn present(self: Frame) !void {
                 try self.validate();
-                if (self.app.state == .recording) _ = try self.submit();
-                try self.app.finish();
+                if (self.context.state == .recording) _ = try self.submit();
+                try self.context.finish();
             }
 
             /// Commands can execute while being recorded. Drain them before
             /// releasing an abandoned frame; retry this call after a timeout.
             pub fn discard(self: Frame) !void {
                 try self.validate();
-                if (self.app.state == .recording) _ = try self.submit();
-                self.app.discard_pending = true;
-                try self.app.finish();
+                if (self.context.state == .recording) _ = try self.submit();
+                self.context.discard_pending = true;
+                try self.context.finish();
             }
         };
     };
@@ -230,8 +230,8 @@ const Hardware = struct {
 };
 
 test {
-    _ = @import("app/tests.zig");
+    _ = @import("context/tests.zig");
 }
 pub const testing = if (@import("builtin").is_test) struct {
-    pub const create = AppImpl;
+    pub const create = ContextImpl;
 } else struct {};

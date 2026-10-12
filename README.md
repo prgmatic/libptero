@@ -1,7 +1,7 @@
 # Libptero
 Libptero is a Nintendo 64 SDK written in Zig, with native generated assets, explicit memory ownership, and RSP/RDP rendering. It builds on ideas and code from libdragon and Tiny3D.
 
-Start with [Game loops and render passes](src/n64/app/README.md) for borrowed
+Start with [Game loops and render passes](src/n64/context/README.md) for borrowed
 geometry, explicit geometry/overlay state, sprites, and text, or
 [Runtime APIs](src/n64/README.md) for independently managed subsystems. The examples
 repository's `collect` game demonstrates movement, pause/restart, audio and HUD.

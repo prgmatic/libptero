@@ -1,24 +1,24 @@
 # Game loops and render passes
 
-`n64.app.App(.{})` owns an RGBA16 display and renderer. Add
+`n64.context.Context(.{})` owns an RGBA16 display and renderer. Add
 `.geometry = true` for geometry and a depth buffer. Audio can share its public
-`runtime`. Initialize the app **in place**, in persistent storage: the runtime
+`runtime`. Initialize the context **in place**, in persistent storage: the runtime
 and queues contain internal pointers.
 
 ```zig
 var memory: [1024 * 1024]u8 = undefined;
 var arena = std.heap.FixedBufferAllocator.init(&memory);
-var app: n64.app.App(.{ .geometry = true }) = undefined;
+var context: n64.context.Context(.{ .geometry = true }) = undefined;
 
 pub fn main() !void {
     n64.debug.init();
-    try app.init(arena.allocator(), .{});
+    try context.init(arena.allocator(), .{});
     var model_matrix: n64.math.FixedMat4 align(16) = .identity;
     var camera = n64.graphics.geometry.Viewport.init(320, 240);
     camera.setPerspective(n64.math.degreesToRadians(65), 1, 200);
     camera.lookAt(.init(0, 30, 80), .zero, .init(0, 1, 0));
     while (true) {
-        const frame = try app.beginFrame(.{ .clear_color = .black });
+        const frame = try context.beginFrame(.{ .clear_color = .black });
         const world = try frame.beginGeometry(.{
             .camera = &camera,
             .lighting = .{
@@ -94,9 +94,9 @@ while recording and may be immediately reused; `NoSpaceLeft` emits no commands.
 
 ## Borrowed geometry and recorded models
 
-The app allocates color buffers and, for 3D, one depth buffer at initialization.
+The context allocates color buffers and, for 3D, one depth buffer at initialization.
 Command storage is embedded, including two 64 KiB RDP buffers. Frame/pass methods
-allocate no heap memory. The app has no camera, transform, pose, or vertex upload
+allocate no heap memory. The context has no camera, transform, pose, or vertex upload
 pool and no capacity settings for those resources.
 
 `beginGeometry` borrows a `*const Viewport`. `drawModel` and `drawRecorded` borrow
@@ -123,7 +123,7 @@ Keep camera matrices, transforms, pose arrays, vertices, indices, textures, and
 recorded commands alive and unchanged while any queued work may read them.
 Recording can start RSP execution before `submit`. Starting another pass does
 not release earlier passes' source data. Reuse buffers only after successful
-render completion, usually `frame.present()` or `app.finish()`. A timeout keeps
+render completion, usually `frame.present()` or `context.finish()`. A timeout keeps
 the submission alive and **does not end the borrow**. Frame tokens validate
 command recording; they cannot detect mutation or destruction of caller buffers.
 
@@ -164,7 +164,7 @@ preserves contents. Depth clears default on for 3D.
 
 `frame.present()` submits if necessary, waits for both processors, and presents.
 For overlap, call `frame.submit()`, do independent CPU work or service
-`audio.Player`, then call `frame.present()` or `app.finish()`. Starting the next
+`audio.Player`, then call `frame.present()` or `context.finish()`. Starting the next
 frame also finishes an outstanding submission. There is one GPU submission in
 flight, with no additional in-flight fence or frame queue.
 
@@ -206,9 +206,9 @@ Geometry drawing now has one borrowing API:
 - Edit a mutable model's vertices directly instead of calling `uploadVertices`.
 
 The `*Borrowed` aliases, automatic snapshots, `uploads` field, and the `transforms`,
-`cameras`, `pose_matrices`, and `vertex_pairs` app options have been removed.
+`cameras`, `pose_matrices`, and `vertex_pairs` context options have been removed.
 `beginOverlay()` is `const hud = try frame.beginOverlay(.{})`; draw through `hud`.
 
 The lower-level renderer/context `beginFrame` still preserves pipeline state.
-The app's initial preset is for direct-state drawing. Pass options, rather
+The context's initial preset is for direct-state drawing. Pass options, rather
 than setters before `beginFrame`, determine the state used by pass drawing.
