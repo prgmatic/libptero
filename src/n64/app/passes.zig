@@ -16,15 +16,8 @@ pub fn GeometryPass(comptime App: type) type {
         generation: u64,
         pipeline: options.GeometryPipeline,
 
-        pub fn drawModel(self: @This(), asset: anytype, transform: math.Mat4) !void {
-            try validate(self.frame, self.generation);
-            const matrix = try self.frame.app.uploads.matrix(transform);
-            self.pipeline.apply(&self.frame.app.geometry);
-            self.frame.app.geometry.drawModelWithTransform(asset, matrix);
-        }
-
-        /// Borrow a persistent transform without copying. Keep it unchanged until completion.
-        pub fn drawModelBorrowed(self: @This(), asset: anytype, transform: *const math.FixedMat4) !void {
+        /// Borrow the fixed transform and asset payloads until completion.
+        pub fn drawModel(self: @This(), asset: anytype, transform: *const math.FixedMat4) !void {
             try validate(self.frame, self.generation);
             self.pipeline.apply(&self.frame.app.geometry);
             self.frame.app.geometry.drawModelWithTransform(asset, transform);
@@ -38,27 +31,15 @@ pub fn GeometryPass(comptime App: type) type {
             self.frame.app.geometry.recordModel(recorded, asset);
         }
 
-        pub fn drawRecorded(self: @This(), recorded: anytype, transform: math.Mat4) !void {
-            try validate(self.frame, self.generation);
-            const matrix = try self.frame.app.uploads.matrix(transform);
-            self.pipeline.apply(&self.frame.app.geometry);
-            self.frame.app.geometry.drawRecordedWithTransform(recorded, matrix);
-        }
-
-        pub fn drawRecordedBorrowed(self: @This(), recorded: anytype, transform: *const math.FixedMat4) !void {
+        /// Borrow the recorded commands and fixed transform until completion.
+        pub fn drawRecorded(self: @This(), recorded: anytype, transform: *const math.FixedMat4) !void {
             try validate(self.frame, self.generation);
             self.pipeline.apply(&self.frame.app.geometry);
             self.frame.app.geometry.drawRecordedWithTransform(recorded, transform);
         }
 
-        /// Snapshot fixed global bone matrices. The caller may immediately reuse the source.
+        /// Bind fixed global bone matrices without copying. Keep them unchanged until completion.
         pub fn setPose(self: @This(), matrices: []const math.FixedMat4) !void {
-            try validate(self.frame, self.generation);
-            self.frame.app.geometry.setPose(try self.frame.app.uploads.pose(matrices));
-        }
-
-        /// Bind an already persistent pose; its storage remains borrowed until completion.
-        pub fn setPoseBorrowed(self: @This(), matrices: []const math.FixedMat4) !void {
             try validate(self.frame, self.generation);
             if (matrices.len == 0) return error.EmptyPose;
             self.frame.app.geometry.setPose(matrices);

@@ -43,7 +43,8 @@ pub const GeometryPipeline = struct {
     }
 };
 pub const GeometryOptions = struct {
-    camera: graphics.geometry.Viewport,
+    /// Stable caller-owned viewport; its fixed matrices remain borrowed until completion.
+    camera: *const graphics.geometry.Viewport,
     lighting: Lighting = .{},
     pipeline: GeometryPipeline = .{},
 };

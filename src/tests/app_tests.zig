@@ -5,7 +5,7 @@ const testing = @import("assert.zig");
 const runner = @import("runner.zig");
 
 var storage: [560 * 1024]u8 = undefined;
-var app: n64.app.App(.{ .geometry = true, .transforms = 2, .cameras = 2, .pose_matrices = 2, .vertex_pairs = 16 }) = undefined;
+var app: n64.app.App(.{ .geometry = true }) = undefined;
 var player: n64.audio.Player = undefined;
 var scheduler: n64.rom.Scheduler = undefined;
 var asset_bytes: [1024]u8 align(16) = undefined;
@@ -13,7 +13,7 @@ const Slot = n64.rom.Slot(.{ .triangle = assets.model_rom, .joint = assets.joint
 var slot: Slot = .{};
 
 pub const tests = [_]runner.Test{
-    .{ .name = "App: frame uploads, voice handles and scheduled typed assets", .run = gameLoop },
+    .{ .name = "App: borrowed geometry, voice handles and scheduled typed assets", .run = gameLoop },
     .{ .name = "App: recorded/dynamic geometry and isolated sprite passes", .run = passRendering },
 };
 
@@ -44,17 +44,16 @@ fn gameLoop() !void {
     camera.setPerspective(n64.math.degreesToRadians(70), 1, 500);
     camera.lookAt(.init(0, 0, 250), .zero, .init(0, 1, 0));
     const frame = try app.beginFrame(.{ .clear_color = .green });
-    const world = try frame.beginGeometry(.{ .camera = camera });
-    try world.drawModel(assets.model_resident, .identity);
-    var transform = n64.math.Mat4.identity;
-    transform.m[3][0] = 10;
-    try world.drawModel(assets.model_resident, transform);
-    try testing.expectEqual(@as(f32, 0), app.uploads.matrices[0].get(3, 0));
-    try testing.expectEqual(@as(f32, 10), app.uploads.matrices[1].get(3, 0));
-    if (world.drawModel(assets.model_resident, .identity)) |_| return error.ExpectedStorageFull else |err| try testing.expect(err == error.FrameStorageFull);
+    const world = try frame.beginGeometry(.{ .camera = &camera });
+    var transforms: [2]n64.math.FixedMat4 align(16) = .{ .identity, .identity };
+    transforms[1].set(3, 0, 10);
+    try world.drawModel(assets.model_resident, &transforms[0]);
+    try world.drawModel(assets.model_resident, &transforms[1]);
+    try testing.expectEqual(@as(f32, 0), transforms[0].get(3, 0));
+    try testing.expectEqual(@as(f32, 10), transforms[1].get(3, 0));
     try slot.draw(&app.geometry);
     _ = try frame.submit();
-    if (world.drawModel(assets.model_resident, .identity)) |_| return error.ExpectedFrameSubmitted else |err| try testing.expect(err == error.FrameSubmitted);
+    if (world.drawModel(assets.model_resident, &transforms[0])) |_| return error.ExpectedFrameSubmitted else |err| try testing.expect(err == error.FrameSubmitted);
     _ = try player.service(.{});
     try frame.present();
     try slot.retire();
@@ -77,8 +76,12 @@ fn passRendering() !void {
     var camera = n64.graphics.geometry.Viewport.init(320, 240);
     camera.setPerspective(n64.math.degreesToRadians(70), 1, 500);
     camera.lookAt(.init(0, 0, 250), .zero, .init(0, 1, 0));
+    var dynamic = try n64.graphics.model.MutableModel.init(allocator, assets.model_resident.model);
+    defer dynamic.deinit(allocator);
+    dynamic.vertices(0).get(0).position[1] += 1;
+    const transform: n64.math.FixedMat4 align(16) = .identity;
     const frame = try app.beginFrame(.{ .clear_color = .blue });
-    const world = try frame.beginGeometry(.{ .camera = camera, .lighting = .{
+    const world = try frame.beginGeometry(.{ .camera = &camera, .lighting = .{
         .ambient = .fromBytes(128, 128, 128, 255),
         .lights = &.{
             .{ .directional = .{ .direction = .init(1, -1, 1) } },
@@ -88,15 +91,10 @@ fn passRendering() !void {
     var pose = [_]n64.math.FixedMat4{ .identity, .identity };
     try world.setPose(&pose);
     try world.recordModel(&recorded, assets.joint_resident);
-    try world.drawRecorded(&recorded, .identity);
-    var part = assets.model_resident.model.parts[0];
-    part.vertices = try frame.uploadVertices(part.vertices);
-    part.data_usage = .dynamic;
-    var model = assets.model_resident.model;
-    model.parts = (&part)[0..1];
-    try world.drawModel(assets.model_resident.withModel(model), .identity);
+    try world.drawRecorded(&recorded, &transform);
+    try world.drawModel(assets.model_resident.withModel(dynamic.model()), &transform);
     const hud = try frame.beginOverlay(.{});
-    if (world.drawRecorded(&recorded, .identity)) |_| return error.ExpectedInvalidPass else |err| try testing.expect(err == error.InvalidPass);
+    if (world.drawRecorded(&recorded, &transform)) |_| return error.ExpectedInvalidPass else |err| try testing.expect(err == error.InvalidPass);
     n64.cache.writebackData(&white_texels);
     const image: n64.graphics.image.ConstImage(n64.graphics.color.Rgba16) = .{ .width = 2, .height = 2, .texel_data = &white_texels };
     try hud.drawSprite(image, .{ .position = .{ 8, 8 }, .scale = .{ 4, 4 }, .tint = .red });

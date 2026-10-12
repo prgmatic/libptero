@@ -218,7 +218,7 @@ pub const Context = struct {
         self.* = undefined;
     }
 
-    pub fn attachViewport(self: *Context, viewport: *Viewport) void {
+    pub fn attachViewport(self: *Context, viewport: *const Viewport) void {
         self.view_matrix = viewport.camera_float;
         cache.writebackData(viewport);
         const normalized_w: u16 = @intFromFloat(@round(65535.0 * viewport.w_normalization));

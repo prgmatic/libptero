@@ -8,24 +8,25 @@ and queues contain internal pointers.
 ```zig
 var memory: [1024 * 1024]u8 = undefined;
 var arena = std.heap.FixedBufferAllocator.init(&memory);
-var app: n64.app.App(.{ .geometry = true, .transforms = 64, .cameras = 2 }) = undefined;
+var app: n64.app.App(.{ .geometry = true }) = undefined;
 
 pub fn main() !void {
     n64.debug.init();
     try app.init(arena.allocator(), .{});
+    var model_matrix: n64.math.FixedMat4 align(16) = .identity;
     var camera = n64.graphics.geometry.Viewport.init(320, 240);
     camera.setPerspective(n64.math.degreesToRadians(65), 1, 200);
     camera.lookAt(.init(0, 30, 80), .zero, .init(0, 1, 0));
     while (true) {
         const frame = try app.beginFrame(.{ .clear_color = .black });
         const world = try frame.beginGeometry(.{
-            .camera = camera,
+            .camera = &camera,
             .lighting = .{
                 .ambient = .fromBytes(100, 100, 100, 255),
                 .lights = &.{.{ .directional = .{ .direction = .init(-1, 1, 1) } }},
             },
         });
-        try world.drawModel(assets.model, .identity);
+        try world.drawModel(assets.model, &model_matrix);
         const hud = try frame.beginOverlay(.{});
         try hud.drawText(assets.font, 16, 20, "Hello!", .{});
         try frame.present();
@@ -41,8 +42,7 @@ are smaller introductions.
 
 A pass is a small borrowed handle. Starting another pass invalidates every copy
 of the previous handle (`InvalidPass`). Passes may alternate geometry/overlay;
-return to geometry by starting a new pass with a camera. A failed geometry-pass
-begin (camera capacity or too many lights) preserves the existing pass.
+return to geometry by starting a new pass with a camera. A geometry-pass begin rejected for too many lights preserves the existing pass.
 Submission rejects further drawing (`FrameSubmitted`); completing or discarding
 the frame invalidates its frame and pass handles (`InvalidFrame`).
 
@@ -62,7 +62,7 @@ Geometry state follows this precedence:
    therefore inherit pass defaults rather than a preceding model's values.
    Material order *within* a model retains the native material-provider contract.
 
-Camera snapshots are attached before lights are transformed. `Lighting.lights`
+The borrowed camera is attached before lights are transformed. `Lighting.lights`
 accepts directional and point lights in world space, up to
 `graphics.geometry.max_lights`. That slice is consumed during pass creation and
 can immediately be reused. Each new geometry pass establishes its own ambient
@@ -92,52 +92,52 @@ scale must fit the RDP's signed texture step. Rotation is not exposed by this
 rectangle path. Text Y is the first baseline. Formatting scratch is consumed
 while recording and may be immediately reused; `NoSpaceLeft` emits no commands.
 
-## Bounded uploads and recorded models
+## Borrowed geometry and recorded models
 
-Initialization allocates color buffers and, for 3D, one depth buffer using the
-supplied allocator. Frame/pass methods allocate no heap memory. Command storage
-is embedded, including two 64 KiB RDP buffers. The 2D app reserves no geometry
-upload arrays. The 3D defaults reserve 128 transforms and four camera snapshots.
-Pose and vertex uploads are opt-in:
+The app allocates color buffers and, for 3D, one depth buffer at initialization.
+Command storage is embedded, including two 64 KiB RDP buffers. Frame/pass methods
+allocate no heap memory. The app has no camera, transform, pose, or vertex upload
+pool and no capacity settings for those resources.
 
-```zig
-var app: n64.app.App(.{
-    .geometry = true,
-    .transforms = 64,
-    .cameras = 2,
-    .pose_matrices = 128, // Total fixed bone matrices copied per frame.
-    .vertex_pairs = 256, // Total packed VertexPair values copied per frame.
-}) = undefined;
-```
+`beginGeometry` borrows a `*const Viewport`. `drawModel` and `drawRecorded` borrow
+`*const FixedMat4` transforms. `setPose` borrows the caller's fixed global bone
+matrices for subsequent first-joint model draws. Vertices are borrowed from model
+parts, just as in the native geometry API. Bind a pose explicitly before drawing
+a skinned model; pass creation does not supply one.
 
-`world.drawModel` packs a transform into independent aligned frame storage.
-`world.setPose(fixed_global_bones)` copies a pose and binds it for subsequent
-first-joint model draws. Bind a pose explicitly before drawing a skinned model;
-pass creation does not supply one. `drawModelBorrowed` and `setPoseBorrowed`
-accept persistent storage without copying. Borrowed data must remain unchanged
-until completion. These paths retain the native geometry cache-writeback rules.
-
-`frame.uploadVertices(pairs)` copies packed vertices and returns a read-only
-slice valid through frame completion. Use that slice in a `.dynamic` model part
-so drawing writes it back before the RSP reads it:
+Generate data directly into its final storage. Convert a floating-point transform
+with `Mat4.writeFixed(&destination)` and a skeleton with
+`Skeleton.writeMatrices(destination)`. Neither needs an intermediate fixed-point
+snapshot or a second upload copy.
 
 ```zig
-var part = asset.model.parts[0];
-part.vertices = try frame.uploadVertices(deformed_pairs);
-part.data_usage = .dynamic;
-var model = asset.model;
-model.parts = (&part)[0..1];
-try world.drawModel(asset.withModel(model), transform);
+var matrices: [actor_count]n64.math.FixedMat4 align(16) = undefined;
+// Inside a frame, each actor uses its own stable slot:
+for (actors, 0..) |actor, index| {
+    actor.transform.writeFixed(&matrices[index]);
+    try world.drawModel(actor.asset, &matrices[index]);
+}
 ```
 
-Part descriptors are consumed while recording. Referenced vertices, strips,
-textures, and other payloads remain borrowed through completion. Uploading
-vertices does not copy indices or materials. For multiple parts, construct a
-caller-owned descriptor array in the same way. Frame upload exhaustion returns
-`FrameStorageFull` before that upload/draw emits commands. Source arrays can be
-reused after a successful copy. The app retains uploads through timeout recovery;
-`uploads.matrix_high_water`, `pose_high_water`, and `vertex_high_water` report
-peak usage across frames.
+Keep camera matrices, transforms, pose arrays, vertices, indices, textures, and
+recorded commands alive and unchanged while any queued work may read them.
+Recording can start RSP execution before `submit`. Starting another pass does
+not release earlier passes' source data. Reuse buffers only after successful
+render completion, usually `frame.present()` or `app.finish()`. A timeout keeps
+the submission alive and **does not end the borrow**. Frame tokens validate
+command recording; they cannot detect mutation or destruction of caller buffers.
+
+A synchronous loop can reuse one buffer per actor after each presentation.
+CPU/GPU overlap that updates the next frame's data needs separate source buffers
+or an explicit completion wait before reuse. Using a loop-local matrix shared by
+every actor is unsafe: all queued draws can reference the same overwritten value.
+
+For deformation, initialize `model.MutableModel` once, edit its `vertices(...)`
+in place after the previous render completes, and draw
+`asset.withModel(instance.model())`. Its dynamic parts write back their vertex
+buffers before RSP reads. Handwritten models can likewise borrow caller-owned
+`[]VertexPair` buffers with `.data_usage = .dynamic`. No frame vertex-copy helper
+is needed. Static asset vertices are borrowed directly and remain immutable.
 
 Record static geometry/materials once in persistent caller-owned storage:
 
@@ -145,21 +145,20 @@ Record static geometry/materials once in persistent caller-owned storage:
 var recorded: n64.graphics.geometry.RecordedModel = undefined;
 // In a geometry pass, once; the asset and recording must remain alive:
 try world.recordModel(&recorded, assets.model);
-try world.drawRecorded(&recorded, transform);
+try world.drawRecorded(&recorded, &model_matrix);
 ```
 
 Recording uses the existing fixed command-block capacity. Recorded commands
 capture material/pipeline choices, including modes inherited when recorded.
 Those commands take precedence over the replaying pass's baseline. Re-record
 when those choices change, after all users of the old block finish. Camera,
-lights, transform, and the separately bound pose remain dynamic.
-`drawRecordedBorrowed` also accepts a persistent fixed transform. Neither replay
-method allocates or rebuilds the recorded model commands.
+lights, transform, and the separately bound pose remain dynamic. Replay does not
+allocate, copy payloads, or rebuild the model commands.
 
 ## Timing, submission, and shutdown
 
 `beginFrame` finishes a previously submitted frame, acquires a framebuffer,
-resets completed upload storage, polls input, and reports elapsed seconds in
+polls input, and reports elapsed seconds in
 `frame.delta` (clamped to `Options.max_delta`, default 0.25). Omitted color clear
 preserves contents. Depth clears default on for 3D.
 
@@ -169,7 +168,7 @@ For overlap, call `frame.submit()`, do independent CPU work or service
 frame also finishes an outstanding submission. There is one GPU submission in
 flight, with no additional in-flight fence or frame queue.
 
-Timeouts retain the frame, submission, and upload storage. Retry `present` or
+Timeouts retain the frame and submission; the caller must retain borrowed data. Retry `present` or
 `finish`; do not reuse hardware-owned memory. `frame.discard()` submits and
 drains commands before releasing the frame because streamed commands may have
 already executed. Discard can also time out and be retried. `deinit(allocator)`
@@ -194,12 +193,22 @@ be observed or validated by a pass. Start a fresh pass after such work before
 resuming pass drawing, and follow the render queue's `invalidateState` rule when
 bypassing its state tracker with raw commands.
 
-Existing frame-level `setCamera`, `drawModel`, `drawModelBorrowed`, `drawSprite`,
-and `drawText` remain direct-state compatibility helpers. Calling them invalidates
-active pass handles. They retain their original state semantics; new code should
-use passes for per-draw defaults. `beginOverlay()` has changed to
-`const hud = try frame.beginOverlay(.{})`; draw through `hud` afterward.
+Frame-level `setCamera`, `drawModel`, `drawSprite`, and `drawText` remain direct-state
+helpers. Calling them invalidates active pass handles. Their state semantics
+remain direct; new code should use passes for per-draw defaults.
+
+Geometry drawing now has one borrowing API:
+
+- Pass `&camera` to `beginGeometry` or `setCamera`.
+- Pass a fixed-matrix pointer to `drawModel` or `drawRecorded`; generate it with
+  `writeFixed` directly into stable caller storage.
+- Pass the final pose buffer to `setPose`.
+- Edit a mutable model's vertices directly instead of calling `uploadVertices`.
+
+The `*Borrowed` aliases, automatic snapshots, `uploads` field, and the `transforms`,
+`cameras`, `pose_matrices`, and `vertex_pairs` app options have been removed.
+`beginOverlay()` is `const hud = try frame.beginOverlay(.{})`; draw through `hud`.
 
 The lower-level renderer/context `beginFrame` still preserves pipeline state.
-The app's initial preset is for direct-state compatibility. Pass options, rather
+The app's initial preset is for direct-state drawing. Pass options, rather
 than setters before `beginFrame`, determine the state used by pass drawing.
