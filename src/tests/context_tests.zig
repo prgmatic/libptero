@@ -54,7 +54,7 @@ fn gameLoop() !void {
     try slot.draw(&context.geometry);
     _ = try frame.submit();
     if (world.drawModel(assets.model_resident, &transforms[0])) |_| return error.ExpectedFrameSubmitted else |err| try testing.expect(err == error.FrameSubmitted);
-    _ = try player.service(.{});
+    _ = try player.update(.{});
     try frame.present();
     try slot.retire();
     if (frame.present()) |_| return error.ExpectedInvalidFrame else |err| try testing.expect(err == error.InvalidFrame);

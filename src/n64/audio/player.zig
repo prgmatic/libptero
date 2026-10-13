@@ -10,7 +10,7 @@ const playback = @import("playback.zig");
 pub const Voice = pool_api.Voice;
 pub const Options = struct { channels: u8 = 16, output: output_api.Options = .{} };
 pub const PlayOptions = struct { volume: f32 = 1, pan: f32 = 0 };
-pub const ServiceOptions = struct { max_buffers: u8 = 4, max_attempts: u32 = 1_000_000 };
+pub const UpdateOptions = struct { max_buffers: u8 = 4, max_attempts: u32 = 1_000_000 };
 
 /// Keep at a stable address. Voices and attached Streams borrow this player;
 /// source samples and stream windows must outlive playback. Exhaustion returns
@@ -75,8 +75,8 @@ pub const Player = struct {
     /// Fill at most max_buffers, always completing a previously timed-out mix
     /// first. PI/decoder timeouts are retried through this same entry point.
     /// Call regularly outside interrupts, normally after graphics submission.
-    pub fn service(self: *Player, options: ServiceOptions) !u8 {
-        return playback.service(self, options);
+    pub fn update(self: *Player, options: UpdateOptions) !u8 {
+        return playback.update(self, options);
     }
 
     fn finishMix(self: *Player, attempts: u32) !void {
@@ -89,7 +89,7 @@ pub const Player = struct {
 
     /// Drain playback before destroying the shared runtime. Output timeouts
     /// retain allocation and permit retry. A pending decoder/refill must first
-    /// be completed by service, which retains the stream's borrowed workspace.
+    /// be completed by update, which retains the stream's borrowed workspace.
     pub fn deinit(self: *Player, allocator: std.mem.Allocator, max_attempts: u32) !void {
         if (self.pending_commit) try self.finishMix(max_attempts);
         if (self.mixer_initialized) {

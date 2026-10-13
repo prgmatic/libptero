@@ -105,11 +105,11 @@ pub fn Queue(comptime capacity: usize, comptime Dma: type) type {
         /// Service AI even during background DMA. Once that DMA retires, fill
         /// audio first, then admit one background chunk. Call every game frame
         /// (or more often); this does not preempt an already active PI transfer.
-        pub fn serviceAudio(self: *Self, player: anytype, options: @import("../audio/player.zig").ServiceOptions) !void {
+        pub fn serviceAudio(self: *Self, player: anytype, options: @import("../audio/player.zig").UpdateOptions) !void {
             try self.poll();
             player.output.service();
             if (self.active != null) return;
-            _ = try player.service(options);
+            _ = try player.update(options);
             try self.dispatch();
         }
         pub fn isComplete(self: *Self, ticket: Ticket) !bool {

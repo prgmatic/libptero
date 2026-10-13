@@ -188,29 +188,38 @@ try player.init(allocator, &app.runtime, .{ .channels = 16 });
 const voice = try player.play(assets.effect, .{ .volume = 0.7, .pan = -0.2 });
 try player.setVolume(voice, .{ .volume = 0.5 });
 // After frame.submit(), before frame.present():
-_ = try player.service(.{});
+_ = try player.update(.{});
+```
+
+Each `play` adds a voice, so two clips can overlap on the same player:
+
+```zig
+_ = try player.play(assets.music, .{ .volume = 0.4 });
+_ = try player.play(assets.effect, .{ .volume = 0.5 });
+// One update mixes all active voices.
+_ = try player.update(.{});
 ```
 
 Stereo reserves two adjacent slots automatically. A full/fragmented pool returns
 `VoiceLimit`; no existing voice is stolen. Generation-checked handles cannot
 control a later occupant of the same slot or a different player's voice.
-`isPlaying` reflects completion observed by `service`. `playStream(&stream, .{})`
+`isPlaying` reflects completion observed by `update`. `playStream(&stream, .{})`
 uses the same handles and controls; `seek(voice, source_frame)` seeks a stream.
 Samples, streams and windows remain caller-owned and must outlive playback.
 Do not mix direct channel control with the player's voice pool.
 
-`service` fills at most four available output buffers by default, with explicit
+`update` fills at most four available output buffers by default, with explicit
 `max_buffers` and `max_attempts` limits. A timed-out mixer submission retains its
-acquired output buffer. The next `service` finishes and commits it before
-acquiring another; PI/decoder refill timeouts also retry through `service`.
+acquired output buffer. The next `update` finishes and commits it before
+acquiring another; PI/decoder refill timeouts also retry through `update`.
 Finishing a previously pending buffer is allowed even with `max_buffers = 0`.
-No allocation occurs during playback or service. Call regularly outside
-interrupts; the service budget is not a background thread or an audio deadline
+No allocation occurs during playback or update. Call regularly outside
+interrupts; the update budget is not a background thread or an audio deadline
 guarantee. For background ROM loads, use `rom.Scheduler.serviceAudio` to reserve
 refill opportunities between bounded DMA chunks.
 
 `deinit(allocator, attempts)` completes a pending mix, detaches voices, drains
-AI, and frees output storage. Finish a pending stream refill via `service` first.
+AI, and frees output storage. Finish a pending stream refill via `update` first.
 An AI drain timeout retains output ownership and allows `deinit` retry. Destroy
 the player before its borrowed runtime/app. Direct `Mixer`/`Output` APIs remain
 available for applications that schedule audio themselves.

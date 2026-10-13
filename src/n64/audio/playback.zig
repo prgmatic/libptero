@@ -3,7 +3,7 @@
 const std = @import("std");
 const Pool = @import("voice_pool.zig").Pool;
 
-pub fn service(player: anytype, options: anytype) !u8 {
+pub fn update(player: anytype, options: anytype) !u8 {
     if (!player.mixer_initialized) return error.PlayerStopped;
     player.output.service();
     player.mixer.stream_read_attempts = options.max_attempts;
@@ -77,17 +77,17 @@ const Fake = struct {
         }
     } = .{},
 };
-const TestOptions = @import("player.zig").ServiceOptions;
+const TestOptions = @import("player.zig").UpdateOptions;
 
 test "timed-out mixes retain acquired buffers and stereo voices until retry commits" {
     var player: Fake = .{};
     const voice = try player.pool.claim(2);
     player.mixer.fail_wait = true;
-    try std.testing.expectError(error.RspTimeout, service(&player, TestOptions{}));
+    try std.testing.expectError(error.RspTimeout, update(&player, TestOptions{}));
     try std.testing.expect(player.pending_commit and player.output.acquired);
     _ = try player.pool.resolve(voice);
     player.mixer.fail_wait = false;
-    try std.testing.expectEqual(@as(u8, 1), try service(&player, TestOptions{ .max_buffers = 0 }));
+    try std.testing.expectEqual(@as(u8, 1), try update(&player, TestOptions{ .max_buffers = 0 }));
     try std.testing.expectEqual(@as(usize, 1), player.mixer.submissions);
     try std.testing.expect(!player.pending_commit and !player.output.acquired);
     try std.testing.expectError(error.InvalidVoice, player.pool.resolve(voice));
@@ -97,27 +97,27 @@ test "timed-out mixes retain acquired buffers and stereo voices until retry comm
 test "submit failure releases the buffer; commit failure retains it without remixing" {
     var player: Fake = .{};
     player.mixer.fail_submit = true;
-    try std.testing.expectError(error.PiTimeout, service(&player, TestOptions{}));
+    try std.testing.expectError(error.PiTimeout, update(&player, TestOptions{}));
     try std.testing.expect(!player.pending_commit and !player.output.acquired);
     player.mixer.fail_submit = false;
     player.output.fail_commit = true;
-    try std.testing.expectError(error.OutputBusy, service(&player, TestOptions{}));
+    try std.testing.expectError(error.OutputBusy, update(&player, TestOptions{}));
     try std.testing.expect(player.pending_commit and player.output.acquired);
     player.output.fail_commit = false;
-    try std.testing.expectEqual(@as(u8, 1), try service(&player, TestOptions{ .max_buffers = 1 }));
+    try std.testing.expectEqual(@as(u8, 1), try update(&player, TestOptions{ .max_buffers = 1 }));
     try std.testing.expectEqual(@as(usize, 1), player.mixer.submissions);
     try std.testing.expectEqual(@as(usize, 1), player.output.commits);
 }
 
-test "service respects budget and full output while preserving active voices" {
+test "update respects budget and full output while preserving active voices" {
     var player: Fake = .{};
     const voice = try player.pool.claim(1);
     player.mixer.settings.channels[voice.index].address = 16;
-    try std.testing.expectEqual(@as(u8, 2), try service(&player, TestOptions{ .max_buffers = 2, .max_attempts = 17 }));
+    try std.testing.expectEqual(@as(u8, 2), try update(&player, TestOptions{ .max_buffers = 2, .max_attempts = 17 }));
     try std.testing.expectEqual(@as(u32, 17), player.mixer.stream_read_attempts);
     _ = try player.pool.resolve(voice);
-    try std.testing.expectEqual(@as(u8, 2), try service(&player, TestOptions{}));
-    try std.testing.expectEqual(@as(u8, 0), try service(&player, TestOptions{}));
+    try std.testing.expectEqual(@as(u8, 2), try update(&player, TestOptions{}));
+    try std.testing.expectEqual(@as(u8, 0), try update(&player, TestOptions{}));
     player.mixer_initialized = false;
-    try std.testing.expectError(error.PlayerStopped, service(&player, TestOptions{}));
+    try std.testing.expectError(error.PlayerStopped, update(&player, TestOptions{}));
 }
