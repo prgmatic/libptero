@@ -11,6 +11,7 @@ const pass_options = @import("context/pass_options.zig");
 pub const GeometryOptions = pass_options.GeometryOptions;
 pub const GeometryPipeline = pass_options.GeometryPipeline;
 pub const OverlayOptions = pass_options.OverlayOptions;
+pub const OverlayPipeline = pass_options.OverlayPipeline;
 pub const SpriteOptions = pass_options.SpriteOptions;
 pub const Lighting = pass_options.Lighting;
 pub const Light = pass_options.Light;
@@ -174,14 +175,8 @@ fn ContextImpl(comptime config: Config, comptime Backend: type) type {
                 try self.recording();
                 if (config.geometry) self.context.geometry.syncTriangles();
                 self.context.pass_generation +%= 1;
-                self.context.renderer.render.setState(options.state());
+                options.pipeline.apply(&self.context.renderer.render);
                 return .{ .frame = self, .generation = self.context.pass_generation, .options = options };
-            }
-
-            pub fn drawSprite(self: Frame, image: anytype, x: f32, y: f32, options: graphics.rdp.SpriteDrawOptions) !void {
-                try self.recording();
-                self.context.pass_generation +%= 1;
-                self.context.renderer.render.drawSprite(image, x, y, options);
             }
 
             pub fn drawText(self: Frame, font: graphics.font.Font, x: f32, y: f32, text: []const u8, options: graphics.font.TextOptions) !void {

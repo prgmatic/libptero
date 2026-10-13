@@ -68,11 +68,15 @@ accepts directional and point lights in world space, up to
 can immediately be reused. Each new geometry pass establishes its own ambient
 color and light count; default lighting is white ambient with no lights.
 
-Overlay passes use one-cycle alpha blending with depth and perspective disabled.
-`OverlayOptions` selects texture filtering and antialiasing. Each sprite or text
-draw restores that baseline. Sprite RGB **and alpha** multiply the texture by
-`SpriteOptions.tint` (white by default). Font-specific combiner, color, and
-coverage changes apply to that text draw and do not leak into the next sprite.
+Overlay passes default to one-cycle alpha blending with depth and perspective
+disabled. `OverlayOptions.pipeline` supplies a full `rdp.State` and environment
+color, restored before each sprite or text draw. Edit `pipeline.state.modes` to
+select filtering, antialiasing, blending, or cycle type, and `pipeline.state.combine`
+for a custom combiner. The default combiner multiplies sprite RGB **and alpha**
+by `SpriteOptions.tint` (white by default). Tint supplies the primitive color
+register; a custom combiner determines how it is used. Font-specific combiner,
+color, and coverage changes apply to that text draw and do not leak into the next
+sprite. The pass synchronizes color register changes automatically.
 
 ```zig
 const hud = try frame.beginOverlay(.{});
@@ -85,6 +89,38 @@ try hud.drawSprite(assets.icons, .{
 var scratch: [64]u8 = undefined;
 try hud.drawTextPrint(assets.font, 16, 48, &scratch, .{}, "SCORE {d}", .{score});
 ```
+
+Custom sprite effects use the same draw API. For example, tint and fade in the
+first cycle, then mix toward an environment color in the second:
+
+```zig
+var flash_state = n64.graphics.rdp.State.textured_sprite;
+flash_state.modes.cycle_type = .two_cycle;
+flash_state.combine = .{
+    .cycle0 = .{
+        .rgb_a = .tex0, .rgb_c = .primitive,
+        .alpha_a = .tex0, .alpha_c = .primitive,
+    },
+    .cycle1 = .{
+        .rgb_a = .environment, .rgb_b = .combined,
+        .rgb_c = .environment_alpha, .rgb_d = .combined,
+        .alpha_d = .combined,
+    },
+};
+const sprites = try frame.beginOverlay(.{ .pipeline = .{
+    .state = flash_state,
+    .environment = .fromInt(0xffffff60), // White flash, strength in alpha.
+} });
+try sprites.drawSprite(assets.ptero, .{
+    .position = .{ 160, 120 },
+    .pivot = .center,
+    .scale = .{ 4, 4 },
+    .tint = .fromInt(0xffc080c0), // Warm tint, opacity in alpha.
+});
+```
+
+Starting `frame.beginOverlay(.{})` again restores the default pipeline and
+invalidates the previous pass handle. Pass settings are copied by value.
 
 Sprite regions use texel coordinates and must fit the image. Omit `source` for
 the entire image. Negative scales flip, zero scale draws nothing, and nonzero
@@ -193,7 +229,7 @@ be observed or validated by a pass. Start a fresh pass after such work before
 resuming pass drawing, and follow the render queue's `invalidateState` rule when
 bypassing its state tracker with raw commands.
 
-Frame-level `setCamera`, `drawModel`, `drawSprite`, and `drawText` remain direct-state
+Frame-level `setCamera`, `drawModel`, and `drawText` remain direct-state
 helpers. Calling them invalidates active pass handles. Their state semantics
 remain direct; new code should use passes for per-draw defaults.
 
@@ -208,6 +244,9 @@ Geometry drawing now has one borrowing API:
 The `*Borrowed` aliases, automatic snapshots, `uploads` field, and the `transforms`,
 `cameras`, `pose_matrices`, and `vertex_pairs` context options have been removed.
 `beginOverlay()` is `const hud = try frame.beginOverlay(.{})`; draw through `hud`.
+`frame.drawSprite` has been removed; use `hud.drawSprite(image, SpriteOptions)`.
+The former overlay `filter` and `antialias` options are now
+`pipeline.state.modes.texture_sample` and `pipeline.state.modes.antialias_en`.
 
 The lower-level renderer/context `beginFrame` still preserves pipeline state.
 The context's initial preset is for direct-state drawing. Pass options, rather

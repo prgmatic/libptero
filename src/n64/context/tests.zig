@@ -259,7 +259,7 @@ test "overlay isolates font state and multiplies sprite tint alpha without reloa
     try hud.drawText(font, 0, 0, "", .{});
     try std.testing.expect(game.renderer.render.getModes().antialias_en);
     try hud.drawSprite(image, .{});
-    try std.testing.expectEqualDeep((context.OverlayOptions{}).state().combine, game.renderer.render.getState().combine);
+    try std.testing.expectEqualDeep((context.OverlayPipeline{}).state.combine, game.renderer.render.getState().combine);
     try std.testing.expect(!game.renderer.render.getModes().antialias_en);
     try std.testing.expect(!game.renderer.render.getModes().z_compare_en);
     try std.testing.expectEqual(tex_count, game.renderer.render.tex_cache_len);
@@ -274,6 +274,54 @@ test "overlay isolates font state and multiplies sprite tint alpha without reloa
     try std.testing.expectEqual(commands, game.renderer.render.cmd_queue.queue.index);
     try hud.drawTextPrint(emptyFont(), 0, 0, &scratch, .{}, "{d}", .{7});
     try frame.discard();
+    try game.deinit(std.testing.failing_allocator);
+}
+
+test "custom overlay pipeline survives text and resets across passes" {
+    const Game = context.testing.create(.{}, Backend);
+    try std.testing.expect(!@hasDecl(Game.Frame, "drawSprite"));
+    var game: Game = undefined;
+    try game.init(std.testing.failing_allocator, .{});
+    const frame = try game.beginFrame(.{});
+    const pixels: [4]graphics.color.Rgba16 align(8) = @splat(.white);
+    const image: graphics.image.ConstImage(graphics.color.Rgba16) = .{ .texel_data = &pixels, .width = 2, .height = 2 };
+    var pipeline: context.OverlayPipeline = .{ .environment = .fromInt(0xffffff60) };
+    pipeline.state.modes.texture_sample = .bilinear;
+    pipeline.state.modes.cycle_type = .two_cycle;
+    pipeline.state.combine = .{
+        .cycle0 = .{ .rgb_a = .tex0, .rgb_c = .primitive, .alpha_a = .tex0, .alpha_c = .primitive },
+        .cycle1 = .{ .rgb_a = .environment, .rgb_b = .combined, .rgb_c = .environment_alpha, .rgb_d = .combined, .alpha_d = .combined },
+    };
+    const sprites = try frame.beginOverlay(.{ .pipeline = pipeline });
+    try std.testing.expectEqualDeep(pipeline.state, game.renderer.render.getState());
+    try sprites.drawSprite(image, .{});
+    const texture_count = game.renderer.render.tex_cache_len;
+    try sprites.drawText(emptyFont(), 0, 0, "", .{ .color = .green });
+    try std.testing.expect(!std.meta.eql(pipeline.state.combine, game.renderer.render.getState().combine));
+    // Simulate environment color left by another draw as well as font state.
+    game.renderer.render.setEnvironmentColor(.black);
+    const start = game.renderer.render.cmd_queue.queue.index;
+    const tint: graphics.color.Rgba32 = .fromInt(0xffc080c0);
+    try sprites.drawSprite(image, .{ .tint = tint });
+    try std.testing.expectEqualDeep(pipeline.state, game.renderer.render.getState());
+    try std.testing.expectEqualDeep(pipeline.state.combine, game.renderer.render.emitted_combine.?);
+    try std.testing.expectEqualDeep(pipeline.state.modes, game.renderer.render.emitted_mode.?);
+    // Color register changes are synchronized before this sprite is emitted.
+    const commands = game.renderer.commands[start..game.renderer.render.cmd_queue.queue.index];
+    try std.testing.expectEqual(@as(u64, 0xE7) << 56, commands[0]);
+    try std.testing.expectEqual((@as(u64, 0xFB) << 56) | @as(u32, @bitCast(pipeline.environment)), commands[1]);
+    try std.testing.expectEqual((@as(u64, 0xFA) << 56) | @as(u32, @bitCast(tint)), commands[2]);
+    const ordinary = try frame.beginOverlay(.{});
+    try std.testing.expectError(error.InvalidPass, sprites.drawSprite(image, .{}));
+    const ordinary_start = game.renderer.render.cmd_queue.queue.index;
+    try ordinary.drawSprite(image, .{});
+    try std.testing.expectEqualDeep((context.OverlayPipeline{}).state, game.renderer.render.getState());
+    try std.testing.expectEqual((@as(u64, 0xFB) << 56) | @as(u32, @bitCast(graphics.color.Rgba32.white)), game.renderer.commands[ordinary_start + 1]);
+    try std.testing.expectEqual(texture_count, game.renderer.render.tex_cache_len);
+    _ = try frame.submit();
+    try std.testing.expectError(error.FrameSubmitted, ordinary.drawSprite(image, .{}));
+    try frame.present();
+    try std.testing.expectError(error.InvalidFrame, ordinary.drawSprite(image, .{}));
     try game.deinit(std.testing.failing_allocator);
 }
 

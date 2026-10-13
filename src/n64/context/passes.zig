@@ -56,8 +56,7 @@ pub fn OverlayPass(comptime Context: type) type {
         fn prepare(self: @This()) !void {
             try validate(self.frame, self.generation);
             const render = &self.frame.context.renderer.render;
-            render.setState(self.options.state());
-            render.cmd_queue.pipeSync();
+            self.options.pipeline.apply(render);
         }
 
         pub fn drawSprite(self: @This(), image: anytype, opts: options.SpriteOptions) !void {

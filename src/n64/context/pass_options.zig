@@ -48,18 +48,27 @@ pub const GeometryOptions = struct {
     lighting: Lighting = .{},
     pipeline: GeometryPipeline = .{},
 };
-pub const OverlayOptions = struct {
-    filter: @import("../graphics/rdp/modes.zig").TextureSample = .point,
-    antialias: bool = false,
+/// Baseline restored before every overlay draw. Sprite tint supplies primitive
+/// color; custom combiners decide how tint and environment color are used.
+pub const OverlayPipeline = struct {
+    state: graphics.rdp.State = defaultState(),
+    environment: Color = .white,
 
-    pub fn state(self: OverlayOptions) graphics.rdp.State {
+    pub fn apply(self: OverlayPipeline, render: anytype) void {
+        render.setState(self.state);
+        render.cmd_queue.pipeSync();
+        render.setEnvironmentColor(self.environment);
+    }
+
+    fn defaultState() graphics.rdp.State {
         var result = graphics.rdp.State.textured_sprite;
-        result.modes.texture_sample = self.filter;
-        result.modes.antialias_en = self.antialias;
         // Both RGB and alpha are multiplied by the draw's tint.
         result.combine = .single(.{ .rgb_a = .tex0, .rgb_c = .primitive, .alpha_a = .tex0, .alpha_c = .primitive });
         return result;
     }
+};
+pub const OverlayOptions = struct {
+    pipeline: OverlayPipeline = .{},
 };
 pub const SpriteOptions = struct {
     position: [2]f32 = .{ 0, 0 },
