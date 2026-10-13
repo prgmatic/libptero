@@ -1,5 +1,5 @@
 const std = @import("std");
-const color = @import("color.zig");
+const color = @import("pixel.zig");
 
 /// Hardware packed far depth and maximum depth delta.
 pub const clear_value: u16 = 0xffff;
@@ -24,6 +24,7 @@ pub const Image = struct {
 
 /// Allocator-owned depth storage. Wait for GPU completion before freeing it.
 pub const DepthBuffer = struct {
+    pub const clear_value = @import("depth.zig").clear_value;
     width: u16,
     height: u16,
     pixels: []align(64) u16,

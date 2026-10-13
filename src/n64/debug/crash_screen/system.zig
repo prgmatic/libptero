@@ -2,7 +2,7 @@ const std = @import("std");
 const model = @import("model.zig");
 const style = @import("style.zig");
 const text = @import("font.zig");
-const codes = @import("../exception_codes.zig");
+const codes = @import("../../cpu/exception_codes.zig");
 
 pub fn draw(img: style.Image, report: *const model.Report) void {
     style.pane(img);

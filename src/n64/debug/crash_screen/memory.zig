@@ -1,10 +1,10 @@
 //! Read-only bank snapshots. No graphics submission, allocation or RSP waits.
 const std = @import("std");
 const model = @import("memory_model.zig");
-const pi = @import("../../io/pi.zig");
+const pi = @import("../../pi/Transfer.zig");
 var boot_bounds: model.Bounds = .{};
 var cart_staging: [model.page_bytes]u8 align(16) = undefined;
-var cart_transfer: pi.Transfer = .{};
+var cart_transfer: pi = .{};
 
 /// Call at startup after clearing BSS, before applications reuse SP DMEM.
 pub fn initBootBounds() void {

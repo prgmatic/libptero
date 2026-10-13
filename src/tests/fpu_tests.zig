@@ -55,11 +55,11 @@ fn nativeMath() !void {
     const inputs: *volatile [6]f32 = &math_inputs;
     try testing.expectEqual(@as(f32, -2), n64.math.fast.floor(inputs[0]));
     try testing.expectEqual(@as(f32, 1), n64.math.fast.floor(inputs[1]));
-    try testing.expectEqual(@as(f32, 0.75), n64.math.fastMod(inputs[2], 1));
+    try testing.expectEqual(@as(f32, 0.75), n64.math.fast.mod(inputs[2], 1));
     try testing.expectEqual(inputs[4], n64.math.fast.floor(inputs[4]));
     try testing.expectEqual(inputs[5], n64.math.fast.floor(inputs[5]));
-    try testing.expect(@abs(n64.math.fastSin(inputs[3]) - 1) < 0.000002);
-    try testing.expect(@abs(n64.math.fastCos(inputs[3])) < 0.000002);
+    try testing.expect(@abs(n64.math.fast.sin(inputs[3]) - 1) < 0.000002);
+    try testing.expect(@abs(n64.math.fast.cos(inputs[3])) < 0.000002);
     const rotation = n64.math.Quat.fromAxisAngle(.init(0, 1, 0), inputs[3]);
     const matrix = n64.math.Mat4.fromSrt(.one, rotation, .zero);
     const point = matrix.transformPoint(.init(1, 0, 0));

@@ -3,6 +3,21 @@ const assets = @import("assets");
 const std = @import("std");
 
 comptime {
+    const App = n64.App(.{ .geometry = true });
+    const Display = n64.display.Swapchain(n64.graphics.pixel.Rgba16);
+    const app_options: App.Options = .{};
+    const pass_options: App.GeometryPass.State = .{};
+    const overlay_options: App.OverlayPass.Options = .{};
+    const display_options: Display.Options = .{};
+    const present_options: Display.PresentOptions = .{};
+    const audio_options: n64.audio.Player.Options = .{};
+    const play_options: n64.audio.Player.PlayOptions = .{};
+    const update_options: n64.audio.Player.UpdateOptions = .{};
+    const text_options: n64.graphics.Font.DrawOptions = .{};
+    const scheduler_options: n64.rom.Scheduler.Options = .{};
+    const fps_options: n64.time.FpsCounter.Options = .{};
+    _ = .{ app_options, pass_options, overlay_options, display_options, present_options, audio_options, play_options, update_options, text_options, scheduler_options, fps_options };
+
     if (assets.fixture_model.materialIndex("fixture") != 0) @compileError("resident material identifier was not generated");
     if (assets.fixture_rom_model.materialIndex("fixture") != 0) @compileError("ROM material identifier was not generated");
     if (assets.fixture_model.materialIndex("trim \"blue\" café") != 1) @compileError("escaped source material name was not preserved");
@@ -15,7 +30,7 @@ comptime {
     if (!@typeInfo(@TypeOf(assets.fixture_ci4.palette)).pointer.is_const) @compileError("embedded palette must be read-only");
     if (assets.raw_data.len != 10) @compileError("raw asset was not embedded");
     if (assets.generated_data.len != 15) @compileError("generated asset was not embedded");
-    if (@TypeOf(assets.rom_data) != n64.rom.Asset or assets.rom_data.size != 15) @compileError("ROM handle was not generated");
+    if (@TypeOf(assets.rom_data) != n64.rom.Region or assets.rom_data.size != 15) @compileError("ROM handle was not generated");
     if (assets.custom_rsp.len == 0) @compileError("ZSP asset was not embedded");
     if (!@typeInfo(@TypeOf(assets.fixture_font.atlases[0].texel_data)).pointer.is_const)
         @compileError("embedded font atlas must be read-only");
@@ -27,8 +42,8 @@ comptime {
     if (@as(u16, @bitCast(part.strip_indices[2])) & 0x4000 == 0) @compileError("model triangle end marker is missing");
 }
 
-var renderer: n64.graphics.geometry.Renderer = undefined;
-var pixels: [8 * 8]n64.graphics.color.Rgba16 align(64) = undefined;
+var renderer: n64.graphics.Renderer = undefined;
+var pixels: [8 * 8]n64.graphics.pixel.Rgba16 align(64) = undefined;
 var reader: n64.rom.Reader = .{};
 var rom_bytes: [15]u8 = undefined;
 var rom_model_storage: [assets.fixture_rom_model.storageSize()]u8 align(16) = undefined;
@@ -50,19 +65,19 @@ pub fn main() !void {
     try rom_ci.load(1_000_000);
     try reader.read(assets.rom_data, 0, &rom_bytes, 1_000_000);
     if (!std.mem.eql(u8, &rom_bytes, &assets.generated_data)) return error.RomReadMismatch;
-    var mesh = try n64.graphics.model.MutableModel.init(allocator, assets.fixture_model.model);
+    var mesh = try n64.graphics.MutableModel.init(allocator, assets.fixture_model.model);
     defer mesh.deinit(allocator);
     mesh.vertices(0).get(0).position[0] = 0;
     if (assets.fixture_model.model.parts[0].vertices[0].pos_a[0] != -64) return error.ModifiedSource;
     const model = assets.fixture_model.withModel(mesh.model()).withOverrides(.{.{
         .texture = assets.fixture_font.atlases[0],
-        .flags = n64.graphics.geometry.DrawFlags{ .textured = true, .no_light = true },
-        .combine = n64.graphics.rdp.CombineMode.single(.{ .rgb_d = .tex0, .alpha_d = .one }),
+        .flags = n64.graphics.DrawFlags{ .textured = true, .no_light = true },
+        .combine = n64.rdp.CombineMode.single(.{ .rgb_d = .tex0, .alpha_d = .one }),
         .fog = false,
     }});
     renderer.init();
-    renderer.beginFrame(try n64.graphics.image.ImgRgba16.initBuffer(&pixels, 8, 8), .{ .clear_color = .black });
-    var viewport = n64.graphics.geometry.Viewport.init(8, 8);
+    renderer.beginFrame(try n64.graphics.Image(n64.graphics.pixel.Rgba16).initBuffer(&pixels, 8, 8), .{ .clear_color = .black });
+    var viewport = n64.graphics.Viewport.init(8, 8);
     renderer.geometry.attachViewport(&viewport);
     renderer.geometry.drawModel(model);
     const loaded_model = try rom_model.view();
@@ -85,7 +100,7 @@ pub fn panicHandler(_: []const u8, _: ?usize) noreturn {
     while (true) {}
 }
 
-pub fn exceptionHandler(_: *n64.debug.TrapFrame) noreturn {
+pub fn exceptionHandler(_: *n64.cpu.exception.TrapFrame) noreturn {
     while (true) {}
 }
 

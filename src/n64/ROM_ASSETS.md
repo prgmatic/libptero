@@ -1,6 +1,6 @@
 # ROM assets
 
-`AssetBundle.addRomFile(name, path)` exposes an `n64.rom.Asset` handle. Unlike
+`AssetBundle.addRomFile(name, path)` exposes an `n64.rom.Region` handle. Unlike
 `embedFile`, the bytes are appended outside ELF load segments and remain in
 cartridge ROM at boot. Pass the bundle through `Sdk.addRom(.{ .assets = &bundle })`;
 importing its module alone does not attach the payload to a ROM. Packing follows
@@ -34,7 +34,7 @@ releasing them. `PiBusy` is retried during polling when another reader owns PI.
 Bounds, ROM limits, and generated alignment are checked. Empty end reads work.
 `bytes_read` and `transfers` count completed logical bytes and issued DMAs.
 
-`n64.io.pi.Transfer` provides lower-level asynchronous ROM DMA into complete,
+`n64.pi.Transfer` provides lower-level asynchronous ROM DMA into complete,
 caller-owned 16-byte cache lines. Its destination address and length must be
 16-byte aligned, and its ROM range must fit the 64 MiB cartridge space. It handles
 cache writeback/invalidation, exclusive transfer ownership, an idle sticky-error
@@ -72,7 +72,7 @@ try renderer.submit().wait(.{});
 try room.deinit(allocator);
 ```
 
-`view()` returns the same borrowed native `model.Asset(Materials)`, `ConstImage`
+`view()` returns the same borrowed native `n64.graphics.ModelAsset(Materials)`, `ConstImage`
 or `PalettedImage` used by the embedded path. Existing material overrides,
 recorded models, CPU skinning and first-joint RSP poses work with loaded assets.
 Bindings are established once when DMA completes; `view()` does not traverse

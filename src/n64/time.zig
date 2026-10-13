@@ -52,7 +52,7 @@ pub const Timer = struct {
     }
 };
 
-pub const FpsOptions = struct {
+const FpsOptions = struct {
     initial_fps: f32 = 60,
     smoothing: f32 = 0.01,
     /// Quantize vsync frame times into refresh intervals. Omit for immediate
@@ -62,6 +62,7 @@ pub const FpsOptions = struct {
 
 /// An exponentially filtered frame duration, separate from the hardware timer.
 pub const FpsCounter = struct {
+    pub const Options = FpsOptions;
     options: FpsOptions,
     filtered_seconds: f32,
 

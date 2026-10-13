@@ -1,5 +1,5 @@
 const debug = @import("../debug.zig");
-const srcmap = @import("srcmap.zig");
+const srcmap = @import("source_map.zig");
 
 pub const max_depth = 20;
 
@@ -47,7 +47,7 @@ fn findFrame(addr: u32) ?Frame {
 /// This uses the compact unwind table generated from the debug ELF.
 pub noinline fn printBacktrace(skip: u32) void {
     const trace = capture(skip + 1) orelse {
-        debug.writeStr("  <backtrace unavailable>\n");
+        debug.writeAll("  <backtrace unavailable>\n");
         return;
     };
     printTrace(trace);

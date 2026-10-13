@@ -1,14 +1,14 @@
 //! Opt-in, allocation-free rendering diagnostics. No calls are made automatically.
 const std = @import("std");
 const debug = @import("../debug.zig");
-const rsp = @import("../rsp/rsp.zig");
-const rdp = @import("../graphics/rdp.zig");
-const rdp_io = @import("../graphics/rdp/io.zig");
+const rsp = @import("../rsp.zig");
+const rdp = @import("../rdp.zig");
+const rdp_io = @import("../hw/dp.zig");
 const VertexPair = @import("../graphics/geometry.zig").VertexPair;
 
 fn print(comptime format: []const u8, args: anytype) void {
     var buffer: [256]u8 = undefined;
-    debug.writeStr(std.fmt.bufPrint(&buffer, format, args) catch return);
+    debug.writeAll(std.fmt.bufPrint(&buffer, format, args) catch return);
 }
 
 /// Capture a tightly packed RGBA16/32 image after its already-submitted full-sync
@@ -75,10 +75,10 @@ pub const RenderSnapshot = struct {
     /// Non-blocking, read-only MMIO reads; hardware may advance between fields.
     pub fn read() RenderSnapshot {
         return .{
-            .rsp_status = @bitCast(rsp.io.status_register_read.*),
-            .rsp_pc = rsp.io.program_counter.*,
-            .dma_busy = rsp.io.dma_busy.*,
-            .dma_full = rsp.io.dma_full.*,
+            .rsp_status = @bitCast(@import("../hw/sp.zig").status_register_read.*),
+            .rsp_pc = @import("../hw/sp.zig").program_counter.*,
+            .dma_busy = @import("../hw/sp.zig").dma_busy.*,
+            .dma_full = @import("../hw/sp.zig").dma_full.*,
             .rdp_status = @bitCast(rdp_io.status.*),
             .rdp_start = rdp_io.dma_start_addr.*,
             .rdp_end = rdp_io.dma_end_addr.*,

@@ -234,7 +234,7 @@ test "CPU renderer fills the native framebuffer without touching guard pixels" {
     var state: model.State = .{};
     _ = state.move(&report, 9999, 9999, 0);
     render(img, &report, state);
-    report.registers = std.mem.zeroes(@import("../cpu_state.zig").TrapFrame);
+    report.registers = std.mem.zeroes(@import("../../cpu/trap_frame.zig").TrapFrame);
     for ([_]model.Tab{ .registers, .memory, .system }) |tab| {
         state = .{ .tab = tab };
         _ = state.move(&report, 9999, 9999, 0);
@@ -252,7 +252,7 @@ test "non-trace pages suppress horizontal bars and memory suppresses both" {
     var pixels: [width * height]Pixel = undefined;
     const img = try Image.initBuffer(&pixels, width, height);
     var report: model.Report = .{};
-    report.registers = std.mem.zeroes(@import("../cpu_state.zig").TrapFrame);
+    report.registers = std.mem.zeroes(@import("../../cpu/trap_frame.zig").TrapFrame);
     for ([_]model.Tab{ .registers, .system, .memory }) |tab| {
         render(img, &report, .{ .tab = tab });
         for (26..608) |x| try std.testing.expectEqual(bg, img.get(@intCast(x), 213));

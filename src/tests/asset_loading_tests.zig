@@ -7,10 +7,10 @@ const timeout = 1_000_000;
 var storage: [1024]u8 align(16) = undefined;
 var other_storage: [1024]u8 align(16) = undefined;
 var heap_storage: [16 * 1024]u8 align(16) = undefined;
-var renderer: n64.graphics.geometry.Renderer = undefined;
-var pixels: [64]n64.graphics.color.Rgba32 align(64) = undefined;
+var renderer: n64.graphics.Renderer = undefined;
+var pixels: [64]n64.graphics.pixel.Rgba32 align(64) = undefined;
 var depth_pixels: [64]u16 align(64) = undefined;
-var viewport: n64.graphics.geometry.Viewport = undefined;
+var viewport: n64.graphics.Viewport = undefined;
 var transform: n64.math.FixedMat4 align(16) = undefined;
 var poses: [3]n64.math.FixedMat4 align(16) = undefined;
 
@@ -108,13 +108,13 @@ fn models() !void {
 }
 
 fn drawTexture(image: anytype) !void {
-    renderer.beginFrame(try n64.graphics.image.ImgRgba32.initBuffer(&pixels, 8, 8), .{ .clear_color = .black });
+    renderer.beginFrame(try n64.graphics.Image(n64.graphics.pixel.Rgba32).initBuffer(&pixels, 8, 8), .{ .clear_color = .black });
     renderer.rdp.render.setState(.textured_sprite);
     renderer.rdp.render.setPrimColor(.white);
     renderer.rdp.render.setTextureFilter(.point);
     renderer.rdp.render.drawSprite(image, 0, 0, .{});
     try renderer.submit().wait(.{ .max_attempts = timeout });
-    n64.cache.invalidateData(&pixels);
+    n64.cpu.cache.invalidateData(&pixels);
 }
 
 fn recycledTextures() !void {
@@ -137,15 +137,15 @@ fn recycledTextures() !void {
 }
 
 fn drawModel(asset: anytype) ![64]u32 {
-    renderer.beginFrame(try n64.graphics.image.ImgRgba32.initBuffer(&pixels, 8, 8), .{
-        .depth = try n64.graphics.depth.Image.initBuffer(&depth_pixels, 8, 8),
+    renderer.beginFrame(try n64.graphics.Image(n64.graphics.pixel.Rgba32).initBuffer(&pixels, 8, 8), .{
+        .depth = try n64.graphics.DepthImage.initBuffer(&depth_pixels, 8, 8),
         .clear_depth = true,
         .clear_color = .black,
     });
     renderer.geometry.attachViewport(&viewport);
     renderer.geometry.drawModelWithTransform(asset, &transform);
     try renderer.submit().wait(.{ .max_attempts = timeout });
-    n64.cache.invalidateData(&pixels);
+    n64.cpu.cache.invalidateData(&pixels);
     var result: [64]u32 = undefined;
     for (&result, pixels) |*rgb, pixel| rgb.* = @as(u32, @bitCast(pixel)) >> 8;
     return result;
@@ -170,11 +170,11 @@ fn renderedModels() !void {
         player.apply(&skeleton);
         skeleton.update();
         if (comptime std.mem.eql(u8, name, "weighted")) {
-            var mesh = try n64.graphics.model.SkinnedModel.init(allocator, value.model);
+            var mesh = try n64.graphics.SkinnedModel.init(allocator, value.model);
             mesh.update(&skeleton);
             const actual = try drawModel(value.withModel(mesh.model()));
             try expectVisible(&actual);
-            var expected_mesh = try n64.graphics.model.SkinnedModel.init(allocator, reference.model);
+            var expected_mesh = try n64.graphics.SkinnedModel.init(allocator, reference.model);
             var expected_skeleton = try n64.graphics.animation.Skeleton.init(allocator, reference.model.nodes);
             var expected_player: n64.graphics.animation.Player = .{ .clip = reference.model.findAnimation("move").? };
             expected_player.seek(0.5);

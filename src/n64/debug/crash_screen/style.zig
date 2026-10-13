@@ -2,8 +2,8 @@
 const model = @import("model.zig");
 const text = @import("font.zig");
 pub const fonts = text.assets;
-pub const Pixel = @import("../../graphics/color.zig").Rgba16;
-pub const Image = @import("../../graphics/image.zig").ImgRgba16;
+pub const Pixel = @import("../../graphics/pixel.zig").Rgba16;
+pub const Image = @import("../../graphics/image.zig").Image(@import("../../graphics/pixel.zig").Rgba16);
 pub const bg = Pixel.fromInt(0x17191eff);
 pub const header = Pixel.fromInt(0x202229ff);
 pub const panel = Pixel.fromInt(0x252832ff);

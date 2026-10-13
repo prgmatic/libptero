@@ -1,0 +1,796 @@
+const q = @import("command_encoder.zig");
+const std = @import("std");
+const blender = @import("blender.zig");
+const modes = @import("modes.zig");
+const cc = @import("combiner.zig");
+const tri = @import("triangles.zig");
+const texture = @import("texture.zig");
+
+pub const SpriteDrawOptions = texture.SpriteDrawOptions;
+pub const Pivot = texture.Pivot;
+
+/// Frame setup borrows targets and performs only explicitly requested clears.
+/// It does not allocate, submit, wait, or reset pipeline state.
+pub fn FrameOptions(comptime Pixel: type) type {
+    return struct {
+        depth: ?@import("../graphics/depth.zig").Image = null,
+        clear_color: ?Pixel = null,
+        clear_depth: bool = false,
+    };
+}
+
+const CommandEncoder = q.CommandEncoder;
+const TextureRectangleOptions = q.TextureRectangleOptions;
+pub const TexVertex = tri.TexVertex;
+
+const CombineMode = cc.CombineMode;
+const BlendMode = blender.BlendMode;
+const CycleType = modes.CycleType;
+const AlphaCompare = modes.AlphaCompare;
+const OtherModes = modes.OtherModes;
+const Rgba32 = @import("../graphics/pixel.zig").Rgba32;
+
+// State-tracking layer over CommandEncoder. Manages OtherModes/combiner dirty state,
+// texture caching in TMEM, and provides high-level draw calls.
+// Access the underlying CommandEncoder via the `cmd_queue` field for direct control.
+pub fn RenderEncoder(comptime QueueType: type) type {
+    return struct {
+        const Self = @This();
+        const TCmdQueue = CommandEncoder(QueueType);
+
+        cmd_queue: TCmdQueue,
+        mode: OtherModes = .{},
+        combine_mode: CombineMode = .primitive,
+
+        emitted_mode: ?OtherModes = null,
+        emitted_combine: ?CombineMode = null,
+        fb_width: u16 = 0,
+        fb_height: u16 = 0,
+
+        tex_cache: [8]TexCacheEntry = [_]TexCacheEntry{.{}} ** 8,
+        tex_cache_len: usize = 0,
+        palette_ptr: usize = 0,
+        palette_content_id: u64 = 0,
+        tmem_next: u10 = 0, // next free TMEM word offset (8-byte words, max 512)
+        next_tile: u3 = 0, // next render tile; load tile = next_tile +% 1
+        /// Most recently bound material texture, consumed by geometry draws.
+        material_tile: u3 = 0,
+
+        pub fn init(queue: QueueType) Self {
+            var result: Self = .{ .cmd_queue = TCmdQueue.init(queue) };
+            result.setCycleType(.one_cycle);
+            return result;
+        }
+
+        pub fn clear(rq: *Self) void {
+            rq.cmd_queue.clear();
+            // CPU buffers discard recorded commands; their tracked hardware
+            // state and texture residency must be reconstructed on reuse.
+            if (!@hasDecl(QueueType, "prepare")) rq.invalidateState();
+        }
+
+        /// Begin recording a frame after previous GPU work has completed.
+        /// CPU command buffers are cleared; streamed RSP buffers remain attached.
+        /// Target storage must stay alive until the submitted work completes.
+        pub fn beginFrame(rq: *Self, image: anytype, options: FrameOptions(@TypeOf(image).Pixel)) void {
+            const frame = options;
+            std.debug.assert(image.width > 0 and image.height > 0);
+            std.debug.assert(!frame.clear_depth or frame.depth != null);
+            if (frame.depth) |depth| {
+                std.debug.assert(depth.width == image.width and depth.height == image.height);
+            }
+            if (@hasField(QueueType, "rsp_queue")) {
+                std.debug.assert(!rq.cmd_queue.queue.rsp_queue.storage.syncpoint_pending);
+            }
+            rq.clear();
+            rq.setFrameBuffer(image);
+            if (frame.depth) |depth| rq.setDepthBuffer(depth);
+            if (frame.clear_color) |color| rq.clearScreen(color);
+            if (frame.clear_depth) rq.clearDepth(frame.depth.?, image);
+        }
+
+        pub fn execute(rq: *Self) void {
+            rq.cmd_queue.execute();
+        }
+
+        /// Submit the recorded batch with an RDP fence and, for RSP-backed
+        /// queues, an RSP marker. Borrowed resources remain in use until both
+        /// complete. Does not allocate. Do not submit while recording a block.
+        pub fn submit(rq: *Self) @import("completion.zig").Completion {
+            const fence = @import("../interrupt.zig").armRdpFence();
+            rq.fullSync();
+            const point = if (@hasDecl(QueueType, "submitSyncpoint"))
+                rq.cmd_queue.queue.submitSyncpoint()
+            else blk: {
+                rq.execute();
+                break :blk if (@hasField(QueueType, "rsp_queue"))
+                    rq.cmd_queue.queue.rsp_queue.insertSyncpoint()
+                else
+                    null;
+            };
+            return .{ .rdp = fence, .rsp = point };
+        }
+
+        pub fn prepare(rq: *Self) void {
+            if (@hasDecl(QueueType, "prepare")) rq.cmd_queue.queue.prepare();
+        }
+
+        pub fn invalidateState(rq: *Self) void {
+            rq.emitted_mode = null;
+            rq.emitted_combine = null;
+            rq.resetTextureCache();
+            rq.palette_ptr = 0;
+        }
+
+        pub fn fullSync(rq: *Self) void {
+            rq.cmd_queue.fullSync();
+        }
+
+        pub fn flushModes(rq: *Self) void {
+            rq.flushPendingModes();
+        }
+
+        fn flushPendingModes(rq: *Self) void {
+            const mode_changed = if (rq.emitted_mode) |previous|
+                @as(u64, @bitCast(previous)) != @as(u64, @bitCast(rq.mode))
+            else
+                true;
+            const combine_changed = if (rq.emitted_combine) |previous|
+                !std.meta.eql(previous, rq.combine_mode)
+            else
+                true;
+            if (!mode_changed and !combine_changed) return;
+            rq.cmd_queue.pipeSync();
+            if (mode_changed) {
+                rq.cmd_queue.setOtherModes(rq.mode);
+                rq.emitted_mode = rq.mode;
+            }
+            if (combine_changed) {
+                rq.cmd_queue.setCombiner(rq.combine_mode);
+                rq.emitted_combine = rq.combine_mode;
+            }
+        }
+
+        pub fn getModes(rq: *const Self) OtherModes {
+            return rq.mode;
+        }
+
+        /// Replace the complete mode word. Applied lazily before drawing or
+        /// flushModes, without dirty flags or immediate hardware waits.
+        pub fn setModes(rq: *Self, value: OtherModes) void {
+            rq.mode = value;
+        }
+
+        pub fn getState(rq: *const Self) @import("state.zig").State {
+            return .{ .modes = rq.mode, .combine = rq.combine_mode };
+        }
+
+        pub fn setState(rq: *Self, value: @import("state.zig").State) void {
+            rq.mode = value.modes;
+            rq.combine_mode = value.combine;
+        }
+
+        pub fn setAntialias(rq: *Self, enabled: bool) void {
+            rq.mode.antialias_en = enabled;
+        }
+
+        pub fn setCycleType(rq: *Self, cycle_type: CycleType) void {
+            rq.mode.cycle_type = cycle_type;
+        }
+
+        pub fn setBlendMode(rq: *Self, blend: BlendMode) void {
+            rq.setState(rq.getState().withBlend(blend));
+        }
+
+        pub fn setCombineMode(rq: *Self, value: CombineMode) void {
+            rq.combine_mode = value;
+        }
+
+        /// Make a texture resident with explicit sampler state and return its render tile.
+        pub fn useTextureSampler(rq: *Self, image: anytype, sampler: texture.Sampler) u3 {
+            rq.material_tile = rq.ensureTexture(image, sampler);
+            return rq.material_tile;
+        }
+
+        /// Bind two textures to adjacent tiles 0/1 for a two-cycle combiner.
+        /// Replaces TMEM residency and selects tile 0 for geometry draws.
+        /// Identical texels share TMEM while retaining independent tile state.
+        /// The pair must fit in TMEM; 32-bit formats are not supported here.
+        pub fn useTexturePair(rq: *Self, first: anytype, second: anytype, first_sampler: texture.Sampler, second_sampler: texture.Sampler) void {
+            validateTexturePair(first, second);
+            const first_indexed = @TypeOf(first).format == .color_indexed;
+            const second_indexed = @TypeOf(second).format == .color_indexed;
+            if (first_indexed) rq.configureTexture(first) else rq.configureTexture(second);
+            const capacity: u32 = if (first_indexed or second_indexed) 256 else 512;
+            const first_words = textureWords(first);
+            const shared = sharesTexels(first, second);
+            const second_words = if (shared) 0 else textureWords(second);
+            if (first_words + second_words > capacity) @panic("texture pair exceeds TMEM");
+            rq.tex_cache_len = 0;
+            rq.loadTexture(first, 0, 0, first_sampler);
+            if (shared) {
+                rq.cmd_queue.tileSync();
+                texture.configureTile(&rq.cmd_queue, second, 1, 0, second_sampler);
+            } else rq.loadTexture(second, 1, @intCast(first_words), second_sampler);
+            rq.cmd_queue.tileSync();
+            rq.tmem_next = @intCast(first_words + second_words);
+            rq.next_tile = 2;
+            rq.material_tile = 0;
+        }
+
+        fn textureWords(image: anytype) u32 {
+            const bits = @as(u32, 4) << @intFromEnum(@TypeOf(image).bit_depth);
+            return ((@as(u32, image.width) * bits + 63) / 64) * image.height;
+        }
+
+        pub fn setDepthState(rq: *Self, compare: bool, update: bool) void {
+            if (rq.mode.z_compare_en == compare and rq.mode.z_update_en == update) return;
+            rq.mode.z_compare_en = compare;
+            rq.mode.z_update_en = update;
+        }
+
+        pub fn setAlphaCompare(rq: *Self, alpha_compare: AlphaCompare) void {
+            if (rq.mode.alpha_compare == alpha_compare) return;
+            rq.mode.alpha_compare = alpha_compare;
+        }
+
+        pub fn setBlendColor(rq: *Self, color: Rgba32) void {
+            rq.cmd_queue.setBlendColor(color);
+        }
+
+        pub fn setPerspectiveTexture(rq: *Self, enabled: bool) void {
+            if (rq.mode.persp_tex_en == enabled) return;
+            rq.mode.persp_tex_en = enabled;
+        }
+
+        pub fn setTextureFilter(rq: *Self, filter: modes.TextureSample) void {
+            if (rq.mode.texture_sample == filter) return;
+            rq.mode.texture_sample = filter;
+        }
+
+        /// Reset the surface state as well as setting it, avoiding leakage
+        /// when switching from a translucent material back to opaque geometry.
+        pub fn setSurfaceType(rq: *Self, translucent: bool) void {
+            rq.mode.z_mode = if (translucent) .transparent else .opaque_surface;
+            rq.mode.cvg_dest = if (translucent) .wrap else .full;
+            rq.mode.write_on_cvg_overflow = translucent;
+        }
+
+        pub fn setEnvironmentColor(rq: *Self, color: Rgba32) void {
+            rq.cmd_queue.setEnvironmentColor(color);
+        }
+
+        pub fn setFrameBuffer(rq: *Self, image: anytype) void {
+            if (@typeInfo(@TypeOf(image.texel_data)).pointer.is_const)
+                @compileError("framebuffer storage must be mutable");
+            rq.fb_width = @intCast(image.width);
+            rq.fb_height = @intCast(image.height);
+            rq.cmd_queue.setColorFrame(image);
+            rq.cmd_queue.setScissor(0, 0, rq.fb_width * 4, rq.fb_height * 4);
+        }
+
+        pub fn setPrimColor(rq: *Self, color: Rgba32) void {
+            rq.cmd_queue.setPrimColor(color);
+        }
+
+        pub fn setFogColor(rq: *Self, color: Rgba32) void {
+            rq.cmd_queue.setFogColor(color);
+        }
+
+        pub fn clearScreen(rq: *Self, color: anytype) void {
+            rq.cmd_queue.pipeSync();
+            rq.cmd_queue.setOtherModes(.{ .cycle_type = .fill });
+            rq.cmd_queue.setFillColor(color);
+            rq.cmd_queue.fillRect(0, 0, (rq.fb_width - 1) * 4, (rq.fb_height - 1) * 4);
+            rq.emitted_mode = null;
+        }
+
+        pub fn setDepthBuffer(rq: *Self, depth_image: @import("../graphics/depth.zig").Image) void {
+            std.debug.assert(depth_image.width == rq.fb_width and depth_image.height == rq.fb_height);
+            rq.cmd_queue.setDepthImage(depth_image);
+        }
+
+        /// Clear packed hardware depth and restore the active color image.
+        pub fn clearDepth(rq: *Self, depth_image: @import("../graphics/depth.zig").Image, color_image: anytype) void {
+            if (@typeInfo(@TypeOf(color_image.texel_data)).pointer.is_const)
+                @compileError("framebuffer storage must be mutable");
+            std.debug.assert(depth_image.width == rq.fb_width and depth_image.height == rq.fb_height);
+            std.debug.assert(color_image.width == rq.fb_width and color_image.height == rq.fb_height);
+            rq.cmd_queue.pipeSync();
+            rq.cmd_queue.setOtherModes(.{ .cycle_type = .fill });
+            rq.cmd_queue.setColorFrame(depth_image);
+            rq.cmd_queue.setFillColor(@import("../graphics/pixel.zig").Rgba16.white);
+            rq.cmd_queue.fillRect(0, 0, (rq.fb_width - 1) * 4, (rq.fb_height - 1) * 4);
+            rq.cmd_queue.pipeSync();
+            rq.cmd_queue.setColorFrame(color_image);
+            rq.emitted_mode = null;
+        }
+
+        pub fn drawRect(rq: *Self, x: u16, y: u16, w: u16, h: u16, color: anytype) void {
+            rq.cmd_queue.pipeSync();
+            rq.cmd_queue.setOtherModes(.{ .cycle_type = .fill });
+            rq.cmd_queue.setFillColor(color);
+            rq.cmd_queue.fillRect(
+                @truncate(@as(u32, x) * 4),
+                @truncate(@as(u32, y) * 4),
+                @truncate((@as(u32, x) + w - 1) * 4),
+                @truncate((@as(u32, y) + h - 1) * 4),
+            );
+            rq.emitted_mode = null;
+        }
+
+        // Explicit texture load into TMEM (bypasses cache).
+        fn loadTexture(rq: *Self, image: anytype, tile: u3, tmem_addr: u9, sampler: texture.Sampler) void {
+            // Finish primitives that can still reference the tiles or TMEM
+            // about to be reused, including glyphs from the previous atlas.
+            rq.cmd_queue.pipeSync();
+            texture.loadTexture(&rq.cmd_queue, image, tile, tmem_addr, sampler);
+        }
+
+        // Returns the render tile for `image`, loading it into TMEM if not cached.
+        // Emits a tileSync when a load occurs. TMEM cache is evicted when full.
+        fn ensureTexture(rq: *Self, image: anytype, sampler: texture.Sampler) u3 {
+            rq.configureTexture(image);
+            const ptr = @intFromPtr(image.texel_data.ptr);
+            const content_id = imageContentId(image);
+            for (rq.tex_cache[0..rq.tex_cache_len]) |entry| {
+                if (entry.ptr == ptr and entry.content_id == content_id and entry.sampler.eql(sampler)) return entry.tile;
+            }
+            // A different CI4 palette bank can share already resident texels.
+            for (rq.tex_cache[0..rq.tex_cache_len]) |entry| {
+                var existing = entry.sampler;
+                existing.palette = sampler.palette;
+                if (entry.ptr == ptr and entry.content_id == content_id and existing.eql(sampler) and rq.tex_cache_len < 4) {
+                    const tile = rq.next_tile;
+                    rq.cmd_queue.tileSync();
+                    texture.configureTile(&rq.cmd_queue, image, tile, @intCast(entry.tmem_addr), sampler);
+                    rq.tex_cache[rq.tex_cache_len] = .{ .ptr = ptr, .content_id = content_id, .tile = tile, .tmem_addr = entry.tmem_addr, .sampler = sampler };
+                    rq.tex_cache_len += 1;
+                    rq.next_tile +%= 2;
+                    return tile;
+                }
+            }
+            const required_words = textureWords(image);
+            const capacity: u32 = if (@TypeOf(image).format == .color_indexed) 256 else 512;
+            if (required_words > capacity) @panic("texture exceeds TMEM capacity");
+            const tmem_words: u10 = @intCast(required_words);
+            // Evict entire cache when TMEM is full or all 4 render slots are used.
+            if (rq.tex_cache_len >= 4 or @as(u32, rq.tmem_next) + required_words > capacity) {
+                rq.resetTextureCache();
+            }
+            const tile = rq.next_tile;
+            const tmem_addr: u9 = @intCast(rq.tmem_next);
+            rq.loadTexture(image, tile, tmem_addr, sampler);
+            rq.cmd_queue.tileSync();
+            rq.tex_cache[rq.tex_cache_len] = .{ .ptr = ptr, .content_id = content_id, .tile = tile, .tmem_addr = tmem_addr, .sampler = sampler };
+            rq.tex_cache_len += 1;
+            rq.tmem_next += tmem_words;
+            rq.next_tile +%= 2;
+            return tile;
+        }
+
+        fn resetTextureCache(rq: *Self) void {
+            rq.tex_cache_len = 0;
+            rq.tmem_next = 0;
+            rq.next_tile = 0;
+        }
+
+        fn configureTexture(rq: *Self, image: anytype) void {
+            const indexed = @TypeOf(image).format == .color_indexed;
+            rq.mode.tlut_en = indexed;
+            rq.mode.tlut_format = if (@hasField(@TypeOf(image), "palette_format")) switch (image.palette_format) {
+                .rgba16 => .rgba16,
+                .ia16 => .ia16,
+            } else .rgba16;
+            if (indexed) {
+                if (!@hasField(@TypeOf(image), "palette")) @compileError("CI textures require PalettedImage with an RGBA16 palette");
+                const palette = image.palette;
+                std.debug.assert(palette.len > 0 and palette.len <= 256);
+                const address = @intFromPtr(palette.ptr);
+                if (rq.palette_ptr == address and rq.palette_content_id == imageContentId(image)) return;
+                rq.resetTextureCache();
+                rq.loadPalette(palette);
+                rq.palette_ptr = address;
+                rq.palette_content_id = imageContentId(image);
+            } else if (rq.palette_ptr != 0) {
+                rq.resetTextureCache();
+                rq.palette_ptr = 0;
+            }
+        }
+
+        fn loadPalette(rq: *Self, palette: []const @import("../graphics/pixel.zig").Rgba16) void {
+            rq.cmd_queue.pipeSync();
+            // TLUT upload follows libdragon's hardware-tested I4 tile layout.
+            // The source remains RGBA16; the 33-word pitch avoids corrupt loads
+            // observed with a zero-pitch RGBA16 tile on the local N64.
+            std.debug.assert(@intFromPtr(palette.ptr) & 7 == 0);
+            rq.cmd_queue.setTextureImage(.rgba, .@"16", 260, @intFromPtr(palette.ptr));
+            rq.cmd_queue.setTile(.{ .color_format = .intensity, .bit_depth = .@"4", .line_length = 33, .tmem_addr = 256, .tile_index = 7 });
+            rq.cmd_queue.loadSync();
+            rq.cmd_queue.loadTlut(7, @intCast(palette.len));
+            rq.cmd_queue.loadSync();
+        }
+
+        /// Integer glyph path: one rectangle and a resident atlas/palette bank.
+        pub fn drawGlyph(rq: *Self, atlas: anytype, x: i16, y: i16, s: u8, t: u8, width: u16, height: u16, palette: u4) void {
+            const tile = rq.ensureTexture(atlas, .{ .palette = palette });
+            rq.flushPendingModes();
+            const left: i32 = @as(i32, x) * 4;
+            const top: i32 = @as(i32, y) * 4;
+            const right = left + @as(i32, width) * 4;
+            const bottom = top + @as(i32, height) * 4;
+            if (right <= 0 or bottom <= 0 or left >= 4095 or top >= 4095) return;
+            rq.cmd_queue.textureRectangle(.{ .tile = tile, .ulx = @intCast(@max(left, 0)), .uly = @intCast(@max(top, 0)), .lrx = @intCast(@min(right, 4095)), .lry = @intCast(@min(bottom, 4095)), .s = @intCast(@as(i32, s) * 32 + @max(-left, 0) * 8), .t = @intCast(@as(i32, t) * 32 + @max(-top, 0) * 8), .dsdx = 1024, .dtdy = 1024 });
+        }
+
+        pub fn drawSprite(rq: *Self, image: anytype, x: f32, y: f32, opts: SpriteDrawOptions) void {
+            const src_width: f32 = if (opts.width != 0) @floatFromInt(opts.width) else @floatFromInt(image.width);
+            const src_height: f32 = if (opts.height != 0) @floatFromInt(opts.height) else @floatFromInt(image.height);
+
+            // Negative scale toggles flip; work with magnitudes.
+            var flip_x = opts.flip_x;
+            var flip_y = opts.flip_y;
+            var scale_x: f32 = opts.scale_x;
+            var scale_y: f32 = opts.scale_y;
+            if (scale_x < 0.0) {
+                flip_x = !flip_x;
+                scale_x = -scale_x;
+            }
+            if (scale_y < 0.0) {
+                flip_y = !flip_y;
+                scale_y = -scale_y;
+            }
+
+            // Pivot in source-rect-local coordinates (0,0 = top-left of sub-rect).
+            const cx: f32 = switch (opts.pivot) {
+                .top_left, .middle_left, .bottom_left => 0.0,
+                .top_middle, .center, .bottom_middle => src_width / 2.0,
+                .top_right, .middle_right, .bottom_right => src_width,
+                .custom => |p| @floatFromInt(p.x),
+            };
+            const cy: f32 = switch (opts.pivot) {
+                .top_left, .top_middle, .top_right => 0.0,
+                .middle_left, .center, .middle_right => src_height / 2.0,
+                .bottom_left, .bottom_middle, .bottom_right => src_height,
+                .custom => |p| @floatFromInt(p.y),
+            };
+
+            const tile = rq.ensureTexture(image, .{ .palette = opts.palette });
+
+            if (opts.rotation == 0.0) {
+                rq.flushPendingModes();
+                texture.drawNonRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, src_width, src_height, flip_x, flip_y, scale_x, scale_y, cx, cy);
+            } else {
+                rq.flushPendingModes();
+                tri.drawRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, src_width, src_height, flip_x, flip_y, opts.rotation, scale_x, scale_y, cx, cy);
+            }
+        }
+
+        pub fn drawTexturedTriangle(rq: *Self, image: anytype, v1: TexVertex, v2: TexVertex, v3: TexVertex) void {
+            const tile = rq.ensureTexture(image, .{});
+            rq.flushPendingModes();
+            tri.emitTexturedTriangle(&rq.cmd_queue, tile, v1, v2, v3);
+        }
+    };
+}
+
+fn imageContentId(image: anytype) u64 {
+    return if (@hasField(@TypeOf(image), "content_id")) image.content_id else 0;
+}
+
+fn sharesTexels(first: anytype, second: anytype) bool {
+    if (@TypeOf(first).Pixel != @TypeOf(second).Pixel) return false;
+    if (first.width != second.width or first.height != second.height) return false;
+    return @intFromPtr(first.texel_data.ptr) == @intFromPtr(second.texel_data.ptr) and
+        imageContentId(first) == imageContentId(second);
+}
+
+fn validateTexturePair(first: anytype, second: anytype) void {
+    // RGBA32 occupies both TMEM banks and needs a different allocator.
+    if (@TypeOf(first).bit_depth == .@"32" or @TypeOf(second).bit_depth == .@"32")
+        @panic("32-bit texture pairs are not supported");
+    validatePairPalette(first, second);
+}
+
+fn validatePairPalette(first: anytype, second: anytype) void {
+    if (@TypeOf(first).format == .color_indexed and @TypeOf(second).format == .color_indexed) {
+        if (first.palette.ptr != second.palette.ptr) @panic("texture pairs require a shared palette");
+    }
+}
+
+const TexCacheEntry = struct {
+    content_id: u64 = 0,
+    ptr: usize = 0,
+    tile: u3 = 0,
+    tmem_addr: usize = 0,
+    sampler: texture.Sampler = .{},
+};
+
+test "material binding selects cached tiles and returns to tile zero after eviction" {
+    const image_module = @import("../graphics/image.zig");
+    const pixels: [*]@import("../graphics/pixel.zig").I8 = @ptrFromInt(0x80400000);
+    const first: image_module.Image(@import("../graphics/pixel.zig").I8) = .{ .width = 8, .height = 8, .texel_data = pixels[0..64] };
+    const second: image_module.Image(@import("../graphics/pixel.zig").I8) = .{ .width = 8, .height = 8, .texel_data = pixels[64..128] };
+    var commands: [128]u64 = undefined;
+    var render = RenderEncoder(q.Direct).init(.{ .buffer = &commands });
+    try std.testing.expectEqual(@as(u3, 0), render.useTextureSampler(first, .{}));
+    try std.testing.expectEqual(@as(u3, 2), render.useTextureSampler(second, .{}));
+    try std.testing.expectEqual(@as(u3, 2), render.material_tile);
+    const previous = render.cmd_queue.queue.index;
+    try std.testing.expectEqual(@as(u3, 0), render.useTextureSampler(first, .{}));
+    try std.testing.expectEqual(previous, render.cmd_queue.queue.index);
+    render.invalidateState();
+    try std.testing.expectEqual(@as(u3, 0), render.useTextureSampler(second, .{}));
+    render.useTexturePair(first, second, .{}, .{});
+    try std.testing.expectEqual(@as(u3, 0), render.material_tile);
+}
+
+test "texture pair binds adjacent tiles with independent scale and scroll" {
+    const image_module = @import("../graphics/image.zig");
+    const pixels: [*]@import("../graphics/pixel.zig").Rgba16 = @ptrFromInt(0x80400000);
+    const image: image_module.Image(@import("../graphics/pixel.zig").Rgba16) = .{ .width = 32, .height = 32, .texel_data = pixels[0 .. 32 * 32] };
+    var commands: [32]u64 = undefined;
+    var render = RenderEncoder(q.Direct).init(.{ .buffer = &commands });
+    render.useTexturePair(image, image, .{ .mask_s = 5, .mask_t = 5, .offset_s = 4, .offset_t = 8 }, .{ .mask_s = 5, .mask_t = 5, .shift_s = 15, .shift_t = 15 });
+    var render_tiles: usize = 0;
+    var tile_sizes: usize = 0;
+    for (commands[0..render.cmd_queue.queue.index]) |command| {
+        const opcode: u8 = @truncate(command >> 56);
+        if (opcode == 0xf5 and (command >> 41) & 0x1ff == 8) {
+            const tile = (command >> 24) & 7;
+            if (tile == 0) {
+                try std.testing.expectEqual(@as(u64, 0), (command >> 32) & 0x1ff);
+                try std.testing.expectEqual(@as(u64, 0), command & 15);
+            } else {
+                try std.testing.expectEqual(@as(u64, 1), tile);
+                try std.testing.expectEqual(@as(u64, 0), (command >> 32) & 0x1ff);
+                try std.testing.expectEqual(@as(u64, 15), command & 15);
+                try std.testing.expectEqual(@as(u64, 15), (command >> 10) & 15);
+            }
+            render_tiles += 1;
+        }
+        if (opcode == 0xf2) {
+            const first = (command >> 24) & 7 == 0;
+            try std.testing.expectEqual(@as(u64, if (first) 4 else 0), (command >> 44) & 0xfff);
+            try std.testing.expectEqual(@as(u64, if (first) 8 else 0), (command >> 32) & 0xfff);
+            tile_sizes += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), render_tiles);
+    try std.testing.expectEqual(@as(usize, 2), tile_sizes);
+    try std.testing.expectEqual(@as(u10, 256), render.tmem_next);
+    try std.testing.expect(!texture.Sampler.eql(.{}, .{ .shift_s = 15 }));
+    try std.testing.expect(!texture.Sampler.eql(.{}, .{ .offset_t = 8 }));
+}
+
+test "complete state values emit changes once and restore after fill and raw commands" {
+    const State = @import("state.zig").State;
+    var commands: [64]u64 = undefined;
+    var render = RenderEncoder(q.Direct).init(.{ .buffer = &commands });
+    var state = State.opaque_geometry;
+    state.modes.antialias_en = false;
+    render.setState(state);
+    render.flushModes();
+    const initial = render.cmd_queue.queue.index;
+    try std.testing.expectEqual(@as(usize, 3), initial);
+    try std.testing.expectEqual(@as(u64, @bitCast(state.modes)), commands[1]);
+    render.setState(state);
+    render.flushModes();
+    try std.testing.expectEqual(initial, render.cmd_queue.queue.index);
+    var updated = render.getModes();
+    updated.antialias_en = true;
+    render.setModes(updated);
+    render.flushModes();
+    try std.testing.expectEqual(initial + 2, render.cmd_queue.queue.index);
+    render.drawRect(0, 0, 4, 4, @import("../graphics/pixel.zig").Rgba16.black);
+    const after_fill = render.cmd_queue.queue.index;
+    render.flushModes();
+    try std.testing.expectEqual(after_fill + 2, render.cmd_queue.queue.index);
+    try std.testing.expectEqual(@as(u64, @bitCast(updated)), commands[after_fill + 1]);
+    render.cmd_queue.setOtherModes(.{ .cycle_type = .copy });
+    render.invalidateState();
+    const before_restore = render.cmd_queue.queue.index;
+    render.flushModes();
+    try std.testing.expectEqual(before_restore + 3, render.cmd_queue.queue.index);
+    render.clear();
+    render.flushModes();
+    try std.testing.expectEqual(@as(usize, 3), render.cmd_queue.queue.index);
+}
+
+test "presets replace translucent and sprite state with complete opaque geometry state" {
+    const State = @import("state.zig").State;
+    var commands: [32]u64 = undefined;
+    var render = RenderEncoder(q.Direct).init(.{ .buffer = &commands });
+    render.setState(State.translucent_geometry);
+    try std.testing.expect(render.getModes().force_blend);
+    try std.testing.expect(!render.getModes().z_update_en);
+    render.setState(State.textured_sprite);
+    try std.testing.expect(!render.getModes().z_compare_en);
+    try std.testing.expect(!render.getModes().persp_tex_en);
+    render.setState(State.opaque_geometry);
+    const value = render.getModes();
+    try std.testing.expect(value.z_update_en and value.z_compare_en and value.persp_tex_en);
+    try std.testing.expect(!value.force_blend and !value.image_read_en and !value.write_on_cvg_overflow);
+    try std.testing.expectEqual(modes.ZMode.opaque_surface, value.z_mode);
+    try std.testing.expect(std.meta.eql(CombineMode.shade, render.getState().combine));
+}
+
+test "frame setup binds and preserves targets unless clearing is requested" {
+    const color = @import("../graphics/pixel.zig");
+    inline for (.{ color.Rgba16, color.Rgba32 }) |Pixel| {
+        var pixels: [8 * 8]Pixel align(64) = undefined;
+        var depths: [8 * 8]u16 align(64) = undefined;
+        const image = try @import("../graphics/image.zig").Image(Pixel).initBuffer(&pixels, 8, 8);
+        const depth = try @import("../graphics/depth.zig").Image.initBuffer(&depths, 8, 8);
+        var commands: [64]u64 = undefined;
+        var render = RenderEncoder(q.Direct).init(.{ .buffer = &commands });
+        render.setState(@import("state.zig").State.textured_sprite);
+        const state = render.getState();
+        render.cmd_queue.pipeSync(); // Old CPU commands are discarded.
+        render.beginFrame(image, .{});
+        try std.testing.expectEqual(@as(usize, 2), render.cmd_queue.queue.index);
+        try std.testing.expectEqual(@as(u8, 0xff), @as(u8, @truncate(commands[0] >> 56)));
+        try std.testing.expectEqual(@as(u8, 0xed), @as(u8, @truncate(commands[1] >> 56)));
+        try std.testing.expectEqual(@as(u16, 8), render.fb_width);
+        try std.testing.expectEqual(@as(u16, 8), render.fb_height);
+        try std.testing.expect(std.meta.eql(state, render.getState()));
+        render.beginFrame(image, .{ .depth = depth });
+        try std.testing.expectEqual(@as(usize, 3), render.cmd_queue.queue.index);
+        try std.testing.expectEqual(@as(u8, 0xfe), @as(u8, @truncate(commands[2] >> 56)));
+        render.beginFrame(image, .{
+            .depth = depth,
+            .clear_color = Pixel.green,
+            .clear_depth = true,
+        });
+        var fills: usize = 0;
+        var last_target: u64 = 0;
+        for (commands[0..render.cmd_queue.queue.index]) |command| {
+            switch (@as(u8, @truncate(command >> 56))) {
+                0xf6 => fills += 1,
+                0xff => last_target = command,
+                else => {},
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 2), fills);
+        try std.testing.expectEqual(@as(u64, @intFromPtr(image.texel_data.ptr)) & 0x00ff_ffff, last_target & 0x00ff_ffff);
+        try std.testing.expect(std.meta.eql(state, render.getState()));
+    }
+}
+
+test "palette textures load TLUT reserve upper TMEM and restore direct texture mode" {
+    const images = @import("../graphics/image.zig");
+    const colors = @import("../graphics/pixel.zig");
+    const texels: [*]const colors.Ci4Pair = @ptrFromInt(0x80400000);
+    const palette: [*]const colors.Rgba16 = @ptrFromInt(0x80401000);
+    const image: images.PalettedImage(colors.Ci4Pair) = .{ .width = 64, .height = 64, .texel_data = texels[0..2048], .palette = palette[0..16] };
+    var commands: [128]u64 = undefined;
+    var render = RenderEncoder(q.Direct).init(.{ .buffer = &commands });
+    try std.testing.expectEqual(@as(u3, 0), render.useTextureSampler(image, .{}));
+    try std.testing.expect(render.mode.tlut_en);
+    try std.testing.expectEqual(@as(u10, 256), render.tmem_next);
+    var tlut_commands: usize = 0;
+    var palette_image = false;
+    var palette_tile = false;
+    for (commands[0..render.cmd_queue.queue.index]) |command| {
+        if (command >> 56 == 0xfd and command & 0x00ff_ffff == 0x00401000) {
+            palette_image = true;
+            try std.testing.expectEqual(@as(u64, 2), command >> 51 & 3);
+            try std.testing.expectEqual(@as(u64, 259), command >> 32 & 0x3ff);
+        }
+        if (command >> 56 == 0xf5 and command >> 24 & 7 == 7) {
+            palette_tile = true;
+            try std.testing.expectEqual(@as(u64, 4), command >> 53 & 7);
+            try std.testing.expectEqual(@as(u64, 0), command >> 51 & 3);
+            try std.testing.expectEqual(@as(u64, 33), command >> 41 & 0x1ff);
+            try std.testing.expectEqual(@as(u64, 256), command >> 32 & 0x1ff);
+        }
+        if (command >> 56 == 0xf0) {
+            tlut_commands += 1;
+            try std.testing.expectEqual(@as(u64, 7), command >> 24 & 7);
+            try std.testing.expectEqual(@as(u64, 15), command >> 14 & 0x3ff);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), tlut_commands);
+    try std.testing.expect(palette_image and palette_tile);
+    const count = render.cmd_queue.queue.index;
+    _ = render.useTextureSampler(image, .{});
+    try std.testing.expectEqual(count, render.cmd_queue.queue.index);
+    var other = image;
+    other.palette = palette[16..32];
+    _ = render.useTextureSampler(other, .{});
+    try std.testing.expectEqual(@as(usize, 1), render.tex_cache_len);
+    const direct: images.ConstImage(colors.I8) = .{ .width = 8, .height = 8, .texel_data = @as([*]const colors.I8, @ptrFromInt(0x80402000))[0..64] };
+    _ = render.useTextureSampler(direct, .{});
+    try std.testing.expect(!render.mode.tlut_en);
+    try std.testing.expectEqual(@as(usize, 0), render.palette_ptr);
+    render.invalidateState();
+    _ = render.useTextureSampler(image, .{});
+    try std.testing.expect(render.mode.tlut_en);
+}
+
+test "font palette banks reuse texels and retain IA16 TLUT interpretation" {
+    const images = @import("../graphics/image.zig");
+    const colors = @import("../graphics/pixel.zig");
+    const texels: [128]colors.Ci4Pair align(8) = @splat(@bitCast(@as(u8, 0x69)));
+    const palette: [32]colors.Rgba16 align(8) = @import("../graphics/Font.zig").outline_palette;
+    const atlas: images.PalettedImage(colors.Ci4Pair) = .{ .width = 16, .height = 16, .texel_data = &texels, .palette = &palette, .palette_format = .ia16 };
+    var commands: [256]u64 = undefined;
+    var render: RenderEncoder(q.Direct) = .init(.{ .buffer = &commands });
+    for (0..20) |index| render.drawGlyph(atlas, @intCast(index * 4), 0, 0, 0, 3, 3, @intCast(index % 2));
+    try std.testing.expectEqual(@as(usize, 2), render.tex_cache_len);
+    try std.testing.expectEqual(render.tex_cache[0].tmem_addr, render.tex_cache[1].tmem_addr);
+    try std.testing.expectEqual(@as(usize, 16), render.tmem_next);
+    try std.testing.expectEqual(@import("modes.zig").TlutFormat.ia16, render.mode.tlut_format);
+    var uploads: usize = 0;
+    for (commands[0..render.cmd_queue.queue.index]) |command| if (command >> 56 == 0xfd) {
+        uploads += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), uploads); // One TLUT, one atlas.
+}
+
+test "new residency identities reload texels and palettes at recycled addresses" {
+    const images = @import("../graphics/image.zig");
+    const colors = @import("../graphics/pixel.zig");
+    const texels: [32]colors.Ci4Pair align(16) = @splat(@bitCast(@as(u8, 0x11)));
+    const palette: [16]colors.Rgba16 align(16) = @splat(.red);
+    var image: images.PalettedImage(colors.Ci4Pair) = .{ .width = 8, .height = 8, .texel_data = &texels, .palette = &palette, .content_id = 1 };
+    var commands: [256]u64 = undefined;
+    var render = RenderEncoder(q.Direct).init(.{ .buffer = &commands });
+    _ = render.useTextureSampler(image, .{});
+    const initial = render.cmd_queue.queue.index;
+    _ = render.useTextureSampler(image, .{});
+    try std.testing.expectEqual(initial, render.cmd_queue.queue.index);
+    image.content_id = 2;
+    _ = render.useTextureSampler(image, .{});
+    var uploads: usize = 0;
+    var palettes: usize = 0;
+    for (commands[initial..render.cmd_queue.queue.index]) |command| {
+        if (command >> 56 == 0xfd) uploads += 1;
+        if (command >> 56 == 0xf0) palettes += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), uploads);
+    try std.testing.expectEqual(@as(usize, 1), palettes);
+
+    var direct: images.ConstImage(colors.I8) = .{ .width = 8, .height = 8, .texel_data = @as([*]const colors.I8, @ptrFromInt(0x80402000))[0..64], .content_id = 3 };
+    _ = render.useTextureSampler(direct, .{});
+    const before_reload = render.cmd_queue.queue.index;
+    direct.content_id = 4;
+    _ = render.useTextureSampler(direct, .{});
+    try std.testing.expect(render.cmd_queue.queue.index > before_reload);
+    const after_reload = render.cmd_queue.queue.index;
+    _ = render.useTextureSampler(direct, .{});
+    try std.testing.expectEqual(after_reload, render.cmd_queue.queue.index);
+}
+
+test "full-TMEM texture pairs share one upload and distinct images remain separate" {
+    const images = @import("../graphics/image.zig");
+    const colors = @import("../graphics/pixel.zig");
+    const shared: images.ConstImage(colors.I8) = .{ .width = 64, .height = 64, .texel_data = @as([*]const colors.I8, @ptrFromInt(0x80400000))[0..4096], .content_id = 1 };
+    var commands: [64]u64 = undefined;
+    var render = RenderEncoder(q.Direct).init(.{ .buffer = &commands });
+    render.useTexturePair(shared, shared, .{}, .{ .shift_s = 15, .offset_t = 8 });
+    try std.testing.expectEqual(@as(u10, 512), render.tmem_next);
+    var uploads: usize = 0;
+    for (commands[0..render.cmd_queue.queue.index]) |word| if (word >> 56 == 0xfd) {
+        uploads += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), uploads);
+    var changed = shared;
+    changed.content_id += 1;
+    try std.testing.expect(!sharesTexels(shared, changed));
+    changed = shared;
+    changed.width = 32;
+    try std.testing.expect(!sharesTexels(shared, changed));
+    const first: images.Image(@import("../graphics/pixel.zig").Rgba16) = .{ .width = 32, .height = 32, .texel_data = @as([*]colors.Rgba16, @ptrFromInt(0x80404000))[0..1024] };
+    var second = first;
+    second.texel_data = @as([*]colors.Rgba16, @ptrFromInt(0x80405000))[0..1024];
+    render.clear();
+    render.useTexturePair(first, second, .{}, .{});
+    uploads = 0;
+    for (commands[0..render.cmd_queue.queue.index]) |word| if (word >> 56 == 0xfd) {
+        uploads += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), uploads);
+    try std.testing.expectEqual(@as(u10, 512), render.tmem_next);
+    try std.testing.expect(!sharesTexels(shared, first));
+}

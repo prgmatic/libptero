@@ -1,6 +1,6 @@
 //! libdragon VADPCM RSP command ABI. PCM mixing remains a separate overlay.
 const std = @import("std");
-const rsp = @import("../rsp/rsp.zig");
+const rsp = @import("../rsp.zig");
 const cache = @import("../cpu/cache.zig");
 pub const max_channel_blocks = 94;
 pub const checkpoint_blocks = 64;
@@ -56,10 +56,10 @@ pub const Decoder = struct {
         cache.writebackData(state);
         cache.invalidateData(state);
         cache.writebackData(book);
-        self.queue.writeOverlayCommand(&self.overlay, 0, rsp.physicalAddress(@intFromPtr(input.ptr)), &.{
-            ((blocks - 1) << 24) | rsp.physicalAddress(@intFromPtr(workspace.ptr)),
-            rsp.physicalAddress(@intFromPtr(state)) | (if (channels == 2) @as(u32, 0x80000000) else 0),
-            rsp.physicalAddress(@intFromPtr(book)),
+        self.queue.writeOverlayCommand(&self.overlay, 0, @import("../cpu.zig").physicalAddress(@intFromPtr(input.ptr)), &.{
+            ((blocks - 1) << 24) | @import("../cpu.zig").physicalAddress(@intFromPtr(workspace.ptr)),
+            @import("../cpu.zig").physicalAddress(@intFromPtr(state)) | (if (channels == 2) @as(u32, 0x80000000) else 0),
+            @import("../cpu.zig").physicalAddress(@intFromPtr(book)),
         });
         self.borrowed_workspace = workspace[0 .. length + 8];
         self.borrowed_state = state;
@@ -73,7 +73,7 @@ pub const Decoder = struct {
         cache.writebackData(destination);
         cache.invalidateData(destination);
         if (source) |history| cache.writebackData(history);
-        self.queue.writeOverlayCommand(&self.overlay, 1, rsp.physicalAddress(@intFromPtr(destination)), &.{if (source) |history| rsp.physicalAddress(@intFromPtr(history)) else 0});
+        self.queue.writeOverlayCommand(&self.overlay, 1, @import("../cpu.zig").physicalAddress(@intFromPtr(destination)), &.{if (source) |history| @import("../cpu.zig").physicalAddress(@intFromPtr(history)) else 0});
         self.borrowed_workspace = &.{};
         self.borrowed_state = destination;
         self.pending = true;

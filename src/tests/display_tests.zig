@@ -3,7 +3,7 @@ const n64 = @import("n64");
 const runner = @import("runner.zig");
 const testing = @import("assert.zig");
 
-var pixels: [2 * 320 * 240]n64.graphics.color.Rgba32 align(64) = undefined;
+var pixels: [2 * 320 * 240]n64.graphics.pixel.Rgba32 align(64) = undefined;
 var commands: [32]u64 align(8) = undefined;
 
 pub const tests = [_]runner.Test{
@@ -15,7 +15,7 @@ fn presentation() !void {
     const status = n64.cpu.cp0.regRead(.Status);
     n64.cpu.cp0.regWrite(.Status, status & ~@as(u32, 1));
     defer n64.cpu.cp0.regWrite(.Status, status);
-    var chain = try n64.display.Swapchain(n64.graphics.color.Rgba32).initBuffer(&pixels, .{});
+    var chain = try n64.display.Swapchain(n64.graphics.pixel.Rgba32).initBuffer(&pixels, .{});
     var unused_allocator = std.heap.FixedBufferAllocator.init(&.{});
     errdefer chain.deinit(unused_allocator.allocator()) catch {};
     const origin: *volatile u32 = @ptrFromInt(0xa4400004);
@@ -32,16 +32,16 @@ fn presentation() !void {
     n64.rsp.halt();
     n64.rsp.waitHalted();
     n64.rsp.releaseRdpToDirect();
-    var render = n64.graphics.rdp.DirectRenderQueue.init(.{ .buffer = &commands });
+    var render = n64.rdp.RenderEncoder(n64.rdp.backend.Direct).init(.{ .buffer = &commands });
     render.setFrameBuffer(gpu_frame.image);
-    render.clearScreen(n64.graphics.color.Rgba32.green);
+    render.clearScreen(n64.graphics.pixel.Rgba32.green);
     const completion = render.submit();
     try chain.present(gpu_frame, completion, .{});
     try testing.expect(completion.isComplete());
     try completion.wait(.{ .max_attempts = 0 });
     try testing.expectEqual(first_origin, origin.*);
-    n64.cache.invalidateData(gpu_frame.image.texel_data);
-    for (gpu_frame.image.texel_data) |pixel| try testing.expectEqual(n64.graphics.color.Rgba32.green, pixel);
+    n64.cpu.cache.invalidateData(gpu_frame.image.texel_data);
+    for (gpu_frame.image.texel_data) |pixel| try testing.expectEqual(n64.graphics.pixel.Rgba32.green, pixel);
 
     // Retire an immediate-mode front buffer before returning it to the CPU.
     chain.options.present_mode = .immediate;

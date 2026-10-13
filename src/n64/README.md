@@ -1,10 +1,13 @@
 # n64 runtime
 
+See [API organization and migration](API.md) for namespaces, source paths, and
+the ownership distinctions between App, renderers, encoders, and data views.
+
 The public `n64` module exposes hardware interfaces, graphics, RSP queues,
 input, math, cache operations, debugging, and display buffer management.
 
 For a coordinated game loop with borrowed render data, input snapshots and explicit
-submission, see [Game loops](context/README.md). The APIs below remain independently
+submission, see [Game loops](app/README.md). The APIs below remain independently
 usable.
 
 ## Display buffers
@@ -13,7 +16,7 @@ usable.
 one contiguous allocation when initialized with an allocator:
 
 ```zig
-const Pixel = n64.graphics.color.Rgba16;
+const Pixel = n64.graphics.pixel.Rgba16;
 var display = try n64.display.Swapchain(Pixel).init(allocator, .{
     .resolution = .@"320x240p",
     .buffer_count = 3,
@@ -105,7 +108,7 @@ drawing; there are no public dirty flags. Reapplying the same state emits no
 redundant mode commands. Convenience setters update the same tracked values.
 
 ```zig
-var state = n64.graphics.rdp.State.opaque_geometry;
+var state = n64.rdp.State.opaque_geometry;
 state.modes.antialias_en = false;
 render.setState(state);
 ```
@@ -126,11 +129,11 @@ Setup is explicit and separate from allocation and display:
 ```zig
 var runtime: n64.rsp.Runtime = undefined;
 runtime.init();
-var renderer: n64.graphics.Renderer = undefined;
+var renderer: n64.rdp.Renderer = undefined;
 renderer.init(&runtime);
 // Sprite and font drawing uses &renderer.render directly.
 
-var geometry: n64.graphics.geometry.Context = undefined;
+var geometry: n64.graphics.GeometryEncoder = undefined;
 geometry.init(&renderer); // Optional: adds geometry and clipping support.
 // Model drawing uses &geometry and shares renderer.render's tracked state.
 ```
@@ -140,7 +143,7 @@ in place and must not move after initialization: their queues and overlays
 contain pointers into their own storage. `Runtime` loads the built-in resident
 program and registers RDP. `Renderer` borrows it and contains the command queue
 and two 64 KiB RDP buffers. It does not initialize geometry or allocate a heap.
-`geometry.Context` borrows the renderer's queue and render state, registers its
+`graphics.GeometryEncoder` borrows the renderer's queue and render state, registers its
 own geometry overlay, and prepares clipping support. Font and sprite examples
 need only the first two objects.
 
@@ -153,18 +156,18 @@ render queues remain available for custom storage and hardware scheduling.
 
 ## Image storage and depth buffers
 
-`image.Image(Pixel)` and `image.ConstImage(Pixel)` are borrowed views. The existing
-`ImgRgba16`, `ImgRgba32`, and other format aliases name mutable views. Construct a
+`graphics.Image(Pixel)` and `graphics.ConstImage(Pixel)` are borrowed views.
+`Image(Pixel)` explicitly names the pixel format of a mutable view. Construct a
 view with `initBuffer(pixels, width, height)` to validate caller-owned storage, or
 use a literal when storage has already been checked. Views never free memory.
 Embedded textures, model textures, and font atlases expose `ConstImage` values.
 Framebuffer bindings require mutable storage.
 
-`image.ImageBuffer(Pixel)` owns an aligned allocation and takes an explicit
+`graphics.ImageBuffer(Pixel)` owns an aligned allocation and takes an explicit
 allocator for both initialization and teardown:
 
 ```zig
-var color = try n64.graphics.image.ImageBuffer(Pixel).init(allocator, width, height);
+var color = try n64.graphics.ImageBuffer(Pixel).init(allocator, width, height);
 defer color.deinit(allocator);
 var depth = try n64.graphics.DepthBuffer.init(allocator, width, height);
 defer depth.deinit(allocator);
@@ -196,8 +199,8 @@ uses the packed far value and restores the color target. Raw command queues reta
 
 ## Frame setup
 
-`beginFrame(color, options)` is available on RDP render queues, `graphics.Renderer`, and
-`geometry.Context`. It binds borrowed color/depth images, sets a full-target
+`beginFrame(color, options)` is available on RDP render queues, `rdp.Renderer`, and
+`graphics.GeometryEncoder`. It binds borrowed color/depth images, sets a full-target
 scissor, and performs only the clears requested by the caller:
 
 ```zig
@@ -222,11 +225,11 @@ preserved independently.
 
 ## Owning geometry renderer
 
-For the standard 3D path, `geometry.Renderer` owns the runtime, RDP renderer, and
+For the standard 3D path, `graphics.Renderer` owns the runtime, RDP renderer, and
 geometry context together. It initializes in place without heap allocation:
 
 ```zig
-var renderer: n64.graphics.geometry.Renderer = undefined;
+var renderer: n64.graphics.Renderer = undefined;
 renderer.init();
 // Access components directly as renderer.runtime, renderer.rdp, renderer.geometry.
 renderer.beginFrame(frame.image, .{ .depth = depth.view(), .clear_depth = true });
@@ -241,7 +244,7 @@ must not move after initialization. It starts an exclusive RSP session, submits
 both geometry and RDP completion markers, and tears down in dependency order.
 Complete all borrowed-resource work before teardown. It does not own display,
 images, vertices, or application matrices. The individual `rsp.Runtime`,
-`graphics.Renderer`, and `geometry.Context` types remain available for applications
+`rdp.Renderer`, and `graphics.GeometryEncoder` types remain available for applications
 that need separate lifetimes or an RDP-only renderer.
 
 ## Point lights and generated UVs
@@ -277,7 +280,7 @@ shifts and offsets; `useTexturePair` uploads identical images once.
 
 ## Drawing model data
 
-Models contain packed parts; generated `model.Asset(Materials)` values pair that
+Models contain packed parts; generated `n64.graphics.ModelAsset(Materials)` values pair that
 geometry with a typed material provider. They carry no renderer or drawing
 methods. Submit model draws through the geometry context:
 
@@ -293,8 +296,7 @@ leaving material/pipeline changes visible. The matrix is borrowed, not copied;
 keep it unchanged and alive until RSP/RDP completion. Neither draw method submits,
 waits, or allocates. Custom providers implement `apply(context, material_index)`;
 texture types remain known at compile time. `asset.material(index)` still reads
-native material metadata. The module-level `model.draw(context, model, materials)`
-primitive is also available to callers building their own draw traversal.
+native material metadata. Use `GeometryEncoder.drawModelWithMaterials` for a custom material provider.
 
 ## Skeletons and animation
 
@@ -307,7 +309,7 @@ const animation = n64.graphics.animation;
 var skeleton = try animation.Skeleton.init(allocator, assets.snake.model.nodes);
 defer skeleton.deinit(allocator);
 var player: animation.Player = .{ .clip = &assets.snake.model.animations[0] };
-var mesh = try n64.graphics.model.SkinnedModel.init(allocator, assets.snake.model);
+var mesh = try n64.graphics.SkinnedModel.init(allocator, assets.snake.model);
 defer mesh.deinit(allocator);
 
 player.update(&skeleton, delta_seconds);
@@ -379,13 +381,13 @@ with `deinit()` and keep their immutable source model alive throughout.
 
 ## Controller snapshots
 
-`io.joypad.System` owns fixed, aligned storage for all four ports. Initialization
+`input.Controllers` owns fixed, aligned storage for all four ports. Initialization
 and polling allocate nothing and finish SI DMA before returning. Systems and
 snapshots are movable, but only one system or raw Joybus transaction may use SI
 at a time. No teardown is required.
 
 ```zig
-var controllers = n64.io.joypad.System.init();
+var controllers = n64.input.Controllers.init();
 controllers.poll();
 const input = controllers.get(.one);
 if (input.pressed(.a)) jump();
@@ -440,8 +442,8 @@ _ = try assets.console.drawPrint(render, 16, 20, &text, .{}, "FPS: {d:.2}", .{fp
 
 `debug.init()` detects a backend. `debug.print` uses a local 256-byte formatting
 buffer, with no heap initialization or shared formatting storage. Oversized
-messages emit their buffered prefix and `[truncated]`. `debug.writeStr` remains
-the raw path for panic handling. The exception module is `debug.exception` and
+messages emit their buffered prefix and `[truncated]`. `debug.writeAll` remains
+the raw path for panic handling. The exception module is `cpu.exception` and
 backend enum tags are `none`, `is_viewer`, and `sc64`.
 
 ## Model overrides and writable instances
@@ -475,7 +477,7 @@ implement just `apply(context, index)`.
 material provider. Use it for both skinned and otherwise mutable instances:
 
 ```zig
-var mesh = try n64.graphics.model.MutableModel.init(allocator, assets.lava.model);
+var mesh = try n64.graphics.MutableModel.init(allocator, assets.lava.model);
 defer mesh.deinit(allocator);
 var vertices = mesh.vertices(0).iterator();
 while (vertices.next()) |vertex| vertex.position[1] = 20;

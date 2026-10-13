@@ -10,7 +10,7 @@ font-compiler assets/my-font.fnt build/font.texels build/font.zig my_font
 ```
 
 Applications normally use `AssetBundle.addFont`, which runs the compiler and
-adds the generated `n64.graphics.font.Font` value to the asset module.
+adds the generated `n64.graphics.Font` value to the asset module.
 
 The ellipsis width is the right edge of the final repeated glyph. Its advance
 includes self-kerning when the source font defines it.
@@ -28,7 +28,7 @@ indexed-color atlases, and asset compression remain intentionally unsupported.
 
 ## Rendering
 
-Generated assets expose an `n64.graphics.font.Font`. Text coordinates use a
+Generated assets expose an `n64.graphics.Font`. Text coordinates use a
 baseline, like libdragon's RDPQ text API. Rendering goes through any libptero
 RDP render queue; the default geometry context uses the RSP overlay queue:
 

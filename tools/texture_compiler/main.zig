@@ -66,6 +66,6 @@ test "generated indexed assets share an aligned texel and RGBA16 palette blob" {
     try std.testing.expectEqualSlices(u8, &.{ 0xf8, 0x01, 0x07, 0xc1 }, data[8..]);
     const source = try texture_compiler.generateSource(allocator, "indexed", result);
     defer allocator.free(source);
-    try std.testing.expect(std.mem.indexOf(u8, source, "PalettedImage(n64.graphics.image.ImgCi4.Pixel)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "PalettedImage(n64.graphics.pixel.Ci4Pair)") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "bytes[8..]") != null);
 }

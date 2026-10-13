@@ -5,7 +5,7 @@ const testing = @import("assert.zig");
 const runner = @import("runner.zig");
 
 var storage: [560 * 1024]u8 = undefined;
-var context: n64.context.Context(.{ .geometry = true }) = undefined;
+var context: n64.App(.{ .geometry = true }) = undefined;
 var player: n64.audio.Player = undefined;
 var scheduler: n64.rom.Scheduler = undefined;
 var asset_bytes: [1024]u8 align(16) = undefined;
@@ -40,7 +40,7 @@ fn gameLoop() !void {
     }
     try testing.expect(scheduler.isIdle());
     try testing.expect(scheduler.transfers > 1);
-    var camera = n64.graphics.geometry.Viewport.init(320, 240);
+    var camera = n64.graphics.Viewport.init(320, 240);
     camera.setPerspective(n64.math.degreesToRadians(70), 1, 500);
     camera.lookAt(.init(0, 0, 250), .zero, .init(0, 1, 0));
     const frame = try context.beginFrame(.{ .clear_color = .green });
@@ -66,17 +66,17 @@ fn gameLoop() !void {
     try context.deinit(allocator);
 }
 
-var recorded: n64.graphics.geometry.RecordedModel = undefined;
-const white_texels: [4]n64.graphics.color.Rgba16 align(8) = @splat(.white);
+var recorded: n64.graphics.RecordedModel = undefined;
+const white_texels: [4]n64.graphics.pixel.Rgba16 align(8) = @splat(.white);
 
 fn passRendering() !void {
     var fixed = std.heap.FixedBufferAllocator.init(&storage);
     const allocator = fixed.allocator();
     try context.init(allocator, .{ .input = false });
-    var camera = n64.graphics.geometry.Viewport.init(320, 240);
+    var camera = n64.graphics.Viewport.init(320, 240);
     camera.setPerspective(n64.math.degreesToRadians(70), 1, 500);
     camera.lookAt(.init(0, 0, 250), .zero, .init(0, 1, 0));
-    var dynamic = try n64.graphics.model.MutableModel.init(allocator, assets.model_resident.model);
+    var dynamic = try n64.graphics.MutableModel.init(allocator, assets.model_resident.model);
     defer dynamic.deinit(allocator);
     dynamic.vertices(0).get(0).position[1] += 1;
     const transform: n64.math.FixedMat4 align(16) = .identity;
@@ -95,11 +95,11 @@ fn passRendering() !void {
     try world.drawModel(assets.model_resident.withModel(dynamic.model()), &transform);
     const hud = try frame.beginOverlay(.{});
     if (world.drawRecorded(&recorded, &transform)) |_| return error.ExpectedInvalidPass else |err| try testing.expect(err == error.InvalidPass);
-    n64.cache.writebackData(&white_texels);
-    const image: n64.graphics.image.ConstImage(n64.graphics.color.Rgba16) = .{ .width = 2, .height = 2, .texel_data = &white_texels };
+    n64.cpu.cache.writebackData(&white_texels);
+    const image: n64.graphics.ConstImage(n64.graphics.pixel.Rgba16) = .{ .width = 2, .height = 2, .texel_data = &white_texels };
     try hud.drawSprite(image, .{ .position = .{ 8, 8 }, .scale = .{ 4, 4 }, .tint = .red });
     // Font rendering sets primitive color even when there are no glyphs.
-    const font: n64.graphics.font.Font = .{ .point_size = 8, .ascent = 8, .descent = 0, .line_height = 8, .ranges = &.{}, .glyphs = &.{} };
+    const font: n64.graphics.Font = .{ .point_size = 8, .ascent = 8, .descent = 0, .line_height = 8, .ranges = &.{}, .glyphs = &.{} };
     var scratch: [16]u8 = undefined;
     try hud.drawTextPrint(font, 0, 0, &scratch, .{ .color = .green }, "{d}", .{123});
     try hud.drawSprite(image, .{ .position = .{ 24, 8 }, .scale = .{ 4, 4 } });
@@ -107,7 +107,7 @@ fn passRendering() !void {
     const completion = try frame.submit();
     try completion.wait(.{});
     // The frame is still acquired. Read GPU-only storage through its uncached alias.
-    const pixels: [*]const volatile n64.graphics.color.Rgba16 = @ptrFromInt(@intFromPtr(context.acquired.image.texel_data.ptr) | n64.io.kseg1_addr);
+    const pixels: [*]const volatile n64.graphics.pixel.Rgba16 = @ptrFromInt(@intFromPtr(context.acquired.image.texel_data.ptr) | n64.cpu.kseg1_addr);
     const red = pixels[10 * 320 + 10];
     const white = pixels[10 * 320 + 26];
     const purple = pixels[10 * 320 + 42];

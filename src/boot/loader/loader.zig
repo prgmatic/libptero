@@ -2,8 +2,8 @@ const std = @import("std");
 const n64 = @import("n64");
 const config = @import("config");
 const elf = @import("elf.zig");
-const pi = n64.interfaces.parallel;
-const si = n64.interfaces.serial;
+const pi = n64.hw.pi;
+const si = n64.hw.si;
 
 export fn __start() linksection(".loader") callconv(.c) noreturn {
     initFpu();
@@ -23,7 +23,7 @@ export fn __start() linksection(".loader") callconv(.c) noreturn {
     const entry = loadElf();
 
     si.pifTerminateBoot();
-    n64.cache.clear();
+    n64.cpu.cache.clear();
     print("Entry {x}\n", .{entry});
     while (entry == 0) {}
 

@@ -11,7 +11,7 @@ pub const Storage = struct {
     /// Read an arbitrary PCM16 byte range, restoring history at the preceding
     /// 1024-source-frame checkpoint. A partial final block is copied precisely.
     /// Reader and decoder timeouts retain this fixed storage for explicit retry.
-    pub fn read(self: *Storage, reader: *rom.Reader, decoder: *codec.Decoder, asset: rom.Asset, metadata: codec.Metadata, channels: u2, start: u64, destination: []u8, attempts: u32) !void {
+    pub fn read(self: *Storage, reader: *rom.Reader, decoder: *codec.Decoder, asset: rom.Region, metadata: codec.Metadata, channels: u2, start: u64, destination: []u8, attempts: u32) !void {
         const frame_bytes = @as(u64, channels) * 2;
         const first_block = start / (frame_bytes * 16);
         var block = first_block / codec.checkpoint_blocks * codec.checkpoint_blocks;

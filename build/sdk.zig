@@ -142,7 +142,7 @@ pub const Sdk = struct {
         }
 
         const default_assembly = self.b.allocator.dupe(std.Build.LazyPath, &.{
-            self.root.path(self.b, "src/game/interrupt.S"),
+            self.root.path(self.b, "src/runtime/interrupt.S"),
         }) catch @panic("OOM");
         const linker_script = options.linker_script orelse makeLinkerScript(self.b, options.name, options.layout);
         var rom = rom_build.build(self.b, .{

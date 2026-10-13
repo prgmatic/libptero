@@ -5,7 +5,7 @@ const glyph_height = 8;
 const glyph_count = font.len / glyph_height;
 
 pub fn drawGlyph(img: anytype, color: anytype, char: u8, x: u16, y: u16) void {
-    if(char >= glyph_count) return;
+    if (char >= glyph_count) return;
     const base = @as(u32, char) * 8;
     for (0..8) |row| {
         const line = font[base + row];

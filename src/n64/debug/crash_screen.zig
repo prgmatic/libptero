@@ -1,11 +1,11 @@
 //! Allocation-free emergency crash UI. Never submits or waits for RSP/RDP work.
 const std = @import("std");
-const vi = @import("../interfaces/video.zig");
+const vi = @import("../hw/vi.zig");
 const cache = @import("../cpu/cache.zig");
 const cp0 = @import("../cpu/cp0.zig");
 const backtrace = @import("backtrace.zig");
-const srcmap = @import("srcmap.zig");
-const TrapFrame = @import("cpu_state.zig").TrapFrame;
+const srcmap = @import("source_map.zig");
+const TrapFrame = @import("../cpu/trap_frame.zig").TrapFrame;
 const controls = @import("crash_screen/input.zig");
 pub const model = @import("crash_screen/model.zig");
 pub const font = @import("crash_screen/font.zig");

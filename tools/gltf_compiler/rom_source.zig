@@ -14,8 +14,8 @@ pub fn generate(allocator: std.mem.Allocator, model: compiler.ConvertedModel, do
     try source.appendSlice(allocator,
         \\const std = @import("std");
         \\const n64 = @import("n64");
-        \\const VertexPair = n64.graphics.geometry.VertexPair;
-        \\const Part = n64.graphics.model.Part;
+        \\const VertexPair = n64.graphics.VertexPair;
+        \\const Part = n64.graphics.Model.Part;
         \\
     );
     try compiler.emitInfluences(allocator, &source, model.batches);
@@ -33,10 +33,10 @@ pub fn generate(allocator: std.mem.Allocator, model: compiler.ConvertedModel, do
 
 fn emitBinding(allocator: std.mem.Allocator, source: *std.ArrayList(u8), bindings: []const u8, batches: []const compiler.Batch, name: []const u8, byte_len: usize) !void {
     try compiler.appendFormat(allocator, source,
-        \\pub const {s}: n64.rom.TypedAsset(Definition) = .{{ .asset = @import("rom_data").{s} }};
+        \\pub const {s}: n64.rom.Asset(Definition) = .{{ .asset = @import("rom_data").{s} }};
         \\pub const Definition = struct {{
         \\    pub const byte_len = {d};
-        \\    pub const Value = n64.graphics.model.Asset(Materials);
+        \\    pub const Value = n64.graphics.ModelAsset(Materials);
         \\    pub const Storage = struct {{ parts: [{d}]Part }};
         \\    pub fn bind(model_data: []align(16) const u8, metadata: *Storage, content_id: u64) Value {{
         \\
@@ -63,7 +63,7 @@ fn emitMaterialPrefix(allocator: std.mem.Allocator, source: *std.ArrayList(u8), 
         \\    pub fn apply(self: @This(), context: anytype, index: u16) void {
         \\        self.bind(context, index, self.get(index));
         \\    }
-        \\    pub fn bind(self: @This(), context: anytype, index: u16, material: n64.graphics.model.Material) void {
+        \\    pub fn bind(self: @This(), context: anytype, index: u16, material: n64.graphics.Material) void {
         \\
     );
     // emitMaterials also writes the closing switch and native material accessor.

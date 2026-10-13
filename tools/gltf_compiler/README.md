@@ -19,7 +19,7 @@ and weighted-influence definitions remain resident Zig metadata. See
 [typed ROM assets](../../src/n64/ROM_ASSETS.md#typed-textures-and-models) for
 ownership, timeout recovery and direct-DMA behavior.
 
-The resulting value pairs a native `n64.graphics.model.Model` with a typed
+The resulting value pairs a native `n64.graphics.Model` with a typed
 material provider. Draw it with `geometry_context.drawModel(asset)` or
 `geometry_context.drawModelWithTransform(asset, &matrix)`. Identical native vertices are merged before batching, including their UVs,
 colors, normals, skin influences, and bind-local source attributes so seams are
@@ -39,7 +39,7 @@ embedded image dimensions are available. External images still need separate
 texture assets and declarative bindings or a material callback; this metadata fallback does not load them.
 
 Material state is exposed as `asset.material(index)` (a native
-`n64.graphics.model.Material`). `context.drawModel(asset)` applies it
+`n64.graphics.Material`). `context.drawModel(asset)` applies it
 automatically for embedded textures. For external textures, callbacks can use
 `asset.material(index).bind(context, texture)` without recreating material settings.
 For ordinary bindings, use a value such as
@@ -126,7 +126,7 @@ static mesh node instances are converted independently; their rigid transforms
 and inherited transforms are baked into geometry with
 inverse-transpose normals. See [runtime animation](../../src/n64/README.md#skeletons-and-animation)
 for mutable skeletons, independent playback, blending, attachments, and CPU
-skinning through `model.SkinnedModel`.
+skinning through `graphics.SkinnedModel`.
 
 The default `.skinning = .weighted` preserves all four influences. Opt into
 `.skinning = .first_joint` in `addModel` for Tiny3D-style RSP skinning: conversion

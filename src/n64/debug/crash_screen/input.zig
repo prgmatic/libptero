@@ -1,8 +1,8 @@
 const std = @import("std");
 const model = @import("model.zig");
-const joypad = @import("../../io/joypad.zig");
-const joybus = @import("../../io/joybus.zig");
-const si = @import("../../interfaces/serial.zig");
+const joypad = @import("../../input/Controllers.zig");
+const joybus = @import("../../input/joybus.zig");
+const si = @import("../../hw/si.zig");
 var buffer: joybus.JoybusBuffer align(64) = .{};
 
 pub fn poll() joypad.State {

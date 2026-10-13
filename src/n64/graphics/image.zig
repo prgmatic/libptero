@@ -1,28 +1,7 @@
 const std = @import("std");
-const colors = @import("color.zig");
+const colors = @import("pixel.zig");
 const ColorFormat = colors.Format;
 const BitDepth = colors.BitDepth;
-
-/// 32-bit RGBA image.
-pub const ImgRgba32 = Image(colors.Rgba32);
-/// 16-bit RGBA image.
-pub const ImgRgba16 = Image(colors.Rgba16);
-/// 16-bit YUV image.
-pub const ImgYuv16 = Image(colors.Yuv16);
-/// 16-bit intensity+alpha image.
-pub const ImgIa16 = Image(colors.Ia16);
-/// 8-bit intensity+alpha image.
-pub const ImgIa8 = Image(colors.Ia8);
-/// 4-bit intensity+alpha image.
-pub const ImgIa4 = Image(colors.Ia4Pair);
-/// 8-bit grayscale image.
-pub const ImgI8 = Image(colors.I8);
-/// 4-bit grayscale image.
-pub const ImgI4 = Image(colors.I4Pair);
-/// 8-bit color-indexed image.
-pub const ImgCi8 = Image(colors.Ci8);
-/// 4-bit color-indexed image.
-pub const ImgCi4 = Image(colors.Ci4Pair);
 
 /// Errors returned when constructing a view over caller-owned storage.
 pub const ViewError = error{ InvalidDimensions, BufferTooSmall };
@@ -152,8 +131,8 @@ test "owned images retain alignment and borrow mutable and read-only views" {
     try std.testing.expectEqual(colors.Rgba16.blue, buffer.constView().get(2, 1));
     try std.testing.expect(!@hasDecl(@TypeOf(view), "deinit"));
     try std.testing.expect(@typeInfo(@TypeOf(buffer.constView().texel_data)).pointer.is_const);
-    try std.testing.expectError(error.BufferTooSmall, ImgRgba16.initBuffer(buffer.pixels[0..1], 3, 2));
-    try std.testing.expectError(error.InvalidDimensions, ImgRgba16.initBuffer(buffer.pixels, 0, 2));
+    try std.testing.expectError(error.BufferTooSmall, Image(colors.Rgba16).initBuffer(buffer.pixels[0..1], 3, 2));
+    try std.testing.expectError(error.InvalidDimensions, Image(colors.Rgba16).initBuffer(buffer.pixels, 0, 2));
     try std.testing.expectError(error.InvalidDimensions, ImageBuffer(colors.Rgba16).init(std.testing.allocator, 0, 2));
     try std.testing.expectError(error.OutOfMemory, ImageBuffer(colors.Rgba16).init(std.testing.failing_allocator, 3, 2));
 }

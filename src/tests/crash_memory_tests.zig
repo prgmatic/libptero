@@ -5,7 +5,7 @@ const runner = @import("runner.zig");
 const crash = n64.debug.crash_screen;
 const mem = crash.model.memory;
 var pattern: [128]u8 align(16) = undefined;
-var cart_owner: n64.io.pi.Transfer = .{};
+var cart_owner: n64.pi.Transfer = .{};
 var cart_destination: [16]u8 align(16) = undefined;
 
 pub const tests = [_]runner.Test{
@@ -18,7 +18,7 @@ fn rdramAndCart() !void {
     const limits = crash.memory.bounds();
     try testing.expect(limits.rdram_size == 4 * 1024 * 1024 or limits.rdram_size == 8 * 1024 * 1024);
     for (&pattern, 0..) |*byte, i| byte.* = @truncate(i * 37 + 11);
-    n64.cache.writebackData(&pattern);
+    n64.cpu.cache.writebackData(&pattern);
     var state: mem.State = .{};
     state.addresses[0] = @intFromPtr(&pattern) + 19;
     var view = crash.memory.capture(limits, state, 100_000);

@@ -3,7 +3,7 @@ const n64 = @import("n64");
 const testing = @import("assert.zig");
 const runner = @import("runner.zig");
 const rsp = n64.rsp;
-const Mixer = n64.audio.mixer.Mixer;
+const Mixer = n64.audio.Mixer;
 const assets = @import("audio_test_assets");
 const timeout = 1_000_000;
 
@@ -39,15 +39,15 @@ fn unpublishedCommands() !void {
 
     publication_queue.writeDmem(marker, 2);
     // Model eviction of cached command words before an explicit submission.
-    n64.cache.writebackData(&publication_queue.storage.buffers[publication_queue.storage.write_index]);
+    n64.cpu.cache.writebackData(&publication_queue.storage.buffers[publication_queue.storage.write_index]);
     try mixer.submit(output[0..64]);
     try mixer.wait(timeout);
     n64.cpu.waitCycles(2000);
-    try testing.expectEqual(@as(u32, 1), rsp.io.readDmem(u32, marker).*);
+    try testing.expectEqual(@as(u32, 1), @import("n64").hw.sp.readDmem(u32, marker).*);
 
     _ = publication_queue.insertSyncpoint();
     try testing.expect(publication_queue.waitSyncpointTimeout(timeout));
-    try testing.expectEqual(@as(u32, 2), rsp.io.readDmem(u32, marker).*);
+    try testing.expectEqual(@as(u32, 2), @import("n64").hw.sp.readDmem(u32, marker).*);
 }
 
 fn idleSilence() !void {
@@ -59,8 +59,8 @@ fn idleSilence() !void {
     try mixer.submit(output[0..64]);
     try mixer.wait(timeout);
     for (output[0..64]) |sample| try testing.expectEqual(@as(i16, 0), sample);
-    try testing.expect(!rsp.io.status_register_read.signal3);
-    try testing.expect(!rsp.io.status_register_read.signal4);
+    try testing.expect(!@import("n64").hw.sp.status_register_read.signal3);
+    try testing.expect(!@import("n64").hw.sp.status_register_read.signal4);
     // The queue is reusable and completed tokens do not leave a stale request.
     for (0..128) |_| {
         try mixer.submit(output[0..64]);
@@ -68,7 +68,7 @@ fn idleSilence() !void {
         // Completion includes the outgoing pointer save, so an immediate
         // submission cannot be overwritten by the preceding queue epilogue.
         const slot = rsp.programs.command_dispatcher_symbols.pointer_stack + 9 * @sizeOf(u32);
-        try testing.expectEqual(mixer.queue.high_return_address, rsp.io.readDmem(u32, slot).*);
+        try testing.expectEqual(mixer.queue.high_return_address, @import("n64").hw.sp.readDmem(u32, slot).*);
     }
 }
 
@@ -86,13 +86,13 @@ fn verifyPcm(channel_count: u16, misaligned: bool) !void {
     try mixer.init(&runtime, channel_count);
     defer mixer.deinit() catch {};
     for (&samples, 0..) |*sample, index| sample.* = if (index < 64) @as(i16, @intCast(index * 32 + 1024)) else 0;
-    n64.cache.writebackData(&samples);
+    n64.cpu.cache.writebackData(&samples);
     @memset(&output, -12345);
     mixer.settings.channels[0] = .{
         .step = 2 << 12,
         .length = 64 * 2 << 12,
-        .address = rsp.physicalAddress(@intFromPtr(&samples)),
-        .flags = n64.audio.mixer.Channel.pcm16,
+        .address = n64.cpu.physicalAddress(@intFromPtr(&samples)),
+        .flags = n64.audio.Mixer.Channel.pcm16,
     };
     mixer.settings.volume_left[0] = 32767;
     mixer.settings.volume_right[0] = 32767;
@@ -168,14 +168,14 @@ fn aiOutput() !void {
     }
     // Four reference-sized buffers drain in under 160 ms.
     try audio_output.deinit(allocator, 10_000_000);
-    try testing.expect(n64.interfaces.audio.readStatus() & n64.interfaces.audio.busy == 0);
+    try testing.expect(n64.hw.ai.readStatus() & n64.hw.ai.busy == 0);
 }
 
-var renderer: n64.graphics.Renderer = undefined;
-var geometry: n64.graphics.geometry.Context = undefined;
-var viewport = n64.graphics.geometry.Viewport.init(8, 8);
-var pixels: [64]n64.graphics.color.Rgba32 align(64) = undefined;
-const vertices align(16) = [_]n64.graphics.geometry.VertexPair{
+var renderer: n64.rdp.Renderer = undefined;
+var geometry: n64.graphics.GeometryEncoder = undefined;
+var viewport = n64.graphics.Viewport.init(8, 8);
+var pixels: [64]n64.graphics.pixel.Rgba32 align(64) = undefined;
+const vertices align(16) = [_]n64.graphics.VertexPair{
     .{ .pos_a = .{ -2, -1, 0 }, .pos_b = .{ 1, -1, 0 }, .normal_a = 0, .normal_b = 0, .color_a = .green, .color_b = .green },
     .{ .pos_a = .{ 0, 1, 0 }, .pos_b = .{ 0, 1, 0 }, .normal_a = 0, .normal_b = 0, .color_a = .green, .color_b = .green },
 };
@@ -208,7 +208,7 @@ fn geometryPreemptionCase(streamed: bool, compressed: bool) !void {
         try mixer.playStream(0, &stream, assets.mono16.frequency);
     } else try mixer.play(0, assets.mono16, assets.mono16.frequency);
     setSteadyVolume(0, 32766, 32766);
-    const image: n64.graphics.image.ImgRgba32 = .{ .width = 8, .height = 8, .texel_data = &pixels };
+    const image: n64.graphics.Image(n64.graphics.pixel.Rgba32) = .{ .width = 8, .height = 8, .texel_data = &pixels };
     viewport = .init(8, 8);
     var expected: [64]u32 = undefined;
     for (0..17) |iteration| {
@@ -221,17 +221,17 @@ fn geometryPreemptionCase(streamed: bool, compressed: bool) !void {
         for (0..300) |_| geometry.setAmbientLight(.white);
         geometry.loadVertices(&vertices, 0, 3);
         if (iteration != 0) {
-            rsp.io.status_register_write.* = rsp.io.status_clear_signal0;
-            renderer.queue.waitThenWriteStatus(0, rsp.io.status_set_signal0);
-            renderer.queue.waitThenWriteStatus(rsp.io.status_signal0, rsp.io.status_set_signal0);
+            @import("n64").hw.sp.status_register_write.* = @import("n64").hw.sp.status_clear_signal0;
+            renderer.queue.waitThenWriteStatus(0, @import("n64").hw.sp.status_set_signal0);
+            renderer.queue.waitThenWriteStatus(@import("n64").hw.sp.status_signal0, @import("n64").hw.sp.status_set_signal0);
         }
         geometry.drawTriangle(0, 1, 2);
         geometry.syncTriangles();
-        if (iteration != 0) renderer.queue.waitThenWriteStatus(rsp.io.status_signal0, 0);
+        if (iteration != 0) renderer.queue.waitThenWriteStatus(@import("n64").hw.sp.status_signal0, 0);
         if (iteration != 0) {
             rsp.flush(&renderer.queue);
             var attempts: u32 = timeout;
-            while (!rsp.io.status_register_read.signal0) {
+            while (!@import("n64").hw.sp.status_register_read.signal0) {
                 if (attempts == 0) return error.RspTimeout;
                 attempts -= 1;
             }
@@ -243,27 +243,27 @@ fn geometryPreemptionCase(streamed: bool, compressed: bool) !void {
                 try mixer.decoder.submit(&decode_workspace, &decode_history, &decode_book, 1, 1);
                 try expectFailure(error.RspTimeout, mixer.decoder.wait(0));
                 try expectFailure(error.MixerBusy, mixer.stop(0));
-                rsp.io.status_register_write.* = rsp.io.status_clear_signal0;
+                @import("n64").hw.sp.status_register_write.* = @import("n64").hw.sp.status_clear_signal0;
                 try mixer.decoder.wait(timeout);
-                try testing.expect(rsp.io.status_register_read.signal0);
+                try testing.expect(@import("n64").hw.sp.status_register_read.signal0);
                 const decoded = std.mem.bytesAsSlice(i16, decode_workspace[0..32]);
                 for (decoded, 0..) |value, sample| try testing.expectEqual(@as(i16, if (sample % 2 == 0) 256 else 512), value);
             }
             try mixer.submit(output[0..64]);
-            rsp.io.status_register_write.* = rsp.io.status_clear_signal0;
+            @import("n64").hw.sp.status_register_write.* = @import("n64").hw.sp.status_clear_signal0;
             try mixer.wait(timeout);
             // Decoder consumed the first gate; the mix then releases the final
             // draw gate. PCM-only work resumes through the first gate here.
-            try testing.expect(rsp.io.status_register_read.signal0 != compressed);
+            try testing.expect(@import("n64").hw.sp.status_register_read.signal0 != compressed);
             for (0..32) |frame| try testing.expectEqual((@as(i16, @intCast(frame)) - 16) * 256, output[frame * 2]);
-            rsp.io.status_register_write.* = rsp.io.status_clear_signal0;
+            @import("n64").hw.sp.status_register_write.* = @import("n64").hw.sp.status_clear_signal0;
         }
         const completion = renderer.submit();
         completion.wait(.{ .max_attempts = timeout }) catch |err| {
             n64.debug.diagnostics.reportRenderTimeout("audio-preemption", &renderer.queue);
             return err;
         };
-        n64.cache.invalidateData(&pixels);
+        n64.cpu.cache.invalidateData(&pixels);
         var visible: usize = 0;
         for (pixels, 0..) |pixel, index| {
             const rgb = @as(u32, @bitCast(pixel)) >> 8;

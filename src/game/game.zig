@@ -1,15 +1,15 @@
 const std = @import("std");
 const n64 = @import("n64");
-const mi = n64.interfaces.mips;
+const mi = n64.hw.mi;
 const rsp = n64.rsp;
-const vi = n64.interfaces.video;
-const rdp = n64.graphics.rdp;
+const vi = n64.hw.vi;
+const rdp = n64.rdp;
 const print = n64.debug.print;
 
-const Rgba32 = n64.graphics.color.Rgba32;
-const Rgba16 = n64.graphics.color.Rgba16;
-const Img16 = n64.graphics.image.ImgRgba16;
-const Img32 = n64.graphics.image.ImgRgba32;
+const Rgba32 = n64.graphics.pixel.Rgba32;
+const Rgba16 = n64.graphics.pixel.Rgba16;
+const Img16 = n64.graphics.Image(n64.graphics.pixel.Rgba16);
+const Img32 = n64.graphics.Image(n64.graphics.pixel.Rgba32);
 
 var sys_buffer: [1024 * 512]u8 = undefined;
 var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&sys_buffer);
@@ -17,9 +17,9 @@ const allocator = fixed_buffer_allocator.allocator();
 
 const width: u16 = 320;
 const height: u16 = 240;
-var frame_storage0: n64.graphics.image.ImageBuffer(Rgba16) = undefined;
-var frame_storage1: n64.graphics.image.ImageBuffer(Rgba16) = undefined;
-var star_storage: n64.graphics.image.ImageBuffer(Rgba32) = undefined;
+var frame_storage0: n64.graphics.ImageBuffer(Rgba16) = undefined;
+var frame_storage1: n64.graphics.ImageBuffer(Rgba16) = undefined;
+var star_storage: n64.graphics.ImageBuffer(Rgba32) = undefined;
 var frame_buffer0: Img16 = undefined;
 var frame_buffer1: Img16 = undefined;
 var current_frame_buffer: *Img16 = undefined;
@@ -27,7 +27,7 @@ var current_frame_buffer: *Img16 = undefined;
 var rdp_queue: rsp.Queue = undefined;
 var rdp_overlay: rsp.Overlay = undefined;
 var rdp_dynamic_buffers: [2][rsp.rdp_dynamic_buffer_len]u8 align(16) = undefined;
-var rq: rdp.DefaultRenderQueue = undefined;
+var rq: rdp.RenderEncoder(rdp.backend.Overlay) = undefined;
 var frame_count: u32 = 0;
 
 var star_texture: Img32 = undefined;
@@ -51,7 +51,7 @@ pub fn main() !void {
 
     while (true) {
         n64.interrupt.waitForInterrupt(.{ .rdp = true, .video = true });
-        rsp.io.status_register_write.* = rsp.io.status_clear_signal1;
+        @import("n64").hw.sp.status_register_write.* = @import("n64").hw.sp.status_clear_signal1;
         swapBuffer();
         update();
     }
@@ -77,7 +77,7 @@ fn init() !void {
     rdp_overlay.init(rsp.programs.rdp_overlay);
     rsp.registerOverlayStatic(&rdp_overlay, 12);
     rdp_queue.init(.low);
-    rq = rdp.DefaultRenderQueue.init(rdp.OverlayQueue.init(
+    rq = rdp.RenderEncoder(rdp.backend.Overlay).init(rdp.backend.Overlay.init(
         &rdp_queue,
         &rdp_overlay,
         .{ rdp_dynamic_buffers[0][0..], rdp_dynamic_buffers[1][0..] },
@@ -137,14 +137,14 @@ fn initStarTexture() !void {
 
             xf = xp + yp * 2;
             yf = yp;
-            const cf = smoothstep(0, 0.1, n64.math.fastCos(xf * std.math.pi * 1.93) * 0.1 - yf + 0.4);
+            const cf = smoothstep(0, 0.1, n64.math.fast.cos(xf * std.math.pi * 1.93) * 0.1 - yf + 0.4);
             const d: u8 = @intFromFloat(dist * 255);
             const c: u8 = @intFromFloat(cf * 255);
 
             star_texture.texel_data[idx] = .fromBytes(d, d, d, c);
         }
     }
-    n64.cache.writebackData(star_texture.texel_data);
+    n64.cpu.cache.writebackData(star_texture.texel_data);
 }
 
 fn enableInterrupts() void {
@@ -201,12 +201,12 @@ const Star = struct {
             .x = width / 2,
             .y = height / 2,
             .color = color,
-            .dir_x = n64.math.fastCos(rot),
-            .dir_y = n64.math.fastSin(rot),
+            .dir_x = n64.math.fast.cos(rot),
+            .dir_y = n64.math.fast.sin(rot),
         };
     }
 
-    pub fn draw(self: Star, render_queue: *rdp.DefaultRenderQueue, image: Img32, elapsed: f32) void {
+    pub fn draw(self: Star, render_queue: *rdp.RenderEncoder(rdp.backend.Overlay), image: Img32, elapsed: f32) void {
         var scale_x: f32 = 1;
         var scale_y: f32 = 1;
 

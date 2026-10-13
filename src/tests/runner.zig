@@ -32,7 +32,7 @@ pub fn run(tests: []const Test) Summary {
             }
             if (diagnostic) |details| {
                 n64.debug.print("      {s}\n", .{details.messageSlice()});
-                if (!n64.debug.srcmap.printLineInfo(0, details.address)) {
+                if (!n64.debug.source_map.printLineInfo(0, details.address)) {
                     n64.debug.print("      at 0x{x:0>8}\n", .{details.address});
                 }
             }

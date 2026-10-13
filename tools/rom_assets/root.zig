@@ -17,7 +17,7 @@ pub fn pack(allocator: std.mem.Allocator, inputs: []const Input) !Result {
     for (inputs, 0..) |input, index| {
         try validate(inputs[0..index], input);
         if (data.written().len + input.data.len > 64 * 1024 * 1024) return error.PayloadTooLarge;
-        try source.writer.print("pub const {s}: @import(\"n64\").rom.Asset = .{{ .offset = {d}, .size = {d} }};\n", .{ input.name, data.written().len, input.data.len });
+        try source.writer.print("pub const {s}: @import(\"n64\").rom.Region = .{{ .offset = {d}, .size = {d} }};\n", .{ input.name, data.written().len, input.data.len });
         try data.writer.writeAll(input.data);
         const padding = if (input.data.len == 0) 16 else std.mem.alignForward(usize, data.written().len, 16) - data.written().len;
         try data.writer.splatByteAll(0, padding);

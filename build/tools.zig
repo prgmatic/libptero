@@ -18,7 +18,7 @@ pub const Tools = struct {
 
 pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
     const srcmap_format = b.createModule(.{
-        .root_source_file = root.path(b, "src/n64/debug/srcmap_format.zig"),
+        .root_source_file = root.path(b, "src/n64/debug/source_map_format.zig"),
         .target = b.graph.host,
     });
     const png = b.createModule(.{

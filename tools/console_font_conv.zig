@@ -2,7 +2,7 @@
 // Each pixel is only 1 bit and only used for software rendering
 // This is probably a one off and won't be used for other fonts
 const std = @import("std");
-const png = @import("../tools/imgparse/png.zig");
+const png = @import("imgparse/png.zig");
 
 const glyph_width = 8;
 const glyph_height = 8;

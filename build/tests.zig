@@ -194,8 +194,6 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
         .{ "runtime-host-tests", "src/n64/n64.zig" },
         .{ "asset-options-tests", "build/assets.zig" },
         .{ "zsp-tests", "tools/zsp/tests.zig" },
-        .{ "ucode-tests", "src/n64/rsp/ucode_tests.zig" },
-        .{ "command-queue-tests", "src/n64/rsp/command_queue_tests.zig" },
         .{ "rsp-overlay-link-tests", "tools/build/rsp_overlay_link.zig" },
         .{ "rsp-pack-tests", "tools/build/rsp_pack.zig" },
         .{ "run-protocol-tests", "src/n64/debug/run_protocol.zig" },
@@ -253,15 +251,15 @@ pub fn addZspPrograms(b: *std.Build, sdk: *Sdk) *std.Build.Module {
 
     var module_source_bytes: std.ArrayList(u8) = .empty;
     module_source_bytes.appendSlice(b.allocator,
-        \\const UCode = @import("n64").rsp.UCode;
+        \\const Program = @import("n64").rsp.Program;
         \\const assets = @import("assets");
         \\
     ) catch @panic("OOM");
     module_source_bytes.appendSlice(b.allocator,
         \\pub const geometry_overlay_rsp align(8) = assets.geometry_overlay;
-        \\pub const geometry_overlay = UCode.fromBlob(&geometry_overlay_rsp);
+        \\pub const geometry_overlay = Program.fromBlob(&geometry_overlay_rsp);
         \\pub const geometry_clipping_rsp align(8) = assets.geometry_clipping;
-        \\pub const geometry_clipping = UCode.fromBlob(&geometry_clipping_rsp);
+        \\pub const geometry_clipping = Program.fromBlob(&geometry_clipping_rsp);
         \\
         \\
     ) catch @panic("OOM");
@@ -272,7 +270,7 @@ pub fn addZspPrograms(b: *std.Build, sdk: *Sdk) *std.Build.Module {
             b.fmt("@embedFile(\"zsp_test_{s}_rsp\").*", .{fixture});
         const declaration = b.fmt(
             \\pub const {s}_rsp align(8) = {s};
-            \\pub const {s} = UCode.fromBlob(&{s}_rsp);
+            \\pub const {s} = Program.fromBlob(&{s}_rsp);
             \\
             \\
         , .{ fixture, blob_expression, fixture, fixture });
@@ -349,7 +347,7 @@ fn addMaterialIdentifierChecks(b: *std.Build, test_step: *std.Build.Step) void {
         const source = b.addWriteFiles().add(b.fmt("material-id-{s}.zig", .{check[0]}), b.fmt(
             \\const n64 = @import("n64");
             \\const Provider = struct {{ pub const material_names = [_][]const u8{{ "body", "body" }}; }};
-            \\comptime {{ _ = @as(n64.graphics.model.Asset(Provider), undefined).materialIndex("{s}"); }}
+            \\comptime {{ _ = @as(n64.graphics.ModelAsset(Provider), undefined).materialIndex("{s}"); }}
         , .{check[0]}));
         const invalid = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = source,

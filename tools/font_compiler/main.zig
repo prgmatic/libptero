@@ -157,17 +157,17 @@ fn generateSource(allocator: std.mem.Allocator, name: []const u8, result: font_c
     errdefer out.deinit();
     const writer = &out.writer;
     try writer.print("const std = @import(\"std\");\nconst n64 = @import(\"n64\");\nconst texels align(8) = @embedFile(\"font_texels\").*;\n", .{});
-    try writer.print("const ranges = [_]n64.graphics.font.Range{{\n", .{});
+    try writer.print("const ranges = [_]n64.graphics.Font.Range{{\n", .{});
     for (result.ranges) |range| try writer.print("    .{{ .first_codepoint = {d}, .glyph_count = {d}, .first_glyph = {d} }},\n", .{ range.first_codepoint, range.glyph_count, range.first_glyph });
     try writer.print("}};\n", .{});
-    try writer.print("const glyphs = [_]n64.graphics.font.Glyph{{\n", .{});
+    try writer.print("const glyphs = [_]n64.graphics.Font.Glyph{{\n", .{});
     for (result.glyphs) |glyph| try writer.print("    .{{ .x_advance = {d}, .x_offset = {d}, .y_offset = {d}, .width = {d}, .height = {d}, .s = {d}, .t = {d},  .atlas = {d}, .layer = {d} }},\n", .{ glyph.x_advance, glyph.x_offset, glyph.y_offset, glyph.width, glyph.height, glyph.s, glyph.t, glyph.atlas, glyph.layer });
     try writer.print("}};\n", .{});
-    try writer.print("const kernings = [_]n64.graphics.font.Kerning{{\n", .{});
+    try writer.print("const kernings = [_]n64.graphics.Font.Kerning{{\n", .{});
     for (result.kernings) |pair| try writer.print("    .{{ .first = {d}, .second = {d}, .amount = {d} }},\n", .{ pair.first, pair.second, pair.amount });
     try writer.print("}};\n", .{});
     try emitAtlases(writer, result);
-    try writer.print("pub const {s}: n64.graphics.font.Font = .{{ .point_size = {d}, .ascent = {d}, .descent = {d}, .line_height = {d}, .ranges = &ranges, .glyphs = &glyphs, .{s} = &atlases, .kernings = &kernings, .ellipsis = ", .{ name, result.point_size, result.ascent, result.descent, result.line_height, if (result.format == .mono_outline) "outline_atlases" else "atlases" });
+    try writer.print("pub const {s}: n64.graphics.Font = .{{ .point_size = {d}, .ascent = {d}, .descent = {d}, .line_height = {d}, .ranges = &ranges, .glyphs = &glyphs, .{s} = &atlases, .kernings = &kernings, .ellipsis = ", .{ name, result.point_size, result.ascent, result.descent, result.line_height, if (result.format == .mono_outline) "outline_atlases" else "atlases" });
     if (result.ellipsis) |ellipsis| try writer.print(".{{ .glyph = {d}, .repetitions = {d}, .advance = {d}, .width = {d} }}", .{ ellipsis.glyph, ellipsis.repetitions, ellipsis.advance, ellipsis.width }) else try writer.print("null", .{});
     try writer.print(" }};\n", .{});
     return out.toOwnedSlice();
@@ -176,10 +176,10 @@ fn emitAtlases(writer: *std.Io.Writer, result: font_compiler.Result) !void {
     const mono = result.format == .mono_outline;
     const pixel = if (mono) "Ci4Pair" else "Rgba16";
     const view = if (mono) "PalettedImage" else "ConstImage";
-    if (mono) try writer.print("const palette align(8) = n64.graphics.font.outline_palette;\n", .{});
-    try writer.print("const atlases = [_]n64.graphics.image.{s}(n64.graphics.color.{s}){{\n", .{ view, pixel });
+    if (mono) try writer.print("const palette align(8) = n64.graphics.Font.outline_palette;\n", .{});
+    try writer.print("const atlases = [_]n64.graphics.{s}(n64.graphics.pixel.{s}){{\n", .{ view, pixel });
     for (result.atlases) |atlas| {
-        try writer.print("    .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.color.{s}, texels[{d}..{d}])", .{ atlas.width, atlas.height, pixel, atlas.texel_offset, atlas.texel_offset + atlas.texel_length });
+        try writer.print("    .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.pixel.{s}, texels[{d}..{d}])", .{ atlas.width, atlas.height, pixel, atlas.texel_offset, atlas.texel_offset + atlas.texel_length });
         if (mono) try writer.print(", .palette = &palette, .palette_format = .ia16", .{});
         try writer.print(" }},\n", .{});
     }
@@ -215,7 +215,7 @@ test "generates typed native font source" {
     const result: font_compiler.Result = .{ .point_size = 8, .ascent = 7, .descent = -1, .line_height = 10, .ranges = &.{}, .glyphs = &.{}, .kernings = &.{}, .atlases = &.{}, .texels = &.{}, .ellipsis = null };
     const source = try generateSource(std.testing.allocator, "fixture", result);
     defer std.testing.allocator.free(source);
-    try std.testing.expect(std.mem.indexOf(u8, source, "pub const fixture: n64.graphics.font.Font") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "pub const fixture: n64.graphics.Font") != null);
 }
 
 test "outlined source binds layered CI4 atlas and ellipsis metrics" {
@@ -223,7 +223,7 @@ test "outlined source binds layered CI4 atlas and ellipsis metrics" {
     const result: font_compiler.Result = .{ .format = .mono_outline, .point_size = 8, .ascent = 7, .descent = -1, .line_height = 10, .ranges = &.{}, .glyphs = &.{}, .kernings = &.{}, .atlases = &atlases, .texels = &.{}, .ellipsis = .{ .glyph = 0, .repetitions = 3, .advance = 18, .width = 17 } };
     const source = try generateSource(std.testing.allocator, "fixture", result);
     defer std.testing.allocator.free(source);
-    try std.testing.expect(std.mem.indexOf(u8, source, "PalettedImage(n64.graphics.color.Ci4Pair)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "PalettedImage(n64.graphics.pixel.Ci4Pair)") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".palette_format = .ia16") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".outline_atlases = &atlases") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, ".width = 17") != null);

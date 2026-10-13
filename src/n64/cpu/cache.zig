@@ -1,5 +1,5 @@
 const std = @import("std");
-const io = @import("../io.zig");
+const cpu = @import("../cpu.zig");
 // Cache ops described in VR4300 manual on page 404.
 const CacheOp = enum(u8) { IndexInvalidate, IndexLoadTag, IndexStoreTag, IndecCreateDirty, HitInvalidate, HitWritebackInvalidate, HitWriteback };
 
@@ -51,7 +51,7 @@ pub fn invalidateDataRange(addr: u32, len: u32) void {
     cacheOp(.HitInvalidate, .Data, addr, len);
 }
 pub fn invadidateDataAll() void {
-    cacheOp(.IndexInvalidate, .Data, io.kseg0_addr, 0x2000);
+    cacheOp(.IndexInvalidate, .Data, cpu.kseg0_addr, 0x2000);
 }
 pub fn writebackData(data: anytype) void {
     switch (@typeInfo(@TypeOf(data))) {
@@ -73,18 +73,18 @@ pub fn writebackDataRange(addr: u32, len: u32) void {
     cacheOp(.HitWriteback, .Data, addr, len);
 }
 pub fn writebackDataAll() void {
-    cacheOp(.HitWriteback, .Data, io.kseg0_addr, 0x2000);
+    cacheOp(.HitWriteback, .Data, cpu.kseg0_addr, 0x2000);
 }
 
 pub fn invalidateInstRange(addr: u32, len: u32) void {
     cacheOp(.HitWriteback, .Instruction, addr, len);
 }
 pub fn invadidateInstAll() void {
-    cacheOp(.IndexInvalidate, .Instruction, io.kseg0_addr, 0x4000);
+    cacheOp(.IndexInvalidate, .Instruction, cpu.kseg0_addr, 0x4000);
 }
 pub fn writebackInstRange(addr: u32, len: u32) void {
     cacheOp(.HitWriteback, .Instruction, addr, len);
 }
 pub fn writebackInstAll() void {
-    cacheOp(.HitWriteback, .Data, io.kseg0_addr, 0x4000);
+    cacheOp(.HitWriteback, .Data, cpu.kseg0_addr, 0x4000);
 }

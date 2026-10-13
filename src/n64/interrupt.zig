@@ -1,6 +1,6 @@
-const mi = @import("interfaces/mips.zig");
-const vi = @import("interfaces/video.zig");
-const rsp_io = @import("rsp/io.zig");
+const mi = @import("hw/mi.zig");
+const vi = @import("hw/vi.zig");
+const rsp_io = @import("hw/sp.zig");
 const profiler = @import("debug/profiler.zig");
 var trace_fence: profiler.Scope = .{};
 const print = @import("debug.zig").print;
@@ -21,7 +21,7 @@ pub fn interruptHandler() void {
     }
     if (raised.video) pollVideoInterrupt();
     if (raised.audio) {
-        @import("interfaces/audio.zig").acknowledge();
+        @import("hw/ai.zig").acknowledge();
         if (audio_handler) |handler| handler();
     }
 

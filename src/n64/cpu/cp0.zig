@@ -88,19 +88,16 @@ pub fn init() void {
 }
 
 pub inline fn regWrite(comptime reg: Cp0Reg, value: u32) void {
-    asm volatile (
-        "mtc0 %[val], $" ++ comptimePrint(@intFromEnum(reg))
+    asm volatile ("mtc0 %[val], $" ++ comptimePrint(@intFromEnum(reg))
         :
-        : [val] "r"(value)
+        : [val] "r" (value),
     );
 }
 
 pub inline fn regRead(comptime reg: Cp0Reg) u32 {
     var out: u32 = undefined;
-    asm volatile (
-        "mfc0 %[out], $" ++ comptimePrint(@intFromEnum(reg))
-        : [out] "=r"(out)
-        :
+    asm volatile ("mfc0 %[out], $" ++ comptimePrint(@intFromEnum(reg))
+        : [out] "=r" (out),
     );
     return out;
 }

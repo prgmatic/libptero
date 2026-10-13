@@ -77,7 +77,7 @@ const Fake = struct {
         }
     } = .{},
 };
-const TestOptions = @import("player.zig").UpdateOptions;
+const TestOptions = @import("Player.zig").UpdateOptions;
 
 test "timed-out mixes retain acquired buffers and stereo voices until retry commits" {
     var player: Fake = .{};

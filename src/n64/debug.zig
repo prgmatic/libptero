@@ -1,15 +1,13 @@
-pub const sc64 = @import("debug/sc64.zig");
-pub const everdrive = @import("debug/everdrive.zig");
-pub const is_viewer = @import("debug/is_viewer.zig");
-pub const exception = @import("debug/exception.zig");
-pub const TrapFrame = @import("debug/cpu_state.zig").TrapFrame;
+const sc64 = @import("debug/backends/sc64.zig");
+const everdrive = @import("debug/backends/everdrive.zig");
+const is_viewer = @import("debug/backends/is_viewer.zig");
 pub const backtrace = @import("debug/backtrace.zig");
-pub const srcmap = @import("debug/srcmap.zig");
+pub const source_map = @import("debug/source_map.zig");
 pub const crash_screen = @import("debug/crash_screen.zig");
 pub const console_font = @import("debug/console_font.zig");
 pub const profiler = @import("debug/profiler.zig");
 pub const diagnostics = @import("debug/diagnostics.zig");
-pub const run_protocol = @import("debug/run_protocol.zig");
+const run_protocol = @import("debug/run_protocol.zig");
 
 /// Notify a deploy listener that this run has finished. Returns to the caller;
 /// the listener handles emulator exit or optional console power-off.
@@ -17,8 +15,8 @@ pub const run_protocol = @import("debug/run_protocol.zig");
 pub fn finish(result: run_protocol.Result) void {
     var buffer: [128]u8 = undefined;
     const record = run_protocol.encode(&buffer, result) catch unreachable;
-    writeStr("\n");
-    writeStr(record);
+    writeAll("\n");
+    writeAll(record);
 }
 
 const std = @import("std");
@@ -53,16 +51,16 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     var buffer: [256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     writer.print(fmt, args) catch {
-        writeStr(writer.buffered());
-        writeStr("[truncated]\n");
+        writeAll(writer.buffered());
+        writeAll("[truncated]\n");
         return;
     };
-    writeStr(writer.buffered());
+    writeAll(writer.buffered());
 }
 
 // Write a raw string to the debug backend without going through std.fmt.
 // Safe to call from a panic handler (no safety checks, no allocations).
-pub fn writeStr(str: []const u8) void {
+pub fn writeAll(str: []const u8) void {
     switch (current_backend) {
         .is_viewer => is_viewer.print(str),
         .sc64 => sc64.print(str),
@@ -72,3 +70,6 @@ pub fn writeStr(str: []const u8) void {
 }
 
 pub var panic_depth: u32 = 0;
+
+pub const RunResult = run_protocol.Result;
+pub const backends = @import("debug/backends.zig");

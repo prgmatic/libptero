@@ -1,15 +1,16 @@
 //! Cooperative, allocation-free PI scheduling. Poll retires a chunk; dispatch
 //! admits the next. Audio can refill between those two operations.
 const std = @import("std");
-const pi = @import("../io/pi.zig");
+const pi = @import("../pi/Transfer.zig");
 pub const Priority = enum(u2) { background, normal, urgent };
-pub const Options = struct { chunk_bytes: usize = 4096 };
-pub const Scheduler = Queue(8, pi.Transfer);
+const SchedulerOptions = struct { chunk_bytes: usize = 4096 };
+pub const Scheduler = Queue(8, pi);
 
 pub fn Queue(comptime capacity: usize, comptime Dma: type) type {
     if (capacity == 0) @compileError("a scheduler requires at least one slot");
     return struct {
         const Self = @This();
+        pub const Options = SchedulerOptions;
         pub const Ticket = struct { owner: *Self, index: usize, generation: u32 };
         const Job = struct {
             state: enum { free, queued, active, complete, failed } = .free,
@@ -25,12 +26,12 @@ pub fn Queue(comptime capacity: usize, comptime Dma: type) type {
         active: ?usize = null,
         chunk: usize = 0,
         cursor: usize = 0,
-        options: Options,
+        options: SchedulerOptions,
         bytes_transferred: u64 = 0,
         transfers: u64 = 0,
         pi_busy: u64 = 0,
 
-        pub fn init(options: Options) !Self {
+        pub fn init(options: SchedulerOptions) !Self {
             if (options.chunk_bytes == 0 or options.chunk_bytes % 16 != 0 or options.chunk_bytes > 64 * 1024) return error.InvalidChunkSize;
             return .{ .options = options };
         }
@@ -105,7 +106,7 @@ pub fn Queue(comptime capacity: usize, comptime Dma: type) type {
         /// Service AI even during background DMA. Once that DMA retires, fill
         /// audio first, then admit one background chunk. Call every game frame
         /// (or more often); this does not preempt an already active PI transfer.
-        pub fn serviceAudio(self: *Self, player: anytype, options: @import("../audio/player.zig").UpdateOptions) !void {
+        pub fn serviceAudio(self: *Self, player: anytype, options: @import("../audio/Player.zig").UpdateOptions) !void {
             try self.poll();
             player.output.service();
             if (self.active != null) return;
@@ -143,7 +144,7 @@ pub fn Queue(comptime capacity: usize, comptime Dma: type) type {
 /// Typed assets use direct DMA by default. beginScheduled opts an owner into
 /// the scheduler; its queue and ticket stay borrowed until poll completes.
 pub const Transfer = struct {
-    direct: pi.Transfer = .{},
+    direct: pi = .{},
     scheduler: ?*Scheduler = null,
     priority: Priority = .background,
     ticket: ?Scheduler.Ticket = null,

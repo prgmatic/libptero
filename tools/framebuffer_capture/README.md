@@ -12,7 +12,7 @@ full-sync fence. Keep the image alive and prevent CPU/RSP/RDP writes or buffer r
 until capture returns. For an RSP-backed renderer, finish its queue as well:
 
 ```zig
-const fence = n64.graphics.rdp.syncFull(rq);
+const fence = n64.rdp.syncFull(rq);
 if (!n64.rsp.waitTimeout(&renderer.queue, 1_000_000)) {
     n64.debug.diagnostics.reportRenderTimeout("frame queue", &renderer.queue);
     return error.RspTimeout;

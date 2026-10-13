@@ -13,13 +13,13 @@ fn directDmemWordAccess() !void {
     rsp.halt();
     rsp.waitHalted();
 
-    rsp.io.readDmem(u32, 0).* = 0xa5001234;
-    rsp.io.readDmem(u32, rsp.io.dmem_len - 4).* = 0x89abcdef;
+    @import("n64").hw.sp.readDmem(u32, 0).* = 0xa5001234;
+    @import("n64").hw.sp.readDmem(u32, @import("n64").hw.sp.dmem_len - 4).* = 0x89abcdef;
 
-    try testing.expectEqual(@as(u32, 0xa5001234), rsp.io.readDmem(u32, 0).*);
+    try testing.expectEqual(@as(u32, 0xa5001234), @import("n64").hw.sp.readDmem(u32, 0).*);
     try testing.expectEqual(
         @as(u32, 0x89abcdef),
-        rsp.io.readDmem(u32, rsp.io.dmem_len - 4).*,
+        @import("n64").hw.sp.readDmem(u32, @import("n64").hw.sp.dmem_len - 4).*,
     );
 }
 
@@ -35,8 +35,8 @@ fn dmaDataLoad() !void {
     rsp.waitHalted();
     rsp.loadData(&data, 0x20);
 
-    try testing.expectEqual(@as(u32, 0x12345678), rsp.io.readDmem(u32, 0x20).*);
-    try testing.expectEqual(@as(u32, 0x9abcdef0), rsp.io.readDmem(u32, 0x24).*);
-    try testing.expectEqual(@as(u32, 0x0f1e2d3c), rsp.io.readDmem(u32, 0x28).*);
-    try testing.expectEqual(@as(u32, 0x4b5a6978), rsp.io.readDmem(u32, 0x2c).*);
+    try testing.expectEqual(@as(u32, 0x12345678), @import("n64").hw.sp.readDmem(u32, 0x20).*);
+    try testing.expectEqual(@as(u32, 0x9abcdef0), @import("n64").hw.sp.readDmem(u32, 0x24).*);
+    try testing.expectEqual(@as(u32, 0x0f1e2d3c), @import("n64").hw.sp.readDmem(u32, 0x28).*);
+    try testing.expectEqual(@as(u32, 0x4b5a6978), @import("n64").hw.sp.readDmem(u32, 0x2c).*);
 }

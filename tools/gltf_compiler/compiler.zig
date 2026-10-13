@@ -286,8 +286,8 @@ pub fn generate(allocator: std.mem.Allocator, model: ConvertedModel, document: D
     try source.appendSlice(allocator,
         \\const std = @import("std");
         \\const n64 = @import("n64");
-        \\const VertexPair = n64.graphics.geometry.VertexPair;
-        \\const Part = n64.graphics.model.Part;
+        \\const VertexPair = n64.graphics.VertexPair;
+        \\const Part = n64.graphics.Model.Part;
         \\const model_data align(8) = @embedFile("model_data").*;
         \\
     );
@@ -480,12 +480,12 @@ pub fn emitImagesWithStorage(allocator: std.mem.Allocator, data: *std.ArrayList(
         try data.appendSlice(allocator, converted.texels[0..converted.base_texel_bytes]);
         const image_type = imageType(converted.format) orelse return error.UnsupportedTextureFormat;
         if (rom_storage) {
-            try appendFormat(allocator, source, "fn texture_{d}(model_data: []align(16) const u8, content_id: u64) n64.graphics.image.ConstImage(n64.graphics.image.{s}.Pixel) {{\nreturn .{{ .width = {d}, .height = {d}, .content_id = content_id, .texel_data = std.mem.bytesAsSlice(n64.graphics.image.{s}.Pixel, model_data[{d}..{d}]) }};\n}}\n", .{ image_index, image_type, converted.width, converted.height, image_type, offset, data.items.len });
+            try appendFormat(allocator, source, "fn texture_{d}(model_data: []align(16) const u8, content_id: u64) n64.graphics.ConstImage(n64.graphics.pixel.{s}) {{\nreturn .{{ .width = {d}, .height = {d}, .content_id = content_id, .texel_data = std.mem.bytesAsSlice(n64.graphics.pixel.{s}, model_data[{d}..{d}]) }};\n}}\n", .{ image_index, image_type, converted.width, converted.height, image_type, offset, data.items.len });
         } else {
             try appendFormat(
                 allocator,
                 source,
-                "const texture_{d}: n64.graphics.image.ConstImage(n64.graphics.image.{s}.Pixel) = .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.image.{s}.Pixel, model_data[{d}..{d}]) }};\n",
+                "const texture_{d}: n64.graphics.ConstImage(n64.graphics.pixel.{s}) = .{{ .width = {d}, .height = {d}, .texel_data = std.mem.bytesAsSlice(n64.graphics.pixel.{s}, model_data[{d}..{d}]) }};\n",
                 .{ image_index, image_type, converted.width, converted.height, image_type, offset, data.items.len },
             );
         }
@@ -498,7 +498,7 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
     try appendFormat(allocator, source,
         \\}};
         \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts, .nodes = &nodes, .skins = &skins, .animations = &animations }}, .materials = .{{}} }};
-        \\pub const ModelAsset = n64.graphics.model.Asset(Materials);
+        \\pub const ModelAsset = n64.graphics.ModelAsset(Materials);
         \\pub const Materials = struct {{
     , .{name});
     try @import("material_ids.zig").emit(allocator, source, document.materials);
@@ -506,7 +506,7 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
         \\    pub fn apply(self: @This(), context: anytype, index: u16) void {
         \\        self.bind(context, index, self.get(index));
         \\    }
-        \\    pub fn bind(_: @This(), context: anytype, index: u16, material: n64.graphics.model.Material) void {
+        \\    pub fn bind(_: @This(), context: anytype, index: u16, material: n64.graphics.Material) void {
         \\        switch (index) {
         \\
     );
@@ -559,7 +559,7 @@ pub fn emitMaterialsWithStorage(allocator: std.mem.Allocator, source: *std.Array
         \\            else => @panic("invalid model material index"),
         \\        }
         \\    }
-        \\    pub fn get(_: @This(), index: u16) n64.graphics.model.Material {
+        \\    pub fn get(_: @This(), index: u16) n64.graphics.Material {
         \\        return switch (index) {
         \\
     );
@@ -657,8 +657,8 @@ fn textureFormat(name: []const u8) ?texture_compiler.Format {
 
 fn imageType(format: texture_compiler.Format) ?[]const u8 {
     const names = [_][]const u8{
-        "", "", "ImgRgba16", "ImgRgba32", "",        "", "ImgYuv16", "",      "", "",
-        "", "", "ImgIa4",    "ImgIa8",    "ImgIa16", "", "ImgI4",    "ImgI8",
+        "", "", "Rgba16",  "Rgba32", "",     "", "Yuv16",  "",   "", "",
+        "", "", "Ia4Pair", "Ia8",    "Ia16", "", "I4Pair", "I8",
     };
     const result = names[@intFromEnum(format)];
     return if (result.len == 0) null else result;
@@ -1256,7 +1256,7 @@ test "generated model uses packed big-endian vertex data" {
     defer cartridge.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, generated.data, cartridge.data);
     try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "@embedFile") == null);
-    try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "n64.rom.TypedAsset(Definition)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "n64.rom.Asset(Definition)") != null);
     try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "parts: [1]Part") != null);
     try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "metadata.parts = .{") != null);
     try std.testing.expectError(error.InvalidAssetName, generateWithStorage(std.testing.allocator, model, document, &.{}, "not-valid", .rom));
@@ -1409,7 +1409,7 @@ test "embedded PNG dimensions feed material UV conversion" {
     try std.testing.expectEqual(default_texture_size, materialTextureSize(document, &png, 1));
     try std.testing.expectEqual(texture_compiler.Format.i8, textureFormat("diffuse.i8.png").?);
     try std.testing.expectEqual(texture_compiler.Format.i8, textureFormat("diffuse.i8").?);
-    try std.testing.expectEqualStrings("ImgI8", imageType(.i8).?);
+    try std.testing.expectEqualStrings("I8", imageType(.i8).?);
     try std.testing.expectEqual(@as(?[]const u8, null), imageType(.ci8));
     const sampler = materialSampler(document, &png, document.materials[0], 0);
     try std.testing.expect(sampler.clamp_s);

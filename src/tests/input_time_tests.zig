@@ -8,7 +8,7 @@ pub const tests = [_]runner.Test{
 };
 
 fn controllerPolling() !void {
-    var controllers = n64.io.joypad.System.init();
+    var controllers = n64.input.Controllers.init();
     controllers.poll();
     const snapshot = controllers.get(.one);
     controllers.poll();
@@ -16,7 +16,7 @@ fn controllerPolling() !void {
     try testing.expectEqual(@as(u32, @bitCast(snapshot.state)), @as(u32, @bitCast(later.previous)));
     inline for (.{ .one, .two, .three, .four }) |port| {
         const input = controllers.get(port);
-        if (input.style == .none) try testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(input.state)));
+        if (input.device_type == .none) try testing.expectEqual(@as(u32, 0), @as(u32, @bitCast(input.state)));
     }
 }
 

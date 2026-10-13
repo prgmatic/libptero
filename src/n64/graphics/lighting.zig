@@ -25,3 +25,23 @@ test "point slots use view-space quarter units, saturate, and retain their tag" 
     try std.testing.expectEqual(@as(u32, 1), point(&math.Mat4.identity, .zero, -1, false)[1]);
     try std.testing.expectEqual(@as(u32, 0xffff), point(&math.Mat4.identity, .zero, 1e6, true)[1]);
 }
+
+pub const Light = union(enum) {
+    directional: struct { color: @import("pixel.zig").Rgba32 = .white, direction: math.Vec3 },
+    point: struct { color: @import("pixel.zig").Rgba32 = .white, position: math.Vec3, strength: f32, ignore_normals: bool = false },
+};
+pub const Lighting = struct {
+    ambient: @import("pixel.zig").Rgba32 = .white,
+    /// Consumed at beginGeometry, after the camera is attached. World space.
+    lights: []const Light = &.{},
+
+    pub fn apply(self: Lighting, context: anytype) void {
+        context.setAmbientLight(self.ambient);
+        for (self.lights, 0..) |light, index| switch (light) {
+            .directional => |value| context.setDirectionalLightAt(@intCast(index), value.color, value.direction),
+            .point => |value| context.setPointLightAt(@intCast(index), value.color, value.position, value.strength, value.ignore_normals),
+        };
+        context.setLightCount(@intCast(self.lights.len));
+    }
+};
+pub const Fog = struct { color: @import("pixel.zig").Rgba32, near: f32, far: f32 };

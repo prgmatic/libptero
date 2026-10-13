@@ -1,7 +1,7 @@
 //! Owned crash data and pure navigation; no MMIO, allocator or live stack reads.
 const std = @import("std");
 const font = @import("font.zig");
-const TrapFrame = @import("../cpu_state.zig").TrapFrame;
+const TrapFrame = @import("../../cpu/trap_frame.zig").TrapFrame;
 pub const memory = @import("memory_model.zig");
 pub const Kind = enum { panic, exception };
 pub const Tab = enum(u2) { trace, registers, memory, system };
@@ -53,7 +53,7 @@ pub const Report = struct {
     memory_view: memory.View = .{},
 
     pub fn programCounter(self: *const Report) ?u32 {
-        if (self.registers) |*regs| return @import("../exception_codes.zig").faultPc(regs.cause, regs.epc);
+        if (self.registers) |*regs| return @import("../../cpu/exception_codes.zig").faultPc(regs.cause, regs.epc);
         return if (self.frame_count != 0) self.frames[0].address else null;
     }
 

@@ -1,5 +1,5 @@
 const n64 = @import("n64");
-const pi = n64.interfaces.parallel;
+const pi = n64.hw.pi;
 const config = @import("config");
 
 pub fn init() void {
@@ -13,13 +13,13 @@ pub fn dmemPrint(fmt: []const u8, args: []const u32) void {
 
     switch (n64.debug.current_backend) {
         .is_viewer => {
-            const s = dmemFormat(n64.debug.is_viewer.buffer, fmt, args);
-            n64.debug.is_viewer.flushBuffer(s.len * 4);
+            const s = dmemFormat(n64.debug.backends.is_viewer.buffer, fmt, args);
+            n64.debug.backends.is_viewer.flushBuffer(s.len * 4);
         },
         .sc64 => {
-            @memset(n64.debug.sc64.data_buffer, 0);
-            const s = dmemFormat(n64.debug.sc64.data_buffer, fmt, args);
-            n64.debug.sc64.flushBuffer(s.len * 4);
+            @memset(n64.debug.backends.sc64.data_buffer, 0);
+            const s = dmemFormat(n64.debug.backends.sc64.data_buffer, fmt, args);
+            n64.debug.backends.sc64.flushBuffer(s.len * 4);
         },
 
         else => {},

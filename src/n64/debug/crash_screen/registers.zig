@@ -2,7 +2,7 @@ const std = @import("std");
 const model = @import("model.zig");
 const style = @import("style.zig");
 const text = @import("font.zig");
-const GprIndex = @import("../cpu_state.zig").GprIndex;
+const GprIndex = @import("../../cpu/trap_frame.zig").GprIndex;
 const clip: text.Clip = .{ .left = 26, .top = model.viewport_top + 18, .right = 608, .bottom = model.viewport_top + 18 + model.register_viewport_height };
 
 pub fn draw(img: style.Image, report: *const model.Report, state: model.State) void {
