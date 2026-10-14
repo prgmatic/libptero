@@ -57,7 +57,7 @@ Streamed PCM builds on these handles; see [audio](audio/README.md).
 palettes, packed vertices and triangle indices remain on cartridge until loaded.
 The default `.resident` preserves the embedded startup-loaded API. ROM PCM audio
 also uses this shared loaded-owner lifecycle: `addAudio(..., .{ .storage = .rom })`
-emits a `StreamSample` with `init`, `initBuffer`, and `storageSize`; its owner exposes
+emits a `RomSample` with `init`, `initBuffer`, and `storageSize`; its owner exposes
 `view()` as an `audio.Sample`. The same descriptor can feed `audio.Stream` without
 loading the full clip. See [audio loading](audio/README.md#pcm-loaded-into-ram-at-runtime)
 for playback lifetime rules and format limits.
@@ -70,12 +70,17 @@ assets.addModel("room", b.path("room.glb"), .{ .storage = .rom });
 
 // Runtime: initialization allocates storage, loading fills it.
 var room = try assets.room.init(allocator);
-try room.load(1_000_000);
-const model = try room.view();
+const model = try room.load(.{});
 renderer.geometry.drawModel(model);
 try renderer.submit().wait(.{});
 try room.deinit(allocator);
 ```
+
+`load(.{})` returns the borrowed native value after a successful read, and
+`view()` retrieves it after asynchronous completion. Both `load` and `wait`
+accept owner-scoped `LoadOptions`/`WaitOptions` with
+`.max_attempts = 1_000_000` by default. For a different bounded budget, use
+`load(.{ .max_attempts = ... })` or `wait(.{ .max_attempts = ... })`.
 
 `view()` returns the same borrowed native `n64.graphics.ModelAsset(Materials)`, `ConstImage`
 or `PalettedImage` used by the embedded path. Existing material overrides,
@@ -98,7 +103,7 @@ if (try crate.poll()) {
     render.drawSprite(try crate.view(), 0, 0, .{});
 }
 // Before returning memory or destroying the owner, finish any pending load:
-try crate.wait(1_000_000);
+try crate.wait(.{});
 ```
 
 `storageSize()` includes the cartridge's 16-byte DMA tail padding. Larger supplied

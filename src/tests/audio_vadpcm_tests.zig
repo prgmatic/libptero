@@ -109,7 +109,7 @@ fn decodeReference(input: []const u8, codebook: *const codec.Codebook, history: 
     };
 }
 
-fn loadReference(sample: n64.audio.StreamSample) !void {
+fn loadReference(sample: n64.audio.RomSample) !void {
     const blocks = (sample.frames + 15) / 16;
     software_state = @splat(0);
     var block: u32 = 0;
@@ -136,7 +136,7 @@ fn generated() !void {
     defer runtime.deinit();
     try mixer.init(&runtime, 32);
     defer mixer.deinit() catch {};
-    for ([_]n64.audio.StreamSample{ assets.mono8_vadpcm, assets.mono16_vadpcm, assets.stereo8_vadpcm, assets.stereo16_vadpcm, assets.finite_vadpcm }) |sample| {
+    for ([_]n64.audio.RomSample{ assets.mono8_vadpcm, assets.mono16_vadpcm, assets.stereo8_vadpcm, assets.stereo16_vadpcm, assets.finite_vadpcm }) |sample| {
         try loadReference(sample);
         stream = try .init(sample, &storage);
         try mixer.playStream(0, &stream, sample.frequency);
@@ -169,7 +169,7 @@ fn seekAndLoop() !void {
     try comparePlayback(sample, 1017, sample.frequency / 2 + 137);
     try mixer.stop(0);
 }
-fn comparePlayback(sample: n64.audio.StreamSample, position: u32, frequency: u32) !void {
+fn comparePlayback(sample: n64.audio.RomSample, position: u32, frequency: u32) !void {
     const resident: n64.audio.Sample = .{
         .data = @alignCast(std.mem.sliceAsBytes(reference_pcm[0 .. sample.frames * sample.channels + 32])),
         .frequency = sample.frequency,

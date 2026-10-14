@@ -65,7 +65,13 @@ reads. Controller identification is `Snapshot.device_type` / `input.DeviceType`.
 `rom.Region` describes raw cartridge bytes. `rom.Asset(Definition)` is a typed
 asset descriptor; its `Loaded` type owns or borrows RAM storage explicitly.
 `rom.Slot(assets)` manages a reusable loading slot. Asset generators emit these
-public types directly.
+public types directly. Loaded owners expose `LoadOptions` and `WaitOptions`;
+`load(.{})` returns the borrowed native value, while `wait(.{})` finishes a
+previously started transfer. Their default polling budget is 1,000,000 attempts.
+
+`audio.Sample` borrows resident PCM. `audio.RomSample` describes cartridge audio
+that can be streamed through `audio.Stream` or loaded through the generic
+`rom.LoadedAsset` lifecycle (PCM only for RAM loading).
 
 ## Explicit command encoding
 

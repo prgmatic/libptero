@@ -1,5 +1,8 @@
 //! Direct typed-asset DMA lifecycle. Operations specialize for each owner type.
 const std = @import("std");
+/// Bounded polling budget, measured in attempts rather than elapsed time.
+pub const WaitOptions = struct { max_attempts: u32 = 1_000_000 };
+pub const LoadOptions = WaitOptions;
 
 // Zero denotes ordinary embedded images. Each completed load receives a new
 // identity so recycled RDRAM addresses cannot hit an old texture/TLUT cache entry.
@@ -32,27 +35,33 @@ pub fn poll(self: anytype) !bool {
 
 /// A timeout retains the owner and buffer. Retry wait/load at the same
 /// address; deinit/unload reject pending DMA. Call outside interrupts.
-pub fn wait(self: anytype, max_attempts: u32) !void {
-    if (!self.loading and self.value == null) return error.NotLoaded;
-    if (@hasDecl(@TypeOf(self.transfer), "isScheduled")) {
-        if (self.transfer.isScheduled()) return error.ScheduledLoadRequiresService;
-    }
-    var remaining = max_attempts;
+pub fn wait(self: anytype, options: WaitOptions) !void {
+    try validateWait(self);
+    var remaining = options.max_attempts;
     while (!try self.poll()) {
         if (remaining == 0) return error.PiTimeout;
         remaining -= 1;
     }
 }
 
+fn validateWait(self: anytype) !void {
+    if (!self.loading and self.value == null) return error.NotLoaded;
+    if (@hasDecl(@TypeOf(self.transfer), "isScheduled")) {
+        if (self.transfer.isScheduled()) return error.ScheduledLoadRequiresService;
+    }
+}
+
 /// Load synchronously or finish a previous timed-out load. A completed
-/// owner can be reused without issuing another DMA.
-pub fn load(self: anytype, max_attempts: u32) !void {
+/// owner can be reused without issuing another DMA. Returns a borrowed native
+/// value, valid until unload/deinit; the owner and bytes must outlive its users.
+pub fn load(self: anytype, options: LoadOptions) !@TypeOf(self.*).Layout.Value {
     if (!self.loading and self.value == null) try self.begin();
-    try self.wait(max_attempts);
+    try self.wait(options);
+    return self.view();
 }
 
 /// O(1) borrowed native value, valid until unload/deinit. Keep the
-/// owner at a stable address and alive until all RSP/RDP work completes.
+/// owner at a stable address and alive until all borrowed uses complete.
 pub fn view(self: anytype) !@TypeOf(self.*).Layout.Value {
     return self.value orelse error.NotLoaded;
 }

@@ -4,7 +4,7 @@ const std = @import("std");
 const rom = @import("../rom.zig");
 const vadpcm = @import("vadpcm.zig");
 const Format = @import("Sample.zig").Format;
-pub const Sample = @import("StreamSample.zig");
+pub const Sample = @import("RomSample.zig");
 pub const Window = struct { position: u32, length: u32 };
 
 /// Caller owns aligned storage and keeps Stream at a stable address. One

@@ -53,6 +53,8 @@ fn LoadedAssetWithTransfer(comptime Definition: type, comptime Transfer: type) t
         loading: bool = false,
 
         pub const Layout = Definition;
+        pub const LoadOptions = @import("load.zig").LoadOptions;
+        pub const WaitOptions = @import("load.zig").WaitOptions;
 
         pub fn init(allocator: std.mem.Allocator, source: rom.Region, metadata: Definition.Storage) !@This() {
             const bytes = try allocator.alignedAlloc(u8, .@"16", std.mem.alignForward(usize, source.size, 16));
@@ -117,32 +119,31 @@ test "DMA retry retains storage, binds once, and gives reloaded data a new ident
     rom.__rom_assets_rom_size = 32;
     var bytes: [32]u8 align(16) = @splat(0);
     var loaded: LoadedAssetWithTransfer(TestDefinition, TestTransfer) = .{ .source = .{ .offset = 0, .size = 17 }, .bytes = &bytes };
-    try std.testing.expectError(error.NotLoaded, loaded.wait(10));
+    try std.testing.expectError(error.NotLoaded, loaded.wait(.{ .max_attempts = 10 }));
     loaded.transfer.busy = true;
     try std.testing.expectError(error.PiBusy, loaded.begin());
     try std.testing.expect(!loaded.loading);
     loaded.transfer.busy = false;
-    try std.testing.expectError(error.PiTimeout, loaded.load(0));
+    try std.testing.expectError(error.PiTimeout, loaded.load(.{ .max_attempts = 0 }));
     try std.testing.expectError(error.AssetBusy, loaded.begin());
     try std.testing.expectError(error.AssetBusy, loaded.unload());
     try std.testing.expectError(error.AssetBusy, loaded.deinit(std.testing.allocator));
     try std.testing.expectError(error.NotLoaded, loaded.view());
     loaded.transfer.complete = true;
-    try loaded.load(10);
-    const first = try loaded.view();
+    const first = try loaded.load(.{});
     try std.testing.expectEqual(@as(u8, 42), first.bytes[0]);
     try std.testing.expectEqual(@as(usize, 17), first.bytes.len);
     try std.testing.expectEqual(@as(u32, 0x1000), loaded.transfer.offset);
     try std.testing.expectEqual(@as(usize, 1), loaded.transfer.starts);
-    try loaded.load(10);
-    try std.testing.expectEqual(first.id, (try loaded.view()).id);
+    const same = try loaded.load(.{ .max_attempts = 10 });
+    try std.testing.expectEqual(first.id, same.id);
     try std.testing.expectError(error.AlreadyLoaded, loaded.begin());
     try loaded.unload();
-    try loaded.load(10);
-    try std.testing.expect(first.id != (try loaded.view()).id);
+    const reloaded = try loaded.load(.{});
+    try std.testing.expect(first.id != reloaded.id);
     loaded.transfer.fail = true;
     try loaded.unload();
-    try std.testing.expectError(error.PiError, loaded.load(10));
+    try std.testing.expectError(error.PiError, loaded.load(.{ .max_attempts = 10 }));
     try std.testing.expectError(error.NotLoaded, loaded.view());
     try loaded.deinit(std.testing.failing_allocator);
 }
@@ -161,6 +162,8 @@ const TestTransfer = struct {
     fail: bool = false,
     bytes: []u8 = &.{},
     starts: usize = 0,
+    polls: usize = 0,
+    ready_after: ?usize = null,
     offset: u32 = 0,
     pub fn begin(self: *@This(), offset: u32, bytes: []align(16) u8) !void {
         if (self.busy) return error.PiBusy;
@@ -169,9 +172,38 @@ const TestTransfer = struct {
         self.starts += 1;
     }
     pub fn poll(self: *@This()) !bool {
+        self.polls += 1;
         if (self.fail) return error.PiError;
+        if (self.ready_after) |count| self.complete = self.polls >= count;
         if (!self.complete) return false;
         @memset(self.bytes, 42);
         return true;
     }
 };
+
+test "wait options retain a delayed DMA for retry and default load returns its existing view" {
+    const old_offset = rom.__rom_assets_rom_offset;
+    const old_size = rom.__rom_assets_rom_size;
+    defer {
+        rom.__rom_assets_rom_offset = old_offset;
+        rom.__rom_assets_rom_size = old_size;
+    }
+    rom.__rom_assets_rom_offset = 0x1000;
+    rom.__rom_assets_rom_size = 32;
+    var bytes: [32]u8 align(16) = undefined;
+    var loaded = try LoadedAssetWithTransfer(TestDefinition, TestTransfer).initBuffer(.{ .offset = 0, .size = 17 }, &bytes, .{});
+    loaded.transfer.ready_after = 4;
+    try std.testing.expectError(error.PiTimeout, loaded.load(.{ .max_attempts = 0 }));
+    try std.testing.expectEqual(@as(usize, 1), loaded.transfer.polls);
+    try std.testing.expectError(error.PiTimeout, loaded.wait(.{ .max_attempts = 1 }));
+    try std.testing.expectEqual(@as(usize, 3), loaded.transfer.polls);
+    try std.testing.expect(loaded.loading);
+    try loaded.wait(.{});
+    const value = try loaded.load(.{});
+    try std.testing.expectEqual(@intFromPtr(&bytes), @intFromPtr(value.bytes.ptr));
+    try std.testing.expectEqual(@as(usize, 17), value.bytes.len);
+    try std.testing.expectEqual((try loaded.view()).id, value.id);
+    try std.testing.expectEqual(@as(usize, 1), loaded.transfer.starts);
+    try std.testing.expectEqual(@as(usize, 4), loaded.transfer.polls);
+    try loaded.deinit(std.testing.failing_allocator);
+}

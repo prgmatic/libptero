@@ -1,10 +1,11 @@
+//! Cartridge audio metadata, shared by ROM streaming and typed PCM RAM loading.
 const std = @import("std");
 const rom = @import("../rom.zig");
 const codec = @import("vadpcm.zig");
 const PcmSample = @import("Sample.zig");
 const Format = PcmSample.Format;
 
-const StreamSample = @This();
+const RomSample = @This();
 
 asset: rom.Region,
 frequency: u32,
@@ -13,21 +14,21 @@ channels: u2 = 1,
 format: Format = .pcm16,
 loop_frames: u32 = 0,
 vadpcm: ?codec.Metadata = null,
-pub fn bytesPerFrame(self: StreamSample) u32 {
+pub fn bytesPerFrame(self: RomSample) u32 {
     return @as(u32, self.channels) * (if (self.format == .pcm16) @as(u32, 2) else 1);
 }
-pub fn validate(self: StreamSample) !void {
+pub fn validate(self: RomSample) !void {
     try self.validateMetadata();
     if (self.vadpcm) |metadata| {
         try self.validateVadpcm(metadata);
     } else if (@as(u64, self.frames) * self.bytesPerFrame() > self.asset.size) return error.IncompletePcm;
 }
 
-fn validateMetadata(self: StreamSample) !void {
+fn validateMetadata(self: RomSample) !void {
     if (self.channels < 1 or self.channels > 2 or self.frequency == 0 or self.frames == 0 or self.loop_frames > self.frames) return error.InvalidSample;
 }
 
-fn validateVadpcm(self: StreamSample, metadata: codec.Metadata) !void {
+fn validateVadpcm(self: RomSample, metadata: codec.Metadata) !void {
     if (self.format != .pcm16) return error.InvalidSample;
     const blocks = (@as(u64, self.frames) + 15) / 16;
     const data_bytes = blocks * 9 * self.channels;
@@ -40,24 +41,24 @@ fn validateVadpcm(self: StreamSample, metadata: codec.Metadata) !void {
 /// owner. Keep the owner stable during DMA and storage alive during playback.
 pub const Loaded = rom.LoadedAsset(PcmLayout);
 
-pub fn storageSize(self: StreamSample) usize {
+pub fn storageSize(self: RomSample) usize {
     return std.mem.alignForward(usize, self.asset.size, 16);
 }
 
 /// Allocate only; call load/begin after placing the owner at its final address.
 /// Compressed audio currently requires streaming and is not decoded by a load.
-pub fn init(self: StreamSample, allocator: std.mem.Allocator) !Loaded {
+pub fn init(self: RomSample, allocator: std.mem.Allocator) !Loaded {
     try self.validateResident();
     return Loaded.init(allocator, self.asset, self);
 }
 
 /// Borrow complete aligned cache lines, including the generated PCM padding.
-pub fn initBuffer(self: StreamSample, bytes: []align(16) u8) !Loaded {
+pub fn initBuffer(self: RomSample, bytes: []align(16) u8) !Loaded {
     try self.validateResident();
     return Loaded.initBuffer(self.asset, bytes, self);
 }
 
-fn validateResident(self: StreamSample) !void {
+fn validateResident(self: RomSample) !void {
     try self.validate();
     if (self.vadpcm != null) return error.CompressedSampleRequiresStreaming;
     const length = @as(u64, self.frames) * self.bytesPerFrame();
@@ -66,7 +67,7 @@ fn validateResident(self: StreamSample) !void {
 }
 
 const PcmLayout = struct {
-    pub const Storage = StreamSample;
+    pub const Storage = RomSample;
     pub const Value = PcmSample;
 
     pub fn bind(bytes: []align(16) const u8, source: *Storage, _: u64) Value {
@@ -82,7 +83,7 @@ const PcmLayout = struct {
 };
 
 test "PCM loading validates size, padding and compression before allocation" {
-    const sample: StreamSample = .{ .asset = .{ .offset = 0, .size = 81 }, .frequency = 22050, .frames = 17, .format = .pcm8 };
+    const sample: RomSample = .{ .asset = .{ .offset = 0, .size = 81 }, .frequency = 22050, .frames = 17, .format = .pcm8 };
     var bytes: [112]u8 align(16) = @splat(0xaa);
     var borrowed = try sample.initBuffer(&bytes);
     try std.testing.expectEqual(@as(usize, 96), sample.storageSize());
@@ -113,7 +114,7 @@ test "PCM loading validates size, padding and compression before allocation" {
 
 test "PCM binding preserves sample metadata and borrows the final DMA storage" {
     var bytes: [96]u8 align(16) = @splat(0x12);
-    var source: StreamSample = .{ .asset = .{ .offset = 0, .size = 96 }, .frequency = 32000, .frames = 8, .channels = 2, .loop_frames = 3 };
+    var source: RomSample = .{ .asset = .{ .offset = 0, .size = 96 }, .frequency = 32000, .frames = 8, .channels = 2, .loop_frames = 3 };
     const sample = PcmLayout.bind(&bytes, &source, 1);
     try sample.validate();
     try std.testing.expectEqual(@intFromPtr(&bytes), @intFromPtr(sample.data.ptr));

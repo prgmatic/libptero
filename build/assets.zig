@@ -170,7 +170,7 @@ pub const AssetBundle = struct {
         self.asset_module.addModelEntry(name, generated_source, data, options.storage);
     }
 
-    /// Convert mono/stereo PCM8/16 WAV to native Sample or ROM StreamSample.
+    /// Convert mono/stereo PCM8/16 WAV to native Sample or ROM RomSample.
     /// VADPCM requires explicit ROM storage; PCM includes silence/loop DMA padding.
     pub fn addAudio(self: *AssetBundle, name: []const u8, source: std.Build.LazyPath, options: AudioOptions) void {
         options.validate() catch {

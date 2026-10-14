@@ -57,7 +57,7 @@ pub fn generateSource(allocator: std.mem.Allocator, name: []const u8, result: Re
     const loop_frames = if (result.loop) result.frames else 0;
     if (result.streamed) return std.fmt.allocPrint(allocator,
         \\const n64 = @import("n64");
-        \\pub const {s}: n64.audio.StreamSample = .{{
+        \\pub const {s}: n64.audio.RomSample = .{{
         \\    .asset = @import("rom_data").{s}, .frequency = {d}, .frames = {d},
         \\    .channels = {d}, .format = .{s}, .loop_frames = {d},
         \\}};
@@ -111,7 +111,7 @@ test "ROM PCM exceeds resident position limit and emits handles without embedded
     try std.testing.expectEqual(@as(u32, 0x80000), result.frames);
     const source = try generateSource(a, "track", result);
     defer a.free(source);
-    try std.testing.expect(std.mem.indexOf(u8, source, "StreamSample") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "RomSample") != null);
     try std.testing.expect(std.mem.indexOf(u8, source, "@embedFile") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "@import(\"rom_data\").track") != null);
 }
@@ -123,7 +123,7 @@ fn compressedSource(allocator: std.mem.Allocator, name: []const u8, result: Resu
     for (book) |coefficient| try source.writer.print("{d}, ", .{coefficient});
     try source.writer.print(
         \\}};
-        \\pub const {s}: n64.audio.StreamSample = .{{
+        \\pub const {s}: n64.audio.RomSample = .{{
         \\    .asset = @import("rom_data").{s}, .frequency = {d}, .frames = {d},
         \\    .channels = {d}, .format = .pcm16, .loop_frames = {d},
         \\    .vadpcm = .{{ .codebook = &codebook, .checkpoint_offset = {d} }},

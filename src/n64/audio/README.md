@@ -83,15 +83,15 @@ load segments. It is already in RAM when application code starts:
 _ = try player.play(assets.effect, .{});
 ```
 
-With `.storage = .rom`, the generated `StreamSample` also provides the same
+With `.storage = .rom`, the generated `RomSample` also provides the same
 loaded-owner API used by textures and models. It keeps metadata native while
 loading the complete converted PCM, including its 64 readable padding bytes:
 
 ```zig
 // Build: assets.addAudio("effect", b.path("effect.wav"), .{ .storage = .rom });
 var effect = try assets.effect.init(allocator); // Allocate only.
-try effect.load(1_000_000);                    // Read on demand.
-const voice = try player.play(try effect.view(), .{});
+const sample = try effect.load(.{});          // Read on demand, return borrowed PCM.
+const voice = try player.play(sample, .{});
 // Service player.update regularly until the voice completes, or stop it.
 // Once playback no longer borrows the sample, release its storage:
 if (player.isPlaying(voice)) try player.stop(voice);
@@ -101,7 +101,11 @@ try effect.deinit(allocator);
 `initBuffer()` borrows caller-owned 16-byte-aligned storage of at least
 `storageSize()` bytes. Both constructors validate PCM metadata, the resident
 512 KiB limit, and padding before allocation or DMA. `view()` returns a borrowed
-`n64.audio.Sample`; there is no metadata copying required in application code.
+`n64.audio.Sample`, as does a successful `load()`; there is no metadata copying
+required in application code. `load(.{})` and `wait(.{})` use a default budget of
+1,000,000 polling attempts. Their owner exposes `LoadOptions` and `WaitOptions`;
+set `.max_attempts` for an explicit budget. These budgets are attempts rather
+than elapsed time. Returning a sample does not transfer ownership of its bytes.
 The shared `rom.LoadedAsset` implementation provides `begin`, `poll`, `wait`,
 `load`, `unload`, and `deinit`. A loaded asset is kept at a stable address while
 DMA is pending; its bytes must remain alive and unchanged while any voice uses
@@ -129,7 +133,7 @@ A single uncompressed ROM asset supports both full RAM loading and streaming.
 
 ## ROM-streamed PCM
 
-Set `.storage = .rom` on `AssetBundle.addAudio` to emit a `StreamSample` instead
+Set `.storage = .rom` on `AssetBundle.addAudio` to emit a `RomSample` instead
 of a resident `Sample`. Input support remains mono/stereo PCM8/PCM16 WAV; the
 converter emits signed PCM8 or big-endian PCM16. The payload stays in cartridge
 ROM. Streamed assets can exceed the resident 512 KiB position limit and RAM size.
@@ -191,7 +195,7 @@ assets.addAudio("music", b.path("music.wav"),
 ```
 
 VADPCM requires explicit `.storage = .rom` and produces a ROM-backed
-`StreamSample`; incompatible resident options fail during build configuration.
+`RomSample`; incompatible resident options fail during build configuration.
 It accepts the same mono/stereo PCM8/PCM16 WAV inputs and decodes to PCM16 at the original sample rate. VADPCM is
 lossy: sixteen PCM16 samples become nine bytes per channel. The host converter
 uses the same four-predictor, order-two encoder as libdragon, vendored under

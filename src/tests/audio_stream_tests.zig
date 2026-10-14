@@ -47,7 +47,7 @@ fn controls(batch: usize, sample: n64.audio.Sample, streamed: bool, frequency: u
         if (streamed) try mixer.seek(0, 48) else mixer.settings.channels[0].position = 48 * sample.bytesPerFrame() << 12;
     }
 }
-fn compare(sample: n64.audio.Sample, source: n64.audio.StreamSample) !void {
+fn compare(sample: n64.audio.Sample, source: n64.audio.RomSample) !void {
     runtime.init();
     defer runtime.deinit();
     try mixer.init(&runtime, 32);
@@ -158,8 +158,7 @@ fn loadedPcm() !void {
         const source = @field(assets, name ++ "_stream");
         const resident = @field(assets, name);
         var loaded = try source.initBuffer(&loaded_storage);
-        try loaded.load(timeout);
-        const sample = try loaded.view();
+        const sample = try loaded.load(.{ .max_attempts = timeout });
         try sample.validate();
         try testing.expect(std.mem.eql(u8, resident.data, sample.data));
         try testing.expectEqual(resident.frequency, sample.frequency);
@@ -190,7 +189,7 @@ fn scheduledPcm() !void {
     var loads = try n64.rom.Scheduler.init(.{ .chunk_bytes = 16 });
     try loaded.beginScheduled(&loads, .background);
     if (loaded.view()) |_| return error.ExpectedNotLoaded else |err| try testing.expect(err == error.NotLoaded);
-    if (loaded.wait(timeout)) |_| return error.ExpectedScheduledWait else |err| try testing.expect(err == error.ScheduledLoadRequiresService);
+    if (loaded.wait(.{ .max_attempts = timeout })) |_| return error.ExpectedScheduledWait else |err| try testing.expect(err == error.ScheduledLoadRequiresService);
     if (loaded.unload()) |_| return error.ExpectedAssetBusy else |err| try testing.expect(err == error.AssetBusy);
     var remaining: u32 = timeout;
     while (!try loaded.poll()) {
@@ -202,7 +201,7 @@ fn scheduledPcm() !void {
     try testing.expect(loads.transfers > 1);
     try testing.expect(std.mem.eql(u8, assets.stereo16.data, (try loaded.view()).data));
     try loaded.unload();
-    try loaded.load(timeout);
+    _ = try loaded.load(.{ .max_attempts = timeout });
     try testing.expect(std.mem.eql(u8, assets.stereo16.data, (try loaded.view()).data));
     try loaded.deinit(fixed.allocator());
 }

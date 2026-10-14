@@ -29,8 +29,7 @@ fn textures() !void {
         const source = @field(assets, "texture_rom_" ++ format);
         const resident = @field(assets, "texture_resident_" ++ format);
         var loaded = try source.init(allocator);
-        try loaded.load(timeout);
-        const image = try loaded.view();
+        const image = try loaded.load(.{ .max_attempts = timeout });
         try testing.expectEqual(resident.width, image.width);
         try testing.expectEqual(resident.height, image.height);
         try testing.expect(std.mem.eql(u8, std.mem.sliceAsBytes(resident.texel_data), std.mem.sliceAsBytes(image.texel_data)));
@@ -50,16 +49,16 @@ fn ownership() !void {
     try first.begin();
     if (second.begin()) |_| return error.ExpectedPiBusy else |err| try testing.expect(err == error.PiBusy);
     if (first.deinit(allocator)) |_| return error.ExpectedAssetBusy else |err| try testing.expect(err == error.AssetBusy);
-    first.wait(0) catch |err| try testing.expect(err == error.PiTimeout);
-    try first.load(timeout);
+    first.wait(.{ .max_attempts = 0 }) catch |err| try testing.expect(err == error.PiTimeout);
+    _ = try first.load(.{ .max_attempts = timeout });
     const old_id = (try first.view()).content_id;
-    try first.load(timeout);
+    _ = try first.load(.{ .max_attempts = timeout });
     try testing.expectEqual(old_id, (try first.view()).content_id);
     try testing.expectEqual(@as(u8, 0xaa), storage[assets.texture_rom_rgba16.storageSize()]);
-    try second.load(timeout);
+    _ = try second.load(.{ .max_attempts = timeout });
     try first.unload();
     try first.begin();
-    try first.wait(timeout);
+    try first.wait(.{ .max_attempts = timeout });
     try testing.expect(old_id != (try first.view()).content_id);
     try first.deinit(allocator);
     try second.deinit(allocator);
@@ -72,8 +71,7 @@ fn models() !void {
         const source = @field(assets, name ++ "_rom");
         if (comptime std.mem.eql(u8, name, "model")) try testing.expectEqual(@as(u16, 0), source.materialIndex("triangle"));
         var loaded = try source.init(allocator);
-        try loaded.load(timeout);
-        const value = try loaded.view();
+        const value = try loaded.load(.{ .max_attempts = timeout });
         const reference = @field(assets, name ++ "_resident");
         if (comptime std.mem.eql(u8, name, "model")) {
             const id = value.materialIndex("triangle");
@@ -124,12 +122,12 @@ fn recycledTextures() !void {
     defer renderer.deinit();
     inline for (.{ .{ "texture_rom_rgba16", "blue_rom" }, .{ "texture_rom_ci4", "blue_palette_rom" } }) |names| {
         var red = try @field(assets, names[0]).initBuffer(&storage);
-        try red.load(timeout);
+        _ = try red.load(.{ .max_attempts = timeout });
         try drawTexture(try red.view());
         try testing.expect(pixels[0].r > 240 and pixels[0].b < 10);
         try red.deinit(allocator);
         var blue = try @field(assets, names[1]).initBuffer(&storage);
-        try blue.load(timeout);
+        _ = try blue.load(.{ .max_attempts = timeout });
         try drawTexture(try blue.view());
         try testing.expect(pixels[0].b > 240 and pixels[0].r < 10);
         try blue.deinit(allocator);
@@ -161,8 +159,7 @@ fn renderedModels() !void {
     transform = n64.math.Mat4.fromSrtEuler(.splat(1.0 / 128.0), .zero, .zero).toFixed();
     inline for (.{ "weighted", "joint" }) |name| {
         var loaded = try @field(assets, name ++ "_rom").initBuffer(&storage);
-        try loaded.load(timeout);
-        const value = try loaded.view();
+        const value = try loaded.load(.{ .max_attempts = timeout });
         const reference = @field(assets, name ++ "_resident");
         var skeleton = try n64.graphics.animation.Skeleton.init(allocator, value.model.nodes);
         var player: n64.graphics.animation.Player = .{ .clip = value.model.findAnimation("move").? };
