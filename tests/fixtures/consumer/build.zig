@@ -22,6 +22,14 @@ pub fn build(b: *std.Build) void {
     assets.addTexture("fixture_rom", b.path("../../../assets/console_font.png"), .{ .storage = .rom });
     assets.addTexture("fixture_rom_ci4", b.path("../../../assets/console_font.png"), .{ .storage = .rom, .format = .ci4 });
     assets.addModel("fixture_rom_model", @import("model_fixture.zig").create(b), .{ .storage = .rom });
+    // Three mono PCM8 frames at 22050 Hz; generated inside the fixture build.
+    const wave = "RIFF" ++ "\x28\x00\x00\x00" ++ "WAVEfmt " ++
+        "\x10\x00\x00\x00\x01\x00\x01\x00" ++
+        "\x22\x56\x00\x00\x22\x56\x00\x00\x01\x00\x08\x00" ++
+        "data\x03\x00\x00\x00\x00\x80\xff\x00";
+    const audio_fixture = b.addWriteFiles().add("fixture.wav", wave);
+    assets.addAudio("fixture_audio", audio_fixture, .{});
+    assets.addAudio("fixture_audio_rom", audio_fixture, .{ .storage = .rom });
     assets.addFont("fixture_font", b.path("assets/font.fnt"), .{});
     assets.addModel("fixture_model", @import("model_fixture.zig").create(b), .{ .texture_sizes = &.{.{ .material = 0, .width = 32, .height = 32 }} });
     _ = assets.addZspProgram("custom_rsp", b.path("assets/custom.zsp"));

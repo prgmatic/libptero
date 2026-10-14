@@ -10,6 +10,7 @@ pub export var __rom_assets_rom_size: u32 = 0xffffffff;
 pub const Region = @import("rom/Region.zig");
 
 pub const Asset = @import("rom/asset.zig").Asset;
+pub const LoadedAsset = @import("rom/asset.zig").LoadedAsset;
 pub const Priority = scheduling.Priority;
 
 /// Reads arbitrary byte ranges using an owned aligned staging buffer. Keep the

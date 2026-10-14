@@ -73,6 +73,60 @@ priority startup, and sustained preemption of clipped geometry across queue
 refills. The benchmark pair compares startup smoothing, a volume transition,
 PCM output and address-normalized channel state across 24 identical workloads.
 
+## PCM loaded into RAM at runtime
+
+The default `.storage = .resident` embeds converted PCM in the program's boot
+load segments. It is already in RAM when application code starts:
+
+```zig
+// Build: assets.addAudio("effect", b.path("effect.wav"), .{});
+_ = try player.play(assets.effect, .{});
+```
+
+With `.storage = .rom`, the generated `StreamSample` also provides the same
+loaded-owner API used by textures and models. It keeps metadata native while
+loading the complete converted PCM, including its 64 readable padding bytes:
+
+```zig
+// Build: assets.addAudio("effect", b.path("effect.wav"), .{ .storage = .rom });
+var effect = try assets.effect.init(allocator); // Allocate only.
+try effect.load(1_000_000);                    // Read on demand.
+const voice = try player.play(try effect.view(), .{});
+// Service player.update regularly until the voice completes, or stop it.
+// Once playback no longer borrows the sample, release its storage:
+if (player.isPlaying(voice)) try player.stop(voice);
+try effect.deinit(allocator);
+```
+
+`initBuffer()` borrows caller-owned 16-byte-aligned storage of at least
+`storageSize()` bytes. Both constructors validate PCM metadata, the resident
+512 KiB limit, and padding before allocation or DMA. `view()` returns a borrowed
+`n64.audio.Sample`; there is no metadata copying required in application code.
+The shared `rom.LoadedAsset` implementation provides `begin`, `poll`, `wait`,
+`load`, `unload`, and `deinit`. A loaded asset is kept at a stable address while
+DMA is pending; its bytes must remain alive and unchanged while any voice uses
+its view. Stop all those voices or observe their completion through
+`Player.isPlaying` after updates before unloading, overwriting, or freeing RAM.
+Deinitializing the player also detaches its voices before asset teardown.
+
+Background loading uses the same cooperative scheduler as other assets:
+
+```zig
+try effect.beginScheduled(&loads, .background);
+// Every application frame:
+try loads.serviceAudio(&player, .{});
+if (try effect.poll()) {
+    // The sample is ready; play once when transitioning to this state.
+}
+```
+
+Scheduled loads require scheduler service and owner polling until completion;
+blocking `load`/`wait` returns `ScheduledLoadRequiresService`. Direct load timeouts
+retain the destination: retry `wait`/`load` before releasing it. Loading is a raw
+transfer; VADPCM full-clip decoding into RAM is unsupported and constructors return
+`CompressedSampleRequiresStreaming`. Use the streaming decoder below instead.
+A single uncompressed ROM asset supports both full RAM loading and streaming.
+
 ## ROM-streamed PCM
 
 Set `.storage = .rom` on `AssetBundle.addAudio` to emit a `StreamSample` instead

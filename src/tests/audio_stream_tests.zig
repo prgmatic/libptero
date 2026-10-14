@@ -13,6 +13,8 @@ var second_storage: [384]u8 align(16) = undefined;
 var output: [64]i16 align(16) = undefined;
 var expected: [12][64]i16 align(16) = undefined;
 pub const tests = [_]runner.Test{
+    .{ .name = "Loaded PCM: all formats match boot samples and RSP output", .run = loadedPcm },
+    .{ .name = "Loaded PCM: scheduler and unload/reload share the asset lifecycle", .run = scheduledPcm },
     .{ .name = "Stream PCM: mono8 matches resident output, ramps, rates and seeks", .run = mono8 },
     .{ .name = "Stream PCM: mono16 matches resident output, ramps, rates and seeks", .run = mono16 },
     .{ .name = "Stream PCM: stereo8 matches resident output, ramps, rates and seeks", .run = stereo8 },
@@ -143,4 +145,64 @@ fn tailLoop() !void {
     var source = assets.mono16_stream;
     source.loop_frames = 7;
     try compare(resident, source);
+}
+
+var loaded_storage: [512]u8 align(16) = undefined;
+fn loadedPcm() !void {
+    var fixed = std.heap.FixedBufferAllocator.init(&second_storage);
+    runtime.init();
+    defer runtime.deinit();
+    try mixer.init(&runtime, 8);
+    defer mixer.deinit() catch {};
+    inline for (.{ "mono8", "mono16", "stereo8", "stereo16", "finite" }) |name| {
+        const source = @field(assets, name ++ "_stream");
+        const resident = @field(assets, name);
+        var loaded = try source.initBuffer(&loaded_storage);
+        try loaded.load(timeout);
+        const sample = try loaded.view();
+        try sample.validate();
+        try testing.expect(std.mem.eql(u8, resident.data, sample.data));
+        try testing.expectEqual(resident.frequency, sample.frequency);
+        try testing.expectEqual(resident.frames, sample.frames);
+        try testing.expectEqual(resident.channels, sample.channels);
+        try testing.expectEqual(resident.format, sample.format);
+        try testing.expectEqual(resident.loop_frames, sample.loop_frames);
+        resetFilter();
+        try mixer.play(0, resident, resident.frequency);
+        mixer.settings.channels[0].position = 48 * resident.bytesPerFrame() << 12;
+        try mixer.submit(&expected[0]);
+        try mixer.wait(timeout);
+        try mixer.stop(0);
+        resetFilter();
+        try mixer.play(0, sample, sample.frequency);
+        mixer.settings.channels[0].position = 48 * sample.bytesPerFrame() << 12;
+        try mixer.submit(&output);
+        try mixer.wait(timeout);
+        try testing.expect(std.mem.eql(i16, &expected[0], &output));
+        try mixer.stop(0);
+        try loaded.deinit(fixed.allocator());
+    }
+}
+
+fn scheduledPcm() !void {
+    var fixed = std.heap.FixedBufferAllocator.init(&second_storage);
+    var loaded = try assets.stereo16_stream.initBuffer(&loaded_storage);
+    var loads = try n64.rom.Scheduler.init(.{ .chunk_bytes = 16 });
+    try loaded.beginScheduled(&loads, .background);
+    if (loaded.view()) |_| return error.ExpectedNotLoaded else |err| try testing.expect(err == error.NotLoaded);
+    if (loaded.wait(timeout)) |_| return error.ExpectedScheduledWait else |err| try testing.expect(err == error.ScheduledLoadRequiresService);
+    if (loaded.unload()) |_| return error.ExpectedAssetBusy else |err| try testing.expect(err == error.AssetBusy);
+    var remaining: u32 = timeout;
+    while (!try loaded.poll()) {
+        if (remaining == 0) return error.LoadTimeout;
+        remaining -= 1;
+        try loads.service();
+    }
+    try testing.expect(loads.isIdle());
+    try testing.expect(loads.transfers > 1);
+    try testing.expect(std.mem.eql(u8, assets.stereo16.data, (try loaded.view()).data));
+    try loaded.unload();
+    try loaded.load(timeout);
+    try testing.expect(std.mem.eql(u8, assets.stereo16.data, (try loaded.view()).data));
+    try loaded.deinit(fixed.allocator());
 }

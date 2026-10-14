@@ -7,7 +7,7 @@ const scheduling = @import("scheduler.zig");
 /// stays native Zig; payloads contain hardware-ready bytes without pointer fixups.
 pub fn Asset(comptime Definition: type) type {
     return struct {
-        pub const Loaded = LoadedAsset(Definition, scheduling.Transfer);
+        pub const Loaded = LoadedAsset(Definition);
         pub const Value = Definition.Value;
         asset: rom.Region,
 
@@ -24,23 +24,25 @@ pub fn Asset(comptime Definition: type) type {
         /// Allocate only; call load or begin after placing the result at its final
         /// address. Use the same allocator for deinit. Owners must not be copied.
         pub fn init(self: @This(), allocator: std.mem.Allocator) !Loaded {
-            const bytes = try allocator.alignedAlloc(u8, .@"16", self.storageSize());
-            errdefer allocator.free(bytes);
-            var result = try self.initBuffer(bytes);
-            result.owned = true;
-            return result;
+            if (self.asset.size != Definition.byte_len) return error.InvalidAsset;
+            return Loaded.init(allocator, self.asset, undefined);
         }
 
         /// Borrow complete DMA cache lines. Extra storage is left untouched.
         pub fn initBuffer(self: @This(), bytes: []align(16) u8) !Loaded {
             if (self.asset.size != Definition.byte_len) return error.InvalidAsset;
-            if (bytes.len < self.storageSize()) return error.BufferTooSmall;
-            return .{ .source = self.asset, .bytes = bytes[0..self.storageSize()] };
+            return Loaded.initBuffer(self.asset, bytes, undefined);
         }
     };
 }
 
-fn LoadedAsset(comptime Definition: type, comptime Transfer: type) type {
+/// Shared ownership and DMA lifecycle for descriptors with runtime metadata.
+/// Definition supplies Storage, Value and bind(); validate metadata before init.
+pub fn LoadedAsset(comptime Definition: type) type {
+    return LoadedAssetWithTransfer(Definition, scheduling.Transfer);
+}
+
+fn LoadedAssetWithTransfer(comptime Definition: type, comptime Transfer: type) type {
     return struct {
         source: rom.Region,
         bytes: []align(16) u8,
@@ -51,6 +53,20 @@ fn LoadedAsset(comptime Definition: type, comptime Transfer: type) type {
         loading: bool = false,
 
         pub const Layout = Definition;
+
+        pub fn init(allocator: std.mem.Allocator, source: rom.Region, metadata: Definition.Storage) !@This() {
+            const bytes = try allocator.alignedAlloc(u8, .@"16", std.mem.alignForward(usize, source.size, 16));
+            errdefer allocator.free(bytes);
+            var result = try initBuffer(source, bytes, metadata);
+            result.owned = true;
+            return result;
+        }
+
+        pub fn initBuffer(source: rom.Region, bytes: []align(16) u8, metadata: Definition.Storage) !@This() {
+            const size = std.mem.alignForward(usize, source.size, 16);
+            if (bytes.len < size) return error.BufferTooSmall;
+            return .{ .source = source, .bytes = bytes[0..size], .metadata = metadata };
+        }
         /// Enqueue a bounded load. Drive queue.service()/serviceAudio(), then
         /// poll this owner. Scheduled waits reject blocking to avoid starving audio.
         pub fn beginScheduled(self: *@This(), queue: *scheduling.Scheduler, priority: scheduling.Priority) !void {
@@ -100,7 +116,7 @@ test "DMA retry retains storage, binds once, and gives reloaded data a new ident
     rom.__rom_assets_rom_offset = 0x1000;
     rom.__rom_assets_rom_size = 32;
     var bytes: [32]u8 align(16) = @splat(0);
-    var loaded: LoadedAsset(TestDefinition, TestTransfer) = .{ .source = .{ .offset = 0, .size = 17 }, .bytes = &bytes };
+    var loaded: LoadedAssetWithTransfer(TestDefinition, TestTransfer) = .{ .source = .{ .offset = 0, .size = 17 }, .bytes = &bytes };
     try std.testing.expectError(error.NotLoaded, loaded.wait(10));
     loaded.transfer.busy = true;
     try std.testing.expectError(error.PiBusy, loaded.begin());

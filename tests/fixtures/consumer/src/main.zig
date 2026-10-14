@@ -42,6 +42,8 @@ comptime {
     if (@as(u16, @bitCast(part.strip_indices[2])) & 0x4000 == 0) @compileError("model triangle end marker is missing");
 }
 
+var audio_storage: [assets.fixture_audio_rom.storageSize()]u8 align(16) = undefined;
+var stream_storage: [256]u8 align(16) = undefined;
 var renderer: n64.graphics.Renderer = undefined;
 var pixels: [8 * 8]n64.graphics.pixel.Rgba16 align(64) = undefined;
 var reader: n64.rom.Reader = .{};
@@ -54,6 +56,13 @@ pub fn main() !void {
     var memory: [1024]u8 align(64) = undefined;
     var fixed = std.heap.FixedBufferAllocator.init(&memory);
     const allocator = fixed.allocator();
+    var loaded_audio = try assets.fixture_audio_rom.initBuffer(&audio_storage);
+    try loaded_audio.load(1_000_000);
+    const audio_sample = try loaded_audio.view();
+    try audio_sample.validate();
+    if (!std.mem.eql(u8, assets.fixture_audio.data, audio_sample.data)) return error.AudioMismatch;
+    _ = try n64.audio.Stream.init(assets.fixture_audio_rom, &stream_storage);
+    try loaded_audio.deinit(allocator);
     var rom_model = try assets.fixture_rom_model.initBuffer(&rom_model_storage);
     defer rom_model.deinit(allocator) catch unreachable;
     try rom_model.load(1_000_000);

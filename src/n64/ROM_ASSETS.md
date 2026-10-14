@@ -51,11 +51,16 @@ provide no runtime filename lookup, decompression, writable filesystem or SD IO.
 
 Streamed PCM builds on these handles; see [audio](audio/README.md).
 
-## Typed textures and models
+## Typed textures, models and PCM
 
 `addTexture` and `addModel` accept `.storage = .rom`. Their converted texels,
 palettes, packed vertices and triangle indices remain on cartridge until loaded.
-The default `.resident` preserves the embedded startup-loaded API.
+The default `.resident` preserves the embedded startup-loaded API. ROM PCM audio
+also uses this shared loaded-owner lifecycle: `addAudio(..., .{ .storage = .rom })`
+emits a `StreamSample` with `init`, `initBuffer`, and `storageSize`; its owner exposes
+`view()` as an `audio.Sample`. The same descriptor can feed `audio.Stream` without
+loading the full clip. See [audio loading](audio/README.md#pcm-loaded-into-ram-at-runtime)
+for playback lifetime rules and format limits.
 
 ```zig
 // build.zig

@@ -51,21 +51,21 @@ pub fn load(self: anytype, max_attempts: u32) !void {
     try self.wait(max_attempts);
 }
 
-/// O(1) borrowed image/model value, valid until unload/deinit. Keep the
+/// O(1) borrowed native value, valid until unload/deinit. Keep the
 /// owner at a stable address and alive until all RSP/RDP work completes.
 pub fn view(self: anytype) !@TypeOf(self.*).Layout.Value {
     return self.value orelse error.NotLoaded;
 }
 
 /// Forget residency without freeing storage. The caller must first wait
-/// for rendering, skinning and recorded blocks that borrow this asset.
+/// for rendering, skinning, playback and recorded blocks borrowing this asset.
 pub fn unload(self: anytype) !void {
     if (self.loading) return error.AssetBusy;
     self.value = null;
 }
 
 /// No implicit hardware wait. Pending DMA retains ownership for retry;
-/// GPU completion remains the caller's responsibility.
+/// Completion of consumers remains the caller's responsibility.
 pub fn deinit(self: anytype, allocator: std.mem.Allocator) !void {
     if (self.loading) return error.AssetBusy;
     if (self.owned) allocator.free(self.bytes);
