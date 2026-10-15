@@ -80,6 +80,7 @@ pub const AlphaMode = enum { OPAQUE, MASK, BLEND };
 pub const MaterialExtensions = struct {
     FAST64_materials_f3d: ?Fast64Material = null,
     FAST64_materials_n64: ?Fast64N64Material = null,
+    KHR_materials_unlit: ?struct {} = null,
 };
 
 pub const Fast64N64Material = struct {
@@ -567,7 +568,7 @@ pub fn emitMaterialsWithStorage(allocator: std.mem.Allocator, source: *std.Array
         const image = materialImageIndex(document, material);
         const sampler = if (image) |i| materialSampler(document, binary, material, i) else materials.Sampler{};
         try appendFormat(allocator, source, "            {d} => ", .{index});
-        try materials.emit(allocator, source, material, materialCulling(material), materialIsBlended(material), image != null, sampler, try materialFilter(document, material));
+        try materials.emit(allocator, source, material, materialCulling(material), materialIsUnlit(material), materialIsBlended(material), image != null, sampler, try materialFilter(document, material));
         try source.appendSlice(allocator, ",\n");
     }
     try source.appendSlice(allocator,
@@ -580,14 +581,22 @@ pub fn emitMaterialsWithStorage(allocator: std.mem.Allocator, source: *std.Array
     );
 }
 
-fn materialCulling(material: Material) struct { front: bool, back: bool } {
-    const extension = material.extensions orelse return .{ .front = false, .back = !material.doubleSided };
+const Culling = struct { front: bool, back: bool };
+
+fn materialCulling(material: Material) Culling {
+    const standard: Culling = .{ .front = false, .back = !material.doubleSided };
+    const extension = material.extensions orelse return standard;
     const fast64 = extension.FAST64_materials_f3d orelse nested: {
-        const n64 = extension.FAST64_materials_n64 orelse return .{ .front = false, .back = false };
+        const n64 = extension.FAST64_materials_n64 orelse return standard;
         const nested_extensions = n64.extensions orelse return .{ .front = false, .back = false };
         break :nested nested_extensions.FAST64_materials_f3d orelse return .{ .front = false, .back = false };
     };
     return .{ .front = fast64.geometryMode.cullFront, .back = fast64.geometryMode.cullBack };
+}
+
+fn materialIsUnlit(material: Material) bool {
+    const extension = material.extensions orelse return false;
+    return extension.KHR_materials_unlit != null;
 }
 
 fn materialIsBlended(material: Material) bool {
@@ -1345,6 +1354,24 @@ test "Fast64 nested material extension enables backface culling" {
     const culling = materialCulling(parsed.value.materials[0]);
     try std.testing.expect(!culling.front);
     try std.testing.expect(culling.back);
+}
+
+test "standard materials honor KHR_materials_unlit and doubleSided alongside extensions" {
+    const json =
+        \\{"accessors":[],"bufferViews":[],"meshes":[],"materials":[{"extensions":{"KHR_materials_unlit":{}}},{"doubleSided":true,"extensions":{"KHR_materials_unlit":{}}}]}
+    ;
+    var parsed = try parseDocument(std.testing.allocator, json);
+    defer parsed.deinit();
+    const single = parsed.value.materials[0];
+    try std.testing.expect(materialIsUnlit(single));
+    try std.testing.expect(materialCulling(single).back);
+    try std.testing.expect(!materialCulling(parsed.value.materials[1]).back);
+
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try emitMaterials(std.testing.allocator, &source, parsed.value, &.{});
+    try std.testing.expect(std.mem.indexOf(u8, source.items, ".no_light = true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, ".cull_back = true") != null);
 }
 
 test "batch layout keeps strip indices separate from transformed vertices" {

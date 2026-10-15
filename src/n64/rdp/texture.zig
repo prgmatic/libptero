@@ -1,3 +1,5 @@
+const fast = @import("../math/fast.zig");
+
 pub const Sampler = struct {
     palette: u4 = 0,
     clamp_s: bool = false,
@@ -116,10 +118,10 @@ pub fn configureTile(cmd_queue: anytype, image: anytype, tile: u3, tmem_addr: u9
 
 pub inline fn drawNonRotatedSprite(cmd_queue: anytype, tile: u3, x: f32, y: f32, s0: u8, t0: u8, width: f32, height: f32, flip_x: bool, flip_y: bool, scale_x: f32, scale_y: f32, cx: f32, cy: f32) void {
     // Screen rectangle in pixel*4 units (RDP 10.2 fixed-point): pivot maps to (x, y).
-    var ulx_raw: i32 = @intFromFloat(@round((x - scale_x * cx) * 4));
-    var uly_raw: i32 = @intFromFloat(@round((y - scale_y * cy) * 4));
-    const lrx_raw: i32 = @intFromFloat(@round((x + scale_x * (width - cx)) * 4));
-    const lry_raw: i32 = @intFromFloat(@round((y + scale_y * (height - cy)) * 4));
+    var ulx_raw: i32 = fast.roundToInt((x - scale_x * cx) * 4);
+    var uly_raw: i32 = fast.roundToInt((y - scale_y * cy) * 4);
+    const lrx_raw: i32 = fast.roundToInt((x + scale_x * (width - cx)) * 4);
+    const lry_raw: i32 = fast.roundToInt((y + scale_y * (height - cy)) * 4);
 
     // dsdx/dtdy in S5.10 format: 1024 = 1.0 texel/pixel; flip negates direction.
     const dsdx: i16 = @intFromFloat(if (flip_x) -(1024.0 / scale_x) else (1024.0 / scale_x));
@@ -173,7 +175,7 @@ pub const SpriteDrawOptions = struct {
     pivot: Pivot = .top_left,
     scale_x: f32 = 1.0, // negative applies additional flip
     scale_y: f32 = 1.0,
-    rotation: f32 = 0.0, // not yet implemented
+    rotation: f32 = 0.0, // radians; non-zero draws two textured triangles
 };
 
 pub const Pivot = union(enum) {

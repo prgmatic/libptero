@@ -89,7 +89,10 @@ pub const Decoder = struct {
     }
     pub fn deinit(self: *Decoder) !void {
         if (self.pending) return error.DecoderBusy;
-        if (self.initialized) rsp.unregisterOverlay(&self.overlay);
+        if (self.initialized) {
+            rsp.releaseHighPriority(&self.queue);
+            rsp.unregisterOverlay(&self.overlay);
+        }
         self.* = .{};
     }
 };

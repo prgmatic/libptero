@@ -172,7 +172,7 @@ fn addWeightedMatrix(destination: *math.Mat4, matrix: math.Mat4, weight: f32) vo
     };
 }
 fn quantize(value: f32) i16 {
-    return @intFromFloat(std.math.clamp(@round(value), -32768, 32767));
+    return @intCast(math.fast.roundToInt(std.math.clamp(value, -32768, 32767)));
 }
 fn unpackNormal(value: u16) math.Vec3 {
     const x: i5 = @bitCast(@as(u5, @truncate(value >> 11)));

@@ -23,6 +23,9 @@ export fn __MI_handler() callconv(.c) void {
     n64.interrupt.interruptHandler();
 }
 
+const status_interrupt_enable: u32 = 1 << 0;
+const status_mi_line: u32 = 1 << 10;
+
 export fn __start() linksection(".text.startup") noreturn {
     // The ROM packer patches these exported values with the appended source
     // map's location. Referencing them keeps the metadata in a minimal ROM.
@@ -34,6 +37,12 @@ export fn __start() linksection(".text.startup") noreturn {
     const bss_len = @intFromPtr(&__bss_end) - @intFromPtr(&__bss_start);
     @memset(@as([*]u8, @ptrCast(&__bss_start))[0..bss_len], 0);
     n64.debug.crash_screen.memory.initBootBounds();
+    // Unmask the MI line only when the exception vector is linked (custom
+    // assembly_files may omit it). MI's own mask starts clear; owners such as
+    // audio.Output enable their sources.
+    if (@extern(?*const u8, .{ .name = "__ptero_exception_vector", .linkage = .weak }) != null) {
+        n64.cpu.cp0.regWrite(.Status, n64.cpu.cp0.regRead(.Status) | status_interrupt_enable | status_mi_line);
+    }
     @field(app, config.entry)() catch |err| @panic(@errorName(err));
     while (true) {}
 }

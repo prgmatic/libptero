@@ -100,7 +100,8 @@ ring: Ring,
 submitted_buffers: u32 = 0,
 
 /// Counts AI FIFO exhaustion after playback starts; intentional shutdown
-/// drain is excluded. Poll/service regularly or enable AI interrupts.
+/// drain is excluded. The AI interrupt refills the FIFO when the SDK runtime's
+/// exception vector is linked; otherwise call service() regularly.
 pub fn underruns(self: *Output) u32 {
     const status = lock();
     defer unlock(status);
@@ -116,12 +117,12 @@ pub fn init(self: *Output, allocator: std.mem.Allocator, options: Options) !void
     cache.writebackData(storage);
     self.* = .{ .storage = storage, .stride = stride, .timing = timing, .ring = .{ .count = options.buffer_count } };
     const status = lock();
-    defer unlock(status);
     ai.configure(timing.dac, timing.bit);
     ai.acknowledge();
     owner = self;
     interrupts.audio_handler = callback;
     mi.updateInterrupts(.{ .set_audio = true });
+    unlock(status);
 }
 
 pub fn acquire(self: *Output) !?[]align(4) i16 {

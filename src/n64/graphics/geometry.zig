@@ -36,9 +36,9 @@ pub const VertexPair = extern struct {
 
 pub fn packNormal(value: math.Vec3) u16 {
     const normal = value.normalized();
-    const x: i32 = std.math.clamp(@as(i32, @intFromFloat(@round(normal.x * 15.5))), -16, 15);
-    const y: i32 = std.math.clamp(@as(i32, @intFromFloat(@round(normal.y * 31.5))), -32, 31);
-    const z: i32 = std.math.clamp(@as(i32, @intFromFloat(@round(normal.z * 15.5))), -16, 15);
+    const x: i32 = std.math.clamp(math.fast.roundToInt(normal.x * 15.5), -16, 15);
+    const y: i32 = std.math.clamp(math.fast.roundToInt(normal.y * 31.5), -32, 31);
+    const z: i32 = std.math.clamp(math.fast.roundToInt(normal.z * 15.5), -16, 15);
     return (@as(u16, @bitCast(@as(i16, @intCast(x)))) & 0x1f) << 11 |
         (@as(u16, @bitCast(@as(i16, @intCast(y)))) & 0x3f) << 5 |
         (@as(u16, @bitCast(@as(i16, @intCast(z)))) & 0x1f);

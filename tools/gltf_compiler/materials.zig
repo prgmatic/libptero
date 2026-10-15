@@ -123,9 +123,9 @@ pub fn filter(material: anytype, point: bool) ![]const u8 {
     return names[index];
 }
 
-pub fn emit(allocator: std.mem.Allocator, output: *std.ArrayList(u8), material: anytype, culling: anytype, blended: bool, has_image: bool, image_sampler: Sampler, filtering: []const u8) !void {
+pub fn emit(allocator: std.mem.Allocator, output: *std.ArrayList(u8), material: anytype, culling: anytype, unlit: bool, blended: bool, has_image: bool, image_sampler: Sampler, filtering: []const u8) !void {
     const f = legacy(material);
-    const flags = nativeFlags(f, culling, has_image);
+    const flags = nativeFlags(f, culling, unlit, has_image);
     try validateFlags(flags);
     const first_sampler = if (f) |value| try sampler(value.tex0) else image_sampler;
     const second_sampler = if (f) |value| try sampler(value.tex1) else Sampler{};
@@ -149,10 +149,10 @@ const NativeFlags = struct { depth: bool = true, textured: bool, shaded: bool = 
 fn validateFlags(flags: NativeFlags) !void {
     if (flags.cull_front and flags.cull_back) return error.InvalidMaterialCulling;
 }
-fn nativeFlags(f: ?Fast64, culling: anytype, image: bool) NativeFlags {
-    const value = f orelse return .{ .textured = image, .cull_front = culling.front, .cull_back = culling.back };
+fn nativeFlags(f: ?Fast64, culling: anytype, unlit: bool, image: bool) NativeFlags {
+    const value = f orelse return .{ .textured = image, .cull_front = culling.front, .cull_back = culling.back, .no_light = unlit };
     const flags = value.rdp_settings;
-    return .{ .depth = flags.g_zbuffer == .on, .textured = image or value.tex0 != null, .shaded = flags.g_shade == .on, .cull_front = flags.g_cull_front == .on, .cull_back = flags.g_cull_back == .on, .no_light = flags.g_lighting == .off };
+    return .{ .depth = flags.g_zbuffer == .on, .textured = image or value.tex0 != null, .shaded = flags.g_shade == .on, .cull_front = flags.g_cull_front == .on, .cull_back = flags.g_cull_back == .on, .no_light = unlit or flags.g_lighting == .off };
 }
 
 fn emitMask(allocator: std.mem.Allocator, output: *std.ArrayList(u8), material: anytype) !void {

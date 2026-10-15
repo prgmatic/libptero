@@ -12,6 +12,9 @@
 
 .section .interrupt.text, "ax"
 
+    # Lets the runtime entry tell whether this vector is linked.
+    .global __ptero_exception_vector
+__ptero_exception_vector:
     .org 0
     j interrupt_handler
 

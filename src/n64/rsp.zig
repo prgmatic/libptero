@@ -21,6 +21,7 @@ pub const wait = control.wait;
 pub const waitTimeout = control.waitTimeout;
 pub const submitHighPriority = control.submitHighPriority;
 pub const waitHighPriorityTimeout = control.waitHighPriorityTimeout;
+pub const releaseHighPriority = control.releaseHighPriority;
 pub const registerOverlay = control.registerOverlay;
 pub const registerOverlayStatic = control.registerOverlayStatic;
 pub const unregisterOverlay = control.unregisterOverlay;

@@ -236,6 +236,7 @@ pub fn deinit(self: *Mixer) !void {
         active.attached = false;
     };
     try self.decoder.deinit();
+    rsp.releaseHighPriority(&self.queue);
     rsp.unregisterOverlay(&self.overlay);
     self.runtime.mixer_attached = false;
     self.* = undefined;

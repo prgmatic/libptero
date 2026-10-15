@@ -278,6 +278,16 @@ pub fn waitHighPriorityTimeout(queue: *Queue, max_attempts: u32) bool {
 /// switch (slot 9 as saved by the last completed batch's epilogue).
 var high_resume_address: ?u32 = null;
 
+/// Call before a completed high-priority queue's storage is freed. If the next
+/// batch would be chained through its buffers, fall back to publishing slot 9
+/// directly, which overwrites the dispatcher's stale pointer into them.
+pub fn releaseHighPriority(queue: *const Queue) void {
+    if (queue.storage.submitted) @panic("release a high-priority RSP queue only after its batch completes");
+    if (high_resume_address) |resume_address| {
+        if (resume_address == queue.high_return_address) high_resume_address = null;
+    }
+}
+
 fn wakeContinuous() void {
     const wake_status = io.status_set_signal7 | io.status_clear_halt | io.status_clear_broke;
     io.status_register_write.* = wake_status;

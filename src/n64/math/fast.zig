@@ -27,6 +27,14 @@ pub inline fn floor(value: f32) f32 {
     return @floor(value);
 }
 
+/// Rounds to the nearest integer, halfway cases away from zero like `@round`.
+/// `@round` lowers to a software `roundf` call on MIPS; this is an add and one
+/// `trunc.w.s`. Values just below a half (within one ULP) may round up. The
+/// value must fit in i32.
+pub inline fn roundToInt(value: f32) i32 {
+    return @intFromFloat(value + std.math.copysign(@as(f32, 0.5), value));
+}
+
 /// Sine approximation matching libdragon's `fm_sinf` accuracy and range
 /// reduction. It stays within roughly five ULP on [-pi, pi].
 pub fn sin(value: f32) f32 {
@@ -51,6 +59,14 @@ test "fast trigonometry tracks standard functions over graphics angles" {
         try testing.expectApproxEqAbs(@sin(angle), sin(angle), 0.000002);
         try testing.expectApproxEqAbs(@cos(angle), cos(angle), 0.000002);
     }
+}
+
+test "fast rounding matches @round halfway cases" {
+    try std.testing.expectEqual(@as(i32, 3), roundToInt(2.5));
+    try std.testing.expectEqual(@as(i32, 0), roundToInt(0.25));
+    try std.testing.expectEqual(@as(i32, -3), roundToInt(-2.5));
+    try std.testing.expectEqual(@as(i32, -3), roundToInt(-2.6));
+    try std.testing.expectEqual(@as(i32, 7), roundToInt(6.75));
 }
 
 test "fast modulo follows floor-based positive wrapping" {
