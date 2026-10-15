@@ -44,11 +44,17 @@ pub fn RenderEncoder(comptime QueueType: type) type {
 
         emitted_mode: ?OtherModes = null,
         emitted_combine: ?CombineMode = null,
+        /// Color registers last emitted through this encoder; repeats are skipped.
+        emitted_prim: ?Rgba32 = null,
+        emitted_env: ?Rgba32 = null,
         fb_width: u16 = 0,
         fb_height: u16 = 0,
 
         tex_cache: [8]TexCacheEntry = [_]TexCacheEntry{.{}} ** 8,
         tex_cache_len: usize = 0,
+        /// Changes whenever resident textures may have been evicted, so a
+        /// tile returned by bindSprite stays valid while this is unchanged.
+        texture_epoch: u32 = 0,
         palette_ptr: usize = 0,
         palette_content_id: u64 = 0,
         tmem_next: u10 = 0, // next free TMEM word offset (8-byte words, max 512)
@@ -118,6 +124,8 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         pub fn invalidateState(rq: *Self) void {
             rq.emitted_mode = null;
             rq.emitted_combine = null;
+            rq.emitted_prim = null;
+            rq.emitted_env = null;
             rq.resetTextureCache();
             rq.palette_ptr = 0;
         }
@@ -256,8 +264,13 @@ pub fn RenderEncoder(comptime QueueType: type) type {
             rq.mode.write_on_cvg_overflow = translucent;
         }
 
+        /// Skips a repeated color. A change syncs the pipe first, as the
+        /// environment register is read by primitives still in flight.
         pub fn setEnvironmentColor(rq: *Self, color: Rgba32) void {
+            if (rq.emitted_env) |previous| if (@as(u32, @bitCast(previous)) == @as(u32, @bitCast(color))) return;
+            rq.cmd_queue.pipeSync();
             rq.cmd_queue.setEnvironmentColor(color);
+            rq.emitted_env = color;
         }
 
         pub fn setFrameBuffer(rq: *Self, image: anytype) void {
@@ -269,8 +282,11 @@ pub fn RenderEncoder(comptime QueueType: type) type {
             rq.cmd_queue.setScissor(0, 0, rq.fb_width * 4, rq.fb_height * 4);
         }
 
+        /// Skips a repeated color. Primitive color needs no pipe sync.
         pub fn setPrimColor(rq: *Self, color: Rgba32) void {
+            if (rq.emitted_prim) |previous| if (@as(u32, @bitCast(previous)) == @as(u32, @bitCast(color))) return;
             rq.cmd_queue.setPrimColor(color);
+            rq.emitted_prim = color;
         }
 
         pub fn setFogColor(rq: *Self, color: Rgba32) void {
@@ -370,6 +386,7 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         }
 
         fn resetTextureCache(rq: *Self) void {
+            rq.texture_epoch +%= 1;
             rq.tex_cache_len = 0;
             rq.tmem_next = 0;
             rq.next_tile = 0;
@@ -424,8 +441,23 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         }
 
         pub fn drawSprite(rq: *Self, image: anytype, x: f32, y: f32, opts: SpriteDrawOptions) void {
-            const src_width: f32 = if (opts.width != 0) @floatFromInt(opts.width) else @floatFromInt(image.width);
-            const src_height: f32 = if (opts.height != 0) @floatFromInt(opts.height) else @floatFromInt(image.height);
+            const tile = rq.bindSprite(image, opts.palette);
+            rq.drawSpriteOnTile(tile, image.width, image.height, x, y, opts);
+        }
+
+        /// Make `image` resident and emit pending modes for sprite draws. The
+        /// tile stays valid while `texture_epoch` and the render state are
+        /// unchanged, so repeated sprites can skip straight to drawSpriteOnTile.
+        pub fn bindSprite(rq: *Self, image: anytype, palette: u4) u3 {
+            const tile = rq.ensureTexture(image, .{ .palette = palette });
+            rq.flushPendingModes();
+            return tile;
+        }
+
+        /// Sprite geometry for a tile already bound with bindSprite.
+        pub fn drawSpriteOnTile(rq: *Self, tile: u3, image_width: anytype, image_height: anytype, x: f32, y: f32, opts: SpriteDrawOptions) void {
+            const src_width: f32 = if (opts.width != 0) @floatFromInt(opts.width) else @floatFromInt(image_width);
+            const src_height: f32 = if (opts.height != 0) @floatFromInt(opts.height) else @floatFromInt(image_height);
 
             // Negative scale toggles flip; work with magnitudes.
             var flip_x = opts.flip_x;
@@ -455,13 +487,9 @@ pub fn RenderEncoder(comptime QueueType: type) type {
                 .custom => |p| @floatFromInt(p.y),
             };
 
-            const tile = rq.ensureTexture(image, .{ .palette = opts.palette });
-
             if (opts.rotation == 0.0) {
-                rq.flushPendingModes();
                 texture.drawNonRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, src_width, src_height, flip_x, flip_y, scale_x, scale_y, cx, cy);
             } else {
-                rq.flushPendingModes();
                 tri.drawRotatedSprite(&rq.cmd_queue, tile, x, y, opts.s0, opts.t0, src_width, src_height, flip_x, flip_y, opts.rotation, scale_x, scale_y, cx, cy);
             }
         }

@@ -39,9 +39,10 @@ pub const OverlayPipeline = struct {
     state: rdp.State = defaultState(),
     environment: Color = .white,
 
+    /// Modes and combiner flush lazily before the next draw; the environment
+    /// color syncs the pipe itself only when it changes.
     pub fn apply(self: OverlayPipeline, render: anytype) void {
         render.setState(self.state);
-        render.cmd_queue.pipeSync();
         render.setEnvironmentColor(self.environment);
     }
 
@@ -63,11 +64,14 @@ pub const SpriteOptions = struct {
     scale: [2]f32 = .{ 1, 1 },
     flip_x: bool = false,
     flip_y: bool = false,
+    /// Radians around the pivot. Non-zero draws two textured triangles.
+    rotation: f32 = 0,
 
     /// Zero scale is a no-op. Other scales must fit the RDP's signed 5.10 step.
     pub fn validate(self: SpriteOptions, width: u32, height: u32) !void {
         for (self.position) |value| if (!@import("std").math.isFinite(value)) return error.InvalidSpritePosition;
         for (self.scale) |value| try validateScale(value);
+        if (!@import("std").math.isFinite(self.rotation)) return error.InvalidSpriteRotation;
         if (self.source) |source| try validateRegion(source, width, height);
     }
 
@@ -93,6 +97,7 @@ pub const SpriteOptions = struct {
             .scale_y = self.scale[1],
             .flip_x = self.flip_x,
             .flip_y = self.flip_y,
+            .rotation = self.rotation,
         };
     }
 };

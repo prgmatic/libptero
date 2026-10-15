@@ -56,6 +56,19 @@ pub fn writeOverlayCommand(
     self.current().writeOverlayCommand(registered, command_index, inline_argument, arguments);
 }
 
+/// writeOverlayCommandKnown with a compile-time argument count.
+pub inline fn writeOverlayCommandFixed(
+    self: *Queue,
+    registered: *const Overlay,
+    command_index: u8,
+    inline_argument: u32,
+    comptime argument_count: usize,
+    arguments: [argument_count]u32,
+) void {
+    self.reserveCommandWords(1 + argument_count);
+    self.current().writeRawCommandFixed(registered.commandId(command_index), inline_argument, argument_count, arguments);
+}
+
 // Fast path for typed wrappers whose command ABI is fixed in code. Generic
 // callers should use writeOverlayCommand so metadata still validates them.
 pub inline fn writeOverlayCommandKnown(

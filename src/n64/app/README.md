@@ -122,10 +122,27 @@ try sprites.drawSprite(assets.ptero, .{
 Starting `frame.beginOverlay(.{})` again restores the default pipeline and
 invalidates the previous pass handle. Pass settings are copied by value.
 
+The pass pipeline is emitted once per pass and again only after text, and the
+renderer skips repeated primitive and environment colors. For many sprites from
+one image, `hud.sprites(image)` returns a batch handle that binds the texture
+once; each `draw(SpriteOptions)` then emits only a changed tint and the
+rectangle. A batch is borrowed like its pass and rebinds itself after text or
+texture eviction in between:
+
+```zig
+var sparks = try hud.sprites(assets.spark);
+for (particles) |p| try sparks.draw(.{
+    .position = .{ p.x, p.y },
+    .pivot = .center,
+    .tint = p.color,
+});
+```
+
 Sprite regions use texel coordinates and must fit the image. Omit `source` for
 the entire image. Negative scales flip, zero scale draws nothing, and nonzero
-scale must fit the RDP's signed texture step. Rotation is not exposed by this
-rectangle path. Text Y is the first baseline. Formatting scratch is consumed
+scale must fit the RDP's signed texture step. A nonzero `rotation` (radians,
+around the pivot) draws two textured triangles instead of a rectangle. Text Y
+is the first baseline. Formatting scratch is consumed
 while recording and may be immediately reused; `NoSpaceLeft` emits no commands.
 
 ## Borrowed geometry and recorded models
@@ -203,6 +220,11 @@ For overlap, call `frame.submit()`, do independent CPU work or service
 `audio.Player`, then call `frame.present()` or `context.finish()`. Starting the next
 frame also finishes an outstanding submission. There is one GPU submission in
 flight, with no additional in-flight fence or frame queue.
+
+`context.lastFrameStats()` reports the last finished frame: `frame_ms`,
+`record_ms` (beginFrame to submit), `present_wait_ms`, and the RDP's own
+hardware counters `rdp_busy_ms`, `rdp_pipe_ms` and `rdp_tmem_ms`. It needs no
+debug output, so it is cheap enough to leave on.
 
 Timeouts retain the frame and submission; the caller must retain borrowed data. Retry `present` or
 `finish`; do not reuse hardware-owned memory. `frame.discard()` submits and

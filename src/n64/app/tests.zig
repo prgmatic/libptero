@@ -134,6 +134,9 @@ const Backend = struct {
         pub fn lap(_: *@This()) @import("../time.zig").Duration {
             return .{ .ticks = @import("../time.zig").ticks_per_second };
         }
+        pub fn read(_: @This()) @import("../time.zig").Duration {
+            return .{ .ticks = 0 };
+        }
     };
     pub const Completion = struct {
         pub fn wait(_: @This(), _: anytype) !void {}
@@ -312,10 +315,16 @@ test "custom overlay pipeline survives text and resets across passes" {
     try std.testing.expectEqual(@as(u64, 0xE7) << 56, commands[0]);
     try std.testing.expectEqual((@as(u64, 0xFB) << 56) | @as(u32, @bitCast(pipeline.environment)), commands[1]);
     try std.testing.expectEqual((@as(u64, 0xFA) << 56) | @as(u32, @bitCast(tint)), commands[2]);
+    const ordinary_start = game.renderer.render.cmd_queue.queue.index;
     const ordinary = try frame.beginOverlay(.{});
     try std.testing.expectError(error.InvalidPass, sprites.drawSprite(image, .{}));
-    const ordinary_start = game.renderer.render.cmd_queue.queue.index;
     try ordinary.drawSprite(image, .{});
+    // Later sprites in the pass with the same tint emit no state or color commands.
+    const repeat_start = game.renderer.render.cmd_queue.queue.index;
+    try ordinary.drawSprite(image, .{ .position = .{ 4, 4 } });
+    for (game.renderer.commands[repeat_start..game.renderer.render.cmd_queue.queue.index]) |command| {
+        try std.testing.expect(command >> 56 != 0xE7 and command >> 56 != 0xFA and command >> 56 != 0xFB);
+    }
     try std.testing.expectEqualDeep((context.App(.{}).OverlayPass.State{}).state, game.renderer.render.getState());
     try std.testing.expectEqual((@as(u64, 0xFB) << 56) | @as(u32, @bitCast(graphics.pixel.Rgba32.white)), game.renderer.commands[ordinary_start + 1]);
     try std.testing.expectEqual(texture_count, game.renderer.render.tex_cache_len);
@@ -323,6 +332,38 @@ test "custom overlay pipeline survives text and resets across passes" {
     try std.testing.expectError(error.FrameSubmitted, ordinary.drawSprite(image, .{}));
     try frame.present();
     try std.testing.expectError(error.InvalidFrame, ordinary.drawSprite(image, .{}));
+    try game.deinit(std.testing.failing_allocator);
+}
+
+test "sprite batches emit one rectangle per draw and rebind after text" {
+    const Game = context.testing.create(.{}, Backend);
+    var game: Game = undefined;
+    try game.init(std.testing.failing_allocator, .{});
+    const frame = try game.beginFrame(.{});
+    const pixels: [4]graphics.pixel.Rgba16 align(8) = @splat(.white);
+    const image: graphics.ConstImage(graphics.pixel.Rgba16) = .{ .texel_data = &pixels, .width = 2, .height = 2 };
+    const pass = try frame.beginOverlay(.{});
+    var batch = try pass.sprites(image);
+    try batch.draw(.{ .position = .{ 4, 4 } });
+    const render = &game.renderer.render;
+    var start = render.cmd_queue.queue.index;
+    try batch.draw(.{ .position = .{ 8, 4 } });
+    // Texture rectangles are two words; same tint and binding emit nothing else.
+    try std.testing.expectEqual(@as(usize, 2), render.cmd_queue.queue.index - start);
+    try std.testing.expectEqual(@as(u64, 0xE4), game.renderer.commands[start] >> 56);
+    start = render.cmd_queue.queue.index;
+    try batch.draw(.{ .position = .{ 12, 4 }, .tint = .red });
+    try std.testing.expectEqual(@as(usize, 3), render.cmd_queue.queue.index - start);
+    try std.testing.expectEqual(@as(u64, 0xFA), game.renderer.commands[start] >> 56);
+    // Text replaces the pipeline; the next draw restores it before its rectangle.
+    try pass.drawText(emptyFont(), 0, 0, "", .{});
+    try batch.draw(.{ .position = .{ 16, 4 }, .tint = .red });
+    try std.testing.expectEqualDeep((context.App(.{}).OverlayPass.State{}).state, render.getState());
+    try std.testing.expectEqualDeep(render.mode, render.emitted_mode.?);
+    _ = try frame.beginOverlay(.{});
+    try std.testing.expectError(error.InvalidPass, batch.draw(.{}));
+    _ = try frame.submit();
+    try frame.present();
     try game.deinit(std.testing.failing_allocator);
 }
 

@@ -98,48 +98,59 @@ pub fn CommandEncoder(comptime QueueType: type) type {
             cq.queue.execute();
         }
 
+        // Every method below emits one complete packet; backends that accept
+        // whole packets skip their packet assembly.
+        inline fn push1(cq: *Self, value: u64) void {
+            if (@hasDecl(QueueType, "push1")) cq.queue.push1(value) else cq.queue.push(value);
+        }
+
+        inline fn push2(cq: *Self, first: u64, second: u64) void {
+            if (@hasDecl(QueueType, "push2")) cq.queue.push2(first, second) else {
+                cq.queue.push(first);
+                cq.queue.push(second);
+            }
+        }
+
         // 0xE4
         pub fn textureRectangle(cq: *Self, options: TextureRectangleOptions) void {
             const words = buildTextureRectangleWords(0xE4, options);
-            cq.queue.push(words[0]);
-            cq.queue.push(words[1]);
+            cq.push2(words[0], words[1]);
         }
 
         // 0xE5
         pub fn textureRectangleFlip(cq: *Self, options: TextureRectangleOptions) void {
             const words = buildTextureRectangleWords(0xE5, options);
-            cq.queue.push(words[0]);
-            cq.queue.push(words[1]);
+            cq.push2(words[0], words[1]);
         }
 
         // 0xE6
         pub fn loadSync(cq: *Self) void {
-            cq.queue.push(@as(u64, 0xE6) << 56);
+            cq.push1(@as(u64, 0xE6) << 56);
         }
 
         // 0xE7
         pub fn pipeSync(cq: *Self) void {
-            cq.queue.push(@as(u64, 0xE7) << 56);
+            cq.push1(@as(u64, 0xE7) << 56);
         }
 
         // 0xE8
         pub fn tileSync(cq: *Self) void {
-            cq.queue.push(@as(u64, 0xE8) << 56);
+            cq.push1(@as(u64, 0xE8) << 56);
         }
 
         // 0xE9
         pub fn fullSync(cq: *Self) void {
-            cq.queue.push(@as(u64, 0xE9) << 56);
+            cq.push1(@as(u64, 0xE9) << 56);
         }
 
         // 0xEE
         pub fn setPrimDepth(cq: *Self, z: u16, dz: u16) void {
-            cq.queue.push((@as(u64, 0xEE) << 56) | (@as(u64, z) << 16) | @as(u64, dz));
+            cq.push1((@as(u64, 0xEE) << 56) | (@as(u64, z) << 16) | @as(u64, dz));
         }
 
         // 0xFE
         pub fn setDepthImage(cq: *Self, image: anytype) void {
-            cq.queue.push((@as(u64, 0xFE) << 56) | lowBits(@intFromPtr(image.texel_data.ptr), 24));
+            cq.push1((@as(u64, 0xFE) << 56) | lowBits(@intFromPtr(image.texel_data.ptr), 24));
         }
 
         // 0xED
@@ -150,12 +161,12 @@ pub fn CommandEncoder(comptime QueueType: type) type {
                 (@as(u64, lowBits(upper_left_y, 12)) << 32) |
                 (@as(u64, lowBits(lower_right_x, 12)) << 12) |
                 (@as(u64, lowBits(lower_right_y, 12)));
-            cq.queue.push(cmd);
+            cq.push1(cmd);
         }
 
         // 0xEF
         pub fn setOtherModes(cq: *Self, settings: OtherModes) void {
-            cq.queue.push(@bitCast(settings));
+            cq.push1(@bitCast(settings));
         }
 
         // 0xF2
@@ -167,13 +178,13 @@ pub fn CommandEncoder(comptime QueueType: type) type {
                 (@as(u64, options.tile) << 24) |
                 (@as(u64, options.lower_right_s) << 12) |
                 (@as(u64, options.lower_right_t));
-            cq.queue.push(cmd);
+            cq.push1(cmd);
         }
 
         /// Load RGBA16 palette entries to the upper TMEM bank.
         pub fn loadTlut(cq: *Self, tile: u3, color_count: u16) void {
             std.debug.assert(color_count > 0 and color_count <= 256);
-            cq.queue.push((@as(u64, 0xF0) << 56) | (@as(u64, tile) << 24) | (@as(u64, color_count - 1) << 14));
+            cq.push1((@as(u64, 0xF0) << 56) | (@as(u64, tile) << 24) | (@as(u64, color_count - 1) << 14));
         }
 
         // 0xF3
@@ -185,7 +196,7 @@ pub fn CommandEncoder(comptime QueueType: type) type {
                 (@as(u64, options.tile) << 24) |
                 (@as(u64, options.lower_right_s) << 12) |
                 (@as(u64, options.dxt));
-            cq.queue.push(cmd);
+            cq.push1(cmd);
         }
 
         // 0xF4 — same bit layout as SetTileSize; coordinates are u10.2 (pixel * 4)
@@ -197,7 +208,7 @@ pub fn CommandEncoder(comptime QueueType: type) type {
                 (@as(u64, options.tile) << 24) |
                 (@as(u64, options.lower_right_s) << 12) |
                 (@as(u64, options.lower_right_t));
-            cq.queue.push(cmd);
+            cq.push1(cmd);
         }
 
         // 0xF5
@@ -218,7 +229,7 @@ pub fn CommandEncoder(comptime QueueType: type) type {
                 (@as(u64, @intFromBool(options.mirror_s)) << 8) |
                 (@as(u64, options.mask_s) << 4) |
                 (@as(u64, options.shift_s));
-            cq.queue.push(cmd);
+            cq.push1(cmd);
         }
 
         // 0xF6
@@ -229,7 +240,7 @@ pub fn CommandEncoder(comptime QueueType: type) type {
                 (@as(u64, lowBits(lower_right_y, 12)) << 32) |
                 (@as(u64, lowBits(upper_left_x, 12)) << 12) |
                 (@as(u64, lowBits(upper_left_y, 12)));
-            cq.queue.push(cmd);
+            cq.push1(cmd);
         }
 
         // 0xF7
@@ -247,7 +258,7 @@ pub fn CommandEncoder(comptime QueueType: type) type {
                 },
                 else => @compileError("Unsupported fill color type"),
             };
-            cq.queue.push((@as(u64, 0xF7) << 56) | packed_color);
+            cq.push1((@as(u64, 0xF7) << 56) | packed_color);
         }
 
         // 0xF9
@@ -255,7 +266,7 @@ pub fn CommandEncoder(comptime QueueType: type) type {
             const cmd: u64 =
                 (@as(u64, 0xF9) << 56) |
                 (@as(u64, @as(u32, @bitCast(color))));
-            cq.queue.push(cmd);
+            cq.push1(cmd);
         }
 
         // 0xF8
@@ -263,7 +274,7 @@ pub fn CommandEncoder(comptime QueueType: type) type {
             const cmd: u64 =
                 (@as(u64, 0xF8) << 56) |
                 (@as(u64, @as(u32, @bitCast(color))));
-            cq.queue.push(cmd);
+            cq.push1(cmd);
         }
 
         // 0xFA
@@ -271,22 +282,22 @@ pub fn CommandEncoder(comptime QueueType: type) type {
             const cmd: u64 =
                 (@as(u64, 0xFA) << 56) |
                 (@as(u64, @as(u32, @bitCast(color))));
-            cq.queue.push(cmd);
+            cq.push1(cmd);
         }
 
         // 0xFB
         pub fn setEnvironmentColor(cq: *Self, color: Rgba32) void {
-            cq.queue.push((@as(u64, 0xFB) << 56) | @as(u32, @bitCast(color)));
+            cq.push1((@as(u64, 0xFB) << 56) | @as(u32, @bitCast(color)));
         }
 
         // 0xFC
         pub fn setCombiner(cq: *Self, mode: CombineMode) void {
-            cq.queue.push(buildCombineCmd(mode));
+            cq.push1(buildCombineCmd(mode));
         }
 
         // 0xFD
         pub fn setTextureImage(cq: *Self, format: ColorFormat, bit_depth: BitDepth, width: u32, addr: usize) void {
-            cq.queue.push((@as(u64, 0xFD) << 56) |
+            cq.push1((@as(u64, 0xFD) << 56) |
                 (@as(u64, @intFromEnum(format)) << 53) |
                 (@as(u64, @intFromEnum(bit_depth)) << 51) |
                 (@as(u64, lowBits(width - 1, 10)) << 32) |
@@ -298,7 +309,7 @@ pub fn CommandEncoder(comptime QueueType: type) type {
             if (@intFromPtr(image.texel_data.ptr) & 63 != 0) {
                 @panic("RDP color image must be 64-byte aligned");
             }
-            cq.queue.push(buildImageCmd(0xFF, image));
+            cq.push1(buildImageCmd(0xFF, image));
         }
     };
 }

@@ -4,6 +4,35 @@ pub const dma_current_addr: *volatile u32 = @ptrFromInt(0xA4100008);
 pub const status: *const volatile Status = @ptrFromInt(0xA410000C);
 pub const status_write: *volatile u32 = @ptrFromInt(0xA410000C);
 
+const clock_counter: *const volatile u32 = @ptrFromInt(0xA4100010);
+const command_busy_counter: *const volatile u32 = @ptrFromInt(0xA4100014);
+const pipe_busy_counter: *const volatile u32 = @ptrFromInt(0xA4100018);
+const tmem_busy_counter: *const volatile u32 = @ptrFromInt(0xA410001C);
+
+/// RDP activity counters, in RDP clock cycles (24-bit, wrap after ~268 ms).
+pub const Counters = struct {
+    clock: u32,
+    command_busy: u32,
+    pipe_busy: u32,
+    tmem_busy: u32,
+
+    pub const cycles_per_second: f32 = 62_500_000;
+
+    pub fn read() Counters {
+        return .{
+            .clock = clock_counter.* & 0xffffff,
+            .command_busy = command_busy_counter.* & 0xffffff,
+            .pipe_busy = pipe_busy_counter.* & 0xffffff,
+            .tmem_busy = tmem_busy_counter.* & 0xffffff,
+        };
+    }
+
+    /// Clears the clock, command, pipe and TMEM counters.
+    pub fn reset() void {
+        status_write.* = (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9);
+    }
+};
+
 pub fn setDmaSource(source: RdpDmaSource) void {
     status_write.* = switch (source) {
         .rdram => 1 << 0,

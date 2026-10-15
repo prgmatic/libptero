@@ -55,9 +55,14 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
         state: enum { idle, recording, submitted } = .idle,
         generation: u64 = 0,
         pass_generation: u64 = 0,
+        /// Whether the current overlay pass pipeline is still in effect
+        /// (text replaces it), so consecutive sprites skip re-applying it.
+        overlay: struct { applied: bool = false } = .{},
         acquired: Backend.Display.Frame = undefined,
         completion: Backend.Completion = undefined,
         discard_pending: bool = false,
+        stats: FrameStats = .{},
+        recording_stats: FrameStats = .{},
 
         pub fn init(self: *Self, allocator: std.mem.Allocator, options: Options) !void {
             if (!std.math.isFinite(options.max_delta) or options.max_delta <= 0) return error.InvalidDelta;
@@ -82,6 +87,8 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
             if (self.state == .recording) return error.FrameActive;
             try self.finish();
             self.acquired = try self.display.acquire();
+            // The previous frame has completed, so the RDP is idle.
+            if (@hasDecl(Backend, "GpuCounters")) Backend.GpuCounters.reset();
             self.generation +%= 1;
             self.state = .recording;
             if (config.geometry) {
@@ -93,23 +100,43 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
             } else self.renderer.beginFrame(self.acquired.image, .{ .clear_color = options.clear_color });
             self.renderer.render.setState(if (config.geometry) .opaque_geometry else .textured_sprite);
             if (self.options.input) self.controllers.poll();
+            const elapsed = self.timer.lap();
+            self.recording_stats = .{ .frame_ms = elapsed.milliseconds() };
             return .{
                 .context = self,
                 .generation = self.generation,
                 .input = self.controllers.get(.one),
-                .delta = @min(self.timer.lap().seconds(), self.options.max_delta),
+                .delta = @min(elapsed.seconds(), self.options.max_delta),
             };
+        }
+
+        /// Timing of the most recently completed frame, measured without
+        /// debug output. Updated when that frame finishes (normally in the
+        /// following beginFrame).
+        pub fn lastFrameStats(self: *const Self) FrameStats {
+            return self.stats;
         }
 
         /// Present submitted work. A timeout retains the frame, completion and
         /// uploads for retry; it never silently releases hardware-owned memory.
         pub fn finish(self: *Self) !void {
             if (self.state != .submitted) return;
+            const wait_start = self.timer.read();
             if (self.discard_pending) {
                 try self.completion.wait(.{ .max_attempts = self.options.display.max_attempts });
                 try self.display.release(self.acquired);
             } else try self.display.present(self.acquired, self.completion, .{ .max_attempts = self.options.display.max_attempts });
             self.state = .idle;
+            var stats = self.recording_stats;
+            stats.present_wait_ms = self.timer.read().milliseconds() - wait_start.milliseconds();
+            if (@hasDecl(Backend, "GpuCounters")) {
+                const counters = Backend.GpuCounters.read();
+                const ms_per_cycle = 1000.0 / Backend.GpuCounters.cycles_per_second;
+                stats.rdp_busy_ms = @as(f32, @floatFromInt(counters.command_busy)) * ms_per_cycle;
+                stats.rdp_pipe_ms = @as(f32, @floatFromInt(counters.pipe_busy)) * ms_per_cycle;
+                stats.rdp_tmem_ms = @as(f32, @floatFromInt(counters.tmem_busy)) * ms_per_cycle;
+            }
+            self.stats = stats;
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) !void {
@@ -179,6 +206,7 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
                 if (config.geometry) self.context.geometry.syncTriangles();
                 self.context.pass_generation +%= 1;
                 options.pipeline.apply(&self.context.renderer.render);
+                self.context.overlay = .{ .applied = true };
                 return .{ .frame = self, .generation = self.context.pass_generation, .options = options };
             }
 
@@ -192,6 +220,7 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
             /// draw afterward. Public renderer/context remain low-level escape hatches.
             pub fn submit(self: Frame) !Backend.Completion {
                 try self.recording();
+                self.context.recording_stats.record_ms = self.context.timer.read().milliseconds();
                 self.context.completion = if (config.geometry) self.context.geometry.submit() else self.context.renderer.submit();
                 self.context.discard_pending = false;
                 self.context.state = .submitted;
@@ -216,7 +245,25 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
     };
 }
 
+/// One frame's timing. CPU times come from the COP0 counter; RDP times
+/// from the RDP's own busy counters, so they are unaffected by CPU stalls.
+pub const FrameStats = struct {
+    /// Previous frame start to this frame start.
+    frame_ms: f32 = 0,
+    /// beginFrame returning to submit: CPU update and command recording.
+    record_ms: f32 = 0,
+    /// CPU time blocked finishing the frame (GPU completion and vsync).
+    present_wait_ms: f32 = 0,
+    /// RDP processing commands, including stalls waiting on RDRAM.
+    rdp_busy_ms: f32 = 0,
+    /// RDP pixel pipeline busy.
+    rdp_pipe_ms: f32 = 0,
+    /// RDP loading TMEM.
+    rdp_tmem_ms: f32 = 0,
+};
+
 const Hardware = struct {
+    const GpuCounters = @import("hw/dp.zig").Counters;
     const Runtime = rsp.Runtime;
     const Renderer = rdp.Renderer;
     const Geometry = graphics.GeometryEncoder;

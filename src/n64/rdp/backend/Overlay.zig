@@ -62,6 +62,23 @@ pub inline fn push(self: *Overlay, value: u64) void {
     if (self.packet_len == self.packet_expected) self.emitPacket();
 }
 
+/// One complete single-word RDP command. Callers know the packet size, so
+/// this skips packet assembly; the opcode usually folds at compile time.
+pub inline fn push1(self: *Overlay, value: u64) void {
+    self.ensureConfigured();
+    std.debug.assert(self.packet_len == 0);
+    const opcode: u8 = @truncate(value >> 56);
+    self.rsp_queue.writeOverlayCommandFixed(self.overlay, overlayCommandIndex(opcode), @as(u32, @truncate(value >> 32)) & 0x00ffffff, 1, .{@truncate(value)});
+}
+
+/// One complete two-word RDP command (texture rectangles).
+pub inline fn push2(self: *Overlay, first: u64, second: u64) void {
+    self.ensureConfigured();
+    std.debug.assert(self.packet_len == 0);
+    const opcode: u8 = @truncate(first >> 56);
+    self.rsp_queue.writeOverlayCommandFixed(self.overlay, overlayCommandIndex(opcode), @as(u32, @truncate(first >> 32)) & 0x00ffffff, 3, .{ @truncate(first), @truncate(second >> 32), @truncate(second) });
+}
+
 pub fn execute(self: *Overlay) void {
     if (self.packet_len != 0) @panic("incomplete RDP command packet");
     rsp.flush(self.rsp_queue);

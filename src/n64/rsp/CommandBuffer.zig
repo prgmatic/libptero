@@ -124,6 +124,30 @@ pub inline fn writeRawCommand(
     self.buffer[self.index] = 0;
 }
 
+/// writeRawCommand for a compile-time argument count: stores the words
+/// directly instead of calling memcpy, for per-draw RDP commands.
+pub inline fn writeRawCommandFixed(
+    self: *CommandBuffer,
+    command_id: u8,
+    inline_argument: u32,
+    comptime argument_count: usize,
+    arguments: [argument_count]u32,
+) void {
+    if (argument_count > 62) @compileError("RSP command exceeds the 252-byte descriptor limit");
+    if (self.sealed) @panic("cannot append to a sealed RSP command queue");
+    if (@import("builtin").mode == .Debug and inline_argument > 0x00ffffff) @panic("RSP command queue inline argument is too large");
+    const index = self.index;
+    if (index + 1 + argument_count >= self.buffer.len) @panic("RSP command queue is full");
+    const header = @as(u32, command_id) << 24 | inline_argument;
+    if (self.defer_head and index == 0) {
+        self.pending_head = header;
+    } else self.buffer[index] = header;
+    inline for (0..argument_count) |i| self.buffer[index + 1 + i] = arguments[i];
+    self.index = index + 1 + argument_count;
+    // Keep an invalid guard after the last complete command while open.
+    self.buffer[self.index] = 0;
+}
+
 pub fn writeOverlayCommand(
     self: *CommandBuffer,
     registered: *const Overlay,
