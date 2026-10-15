@@ -34,33 +34,35 @@ pub fn analyzeAssembly(assembly: []const u8) AssemblyReport {
     };
 }
 
+const error_hints = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "AnalysisCapacityExceeded", "function exceeds compiler analysis capacity; split it into smaller functions" },
+    .{ "OutOfFreeRegisters", "scalar register allocation failed; shorten overlapping live ranges, split the expression, or pin fewer locals" },
+    .{ "OutOfFreeRegistersInExpression", "scalar register allocation failed; shorten overlapping live ranges, split the expression, or pin fewer locals" },
+    .{ "OutOfFreeVectorRegisters", "vector register allocation failed; shorten overlapping vector live ranges or pin fewer vectors" },
+    .{ "RegisterAlreadyInUse", "explicit register lifetimes overlap; remove one pin or move a declaration past the other value's last use" },
+    .{ "RegisterReadBeforeAssignment", "register may be read before every control-flow path assigns it; initialize it or assign it in every path" },
+    .{ "PinnedRegisterOverwrittenByCallArgument", "a live pinned value overlaps a call argument register; move the value, shorten its lifetime, or change the parameter register" },
+    .{ "PinnedRegisterClobberedByCall", "a value live across this call uses a written register; declare an accurate writes() contract or shorten the live range" },
+    .{ "PinnedRegisterClobberedByExternalCall", "a value live across this call uses a written register; declare an accurate writes() contract or shorten the live range" },
+    .{ "AutomaticRegisterClobberedByCall", "a value live across this call uses a written register; declare an accurate writes() contract or shorten the live range" },
+    .{ "FunctionArgumentCountMismatch", "transfer argument count does not match the target function signature" },
+    .{ "FunctionArgumentTypeMismatch", "transfer argument type does not match the target function signature" },
+    .{ "FunctionArgumentRegisterMismatch", "a vector or callee-written argument is not in the register required by the target function signature" },
+    .{ "FunctionArgumentMoveCycle", "scalar argument moves form a register cycle; reorder the values or use a non-conflicting temporary register" },
+    .{ "UnknownFunction", "transfer target could not be resolved; check its import alias, visibility, and spelling" },
+    .{ "UnknownModule", "transfer target could not be resolved; check its import alias, visibility, and spelling" },
+    .{ "UnresolvedModuleCall", "transfer target could not be resolved; check its import alias, visibility, and spelling" },
+    .{ "PrivateFunction", "an imported transfer target must be declared pub" },
+    .{ "ImemOverflow", "emitted text exceeds the RSP's 4096-byte IMEM capacity; reduce code or split it into overlays" },
+    .{ "InvalidSlot", "a slot must contain exactly one source statement" },
+    .{ "MissingSharedExitSlot", "the terminal transfer requires the labeled block's shared exit slot" },
+    .{ "UnnecessarySlot", "an explicit slot containing only rsp.nop() has no program effect; omit it and let the optimizer fill the hardware slot" },
+    .{ "ExpectedDmemAddress", "RSP memory operations require a value of type dmem; use dmem.addressOf(...) for a data symbol" },
+    .{ "DmemAddressOutOfRange", "a literal DMEM address must be between 0 and 4095" },
+});
+
 pub fn errorHint(err: anyerror) ?[]const u8 {
-    return switch (err) {
-        error.OutOfFreeRegisters,
-        error.OutOfFreeRegistersInExpression,
-        => "scalar register allocation failed; shorten overlapping live ranges, split the expression, or pin fewer locals",
-        error.OutOfFreeVectorRegisters => "vector register allocation failed; shorten overlapping vector live ranges or pin fewer vectors",
-        error.RegisterAlreadyInUse => "explicit register lifetimes overlap; remove one pin or move a declaration past the other value's last use",
-        error.RegisterReadBeforeAssignment => "register may be read before every control-flow path assigns it; initialize it or assign it in every path",
-        error.PinnedRegisterOverwrittenByCallArgument => "a live pinned value overlaps a call argument register; move the value, shorten its lifetime, or change the parameter register",
-        error.PinnedRegisterClobberedByCall,
-        error.PinnedRegisterClobberedByExternalCall,
-        error.AutomaticRegisterClobberedByCall,
-        => "a value live across this call uses a written register; declare an accurate writes() contract or shorten the live range",
-        error.FunctionArgumentCountMismatch => "transfer argument count does not match the target function signature",
-        error.FunctionArgumentTypeMismatch => "transfer argument type does not match the target function signature",
-        error.FunctionArgumentRegisterMismatch => "a vector or callee-written argument is not in the register required by the target function signature",
-        error.FunctionArgumentMoveCycle => "scalar argument moves form a register cycle; reorder the values or use a non-conflicting temporary register",
-        error.UnknownFunction, error.UnknownModule, error.UnresolvedModuleCall => "transfer target could not be resolved; check its import alias, visibility, and spelling",
-        error.PrivateFunction => "an imported transfer target must be declared pub",
-        error.ImemOverflow => "emitted text exceeds the RSP's 4096-byte IMEM capacity; reduce code or split it into overlays",
-        error.InvalidSlot => "a slot must contain exactly one source statement",
-        error.MissingSharedExitSlot => "the terminal transfer requires the labeled block's shared exit slot",
-        error.UnnecessarySlot => "an explicit slot containing only rsp.nop() has no program effect; omit it and let the optimizer fill the hardware slot",
-        error.ExpectedDmemAddress => "RSP memory operations require a value of type dmem; use dmem.addressOf(...) for a data symbol",
-        error.DmemAddressOutOfRange => "a literal DMEM address must be between 0 and 4095",
-        else => null,
-    };
+    return error_hints.get(@errorName(err));
 }
 
 test "assembly report counts final text instructions and raw words" {

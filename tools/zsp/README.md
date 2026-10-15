@@ -23,15 +23,29 @@ optimization hints.
 
 ## Compiler stages
 
-The parser produces the source AST. `rspq.zig` owns the framework-specific
+`parser.zig` owns parser state, declarations, and shared grammar metadata.
+`parse_statements.zig`, `parse_values.zig`, and `parse_memory.zig` handle
+statements, expressions, and shared memory operands. The parser produces the
+source AST and a statement source map. `rspq.zig` owns the framework-specific
 semantic stage by resolving the command-table declaration and validating command indices, encoded
 sizes, and parameter ABI bindings. Its `CommandAnalysis` is the invariant the
 assembly writer consumes for command-table layout and manifest serialization;
 the writer no longer rediscovers or validates those facts.
 
-Name and call resolution, writes inference, control-flow/lifetime analysis,
-register allocation, instruction selection, and function placement remain in
-`asm_writer.zig`. They will be extracted incrementally while preserving output.
+`main.zig` owns process behavior and output files; `options.zig` parses CLI
+arguments without IO. `root.zig` exposes the programmatic API. `modules.zig`
+loads and links modules, retaining source locations and owning each module's
+parsed allocations through `source.Program`, which releases partial ASTs on
+parse failure. `compiler.zig` runs the shared compilation and
+explain pipeline, including the final IMEM limit check.
+
+`analysis.zig` owns writes inference, control-flow/lifetime analysis, and register
+allocation. `placement.zig` computes deterministic function order and tail
+fallthrough before emission. `asm_writer.zig` owns scalar and control-flow
+instruction selection, interfaces, and assembly printing; `emit_vectors.zig`
+owns vector encodings and `emit_operands.zig` handles common address/immediate
+materialization. `registers.zig` supplies shared register metadata, and
+`explain.zig` formats allocation and write reports.
 
 The current post-parse dependency map is:
 
@@ -41,23 +55,37 @@ The current post-parse dependency map is:
   lifetime and allocation simulation.
 - `FunctionContext.prepareLifetimes` builds statement-position control flow and
   live ranges; `bindParameters` and the allocation helpers select registers.
-- `writeFunction` and `writeStatements` perform placement, instruction
-  selection, and direct assembly printing; `asm_optimizer.zig` then optimizes
-  assembly text.
+- `placement.Plan.init` produces the emission order and selected fallthrough
+  edges; `writeFunction` and `writeStatements` consume that plan and perform
+  instruction selection and assembly printing. `asm_optimizer.zig` then
+  optimizes assembly text.
 
-Command behavior and output coverage lives in the command-focused cases in
-`tests.zig`; `rspq.zig` additionally tests normalized metadata and semantic
-errors without depending on assembly text.
+`tests.zig` imports the complete host suite. The `tests/` directory groups
+regressions by analysis, optimizer, vectors, memory, commands, control flow,
+calls, parser, and scalar emission. `rspq.zig` additionally tests normalized
+metadata and semantic errors without depending on assembly text.
 
 This document describes the language implemented in this repository.
+
+The programmatic entry point is `root.zig`. `Program.parse(allocator, source,
+&diagnostic)` owns parsed allocations and borrows the source bytes; keep those
+bytes alive until `Program.deinit()`. Pass `program.functions` to `compile` to
+obtain an owned assembly result, or use `Loader` for file-based module linking.
+`Result.deinit(allocator)` releases assembly bytes. Compilation and explain use
+the same final IMEM validation. Backend diagnostics retain statement source
+locations when available.
 
 ## Building and running
 
 ```sh
-zig build-exe tools/zsp/zsp.zig -femit-bin=/tmp/zsp
+zig build-exe tools/zsp/main.zig -femit-bin=/tmp/zsp
 /tmp/zsp input.zsp output.s
 zig cc -target mips-freestanding-none -c output.s -o output.o
 ```
+
+`zsp.zig` remains a compatibility entry point for existing standalone build
+commands. Invoking the tool without arguments or with `--help` prints usage.
+Invalid arguments and compilation failures exit with a concise diagnostic.
 
 The command-line syntax is:
 
@@ -843,8 +871,15 @@ delay slots intact, and treats unknown raw assembly as a barrier. Use
 ## Current limitations
 
 Notable omissions include general scalar multiplication/division, casts,
-ternary expressions, general vector shifts, unaligned vector operations,
-transposed vector operations, annotations, and macros.
+ternary expressions, general vector shifts, general-purpose annotations, and
+macros. Selected unaligned and transposed transfers are supported through the
+explicit `rsp.vector.*` operations described above.
 
-See `tools/zsp/tests.zig` and the `.zsp` files under `src/n64/rsp/ucode/` and
+Function analysis currently has bounded tables: 128 lifetimes, labels, edges,
+and calls; 2048 lifetime events and statement positions; and 32 nested flow
+loops. Exhausting an analysis table reports `AnalysisCapacityExceeded` rather
+than silently disabling validation. Raw assembly still uses conservative
+register allocation because its effects cannot be inferred from source.
+
+See `tools/zsp/tests/` and the `.zsp` files under `src/n64/rsp/ucode/` and
 `src/tests/ucode/` for executable examples of the supported subset.

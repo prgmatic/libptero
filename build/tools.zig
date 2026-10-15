@@ -50,7 +50,7 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
         .rsp_overlay_link = addTool(b, root, "rsp_overlay_link", "tools/build/rsp_overlay_link.zig", &.{}),
         .ipl3_cat = addTool(b, root, "ipl3_cat", "tools/build/ipl3_cat.zig", &.{}),
         .console_font_conv = addTool(b, root, "console_font_conv", "tools/console_font_conv.zig", &.{}),
-        .zsp = addTool(b, root, "zsp", "tools/zsp/zsp.zig", &.{}),
+        .zsp = addTool(b, root, "zsp", "tools/zsp/main.zig", &.{}),
         .texture_compiler = addTool(b, root, "texture-compiler", "tools/texture_compiler/main.zig", &.{
             .{ .name = "texture_compiler", .module = texture_compiler },
         }),

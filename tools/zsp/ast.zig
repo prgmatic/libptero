@@ -1,6 +1,14 @@
 const std = @import("std");
 
+pub const SourceLocation = struct { line: usize, column: usize };
+pub const StatementLocation = struct {
+    statement: *const Statement,
+    location: SourceLocation,
+};
+
 pub const Function = struct {
+    source_path: []const u8 = "",
+    source_locations: []const StatementLocation = &.{},
     name: []const u8,
     source_name: []const u8,
     emit_label: bool = true,
@@ -513,6 +521,7 @@ pub const Statement = union(enum) {
 
 pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) void {
     for (functions) |function| {
+        allocator.free(function.source_locations);
         if (function.command_indices.len != 0) allocator.free(function.command_indices);
         if (function.command_sizes.len != 0) allocator.free(function.command_sizes);
         if (function.clobber_regs.len != 0) allocator.free(function.clobber_regs);

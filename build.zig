@@ -48,6 +48,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "crash_smoke_options", .module = crash_options.createModule() }},
         .install = .{ .outputs = .{ .rom = true, .debug_elf = true }, .step_name = "crash-screen-smoke", .description = "Build a deliberate real panic or CPU exception" },
     });
+    b.installArtifact(sdk.tools.zsp);
     b.installArtifact(sdk.tools.texture_compiler);
     b.installArtifact(sdk.tools.font_compiler);
     b.installArtifact(sdk.tools.audio_compiler);
