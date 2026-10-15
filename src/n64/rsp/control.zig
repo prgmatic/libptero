@@ -210,23 +210,35 @@ pub fn submitHighPriority(queue: *Queue) void {
     current.stop();
     cache.writebackData(current.buffer[0..]);
 
-    // Publish the DMEM handoff while scalar execution is stopped. Back-to-back
-    // batches can otherwise race the dispatcher's accesses to pointer_stack.
-    // Preserve the PC: low-priority work resumes immediately after publication.
-    halt();
-    waitHalted();
-    // Audio may be the first user of the resident runtime. Give the priority
-    // switch a valid low-priority return stream before waking the dispatcher.
-    if (!resident_queue_started) {
-        cache.writebackData(&idle_queue_buffer);
-        io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(&idle_queue_buffer));
-        setProgramCounter(programs.command_dispatcher.pc_start);
-        resident_queue_started = true;
+    const batch_address = physicalAddress(@intFromPtr(current.buffer.ptr));
+    if (high_resume_address) |resume_address| {
+        // The dispatcher resumes high-priority execution at the word after
+        // the previous batch's epilogue (its swap saved that address in slot
+        // 9). Chain this batch from there with a jump written to RDRAM. The
+        // running RSP is neither halted nor has its DMEM written: halting it
+        // mid-frame, or writing DMEM while it DMAs, intermittently corrupted
+        // its RDP buffer state on hardware (DP_END left behind DP_START, so
+        // the RDP ran past its buffer and never completed).
+        const word: *u32 = @ptrFromInt(0x8000_0000 | resume_address);
+        word.* = @as(u32, @intFromEnum(command_queue.InternalCommand.jump)) << 24 | (batch_address & 0x00ff_ffff);
+        cache.writebackData(@as(*const [1]u32, word));
+        io.status_register_write.* = io.status_clear_signal5;
+    } else {
+        // First batch: publish slot 9 while scalar execution is stopped.
+        // Preserve the PC: low-priority work resumes immediately afterwards.
+        halt();
+        waitHalted();
+        // Audio may be the first user of the resident runtime. Give the priority
+        // switch a valid low-priority return stream before waking the dispatcher.
+        if (!resident_queue_started) {
+            cache.writebackData(&idle_queue_buffer);
+            io.readDmem(u32, queue_address_dmem).* = physicalAddress(@intFromPtr(&idle_queue_buffer));
+            setProgramCounter(programs.command_dispatcher.pc_start);
+            resident_queue_started = true;
+        }
+        io.status_register_write.* = io.status_clear_signal5;
+        io.readDmem(u32, pointer_stack_dmem + 9 * @sizeOf(u32)).* = batch_address;
     }
-
-    io.status_register_write.* = io.status_clear_signal5;
-    io.readDmem(u32, pointer_stack_dmem + 9 * @sizeOf(u32)).* =
-        physicalAddress(@intFromPtr(current.buffer.ptr));
     queue.trace_high = profiler.begin(.rsp_high, "RSP high batch (observed)", @intCast(current.index));
     io.status_register_write.* = io.status_set_signal4;
     wakeContinuous();
@@ -254,9 +266,17 @@ pub fn waitHighPriorityTimeout(queue: *Queue, max_attempts: u32) bool {
     queue.trace_high.end();
     queue.trace_high = .{};
     queue.storage.queues[queue.storage.write_index].clear();
+    // The next batch is chained from this batch's resume word, so it must be
+    // written into the other buffer.
+    queue.storage.write_index ^= 1;
+    high_resume_address = queue.high_return_address;
     queue.storage.submitted = false;
     return true;
 }
+
+/// RDRAM address at which the dispatcher resumes its next high-priority
+/// switch (slot 9 as saved by the last completed batch's epilogue).
+var high_resume_address: ?u32 = null;
 
 fn wakeContinuous() void {
     const wake_status = io.status_set_signal7 | io.status_clear_halt | io.status_clear_broke;
@@ -501,6 +521,7 @@ pub fn loadResident(program: Program) void {
     clearDmem();
     load(program);
     resident_queue_started = false;
+    high_resume_address = null;
 }
 
 // The RSP must already be halted before directly accessing DMEM.
