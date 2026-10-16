@@ -25,6 +25,12 @@ environment: ?Rgba32 = null,
 vertex_effect: geometry.VertexEffect = .none,
 /// Explicit blender override, e.g. blending against the blend-color register.
 blend: ?rdp.BlendMode = null,
+/// RDP Z compare/update overrides; null derives them from `flags.depth` and
+/// `translucent`. Unlike clearing `flags.depth`, these leave the RSP's
+/// triangle format and lighting unchanged: use them to skip the Z read and
+/// write for a surface drawn in painter's order, such as a ground plane.
+depth_test: ?bool = null,
+depth_write: ?bool = null,
 
 pub fn apply(self: Material, context: anytype) void {
     self.applyGeometry(context);
@@ -45,7 +51,7 @@ fn applyGeometry(self: Material, context: anytype) void {
 }
 
 fn applyDepth(self: Material, rq: anytype) void {
-    rq.setDepthState(self.flags.depth, self.flags.depth and !self.translucent);
+    rq.setDepthState(self.depth_test orelse self.flags.depth, self.depth_write orelse (self.flags.depth and !self.translucent));
     rq.setSurfaceType(self.translucent);
     if (self.z_mode) |z_mode| {
         var mode = rq.getModes();
@@ -143,6 +149,13 @@ test "fogged alpha materials restore opaque state and preserve combiner alpha" {
     try std.testing.expectEqual(rdp.BlendAlphaSrc.pixel_alpha, context.render.mode.blend_a0);
     try std.testing.expectEqual(rdp.BlendColorSrc.pixel, context.render.mode.blend_m0);
     try std.testing.expectEqual(rdp.BlendInvSrc.inv_a, context.render.mode.blend_b0);
+    (Material{ .depth_test = false, .depth_write = false }).apply(&context);
+    try std.testing.expect(context.flags.depth);
+    try std.testing.expect(!context.render.mode.z_compare_en);
+    try std.testing.expect(!context.render.mode.z_update_en);
+    (Material{ .translucent = true, .depth_write = true }).apply(&context);
+    try std.testing.expect(context.render.mode.z_compare_en);
+    try std.testing.expect(context.render.mode.z_update_en);
     (Material{ .translucent = true, .z_mode = .decal }).apply(&context);
     try std.testing.expectEqual(rdp.ZMode.decal, context.render.mode.z_mode);
     try std.testing.expect(!context.render.mode.z_update_en);

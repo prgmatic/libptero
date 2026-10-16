@@ -275,7 +275,8 @@ Fast64 texture-generation metadata sets this automatically, including a reset
 when the following material uses ordinary UVs. Custom draws can call
 `Context.setVertexEffect` directly. `Material.blend` accepts an explicit
 `rdp.BlendMode` override for effects such as blending against the blend-color
-register. A texture pair can reuse the same texels in TMEM with separate tile
+register. `rdp.BlendMode.additive` adds into the framebuffer but wraps, rather
+than saturates, on overflow. A texture pair can reuse the same texels in TMEM with separate tile
 shifts and offsets; `useTexturePair` uploads identical images once.
 
 ## Drawing model data
@@ -503,6 +504,8 @@ stable-address requirement.
 
 
 `Material.z_mode` can override the surface depth comparison (for example, a
-coplanar translucent decal). `Material.bind` resolves spherical-map dimensions
+coplanar translucent decal). `depth_test` and `depth_write` switch the RDP's Z
+compare and update without changing the RSP triangle format or lighting, unlike
+clearing `flags.depth`. `Material.bind` resolves spherical-map dimensions
 and bounds power-of-two wrap masks to the externally supplied image. Explicit
 low-level `useTextureSampler` bindings retain the caller's exact tile settings.

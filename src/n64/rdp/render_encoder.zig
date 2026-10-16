@@ -47,6 +47,8 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         /// Color registers last emitted through this encoder; repeats are skipped.
         emitted_prim: ?Rgba32 = null,
         emitted_env: ?Rgba32 = null,
+        /// Packed fill color last emitted by fillRectangle.
+        emitted_fill: ?u32 = null,
         fb_width: u16 = 0,
         fb_height: u16 = 0,
 
@@ -126,6 +128,7 @@ pub fn RenderEncoder(comptime QueueType: type) type {
             rq.emitted_combine = null;
             rq.emitted_prim = null;
             rq.emitted_env = null;
+            rq.emitted_fill = null;
             rq.resetTextureCache();
             rq.palette_ptr = 0;
         }
@@ -299,6 +302,7 @@ pub fn RenderEncoder(comptime QueueType: type) type {
             rq.cmd_queue.setFillColor(color);
             rq.cmd_queue.fillRect(0, 0, (rq.fb_width - 1) * 4, (rq.fb_height - 1) * 4);
             rq.emitted_mode = null;
+            rq.emitted_fill = null;
         }
 
         pub fn setDepthBuffer(rq: *Self, depth_image: @import("../graphics/depth.zig").Image) void {
@@ -320,6 +324,7 @@ pub fn RenderEncoder(comptime QueueType: type) type {
             rq.cmd_queue.pipeSync();
             rq.cmd_queue.setColorFrame(color_image);
             rq.emitted_mode = null;
+            rq.emitted_fill = null;
         }
 
         pub fn drawRect(rq: *Self, x: u16, y: u16, w: u16, h: u16, color: anytype) void {
@@ -333,6 +338,55 @@ pub fn RenderEncoder(comptime QueueType: type) type {
                 @truncate((@as(u32, y) + h - 1) * 4),
             );
             rq.emitted_mode = null;
+            rq.emitted_fill = null;
+        }
+
+        const fill_modes: OtherModes = .{ .cycle_type = .fill };
+
+        /// Opaque rectangle in fill mode, which writes several pixels per RDP
+        /// clock but cannot blend, texture or dither. `color` is a framebuffer
+        /// pixel. Consecutive calls emit only color changes and rectangles;
+        /// the tracked state is restored lazily before the next other draw.
+        pub fn fillRectangle(rq: *Self, x: u16, y: u16, w: u16, h: u16, color: anytype) void {
+            if (w == 0 or h == 0) return;
+            const was_fill = if (rq.emitted_mode) |emitted| @as(u64, @bitCast(emitted)) == @as(u64, @bitCast(fill_modes)) else false;
+            if (!was_fill) {
+                rq.cmd_queue.pipeSync();
+                rq.cmd_queue.setOtherModes(fill_modes);
+                rq.emitted_mode = fill_modes;
+            }
+            const bits: u32 = switch (@bitSizeOf(@TypeOf(color))) {
+                16 => @as(u16, @bitCast(color)),
+                32 => @bitCast(color),
+                else => @compileError("fillRectangle takes a 16- or 32-bit framebuffer pixel"),
+            };
+            if (rq.emitted_fill != bits) {
+                // The fill color register is read by rectangles still in flight.
+                if (was_fill) rq.cmd_queue.pipeSync();
+                rq.cmd_queue.setFillColor(color);
+                rq.emitted_fill = bits;
+            }
+            rq.cmd_queue.fillRect(
+                @truncate(@as(u32, x) * 4),
+                @truncate(@as(u32, y) * 4),
+                @truncate((@as(u32, x) + w - 1) * 4),
+                @truncate((@as(u32, y) + h - 1) * 4),
+            );
+        }
+
+        /// Untextured rectangle through the current one- or two-cycle state, so
+        /// it blends like any other draw. Coordinates are pixels with quarter-
+        /// pixel precision; the lower-right edge is exclusive.
+        pub fn shadeRectangle(rq: *Self, x: f32, y: f32, w: f32, h: f32) void {
+            if (!(w > 0 and h > 0)) return;
+            rq.flushPendingModes();
+            const fast = @import("../math/fast.zig");
+            const x0 = std.math.clamp(fast.roundToInt(x * 4), 0, 4095);
+            const y0 = std.math.clamp(fast.roundToInt(y * 4), 0, 4095);
+            const x1 = std.math.clamp(fast.roundToInt((x + w) * 4), 0, 4095);
+            const y1 = std.math.clamp(fast.roundToInt((y + h) * 4), 0, 4095);
+            if (x1 <= x0 or y1 <= y0) return;
+            rq.cmd_queue.fillRect(@intCast(x0), @intCast(y0), @intCast(x1), @intCast(y1));
         }
 
         // Explicit texture load into TMEM (bypasses cache).

@@ -25,6 +25,9 @@ const InitOptions = struct {
     display: display_api.Swapchain(graphics.pixel.Rgba16).Options = .{ .framebuffer_access = .gpu_only },
     input: bool = true,
     max_delta: f32 = 0.25,
+    /// Print RSP/RDP registers and queue state over the debug link when a
+    /// frame times out, before the error is returned.
+    report_timeouts: bool = true,
 };
 const BeginFrameOptions = struct {
     clear_color: ?graphics.pixel.Rgba16 = null,
@@ -63,6 +66,12 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
         discard_pending: bool = false,
         stats: FrameStats = .{},
         recording_stats: FrameStats = .{},
+        audio: ?AudioHook = null,
+
+        const AudioHook = struct {
+            player: *anyopaque,
+            update: *const fn (*anyopaque) anyerror!void,
+        };
 
         pub fn init(self: *Self, allocator: std.mem.Allocator, options: Options) !void {
             if (!std.math.isFinite(options.max_delta) or options.max_delta <= 0) return error.InvalidDelta;
@@ -86,7 +95,10 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
         pub fn beginFrame(self: *Self, options: FrameOptions) !Frame {
             if (self.state == .recording) return error.FrameActive;
             try self.finish();
-            self.acquired = try self.display.acquire();
+            self.acquired = self.display.acquire() catch |err| {
+                self.reportTimeout("acquire", err);
+                return err;
+            };
             // The previous frame has completed, so the RDP is idle.
             if (@hasDecl(Backend, "GpuCounters")) Backend.GpuCounters.reset();
             self.generation +%= 1;
@@ -110,6 +122,33 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
             };
         }
 
+        /// Mix audio in every submit, right after the GPU receives the frame,
+        /// so mixing overlaps rendering. `player` is an audio.Player (or any
+        /// type with `update(.{})`) that must stay at a stable address; detach
+        /// before deinitializing it.
+        pub fn attachAudio(self: *Self, player: anytype) void {
+            const Player = @TypeOf(player.*);
+            self.audio = .{ .player = player, .update = struct {
+                fn update(opaque_player: *anyopaque) anyerror!void {
+                    const typed: *Player = @ptrCast(@alignCast(opaque_player));
+                    _ = try typed.update(.{});
+                }
+            }.update };
+        }
+
+        pub fn detachAudio(self: *Self) void {
+            self.audio = null;
+        }
+
+        fn reportTimeout(self: *Self, comptime stage: []const u8, err: anyerror) void {
+            if (comptime !@hasDecl(Backend, "reportTimeout")) return;
+            if (!self.options.report_timeouts) return;
+            switch (err) {
+                error.RspTimeout, error.RdpFenceTimeout, error.VBlankTimeout => Backend.reportTimeout(stage, &self.renderer),
+                else => {},
+            }
+        }
+
         /// Timing of the most recently completed frame, measured without
         /// debug output. Updated when that frame finishes (normally in the
         /// following beginFrame).
@@ -122,10 +161,10 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
         pub fn finish(self: *Self) !void {
             if (self.state != .submitted) return;
             const wait_start = self.timer.read();
-            if (self.discard_pending) {
-                try self.completion.wait(.{ .max_attempts = self.options.display.max_attempts });
-                try self.display.release(self.acquired);
-            } else try self.display.present(self.acquired, self.completion, .{ .max_attempts = self.options.display.max_attempts });
+            self.presentSubmitted() catch |err| {
+                self.reportTimeout("present", err);
+                return err;
+            };
             self.state = .idle;
             var stats = self.recording_stats;
             stats.present_wait_ms = self.timer.read().milliseconds() - wait_start.milliseconds();
@@ -137,6 +176,13 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
                 stats.rdp_tmem_ms = @as(f32, @floatFromInt(counters.tmem_busy)) * ms_per_cycle;
             }
             self.stats = stats;
+        }
+
+        fn presentSubmitted(self: *Self) !void {
+            if (self.discard_pending) {
+                try self.completion.wait(.{ .max_attempts = self.options.display.max_attempts });
+                try self.display.release(self.acquired);
+            } else try self.display.present(self.acquired, self.completion, .{ .max_attempts = self.options.display.max_attempts });
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) !void {
@@ -216,15 +262,24 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
                 _ = try font.draw(&self.context.renderer.render, x, y, text, options);
             }
 
-            /// Submit once without waiting or changing VI. A copied Frame cannot
-            /// draw afterward. Public renderer/context remain low-level escape hatches.
+            /// Submit once without waiting or changing VI, then mix attached
+            /// audio. A copied Frame cannot draw afterward. An audio error is
+            /// returned after the frame is submitted; present() still applies.
+            /// Public renderer/context remain low-level escape hatches.
             pub fn submit(self: Frame) !Backend.Completion {
                 try self.recording();
-                self.context.recording_stats.record_ms = self.context.timer.read().milliseconds();
-                self.context.completion = if (config.geometry) self.context.geometry.submit() else self.context.renderer.submit();
-                self.context.discard_pending = false;
-                self.context.state = .submitted;
-                return self.context.completion;
+                const context = self.context;
+                const submit_start = context.timer.read();
+                context.recording_stats.record_ms = submit_start.milliseconds();
+                context.completion = if (config.geometry) context.geometry.submit() else context.renderer.submit();
+                context.discard_pending = false;
+                context.state = .submitted;
+                if (context.audio) |audio| {
+                    const mix_start = context.timer.read();
+                    try audio.update(audio.player);
+                    context.recording_stats.audio_ms = context.timer.read().milliseconds() - mix_start.milliseconds();
+                }
+                return context.completion;
             }
 
             pub fn present(self: Frame) !void {
@@ -252,6 +307,8 @@ pub const FrameStats = struct {
     frame_ms: f32 = 0,
     /// beginFrame returning to submit: CPU update and command recording.
     record_ms: f32 = 0,
+    /// Mixing attached audio in submit.
+    audio_ms: f32 = 0,
     /// CPU time blocked finishing the frame (GPU completion and vsync).
     present_wait_ms: f32 = 0,
     /// RDP processing commands, including stalls waiting on RDRAM.
@@ -272,6 +329,10 @@ const Hardware = struct {
     const Controllers = joypad.Controllers;
     const Timer = time.Timer;
     const Completion = rdp.Completion;
+
+    pub fn reportTimeout(comptime stage: []const u8, renderer: *Renderer) void {
+        @import("debug/diagnostics.zig").reportRenderTimeout("app " ++ stage, &renderer.queue);
+    }
 };
 
 test {

@@ -122,6 +122,29 @@ pub fn OverlayPass(comptime Context: type) type {
             };
         }
 
+        /// Opaque rectangle in whole pixels, drawn in fill mode: the fastest way
+        /// to cover large areas, but it ignores the pass blend and combiner.
+        pub fn fillRect(self: @This(), x: u16, y: u16, w: u16, h: u16, color: graphics.pixel.Rgba32) !void {
+            try validate(self.frame, self.generation);
+            const pixel = Context.Pixel.fromBytes(color.r, color.g, color.b, color.a);
+            self.frame.context.renderer.render.fillRectangle(x, y, w, h, pixel);
+        }
+
+        /// Flat-colored rectangle blended with the pass's blend mode; the color's
+        /// alpha is its coverage. Swaps the pass combiner for a flat one, so group
+        /// rectangles together rather than alternating them with sprites.
+        pub fn drawRect(self: @This(), x: f32, y: f32, w: f32, h: f32, color: graphics.pixel.Rgba32) !void {
+            try validate(self.frame, self.generation);
+            for ([_]f32{ x, y, w, h }) |value| if (!std.math.isFinite(value)) return error.InvalidRect;
+            const context = self.frame.context;
+            const render = &context.renderer.render;
+            self.prepare();
+            render.setCombineMode(.primitive);
+            context.overlay.applied = false;
+            render.setPrimColor(color);
+            render.shadeRectangle(x, y, w, h);
+        }
+
         /// Scratch is consumed during recording and may be reused immediately.
         /// A formatting failure emits no commands.
         pub fn drawTextPrint(self: @This(), font: graphics.Font, x: f32, y: f32, scratch: []u8, opts: graphics.Font.DrawOptions, comptime fmt: []const u8, args: anytype) !void {

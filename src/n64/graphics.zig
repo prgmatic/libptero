@@ -39,4 +39,6 @@ test {
     _ = animation;
     _ = geometry;
     _ = RecordedModel;
+    _ = Viewport;
+    _ = @import("graphics/lighting.zig");
 }

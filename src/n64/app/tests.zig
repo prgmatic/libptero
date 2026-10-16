@@ -141,6 +141,10 @@ const Backend = struct {
     pub const Completion = struct {
         pub fn wait(_: @This(), _: anytype) !void {}
     };
+    pub var timeout_reports: usize = 0;
+    pub fn reportTimeout(comptime _: []const u8, _: *Renderer) void {
+        timeout_reports += 1;
+    }
 };
 
 test "frame tokens borrow caller buffers and reject duplicate acquire and stale copies" {
@@ -405,5 +409,89 @@ test "recorded draws and poses borrow final buffers through timeout recovery" {
     try std.testing.expectEqual(@as(f32, 10), game.geometry.pose[0].get(3, 0));
     try std.testing.expectEqual(@as(i16, 20), game.geometry.vertices[0].pos_a[0]);
     try next.discard();
+    try game.deinit(std.testing.failing_allocator);
+}
+
+test "timeouts are reported once each unless disabled" {
+    var game: context.testing.create(.{}, Backend) = undefined;
+    try game.init(std.testing.failing_allocator, .{});
+    const frame = try game.beginFrame(.{});
+    game.display.timeout = true;
+    const before = Backend.timeout_reports;
+    try std.testing.expectError(error.VBlankTimeout, frame.present());
+    try std.testing.expectEqual(before + 1, Backend.timeout_reports);
+    game.options.report_timeouts = false;
+    try std.testing.expectError(error.VBlankTimeout, frame.present());
+    try std.testing.expectEqual(before + 1, Backend.timeout_reports);
+    game.display.timeout = false;
+    try frame.present();
+    try game.deinit(std.testing.failing_allocator);
+}
+
+test "attached audio mixes after each submit and errors keep the frame submitted" {
+    const Player = struct {
+        updates: usize = 0,
+        fail: bool = false,
+        pub fn update(self: *@This(), _: struct {}) !u8 {
+            if (self.fail) return error.AudioTimeout;
+            self.updates += 1;
+            return 1;
+        }
+    };
+    var game: context.testing.create(.{}, Backend) = undefined;
+    try game.init(std.testing.failing_allocator, .{});
+    var player: Player = .{};
+    game.attachAudio(&player);
+    var frame = try game.beginFrame(.{});
+    try std.testing.expectEqual(@as(usize, 0), player.updates);
+    _ = try frame.submit();
+    try std.testing.expectEqual(@as(usize, 1), player.updates);
+    try frame.present();
+    player.fail = true;
+    frame = try game.beginFrame(.{});
+    try std.testing.expectError(error.AudioTimeout, frame.submit());
+    try frame.present();
+    game.detachAudio();
+    player.fail = false;
+    frame = try game.beginFrame(.{});
+    try frame.present();
+    try std.testing.expectEqual(@as(usize, 1), player.updates);
+    try game.deinit(std.testing.failing_allocator);
+}
+
+test "overlay rectangles fill opaquely or blend with a flat combiner" {
+    var game: context.testing.create(.{}, Backend) = undefined;
+    try game.init(std.testing.failing_allocator, .{});
+    const frame = try game.beginFrame(.{});
+    const pass = try frame.beginOverlay(.{});
+    const render = &game.renderer.render;
+    var start = render.cmd_queue.queue.index;
+    try pass.fillRect(0, 0, 320, 12, .fromBytes(255, 0, 0, 255));
+    // Sync, fill mode, fill color, rectangle.
+    try std.testing.expectEqual(@as(usize, 4), render.cmd_queue.queue.index - start);
+    start = render.cmd_queue.queue.index;
+    try pass.fillRect(0, 12, 320, 12, .fromBytes(255, 0, 0, 255));
+    try std.testing.expectEqual(@as(usize, 1), render.cmd_queue.queue.index - start);
+    try std.testing.expectEqual(@as(u64, 0xF6), game.renderer.commands[start] >> 56);
+    start = render.cmd_queue.queue.index;
+    try pass.fillRect(0, 24, 320, 12, .fromBytes(0, 255, 0, 255));
+    try std.testing.expectEqual(@as(usize, 3), render.cmd_queue.queue.index - start);
+    try pass.fillRect(0, 0, 0, 12, .white);
+    try pass.drawRect(10, 10, 20.5, 8, .fromInt(0x00ff0080));
+    try std.testing.expectEqualDeep(rdp.CombineMode.primitive, render.emitted_combine.?);
+    try std.testing.expectEqualDeep((context.App(.{}).OverlayPass.State{}).state.modes, render.emitted_mode.?);
+    const rect = game.renderer.commands[render.cmd_queue.queue.index - 1];
+    try std.testing.expectEqual(@as(u64, 0xF6), rect >> 56);
+    try std.testing.expectEqual(@as(u64, 122), (rect >> 44) & 0xfff);
+    start = render.cmd_queue.queue.index;
+    try pass.drawRect(10, 30, 20, 8, .fromInt(0x00ff0080));
+    try std.testing.expectEqual(@as(usize, 1), render.cmd_queue.queue.index - start);
+    try std.testing.expectError(error.InvalidRect, pass.drawRect(std.math.inf(f32), 0, 1, 1, .white));
+    const pixels: [4]graphics.pixel.Rgba16 align(8) = @splat(.white);
+    const image: graphics.ConstImage(graphics.pixel.Rgba16) = .{ .texel_data = &pixels, .width = 2, .height = 2 };
+    try pass.drawSprite(image, .{});
+    try std.testing.expectEqualDeep((context.App(.{}).OverlayPass.State{}).state, render.getState());
+    try std.testing.expectEqualDeep(render.combine_mode, render.emitted_combine.?);
+    try frame.discard();
     try game.deinit(std.testing.failing_allocator);
 }

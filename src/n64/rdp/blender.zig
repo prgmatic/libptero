@@ -40,6 +40,17 @@ pub const BlendMode = struct {
         .pass1 = .{ .m = .pixel },
         .pass2 = .{},
     };
+    /// Adds the pixel, scaled by its alpha, to the framebuffer: P*A + M.
+    /// The RDP blender does not saturate, so a channel whose sum passes 255
+    /// wraps toward black. Use it only where sums stay in range, such as dim
+    /// tints over dark areas. For bright glows, `alpha` blending toward a
+    /// bright tint never overflows.
+    pub const additive: BlendMode = .{
+        .force_blend = true,
+        .image_read_en = true,
+        .pass1 = .{ .b = .one },
+        .pass2 = .{ .m = .pixel },
+    };
     /// Blend pixel with the fog color register using fog alpha.
     pub const fog: BlendMode = .{
         .force_blend = true,

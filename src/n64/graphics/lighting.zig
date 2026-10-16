@@ -43,5 +43,54 @@ pub const Lighting = struct {
         };
         context.setLightCount(@intCast(self.lights.len));
     }
+
+    /// Copy the point lights that light `position` most into `dest`,
+    /// strongest first, and return the filled prefix. Each light adds RSP
+    /// work to every lit vertex, so scenes with many light sources should
+    /// pass only a few. Influence is strength over squared distance;
+    /// directional lights in `candidates` are skipped.
+    pub fn strongestAt(dest: []Light, candidates: []const Light, position: math.Vec3) []Light {
+        var scores: [max_selection]f32 = undefined;
+        const capacity = @min(dest.len, max_selection);
+        var count: usize = 0;
+        for (candidates) |candidate| {
+            const light = switch (candidate) {
+                .point => |value| value,
+                .directional => continue,
+            };
+            const offset = light.position.sub(position);
+            const score = light.strength / (offset.dot(offset) + 1);
+            if (count == capacity and (count == 0 or score <= scores[count - 1])) continue;
+            var index = if (count < capacity) count else count - 1;
+            while (index > 0 and scores[index - 1] < score) : (index -= 1) {
+                scores[index] = scores[index - 1];
+                dest[index] = dest[index - 1];
+            }
+            scores[index] = score;
+            dest[index] = candidate;
+            if (count < capacity) count += 1;
+        }
+        return dest[0..count];
+    }
+
+    const max_selection = 16;
 };
+
+test "strongestAt keeps the most influential point lights in order" {
+    const candidates = [_]Light{
+        .{ .point = .{ .position = .init(100, 0, 0), .strength = 50 } },
+        .{ .directional = .{ .direction = .init(0, 1, 0) } },
+        .{ .point = .{ .position = .init(10, 0, 0), .strength = 50 } },
+        .{ .point = .{ .position = .init(30, 0, 0), .strength = 50 } },
+        .{ .point = .{ .position = .init(20, 0, 0), .strength = 400 } },
+    };
+    var dest: [2]Light = undefined;
+    const chosen = Lighting.strongestAt(&dest, &candidates, .zero);
+    try std.testing.expectEqual(@as(usize, 2), chosen.len);
+    try std.testing.expectEqual(@as(f32, 20), chosen[0].point.position.x);
+    try std.testing.expectEqual(@as(f32, 10), chosen[1].point.position.x);
+    var wide: [8]Light = undefined;
+    try std.testing.expectEqual(@as(usize, 4), Lighting.strongestAt(&wide, &candidates, .zero).len);
+    try std.testing.expectEqual(@as(usize, 0), Lighting.strongestAt(dest[0..0], &candidates, .zero).len);
+}
 pub const Fog = struct { color: @import("pixel.zig").Rgba32, near: f32, far: f32 };

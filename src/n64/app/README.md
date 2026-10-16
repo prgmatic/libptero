@@ -67,6 +67,22 @@ accepts directional and point lights in world space, up to
 `graphics.max_lights`. That slice is consumed during pass creation and
 can immediately be reused. Each new geometry pass establishes its own ambient
 color and light count; default lighting is white ambient with no lights.
+Every light adds RSP work to each lit vertex. With many light sources, pick the
+few that matter with `Lighting.strongestAt(dest, candidates, position)`, which
+keeps the point lights with the most influence (strength over squared distance)
+at a position such as the player's.
+
+The camera's `Viewport.project(world)` returns screen `x`/`y`, `depth`, and
+`scale` (pixels per world unit there), or null behind the camera, for anchoring
+sprites, text and sound panning to 3D objects.
+
+Imported materials accept `depth_test` and `depth_write` overrides that switch
+only the RDP's Z compare and update. A large surface drawn first in painter's
+order, such as a ground plane, can skip its Z read-modify-write that way:
+
+```zig
+const ground = assets.ground.withOverrides(.{.{ .depth_test = false, .depth_write = false }});
+```
 
 Overlay passes default to one-cycle alpha blending with depth and perspective
 disabled. `OverlayOptions.pipeline` supplies a full `rdp.State` and environment
@@ -136,6 +152,17 @@ for (particles) |p| try sparks.draw(.{
     .pivot = .center,
     .tint = p.color,
 });
+```
+
+Rectangles need no texture. `hud.fillRect(x, y, w, h, color)` draws an opaque
+whole-pixel rectangle in fill mode, the cheapest way to cover large areas, and
+ignores the pass blend and combiner. `hud.drawRect(x, y, w, h, color)` blends
+with the pass's blend mode, using the color's alpha as coverage; it swaps in a
+flat combiner, so group rectangles instead of alternating them with sprites.
+
+```zig
+for (bands, 0..) |color, i| try backdrop.fillRect(0, @intCast(i * 12), 320, 12, color);
+try hud.drawRect(12, 180, 120, 30, .fromInt(0x10102080)); // Translucent panel.
 ```
 
 Sprite regions use texel coordinates and must fit the image. Omit `source` for
@@ -216,17 +243,24 @@ polls input, and reports elapsed seconds in
 preserves contents. Depth clears default on for 3D.
 
 `frame.present()` submits if necessary, waits for both processors, and presents.
-For overlap, call `frame.submit()`, do independent CPU work or service
-`audio.Player`, then call `frame.present()` or `context.finish()`. Starting the next
+For overlap, call `frame.submit()`, do independent CPU work, then call
+`frame.present()` or `context.finish()`. `context.attachAudio(&player)` makes
+every submit mix an `audio.Player` right after the GPU receives the frame, which
+is the point where mixing overlaps rendering. An audio error is returned after
+the frame has been submitted, so `present` still applies. Call
+`context.detachAudio()` before deinitializing the player. Starting the next
 frame also finishes an outstanding submission. There is one GPU submission in
 flight, with no additional in-flight fence or frame queue.
 
 `context.lastFrameStats()` reports the last finished frame: `frame_ms`,
-`record_ms` (beginFrame to submit), `present_wait_ms`, and the RDP's own
+`record_ms` (beginFrame to submit), `audio_ms` (mixing in submit), `present_wait_ms`, and the RDP's own
 hardware counters `rdp_busy_ms`, `rdp_pipe_ms` and `rdp_tmem_ms`. It needs no
 debug output, so it is cheap enough to leave on.
 
-Timeouts retain the frame and submission; the caller must retain borrowed data. Retry `present` or
+Timeouts retain the frame and submission; the caller must retain borrowed data.
+An RSP, RDP or vblank timeout first prints the RSP/RDP registers and queue state
+over the debug link (`debug.diagnostics.reportRenderTimeout`); set
+`Options.report_timeouts = false` to suppress it. Retry `present` or
 `finish`; do not reuse hardware-owned memory. `frame.discard()` submits and
 drains commands before releasing the frame because streamed commands may have
 already executed. Discard can also time out and be retried. `deinit(allocator)`
