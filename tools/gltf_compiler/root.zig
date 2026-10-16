@@ -3,6 +3,7 @@ const compiler = @import("compiler.zig");
 pub const Glb = compiler.Glb;
 pub const Document = compiler.Document;
 pub const ConvertOptions = compiler.ConvertOptions;
+pub const Diagnostic = compiler.Diagnostic;
 pub const TextureSize = compiler.TextureSize;
 pub const parseTextureSize = compiler.parseTextureSize;
 pub const ConvertedModel = compiler.ConvertedModel;

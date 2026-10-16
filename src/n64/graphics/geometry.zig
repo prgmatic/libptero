@@ -7,6 +7,8 @@ const Rgba32 = @import("pixel.zig").Rgba32;
 
 const vertex_output_size = 36;
 pub const max_lights = 7;
+/// Vertices the RSP vertex buffer holds (loadVertices offset + count).
+pub const max_loaded_vertices = 70;
 pub const VertexEffect = union(enum) {
     none,
     /// Sphere-map dimensions in texels. Generated coordinates replace mesh UVs.

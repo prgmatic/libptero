@@ -3,6 +3,7 @@ const cache = @import("../cpu/cache.zig");
 const cpu = @import("../cpu.zig");
 const profiler = @import("../debug/profiler.zig");
 const rdp_io = @import("../hw/dp.zig");
+const time = @import("../time.zig");
 
 const io = @import("../hw/sp.zig");
 pub const programs = @import("programs.zig");
@@ -75,6 +76,7 @@ pub fn runProgram(program: Program) void {
     halt();
     waitHalted();
     load(program);
+    resident_queue_started = false;
     runAsync(program.pc_start);
 }
 
@@ -142,7 +144,14 @@ pub fn flush(queue: *Queue) void {
         // Space uncached SP_STATUS reads while the RDP owns the shared RCP bus.
         // Libdragon gets equivalent pacing from its timed RSP_WAIT_LOOP.
         const poll_interval_cycles = 64;
-        while (!io.status_register_read.signal6) cpu.waitCycles(poll_interval_cycles);
+        if (!io.status_register_read.signal6) {
+            const started = time.Instant.now();
+            while (!io.status_register_read.signal6) {
+                checkQueueProgress(queue, started, "RSP queue flush");
+                cpu.waitCycles(poll_interval_cycles);
+            }
+            queue_wait_ticks +%= time.Instant.now().since(started).ticks;
+        }
         io.status_register_write.* = io.status_clear_signal6;
         next.clearStreaming();
     }
@@ -168,6 +177,7 @@ pub fn flush(queue: *Queue) void {
         resident_queue_started = true;
         wakeContinuous();
     } else {
+        checkNotCrashed(queue, "RSP queue flush");
         wakeContinuous();
     }
     storage.write_index = next_index;
@@ -177,7 +187,113 @@ pub fn flush(queue: *Queue) void {
 pub fn wait(queue: *const Queue) void {
     if (queue.priority != .low) @panic("use waitHighPriorityTimeout for a high-priority RSP queue");
     if (!queue.storage.submitted) return;
-    while (!io.status_register_read.signal6) {}
+    const started = time.Instant.now();
+    while (!io.status_register_read.signal6) checkQueueProgress(queue, started, "RSP queue wait");
+}
+
+/// Longest the CPU waits for the low-priority queue before reporting a hang.
+pub const queue_stall_limit_ticks: u32 = 2 * time.ticks_per_second;
+
+/// Panic (after printing RSP/RDP state) instead of spinning forever when the
+/// RSP can no longer reach the queue's completion signal. A halted, broken
+/// RSP that has not raised signal6 executed a `break` mid-queue (invalid
+/// command or overwritten microcode); the dispatcher only idles after it.
+fn checkQueueProgress(queue: *const Queue, started: time.Instant, comptime label: []const u8) void {
+    const status = io.status_register_read.*;
+    if (status.signal6) return;
+    if (status.is_halted and status.is_broke) {
+        reportQueueFault(queue, label ++ ": RSP halted on break");
+        @panic("RSP crashed while executing the command queue");
+    }
+    if (time.Instant.now().since(started).ticks > queue_stall_limit_ticks) {
+        reportQueueFault(queue, label ++ ": no progress for 2 s");
+        @panic("RSP command queue stalled");
+    }
+}
+
+/// IMEM address after the dispatcher's idle `break`: where a queue that ran
+/// out of input halts. Any other halted-on-break PC is a crash.
+const idle_resume_pc = programs.command_dispatcher_symbols.LABEL_waitForInput_ifend_0;
+
+fn rspCrashed() bool {
+    const status = io.status_register_read.*;
+    if (!status.is_halted or !status.is_broke) return false;
+    return (io.program_counter.* & 0xffc) != idle_resume_pc;
+}
+
+/// Waking a crashed RSP clears its halt and lets it run past the `break`
+/// into unrelated code, losing the evidence. Check before every wake of the
+/// running resident queue.
+fn checkNotCrashed(queue: ?*const Queue, comptime label: []const u8) void {
+    if (!rspCrashed()) return;
+    reportQueueFault(queue, label ++ ": RSP halted on break");
+    @panic("RSP crashed while executing the command queue");
+}
+
+/// Panic with an RSP/RDP state report if the resident queue's RSP halted on
+/// a `break` anywhere but its idle point. Waiting for its work would never
+/// finish. Cheap enough to call from wait loops.
+pub fn panicIfCrashed(comptime label: []const u8) void {
+    if (resident_queue_started) checkNotCrashed(null, label);
+}
+
+fn reportQueueFault(queue: ?*const Queue, label: []const u8) void {
+    const diagnostics = @import("../debug/diagnostics.zig");
+    diagnostics.reportRenderTimeout(label, queue);
+    diagnostics.reportRspFault();
+}
+
+// CPU time blocked on a full low-priority queue, in COP0 Count ticks.
+var queue_wait_ticks: u32 = 0;
+
+// RSP busy accounting. The dispatcher stores the DP clock in DMEM just before
+// it halts for lack of input; the CPU reads it while the RSP is halted and
+// timestamps every wake. Busy time is the sum of wake-to-idle intervals.
+const idle_clock_dmem = programs.command_dispatcher_symbols.overlay_data_rdram;
+var busy_clocks: u32 = 0;
+var wake_clock: u32 = 0;
+var last_idle_clock: ?u32 = null;
+var awake = false;
+
+fn accountIdle() void {
+    const status = io.status_register_read.*;
+    if (!status.is_halted or !status.is_broke) return;
+    if ((io.program_counter.* & 0xffc) != idle_resume_pc) return;
+    const idle = io.readDmem(u32, idle_clock_dmem).*;
+    if (last_idle_clock == idle) return;
+    last_idle_clock = idle;
+    if (awake) busy_clocks +%= (idle -% wake_clock) & 0xffffff;
+    awake = false;
+}
+
+/// RSP activity since the previous `takeCounters` call. Busy time includes
+/// stalls inside commands (DMA, waiting for RDP buffer space) and
+/// high-priority work such as audio; work still running when this is called
+/// is counted at the RSP's next idle. Intervals longer than the 24-bit DP
+/// clock period (~268 ms) are truncated.
+pub const Counters = struct {
+    /// RSP running between a CPU wake and the queue running dry, in DP clocks.
+    busy_clocks: u32,
+    /// CPU blocked in `flush` waiting for the RSP to drain the previous
+    /// command buffer, in COP0 Count ticks (`time.ticks_per_second`).
+    queue_wait_ticks: u32,
+
+    pub const busy_clocks_per_second: f32 = rdp_io.Counters.cycles_per_second;
+
+    pub fn busyMilliseconds(self: Counters) f32 {
+        return @as(f32, @floatFromInt(self.busy_clocks)) * (1000.0 / busy_clocks_per_second);
+    }
+    pub fn queueWaitMilliseconds(self: Counters) f32 {
+        return (time.Duration{ .ticks = self.queue_wait_ticks }).milliseconds();
+    }
+};
+
+pub fn takeCounters() Counters {
+    accountIdle();
+    const result: Counters = .{ .busy_clocks = busy_clocks, .queue_wait_ticks = queue_wait_ticks };
+    busy_clocks = 0;
+    queue_wait_ticks = 0;
+    return result;
 }
 
 pub fn waitTimeout(queue: *const Queue, max_attempts: u32) bool {
@@ -186,11 +302,13 @@ pub fn waitTimeout(queue: *const Queue, max_attempts: u32) bool {
     if (queue.priority != .low) @panic("use waitHighPriorityTimeout for a high-priority RSP queue");
     if (!queue.storage.submitted) return true;
     var remaining = max_attempts;
-    while (!io.status_register_read.signal6) {
-        if (remaining == 0) return false;
+    while (true) {
+        const status = io.status_register_read.*;
+        if (status.signal6) return true;
+        // A crashed RSP never completes; report it like a timeout.
+        if (remaining == 0 or (status.is_halted and status.is_broke)) return false;
         remaining -= 1;
     }
-    return true;
 }
 
 pub fn submitHighPriority(queue: *Queue) void {
@@ -198,6 +316,7 @@ pub fn submitHighPriority(queue: *Queue) void {
     defer trace_scope.end();
     if (queue.priority != .high) @panic("high-priority submission requires a high-priority RSP queue");
     if (queue.storage.submitted) @panic("high-priority RSP queue is already submitted");
+    if (resident_queue_started) checkNotCrashed(queue, "RSP high-priority submit");
     queue.reserveCommandWords(0);
     const current = &queue.storage.queues[queue.storage.write_index];
     current.writeRawCommand(
@@ -289,10 +408,15 @@ pub fn releaseHighPriority(queue: *const Queue) void {
 }
 
 fn wakeContinuous() void {
+    accountIdle();
     const wake_status = io.status_set_signal7 | io.status_clear_halt | io.status_clear_broke;
     io.status_register_write.* = wake_status;
     asm volatile ("nop; nop; nop; b 1f; 1: nop; nop; nop; nop; nop; nop");
     io.status_register_write.* = wake_status;
+    if (!awake) {
+        wake_clock = rdp_io.clock();
+        awake = true;
+    }
 }
 
 pub fn registerOverlay(registered: *Overlay) u8 {

@@ -175,6 +175,11 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
                 stats.rdp_pipe_ms = @as(f32, @floatFromInt(counters.pipe_busy)) * ms_per_cycle;
                 stats.rdp_tmem_ms = @as(f32, @floatFromInt(counters.tmem_busy)) * ms_per_cycle;
             }
+            if (@hasDecl(Backend, "RspCounters")) {
+                const counters = Backend.RspCounters.take();
+                stats.rsp_busy_ms = counters.busyMilliseconds();
+                stats.rsp_queue_wait_ms = counters.queueWaitMilliseconds();
+            }
             self.stats = stats;
         }
 
@@ -317,10 +322,22 @@ pub const FrameStats = struct {
     rdp_pipe_ms: f32 = 0,
     /// RDP loading TMEM.
     rdp_tmem_ms: f32 = 0,
+    /// RSP running since the previous frame finished: geometry, RDP command
+    /// generation and audio, including its stalls on DMA and RDP buffer space.
+    /// Measured from the dispatcher's idle timestamps on the DP clock.
+    rsp_busy_ms: f32 = 0,
+    /// Part of `record_ms` the CPU spent blocked because the RSP had not yet
+    /// drained the previous command buffer (RSP-bound recording).
+    rsp_queue_wait_ms: f32 = 0,
 };
 
 const Hardware = struct {
     const GpuCounters = @import("hw/dp.zig").Counters;
+    const RspCounters = struct {
+        fn take() rsp.Counters {
+            return rsp.takeCounters();
+        }
+    };
     const Runtime = rsp.Runtime;
     const Renderer = rdp.Renderer;
     const Geometry = graphics.GeometryEncoder;

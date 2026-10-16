@@ -16,7 +16,9 @@ filter: modes.TextureSample = .point,
 translucent: bool = false,
 z_mode: ?rdp.ZMode = null,
 alpha_cutoff: ?u8 = null,
-/// null inherits the context's current geometry fog setting.
+/// null inherits the context's fog default (the pass fog). Translucent
+/// materials whose combiner reads vertex (shade) alpha inherit no fog: the
+/// RSP stores fog in shade alpha, so the two cannot be combined.
 fog: ?bool = null,
 cycle_type: rdp.CycleType = .one_cycle,
 combine: rdp.CombineMode = .shade,
@@ -33,8 +35,8 @@ depth_test: ?bool = null,
 depth_write: ?bool = null,
 
 pub fn apply(self: Material, context: anytype) void {
-    self.applyGeometry(context);
-    const fog = self.fog orelse context.fog_enabled;
+    const fog = self.resolvedFog(context);
+    self.applyGeometry(context, fog);
     const rq = if (@typeInfo(@TypeOf(context.render)) == .pointer) context.render else &context.render;
     // Material registers can be read by primitives still in the pipeline.
     rq.cmd_queue.pipeSync();
@@ -44,10 +46,29 @@ pub fn apply(self: Material, context: anytype) void {
     self.applyColors(rq);
 }
 
-fn applyGeometry(self: Material, context: anytype) void {
+/// Fog this material draws with in `context`.
+pub fn resolvedFog(self: Material, context: anytype) bool {
+    if (self.fog) |enabled| return enabled;
+    if (self.translucent and self.usesShadeAlpha()) return false;
+    return if (@hasField(@TypeOf(context.*), "fog_default")) context.fog_default else context.fog_enabled;
+}
+
+/// Whether the combiner reads per-vertex alpha, which fog would replace.
+pub fn usesShadeAlpha(self: Material) bool {
+    for ([_]rdp.CycleMode{ self.combine.cycle0, self.combine.cycle1 }) |cycle| {
+        if (cycle.alpha_a == .shade or cycle.alpha_b == .shade or cycle.alpha_c == .shade or cycle.alpha_d == .shade or cycle.rgb_c == .shade_alpha)
+            return true;
+    }
+    return false;
+}
+
+fn applyGeometry(self: Material, context: anytype, fog: bool) void {
     context.setDrawFlags(self.flags);
     context.setVertexEffect(self.vertex_effect);
-    if (self.fog) |enabled| context.setFogEnabled(enabled);
+    // Inheriting materials restore the default after an explicit override.
+    if (@hasDecl(@TypeOf(context.*), "setMaterialFog")) {
+        context.setMaterialFog(fog);
+    } else if (self.fog != null or fog != context.fog_enabled) context.setFogEnabled(fog);
 }
 
 fn applyDepth(self: Material, rq: anytype) void {
@@ -173,4 +194,42 @@ test "external images bound legacy wrap masks to actual texel dimensions" {
     try std.testing.expectEqual(@as(u4, 4), boundedMask(4, 32));
     try std.testing.expectEqual(@as(u4, 0), boundedMask(0, 32));
     try std.testing.expectEqual(@as(u4, 6), boundedMask(6, 44));
+}
+
+test "inheriting materials use the fog default and vertex alpha disables fog" {
+    const std = @import("std");
+    const TestContext = struct {
+        render: rdp.RenderEncoder(rdp.backend.Direct),
+        fog_enabled: bool = true,
+        fog_default: bool = true,
+        fog_commands: u32 = 0,
+        pub fn setDrawFlags(_: *@This(), _: geometry.DrawFlags) void {}
+        pub fn setVertexEffect(_: *@This(), _: geometry.VertexEffect) void {}
+        pub fn setMaterialFog(self: *@This(), enabled: bool) void {
+            if (enabled == self.fog_enabled) return;
+            self.fog_enabled = enabled;
+            self.fog_commands += 1;
+        }
+    };
+    var commands: [64]u64 = undefined;
+    var context: TestContext = .{ .render = .init(.{ .buffer = &commands }) };
+    (Material{ .fog = false }).apply(&context);
+    try std.testing.expect(!context.fog_enabled);
+    // The next inheriting material returns to the pass default.
+    (Material{}).apply(&context);
+    try std.testing.expect(context.fog_enabled);
+
+    const shadow: Material = .{ .translucent = true, .combine = .shade };
+    try std.testing.expect(shadow.usesShadeAlpha());
+    try std.testing.expect(!shadow.resolvedFog(&context));
+    shadow.apply(&context);
+    try std.testing.expect(!context.fog_enabled);
+    try std.testing.expectEqual(rdp.BlendAlphaSrc.pixel_alpha, context.render.mode.blend_a0);
+    try std.testing.expectEqual(rdp.CycleType.one_cycle, context.render.mode.cycle_type);
+
+    const glass: Material = .{ .translucent = true, .combine = .single(.{ .rgb_d = .shade, .alpha_d = .primitive }) };
+    try std.testing.expect(!glass.usesShadeAlpha());
+    try std.testing.expect(glass.resolvedFog(&context));
+    try std.testing.expect((Material{ .translucent = true, .combine = .shade, .fog = true }).resolvedFog(&context));
+    try std.testing.expectEqual(@as(u32, 3), context.fog_commands);
 }

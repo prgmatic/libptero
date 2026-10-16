@@ -63,13 +63,21 @@ fn fetchCommandBufferWithPointer(
     const status_clear_signal_more: u32 = 0x00800000;
 
     reg status_value: u32;
+    reg idle_clock: u32;
+    // Publish the RDP clock (DPC_CLOCK) at which the queue went idle; the
+    // CPU pairs it with its wake time to measure RSP busy time. Overlay id 0
+    // never maps to an overlay, so its table entry is free. Read the clock
+    // before SP_STATUS: the CPU's double wake write only covers a short
+    // window between the signal check and the break.
+    idle_clock = rsp.cp0.read(12);
     status_value = rsp.cp0.spStatus();
     status_value &= status_signal_more;
     if(status_value == 0) slot {
-        status_value = status_clear_signal_more;
+        store(u32, overlay_data_rdram, idle_clock);
     } {
         rsp.halt();
     }
+    status_value = status_clear_signal_more;
     rsp.cp0.setSpStatus(status_value);
 
     tail fetchCommandBuffer();
@@ -85,8 +93,7 @@ fn fetchCommandBufferWithPointer(
 
 @rspq.command(2) fn jump(command: dmem) noreturn {
     reg($s0) rdram: u32 = undefined;
-    rdram = command;
-    rdram <<= 8;
+    rdram = command << 8;
     rdram >>>= 8;
     jump fetchCommandBufferWithPointer(rdram);
 }

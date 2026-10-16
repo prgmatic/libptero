@@ -739,6 +739,26 @@ pub const ConvertOptions = struct {
     preserve_triangle_order: bool = false,
     /// First JOINTS_0 component, with bind-local geometry transformed on RSP.
     skinning: enum { weighted, first_joint } = .weighted,
+    /// Receives the location of a failing primitive or vertex, if any.
+    diagnostic: ?*Diagnostic = null,
+};
+
+/// Where conversion failed, for errors such as `UvOutOfRange`.
+pub const Diagnostic = struct {
+    mesh: ?usize = null,
+    primitive: ?usize = null,
+    material: ?u32 = null,
+    /// Source vertex index within the primitive.
+    vertex: ?u32 = null,
+    /// Source TEXCOORD_0 value of that vertex.
+    uv: ?[2]f32 = null,
+    texture_size: [2]u32 = .{ 0, 0 },
+
+    /// Representable UV magnitude in texture repeats for the texture size.
+    pub fn uvLimit(self: Diagnostic, axis: usize) f32 {
+        if (self.texture_size[axis] == 0) return 0;
+        return 1024.0 / @as(f32, @floatFromInt(self.texture_size[axis]));
+    }
 };
 
 pub fn convert(allocator: std.mem.Allocator, document: Document, binary: []const u8, options: ConvertOptions) !ConvertedModel {
@@ -777,7 +797,8 @@ fn convertMeshes(allocator: std.mem.Allocator, document: Document, binary: []con
 }
 
 fn convertMeshNode(allocator: std.mem.Allocator, document: Document, binary: []const u8, options: ConvertOptions, batches: *std.ArrayList(Batch), mesh: Mesh, mesh_index: usize, node_index: ?usize) !void {
-    for (mesh.primitives) |primitive| {
+    for (mesh.primitives, 0..) |primitive, primitive_index| {
+        if (options.diagnostic) |diagnostic| diagnostic.* = .{ .mesh = mesh_index, .primitive = primitive_index, .material = primitive.material };
         if (primitive.mode != 4) return error.UnsupportedPrimitiveMode;
         const start = batches.items.len;
         try convertPrimitive(allocator, document, binary, primitive, options, batches);
@@ -798,7 +819,18 @@ fn prepareVertices(pool: *@import("vertex_remap.zig").Pool, views: PrimitiveView
 }
 
 fn primitiveVertex(views: PrimitiveViews, options: ConvertOptions, index: u32) !Vertex {
-    var vertex = try convertVertex(views.positions, views.normals, views.colors, views.uvs, index, views.texture_size, options.scale);
+    return primitiveVertexUnchecked(views, options, index) catch |err| {
+        if (err == error.UvOutOfRange) if (options.diagnostic) |diagnostic| {
+            diagnostic.vertex = index;
+            diagnostic.texture_size = views.texture_size;
+            if (views.uvs) |uvs| diagnostic.uv = .{ uvs.float(index, 0) catch 0, uvs.float(index, 1) catch 0 };
+        };
+        return err;
+    };
+}
+
+fn primitiveVertexUnchecked(views: PrimitiveViews, options: ConvertOptions, index: u32) !Vertex {
+    var vertex = try convertVertex(views.positions, views.normals, views.colors, views.uvs, index, views.texture_size, options.scale, views.uv_shift);
     vertex.influence = try rig.readInfluence(views.joints, views.weights, index);
     if (options.skinning == .first_joint) try captureBindSource(&vertex, views, index, options.scale);
     if (views.uv_adjust and views.uvs != null) try centerUv(&vertex.uv);
@@ -830,6 +862,7 @@ fn convertPrimitive(
     for (options.texture_sizes) |size| {
         if (primitive.material == @as(u32, size.material)) views.texture_size = .{ size.width, size.height };
     }
+    views.uv_shift = try uvRebase(views, materialUvPeriods(document, primitive.material, views.texture_size));
     var pool = try @import("vertex_remap.zig").Pool.init(allocator, views.positions.count);
     defer pool.deinit();
     try prepareVertices(&pool, views, options);
@@ -895,6 +928,9 @@ const PrimitiveViews = struct {
     indices: AccessorView,
     texture_size: [2]u32,
     uv_adjust: bool,
+    /// Whole texture repeats subtracted from every UV (in UV units) so a
+    /// primitive far from the origin still fits the S10.5 texel range.
+    uv_shift: [2]f32 = .{ 0, 0 },
 
     fn init(document: Document, binary: []const u8, primitive: Primitive) !PrimitiveViews {
         if ((primitive.attributes.JOINTS_0 == null) != (primitive.attributes.WEIGHTS_0 == null)) return error.InvalidSkinAttributes;
@@ -1036,12 +1072,12 @@ fn findRemap(remap: []const Remap, source: u32) ?u8 {
     return null;
 }
 
-fn convertVertex(positions: AccessorView, normals: ?AccessorView, colors: ?AccessorView, uvs: ?AccessorView, index: u32, texture_size: [2]u32, scale: f32) !Vertex {
+fn convertVertex(positions: AccessorView, normals: ?AccessorView, colors: ?AccessorView, uvs: ?AccessorView, index: u32, texture_size: [2]u32, scale: f32, uv_shift: [2]f32) !Vertex {
     return .{
         .position = try convertPosition(positions, index, scale),
         .normal = if (normals) |view| try convertNormal(view, index) else 0,
         .color = if (colors) |view| try convertColor(view, index) else .{ 255, 255, 255, 255 },
-        .uv = if (uvs) |view| try convertUv(view, index, texture_size) else .{ 0, 0 },
+        .uv = if (uvs) |view| try convertUv(view, index, texture_size, uv_shift) else .{ 0, 0 },
     };
 }
 
@@ -1071,15 +1107,76 @@ fn convertColor(view: AccessorView, index: u32) ![4]u8 {
     return result;
 }
 
-fn convertUv(view: AccessorView, index: u32, texture_size: [2]u32) ![2]i16 {
+fn convertUv(view: AccessorView, index: u32, texture_size: [2]u32, shift: [2]f32) ![2]i16 {
     if (view.component_count != 2 or index >= view.count) return error.InvalidUvAccessor;
     var result: [2]i16 = undefined;
     for (0..2) |component| {
-        const value = try view.float(index, component) * @as(f32, @floatFromInt(texture_size[component])) * 32;
+        const value = (try view.float(index, component) - shift[component]) * @as(f32, @floatFromInt(texture_size[component])) * 32;
         if (value < -32768 or value > 32767) return error.UvOutOfRange;
         result[component] = @intFromFloat(value);
     }
     return result;
+}
+
+/// Texture repeat period per axis, in texels, over which sampling is
+/// invariant (twice the wrap period, so mirrored axes qualify too), or null
+/// when the axis clamps, is unmasked or is shifted by the tile.
+fn materialUvPeriods(document: Document, material_index: ?u32, texture_size: [2]u32) [2]?u32 {
+    const index = material_index orelse return .{ null, null };
+    if (index >= document.materials.len) return .{ null, null };
+    const material = document.materials[index];
+    const resolved: materials.Sampler = if (materials.legacy(material)) |fast64|
+        materials.sampler(fast64.tex0) catch return .{ null, null }
+    else if (materialImageIndex(document, material) != null)
+        imageSampler(document, material, texture_size)
+    else
+        return .{ null, null };
+    return .{
+        axisPeriod(resolved.clamp_s, resolved.mask_s, resolved.shift_s),
+        axisPeriod(resolved.clamp_t, resolved.mask_t, resolved.shift_t),
+    };
+}
+
+fn imageSampler(document: Document, material: Material, size: [2]u32) materials.Sampler {
+    const texture = document.textures[material.pbrMetallicRoughness.?.baseColorTexture.?.index];
+    const sampler = if (texture.sampler) |i| if (i < document.samplers.len) document.samplers[i] else Sampler{} else Sampler{};
+    const s = samplerAxis(sampler.wrapS, size[0]);
+    const t = samplerAxis(sampler.wrapT, size[1]);
+    return .{ .clamp_s = s.clamp, .clamp_t = t.clamp, .mask_s = s.mask, .mask_t = t.mask };
+}
+
+fn axisPeriod(clamp: bool, mask: u4, shift: u4) ?u32 {
+    if (clamp or mask == 0 or shift != 0) return null;
+    return @as(u32, 2) << mask;
+}
+
+/// Subtract whole texture repeats from a primitive whose UVs exceed the
+/// S10.5 range, centering its UV bounds on the origin. Wrapping samplers
+/// render identically; other primitives are left for the range check.
+fn uvRebase(views: PrimitiveViews, periods: [2]?u32) ![2]f32 {
+    const uvs = views.uvs orelse return .{ 0, 0 };
+    var low: [2]f32 = .{ std.math.inf(f32), std.math.inf(f32) };
+    var high: [2]f32 = .{ -std.math.inf(f32), -std.math.inf(f32) };
+    for (0..views.indices.count) |corner| {
+        const index = try views.indices.index(corner);
+        if (index >= uvs.count) return error.InvalidUvAccessor;
+        for (0..2) |axis| {
+            const value = try uvs.float(index, axis);
+            low[axis] = @min(low[axis], value);
+            high[axis] = @max(high[axis], value);
+        }
+    }
+    var shift: [2]f32 = .{ 0, 0 };
+    for (0..2) |axis| {
+        if (!(low[axis] <= high[axis])) continue;
+        const size: f32 = @floatFromInt(views.texture_size[axis]);
+        // Leave room for the half-texel filtering adjustment.
+        const fits = low[axis] * size * 32 >= -32768 + 16 and high[axis] * size * 32 <= 32767;
+        if (fits) continue;
+        const period = @as(f32, @floatFromInt(periods[axis] orelse continue)) / size;
+        shift[axis] = @round((low[axis] + high[axis]) / 2 / period) * period;
+    }
+    return shift;
 }
 
 fn centerUv(uv: *[2]i16) !void {
@@ -1390,7 +1487,7 @@ test "vertex conversion handles packed attributes and range errors" {
     const normal_view: AccessorView = .{ .bytes = normals_bytes, .count = 1, .stride = 12, .component_type = 5126, .component_count = 3, .normalized = false };
     const color_view: AccessorView = .{ .bytes = &colors_bytes, .count = 1, .stride = 4, .component_type = 5121, .component_count = 4, .normalized = true };
     const uv_view: AccessorView = .{ .bytes = uv_bytes, .count = 1, .stride = 8, .component_type = 5126, .component_count = 2, .normalized = false };
-    const vertex = try convertVertex(position_view, normal_view, color_view, uv_view, 0, .{ 32, 16 }, 10);
+    const vertex = try convertVertex(position_view, normal_view, color_view, uv_view, 0, .{ 32, 16 }, 10, .{ 0, 0 });
     try std.testing.expectEqual([3]i16{ 13, -25, 30 }, vertex.position);
     try std.testing.expectEqual(packNormal(.{ 0, 1, 0 }), vertex.normal);
     try std.testing.expectEqual(@as(u8, 32), vertex.color[3]);
@@ -1401,7 +1498,7 @@ test "vertex conversion handles packed attributes and range errors" {
     try std.testing.expectError(error.PositionOutOfRange, convertPosition(huge, 0, 1));
     try std.testing.expectError(error.InvalidNormalAccessor, convertNormal(uv_view, 0));
     try std.testing.expectError(error.InvalidColorAccessor, convertColor(uv_view, 0));
-    try std.testing.expectError(error.InvalidUvAccessor, convertUv(normal_view, 0, .{ 1, 1 }));
+    try std.testing.expectError(error.InvalidUvAccessor, convertUv(normal_view, 0, .{ 1, 1 }, .{ 0, 0 }));
     try std.testing.expectEqual(@as(u16, 0), packNormal(.{ 0, 0, 0 }));
 }
 
@@ -1454,7 +1551,7 @@ test "legacy Fast64 external texture bounds feed material UV conversion" {
     try std.testing.expectEqual([2]u32{ 32, 64 }, materialTextureSize(parsed.value, &.{}, 1));
     const bytes = std.mem.asBytes(&[_]f32{ 0.5, 0.25 });
     const uv: AccessorView = .{ .bytes = bytes, .count = 1, .stride = 8, .component_type = 5126, .component_count = 2, .normalized = false };
-    try std.testing.expectEqual([2]i16{ 1024, 512 }, try convertUv(uv, 0, materialTextureSize(parsed.value, &.{}, 0)));
+    try std.testing.expectEqual([2]i16{ 1024, 512 }, try convertUv(uv, 0, materialTextureSize(parsed.value, &.{}, 0), .{ 0, 0 }));
     try std.testing.expectEqual(@as(?u32, null), legacyAxisSize(.{ .high = -1 }));
     try std.testing.expectEqual(@as(?u32, null), legacyAxisSize(.{ .high = 1.5 }));
     try std.testing.expectEqual(@as(?u32, null), legacyAxisSize(.{ .high = std.math.inf(f32) }));
@@ -1578,6 +1675,22 @@ test "static mesh instances bake independently and sphere maps discard unused ov
     try std.testing.expectEqual([3]i16{ -2, 0, 0 }, result.batches[1].vertices[0].position);
     material.extras.?.f3d_mat.?.rdp_settings.g_tex_gen = .off;
     try std.testing.expectError(error.UvOutOfRange, convert(std.testing.allocator, document, &binary, .{ .scale = 1 }));
+
+    // Unmasked axes cannot be rebased; the diagnostic names the location.
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(error.UvOutOfRange, convert(std.testing.allocator, document, &binary, .{ .scale = 1, .diagnostic = &diagnostic }));
+    try std.testing.expectEqual(@as(?usize, 0), diagnostic.mesh);
+    try std.testing.expectEqual(@as(?usize, 0), diagnostic.primitive);
+    try std.testing.expectEqual(@as(?u32, 0), diagnostic.material);
+    try std.testing.expectEqual(@as(?u32, 0), diagnostic.vertex);
+    try std.testing.expectEqual(@as(?[2]f32, .{ 2000, 0 }), diagnostic.uv);
+    try std.testing.expectEqual(@as(f32, 32), diagnostic.uvLimit(0));
+
+    // Wrapping (masked) axes are rebased by whole repeats instead.
+    material.extras.?.f3d_mat.?.tex0 = .{ .S = .{ .high = 31, .mask = 5 }, .T = .{ .high = 31, .mask = 5, .mirror = .on } };
+    const rebased = try convert(std.testing.allocator, document, &binary, .{ .scale = 1, .preserve_triangle_order = true });
+    defer rebased.deinit(std.testing.allocator);
+    for (rebased.batches[0].vertices) |vertex| for (vertex.uv) |coordinate| try std.testing.expect(@abs(coordinate) <= 16);
 }
 
 test "quantized duplicate source indices share a batch vertex without reordering triangles" {

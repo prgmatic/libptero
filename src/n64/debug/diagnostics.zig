@@ -102,3 +102,23 @@ pub fn reportRenderTimeout(label: []const u8, queue: ?*const rsp.Queue) void {
         }
     }
 }
+
+/// Print the dispatcher's crash scratch word and command fetch window after an
+/// RSP `break`: `invalidCommand` stores 0xff01xxxx (unknown overlay) or
+/// 0xff02xxxx (unknown command) in the scratch word before halting.
+pub fn reportRspFault() void {
+    const sp = @import("../hw/sp.zig");
+    const symbols = rsp.programs.command_dispatcher_symbols;
+    print("RSP scratch={x:0>8}\n", .{sp.readDmem(u32, symbols.resident_scratch).*});
+    var offset: u32 = 0;
+    while (offset < 256) : (offset += 16) {
+        const base = symbols.command_buffer_storage + offset;
+        print("RSP commands+{d}: {x:0>8} {x:0>8} {x:0>8} {x:0>8}\n", .{
+            offset,
+            sp.readDmem(u32, base).*,
+            sp.readDmem(u32, base + 4).*,
+            sp.readDmem(u32, base + 8).*,
+            sp.readDmem(u32, base + 12).*,
+        });
+    }
+}

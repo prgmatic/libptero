@@ -299,6 +299,32 @@ waits, or allocates. Custom providers implement `apply(context, material_index)`
 texture types remain known at compile time. `asset.material(index)` still reads
 native material metadata. Use `GeometryEncoder.drawModelWithMaterials` for a custom material provider.
 
+## Immediate triangles
+
+For dynamic geometry such as particles, load vertices and draw triangles by
+index into the loaded vertices (up to `geometry.max_loaded_vertices`):
+
+```zig
+renderer.geometry.loadVertices(&quad_vertices, 0, 4);
+// One command and one sync for the whole batch. `storage` holds three i16
+// per triangle and must stay alive until the frame completes.
+renderer.geometry.drawTriangles(&.{ .{ 0, 1, 2 }, .{ 0, 2, 3 } }, &storage);
+renderer.geometry.drawTriangle(0, 1, 2); // single triangle, synced
+```
+
+Clipping a triangle against the near plane loads clipping code over part of
+the geometry microcode until a triangle sync restores it. `drawTriangle` and
+`drawTriangles` sync themselves. `drawTriangleStrip(indices, false)` leaves the
+sync pending for consecutive strips; the encoder emits it before the next
+non-strip geometry command, material change, recorded model or submission.
+After unsynced strips, call `syncTriangles` before issuing RDP commands
+directly through the renderer.
+
+If the RSP crashes anyway (it halts on a `break` without finishing the queue),
+`rsp.flush` and `rsp.wait` print the RSP/RDP state and the dispatcher's fetch
+window over the debug link and panic, instead of waiting forever. They also
+panic after 2 s without progress.
+
 ## Skeletons and animation
 
 Generated model data exposes `nodes`, `skins`, and `animations`. The
@@ -359,10 +385,12 @@ For first-joint assets (`addModel(..., .{ .skinning = .first_joint })`), retain
 immutable bind-local vertices and use the geometry RSP instead:
 
 ```zig
-const pose = try allocator.alloc(n64.math.FixedMat4, skeleton.matrices.len);
-// Reuse or free pose only after GPU completion.
-skeleton.writeMatrices(pose);
-renderer.geometry.setPose(pose);
+// One matrix per node: assets.snake.poseLen() (comptime-known) counts the
+// skinned mesh's own node as well as its joints.
+var pose: [assets.snake.poseLen()]n64.math.FixedMat4 align(16) = undefined;
+// Reuse pose only after GPU completion.
+skeleton.writeMatrices(&pose);
+renderer.geometry.setPose(&pose);
 renderer.geometry.drawModelWithMaterials(assets.snake.model, assets.snake.materials);
 ```
 

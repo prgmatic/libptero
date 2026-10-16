@@ -141,6 +141,16 @@ pub fn RenderEncoder(comptime QueueType: type) type {
             rq.flushPendingModes();
         }
 
+        /// Whether flushModes would emit RDP mode or combiner commands.
+        pub fn modesPending(rq: *const Self) bool {
+            const mode_changed = if (rq.emitted_mode) |previous|
+                @as(u64, @bitCast(previous)) != @as(u64, @bitCast(rq.mode))
+            else
+                true;
+            if (mode_changed) return true;
+            return if (rq.emitted_combine) |previous| !std.meta.eql(previous, rq.combine_mode) else true;
+        }
+
         fn flushPendingModes(rq: *Self) void {
             const mode_changed = if (rq.emitted_mode) |previous|
                 @as(u64, @bitCast(previous)) != @as(u64, @bitCast(rq.mode))

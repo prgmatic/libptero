@@ -10,6 +10,9 @@ var owned_renderer: n64.graphics.Renderer = undefined;
 var pixels: [8 * 8]n64.graphics.pixel.Rgba32 align(64) = undefined;
 
 pub const tests = [_]runner.Test{
+    .{ .name = "Render API: clipped immediate triangles before other geometry commands", .run = clippedImmediateTriangles },
+    .{ .name = "Render API: triangle batches match immediate triangles", .run = triangleBatches },
+    .{ .name = "Render API: RSP counters measure busy and queue-wait time", .run = rspCounters },
     .{ .name = "Render API: mixed-joint RSP poses and odd vertex groups", .run = mixedJointModel },
     .{ .name = "Render API: outlined CI4 fonts preserve fill and outline colors", .run = outlinedFont },
     .{ .name = "Render API: mutable models and automatic queue rollover", .run = mutableModelRollover },
@@ -333,4 +336,113 @@ fn expectRgbNear(pixel: n64.graphics.pixel.Rgba32, expected: [3]u8) !void {
     for ([_]u8{ pixel.r, pixel.g, pixel.b }, expected) |actual, wanted| {
         try testing.expect(@abs(@as(i16, actual) - @as(i16, wanted)) <= 1);
     }
+}
+
+// A floor triangle spanning the camera's near plane: every draw needs clipping.
+var clip_vertices: [2]n64.graphics.VertexPair align(16) = .{
+    .{ .pos_a = .{ -200, -20, 60 }, .normal_a = 0, .pos_b = .{ 200, -20, 60 }, .normal_b = 0, .color_a = .white, .color_b = .white },
+    .{ .pos_a = .{ 0, -20, -800 }, .normal_a = 0, .pos_b = .{ 0, -20, -800 }, .normal_b = 0, .color_a = .white, .color_b = .white },
+};
+var batch_storage: [2][6]i16 align(8) = undefined;
+
+fn beginClipFrame(image: anytype) void {
+    owned_renderer.beginFrame(image, .{ .clear_color = .black });
+    model_viewport = .init(8, 8);
+    model_viewport.setPerspective(std.math.pi / 2.0, 10, 1000);
+    model_viewport.lookAt(.zero, .init(0, 0, -1), .init(0, 1, 0));
+    const geometry_encoder = &owned_renderer.geometry;
+    geometry_encoder.attachViewport(&model_viewport);
+    geometry_encoder.setDrawFlags(.{ .shaded = true, .no_light = true });
+    owned_renderer.rdp.render.setCombineMode(.shade);
+}
+
+fn countWhite() usize {
+    n64.cpu.cache.invalidateData(&pixels);
+    var white: usize = 0;
+    for (pixels) |pixel| {
+        // Unlit white shades to 0xfe.
+        if (pixel.r > 128 and pixel.g > 128 and pixel.b > 128) white += 1;
+    }
+    return white;
+}
+
+fn clippedImmediateTriangles() !void {
+    // Clipping loads its code over the geometry microcode until a sync. An
+    // unsynced immediate triangle made the next command execute clipping
+    // code, crashing the RSP (invalid command) and hanging the CPU.
+    owned_renderer.init();
+    defer owned_renderer.deinit();
+    const image = try n64.graphics.Image(n64.graphics.pixel.Rgba32).initBuffer(&pixels, 8, 8);
+    for (0..3) |_| {
+        beginClipFrame(image);
+        const geometry_encoder = &owned_renderer.geometry;
+        for (0..40) |index| {
+            geometry_encoder.loadVertices(&clip_vertices, 0, 3);
+            geometry_encoder.drawTriangle(0, 1, 2);
+            // Matrix, vertex and state commands live in the IMEM clipping replaces.
+            geometry_encoder.pushMatrix(&model_transform);
+            geometry_encoder.loadVertices(&clip_vertices, 4, 3);
+            geometry_encoder.drawTriangle(4, 5, 6);
+            geometry_encoder.setAmbientLight(.white);
+            geometry_encoder.popMatrix();
+            // Unsynced strips must be settled before the next non-strip command.
+            geometry_encoder.drawTriangles(&.{.{ 0, 1, 2 }}, &batch_storage[index % 2]);
+            geometry_encoder.drawTriangleStrip(batch_storage[index % 2][0..3], false);
+            geometry_encoder.setDrawFlags(.{ .shaded = true, .no_light = true });
+        }
+        try owned_renderer.submit().wait(.{ .max_attempts = 50_000_000 });
+        const status = n64.hw.sp.status_register_read.*;
+        try testing.expect(!(status.is_broke and status.is_halted and !status.signal6));
+        const white = countWhite();
+        try testing.expect(white > 0 and white < pixels.len);
+    }
+}
+
+fn triangleBatches() !void {
+    owned_renderer.init();
+    defer owned_renderer.deinit();
+    const image = try n64.graphics.Image(n64.graphics.pixel.Rgba32).initBuffer(&pixels, 8, 8);
+    beginClipFrame(image);
+    owned_renderer.geometry.loadVertices(&clip_vertices, 0, 3);
+    owned_renderer.geometry.drawTriangle(0, 1, 2);
+    try owned_renderer.submit().wait(.{ .max_attempts = 10_000_000 });
+    var immediate: [pixels.len]u32 = undefined;
+    try testing.expect(countWhite() > 0);
+    for (&immediate, pixels) |*value, pixel| value.* = @as(u32, @bitCast(pixel)) >> 8;
+
+    beginClipFrame(image);
+    owned_renderer.geometry.loadVertices(&clip_vertices, 0, 3);
+    const encoded = n64.graphics.GeometryEncoder.encodeTriangles(&.{ .{ 0, 1, 2 }, .{ 0, 1, 2 } }, &batch_storage[0]);
+    try testing.expectEqual(@as(usize, 6), encoded.len);
+    try testing.expectEqual(@as(i16, 36), encoded[1]);
+    try testing.expect(encoded[3] < 0);
+    owned_renderer.geometry.drawTriangles(&.{.{ 0, 1, 2 }}, &batch_storage[1]);
+    try owned_renderer.submit().wait(.{ .max_attempts = 10_000_000 });
+    _ = countWhite();
+    for (immediate, pixels) |expected, pixel| try testing.expectEqual(expected, @as(u32, @bitCast(pixel)) >> 8);
+}
+
+fn rspCounters() !void {
+    owned_renderer.init();
+    defer owned_renderer.deinit();
+    const image = try n64.graphics.Image(n64.graphics.pixel.Rgba32).initBuffer(&pixels, 8, 8);
+    _ = n64.rsp.takeCounters();
+    beginClipFrame(image);
+    for (0..400) |_| {
+        owned_renderer.geometry.loadVertices(&clip_vertices, 0, 3);
+        owned_renderer.geometry.drawTriangles(&.{.{ 0, 1, 2 }}, &batch_storage[0]);
+    }
+    const started = n64.time.Instant.now();
+    try owned_renderer.submit().wait(.{ .max_attempts = 50_000_000 });
+    const elapsed_ms = n64.time.Instant.now().since(started).milliseconds();
+    const busy = n64.rsp.takeCounters();
+    // 400 clipped draws keep the RSP busy for milliseconds, and it cannot be
+    // busy for longer than the whole recording plus the wait.
+    try testing.expect(busy.busyMilliseconds() > 0.5);
+    try testing.expect(busy.busyMilliseconds() < 1000);
+    n64.debug.print(" (busy={d:.2}ms queue_wait={d:.2}ms after_submit={d:.2}ms)", .{ busy.busyMilliseconds(), busy.queueWaitMilliseconds(), elapsed_ms });
+    // Idle time is not counted.
+    const idle = n64.time.Instant.now();
+    while (n64.time.Instant.now().since(idle).milliseconds() < 20) {}
+    try testing.expect(n64.rsp.takeCounters().busyMilliseconds() < 1);
 }

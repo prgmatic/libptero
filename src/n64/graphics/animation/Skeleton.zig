@@ -39,8 +39,11 @@ pub fn deinit(self: *Skeleton, allocator: std.mem.Allocator) void {
 
 /// Pack global floating-point matrices directly into caller-owned RSP pose storage. Do not overwrite
 /// an in-flight destination; use one pose buffer per outstanding frame.
+/// Size the destination with the model's node count (`asset.poseLen()`), not
+/// its joint count: skinned glTF models keep their mesh node in `nodes` too.
 pub fn writeMatrices(self: *const Skeleton, destination: []math.FixedMat4) void {
-    std.debug.assert(destination.len == self.matrices.len);
+    // Checked in every build mode: a short pose silently corrupts memory.
+    if (destination.len != self.matrices.len) @panic("pose buffer length must equal the skeleton node count (asset.poseLen())");
     for (destination, self.matrices) |*fixed, *matrix| matrix.writeFixed3x4(fixed);
 }
 
@@ -65,7 +68,7 @@ pub fn update(self: *Skeleton) void {
 /// Destination may alias either source. Only local transforms are blended;
 /// call update afterward to recalculate the hierarchy.
 pub fn blend(self: *Skeleton, a: *const Skeleton, b: *const Skeleton, factor: f32) void {
-    std.debug.assert(self.bones.len == a.bones.len and a.bones.len == b.bones.len);
+    if (self.bones.len != a.bones.len or a.bones.len != b.bones.len) @panic("blended skeletons must have the same node count");
     const t = std.math.clamp(factor, 0, 1);
     for (self.bones, a.bones, b.bones) |*out, start, end| out.* = start.blend(end, t);
 }

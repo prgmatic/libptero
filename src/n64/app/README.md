@@ -253,11 +253,19 @@ frame also finishes an outstanding submission. There is one GPU submission in
 flight, with no additional in-flight fence or frame queue.
 
 `context.lastFrameStats()` reports the last finished frame: `frame_ms`,
-`record_ms` (beginFrame to submit), `audio_ms` (mixing in submit), `present_wait_ms`, and the RDP's own
-hardware counters `rdp_busy_ms`, `rdp_pipe_ms` and `rdp_tmem_ms`. It needs no
+`record_ms` (beginFrame to submit), `audio_ms` (mixing in submit), `present_wait_ms`, the RDP's own
+hardware counters `rdp_busy_ms`, `rdp_pipe_ms` and `rdp_tmem_ms`, and two RSP
+measurements: `rsp_busy_ms` (RSP running since the previous frame finished,
+timed with the DP clock at every queue idle and wake, including audio and stalls
+on DMA or RDP buffer space) and `rsp_queue_wait_ms` (the part of `record_ms`
+spent waiting for the RSP to drain the previous command buffer). A frame whose
+`rsp_busy_ms` approaches `frame_ms`, or with a large `rsp_queue_wait_ms`, is
+RSP-bound: reduce vertices, lights or clipping rather than RDP fill. It needs no
 debug output, so it is cheap enough to leave on.
 
 Timeouts retain the frame and submission; the caller must retain borrowed data.
+A crashed RSP (halted on a `break` mid-queue) or a queue without progress for 2 s
+panics with the same state report rather than hanging the CPU.
 An RSP, RDP or vblank timeout first prints the RSP/RDP registers and queue state
 over the debug link (`debug.diagnostics.reportRenderTimeout`); set
 `Options.report_timeouts = false` to suppress it. Retry `present` or

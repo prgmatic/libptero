@@ -43,7 +43,12 @@ fn waitFor(poller: anytype, options: WaitOptions) WaitError!void {
     while (true) {
         switch (poller.poll()) {
             .complete => return,
-            .rsp_pending => if (remaining == 0) return error.RspTimeout,
+            .rsp_pending => {
+                // A crashed RSP never completes; report it instead of polling
+                // for the whole timeout (hardware completions only).
+                if (@TypeOf(poller) == Completion and remaining % 1024 == 0) rsp.panicIfCrashed("render completion wait");
+                if (remaining == 0) return error.RspTimeout;
+            },
             .rdp_pending => if (remaining == 0) return error.RdpFenceTimeout,
         }
         remaining -= 1;

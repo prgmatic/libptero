@@ -16,6 +16,13 @@ pub fn ModelAsset(comptime Materials: type) type {
             return self.materials.get(index);
         }
 
+        /// Matrices a pose for this model needs: one per skeleton node, which
+        /// includes non-joint nodes such as a skinned mesh's own node. Size
+        /// pose buffers with this (comptime-known for generated assets).
+        pub fn poseLen(self: @This()) usize {
+            return self.model.nodes.len;
+        }
+
         /// Replace borrowed geometry while retaining this asset's materials.
         pub fn withModel(self: @This(), model: Model) @This() {
             return .{ .model = model, .materials = self.materials };

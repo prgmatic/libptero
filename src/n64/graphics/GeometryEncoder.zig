@@ -23,7 +23,13 @@ render: *rdp.RenderEncoder(rdp.backend.Overlay),
 matrix_stack: [8]math.FixedMat4 align(16),
 view_matrix: math.Mat4,
 draw_flags: DrawFlags = .{},
+/// Fog state currently selected on the RSP.
 fog_enabled: bool = false,
+/// Fog state materials inherit when their `fog` is null (set by setFogEnabled).
+fog_default: bool = false,
+/// A strip drawn with `sync = false` may have left the clipping code loaded
+/// over the geometry microcode; it must be synced before any other command.
+triangles_pending: bool = false,
 vertex_effect: VertexEffect = .none,
 last_draw_flags: ?DrawFlags = null,
 last_material_tile: u3 = 0,
@@ -46,6 +52,8 @@ pub fn init(self: *GeometryEncoder, renderer: *RdpRenderer) void {
     self.view_matrix = .identity;
     self.draw_flags = .{};
     self.fog_enabled = false;
+    self.fog_default = false;
+    self.triangles_pending = false;
     self.vertex_effect = .none;
     self.last_draw_flags = null;
     self.pose_len = 0;
@@ -114,6 +122,7 @@ pub fn deinit(self: *GeometryEncoder) void {
 }
 
 pub fn attachViewport(self: *GeometryEncoder, viewport: *const Viewport) void {
+    self.settleTriangles();
     self.view_matrix = viewport.camera_float;
     cache.writebackData(viewport);
     const normalized_w: u16 = @intFromFloat(@round(65535.0 * viewport.w_normalization));
@@ -175,10 +184,12 @@ pub fn drawRecordedWithTransform(self: *GeometryEncoder, recorded: *const Record
 }
 
 pub fn setAmbientLight(self: *GeometryEncoder, color: Rgba32) void {
+    self.settleTriangles();
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, rsp.programs.geometry_overlay_symbols.ambient_color, &.{ @as(u32, @bitCast(color)), 0, 0 });
 }
 pub fn setLightCount(self: *GeometryEncoder, count: u8) void {
     if (count > max_lights) @panic("too many lights");
+    self.settleTriangles();
     self.queue.writeOverlayCommandKnown(
         &self.geometry_overlay,
         3,
@@ -195,6 +206,7 @@ pub fn setDirectionalLight(self: *GeometryEncoder, color: Rgba32, direction: mat
 /// many consecutively numbered slots participate in lighting.
 pub fn setDirectionalLightAt(self: *GeometryEncoder, index: u8, color: Rgba32, direction: math.Vec3) void {
     if (index >= max_lights) @panic("invalid light index");
+    self.settleTriangles();
     const n = self.view_matrix.transformDirection(direction).normalized();
     const x: u8 = @bitCast(@as(i8, @intFromFloat(n.x * 127.0)));
     const y: u8 = @bitCast(@as(i8, @intFromFloat(n.y * 127.0)));
@@ -203,7 +215,22 @@ pub fn setDirectionalLightAt(self: *GeometryEncoder, index: u8, color: Rgba32, d
     const light_address = rsp.programs.geometry_overlay_symbols.directional_light_color + @as(u32, index) * 16;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, light_address, &.{ @as(u32, @bitCast(color)), packed_direction, packed_direction });
 }
+/// Enable fog for following draws, and as the default for materials whose
+/// `fog` is null.
 pub fn setFogEnabled(self: *GeometryEncoder, enabled: bool) void {
+    self.fog_default = enabled;
+    self.emitFog(enabled);
+}
+
+/// Select fog for one material without changing the inherited default.
+/// Emits nothing when the RSP already has this state (outside recording).
+pub fn setMaterialFog(self: *GeometryEncoder, enabled: bool) void {
+    if (enabled == self.fog_enabled and self.queue.recording == null) return;
+    self.emitFog(enabled);
+}
+
+fn emitFog(self: *GeometryEncoder, enabled: bool) void {
+    self.settleTriangles();
     self.fog_enabled = enabled;
     // The vertex loader stores a halfword at this attribute offset. When
     // enabled its high byte replaces shade alpha; otherwise UV is scratch
@@ -216,6 +243,7 @@ pub fn setFogEnabled(self: *GeometryEncoder, enabled: bool) void {
 /// viewport first and activate slots with setLightCount.
 pub fn setPointLightAt(self: *GeometryEncoder, index: u8, color: Rgba32, position: math.Vec3, strength: f32, ignore_normals: bool) void {
     if (index >= max_lights) @panic("invalid light index");
+    self.settleTriangles();
     const words = @import("lighting.zig").point(&self.view_matrix, position, strength, ignore_normals);
     const address = rsp.programs.geometry_overlay_symbols.directional_light_color + @as(u32, index) * 16;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 5, address, &.{ @as(u32, @bitCast(color)), words[0], words[1] });
@@ -228,6 +256,7 @@ pub fn setPointLightAt(self: *GeometryEncoder, index: u8, color: Rgba32, positio
 }
 
 pub fn setVertexEffect(self: *GeometryEncoder, effect: VertexEffect) void {
+    self.settleTriangles();
     self.vertex_effect = effect;
     const symbols = rsp.programs.geometry_overlay_symbols;
     const function: u16 = switch (effect) {
@@ -242,6 +271,7 @@ pub fn setVertexEffect(self: *GeometryEncoder, effect: VertexEffect) void {
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, symbols.uv_generation_parameters, &.{args});
 }
 pub fn setFogRange(self: *GeometryEncoder, near: f32, far: f32) void {
+    self.settleTriangles();
     const address = rsp.programs.geometry_overlay_symbols.fog_scale_offset;
     if (near == 0 and far == 0) {
         self.queue.writeDmem(address, 0);
@@ -259,6 +289,8 @@ pub fn setFogRange(self: *GeometryEncoder, near: f32, far: f32) void {
     self.queue.writeDmem(address + 4, 0x7fff0000 | @as(u32, scale));
 }
 pub fn setDrawFlags(self: *GeometryEncoder, flags: DrawFlags) void {
+    // Material changes are followed by RDP state commands.
+    self.settleTriangles();
     self.draw_flags = flags;
     self.emitDrawFlags();
 }
@@ -269,6 +301,7 @@ fn emitDrawFlags(self: *GeometryEncoder) void {
     if (self.last_draw_flags) |previous| {
         if (std.meta.eql(previous, flags) and self.last_material_tile == self.render.material_tile) return;
     }
+    self.settleTriangles();
     self.last_draw_flags = flags;
     self.last_material_tile = self.render.material_tile;
     // Match Tiny3D's host-side ABI (the triangle include's historical
@@ -283,6 +316,7 @@ fn emitDrawFlags(self: *GeometryEncoder) void {
 /// independent of the current pose buffer.
 pub fn setPose(self: *GeometryEncoder, matrices: []const math.FixedMat4) void {
     cache.writebackData(matrices);
+    self.settleTriangles();
     self.pose_len = matrices.len;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, rsp.programs.geometry_overlay_symbols.segment_table + 4, &.{physical(matrices.ptr)});
 }
@@ -293,26 +327,31 @@ pub fn setBoneMatrix(self: *GeometryEncoder, node: u16, push: bool) void {
     // The RSP reads pose[node] without bounds; a short pose draws garbage.
     // Recorded blocks bind their pose at replay, so RecordedModel checks then.
     if (self.queue.recording == null and node >= self.pose_len) @panic(pose_panic);
+    self.settleTriangles();
     const address = (@as(u32, 4) << 24) | @as(u32, node) * 64;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, (if (push) @as(u32, 64 << 8) else 0) | 1, &.{address});
 }
 
 pub fn pushMatrix(self: *GeometryEncoder, matrix: *const math.FixedMat4) void {
     cache.writebackData(matrix);
+    self.settleTriangles();
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, (64 << 8) | 1, &.{physical(matrix)});
 }
 /// Load a matrix, optionally multiplying it by the current matrix.
 pub fn setMatrix(self: *GeometryEncoder, matrix: *const math.FixedMat4, multiply: bool) void {
     cache.writebackData(matrix);
+    self.settleTriangles();
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, @intFromBool(multiply), &.{physical(matrix)});
 }
 /// Reserve matrix-stack slots without loading matrices into them.
 pub fn advanceMatrixStack(self: *GeometryEncoder, count: u8) void {
     const advance = @as(u32, count) * 64;
     if (advance > std.math.maxInt(i16)) @panic("matrix stack advance is too large");
+    self.settleTriangles();
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, (advance << 8) | 2, &.{0});
 }
 pub fn popMatrix(self: *GeometryEncoder) void {
+    self.settleTriangles();
     const stack_advance = @as(u32, @bitCast(@as(i32, -64 << 8))) & 0x00ff_ff00;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, stack_advance, &.{0});
 }
@@ -323,6 +362,7 @@ pub fn loadVertices(self: *GeometryEncoder, vertices: []const VertexPair, offset
 /// Load immutable asset vertices which are already coherent in RDRAM.
 pub fn loadStaticVertices(self: *GeometryEncoder, vertices: []const VertexPair, offset: u8, count: u8) void {
     if (count == 0 or count > vertices.len * 2) @panic("invalid geometry vertex count");
+    self.settleTriangles();
     const symbols = rsp.programs.geometry_overlay_symbols;
     const vertex_buffer = symbols.vertex_buffer;
     const vertex_input_end = symbols.clipping_buffer_result + 6 * 16;
@@ -331,6 +371,10 @@ pub fn loadStaticVertices(self: *GeometryEncoder, vertices: []const VertexPair, 
     const output_address = vertex_buffer + @as(u32, offset) * vertex_output_size;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 4, input_size, &.{ physical(vertices.ptr), temp_address << 16 | output_address });
 }
+/// Draw one triangle from loaded vertices and sync it. Clipping replaces
+/// part of the geometry microcode until the next sync, so an unsynced
+/// immediate triangle would corrupt the following command. To draw many
+/// triangles, prefer `drawTriangles` (one command and one sync per batch).
 pub fn drawTriangle(self: *GeometryEncoder, a: u8, b: u8, c: u8) void {
     self.beginModelMaterial();
     const vertex_buffer = rsp.programs.geometry_overlay_symbols.vertex_buffer;
@@ -338,7 +382,39 @@ pub fn drawTriangle(self: *GeometryEncoder, a: u8, b: u8, c: u8) void {
     const vb = vertex_buffer + @as(u32, b) * vertex_output_size;
     const vc = vertex_buffer + @as(u32, c) * vertex_output_size;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 0, va, &.{vb << 16 | vc});
+    self.syncTriangles();
 }
+
+/// Most triangles one `drawTriangles` call can draw.
+pub const max_batch_triangles = 420;
+
+/// Encode independent triangles (indices into loaded vertices) as strip
+/// commands in `storage`, which needs three entries per triangle and must
+/// stay alive until submission completes, then draw and sync them once.
+pub fn drawTriangles(self: *GeometryEncoder, triangles: []const [3]u8, storage: []i16) void {
+    if (triangles.len == 0) return;
+    self.drawTriangleStrip(encodeTriangles(triangles, storage), true);
+}
+
+/// Encode independent triangles in the strip format used by
+/// `drawTriangleStrip`: each triangle is a three-vertex strip, with the
+/// restart bit on the first index of every strip after the first.
+pub fn encodeTriangles(triangles: []const [3]u8, storage: []i16) []i16 {
+    if (triangles.len > max_batch_triangles or storage.len < triangles.len * 3) @panic("invalid triangle batch");
+    for (triangles, 0..) |triangle, index| {
+        for (triangle, 0..) |vertex, corner| {
+            if (vertex >= geometry.max_loaded_vertices) @panic("triangle vertex is outside the vertex buffer");
+            var encoded: u16 = @as(u16, vertex) * vertex_output_size;
+            if (index != 0 and corner == 0) encoded |= 0x8000;
+            storage[index * 3 + corner] = @bitCast(encoded);
+        }
+    }
+    return storage[0 .. triangles.len * 3];
+}
+
+/// Draw a caller-built index strip. With `sync = false` consecutive strips
+/// keep the clipping code resident; the encoder syncs before the next
+/// non-strip geometry command, material change or submission.
 pub fn drawTriangleStrip(self: *GeometryEncoder, indices: []const i16, sync: bool) void {
     cache.writebackData(indices);
     self.drawStaticTriangleStrip(indices, sync);
@@ -359,14 +435,22 @@ pub fn drawStaticTriangleStrip(self: *GeometryEncoder, indices: []const i16, syn
         physical(indices.ptr),
         &.{dmem_address << 16 | (byte_count - 1)},
     );
+    self.triangles_pending = !sync;
 }
+/// Wait for queued triangles and restore microcode replaced by clipping.
 pub fn syncTriangles(self: *GeometryEncoder) void {
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 10, 0, &.{});
+    self.triangles_pending = false;
+}
+/// Sync only if an unsynced strip is outstanding.
+pub fn settleTriangles(self: *GeometryEncoder) void {
+    if (self.triangles_pending) self.syncTriangles();
 }
 pub fn beginModelMaterial(self: *GeometryEncoder) void {
     // Textures can be bound after draw flags and can live on any cached tile.
     // Emit at submission time, including inside recorded model blocks.
     self.emitDrawFlags();
+    if (self.render.modesPending()) self.settleTriangles();
     self.render.flushModes();
 }
 

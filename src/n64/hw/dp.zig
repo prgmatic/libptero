@@ -27,11 +27,17 @@ pub const Counters = struct {
         };
     }
 
-    /// Clears the clock, command, pipe and TMEM counters.
+    /// Clears the command, pipe and TMEM counters. The clock counter keeps
+    /// running: the RSP timestamps idle periods with it (`rsp.Counters`).
     pub fn reset() void {
-        status_write.* = (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9);
+        status_write.* = (1 << 6) | (1 << 7) | (1 << 8);
     }
 };
+
+/// Free-running RDP clock (DPC_CLOCK), 24 bits at `Counters.cycles_per_second`.
+pub fn clock() u32 {
+    return clock_counter.* & 0xffffff;
+}
 
 pub fn setDmaSource(source: RdpDmaSource) void {
     status_write.* = switch (source) {

@@ -85,6 +85,14 @@ writes. Unsupported sampler/filter/combiner values are conversion errors.
 
 Filtered UVs receive the half-texel adjustment at conversion (subtract 16 in 10.5
 fixed-point); point-filtered UVs do not. Do not apply another runtime adjustment.
+
+Packed UVs are S10.5 texels, so a coordinate must stay within about ±1024
+texels (±32 repeats of a 32-texel texture). A primitive that exceeds it is
+shifted by whole repeats so its UV bounds center on zero when its sampler
+wraps (repeat or mirror) on that axis; shifting by twice the wrap period keeps
+the image identical. Clamped, unmasked or tile-shifted axes are not rebased.
+A remaining `UvOutOfRange` reports the mesh, primitive, material, vertex and
+source UV (`ConvertOptions.diagnostic` in the API).
 Geometry automatically samples the most recently bound material tile, including
 cache hits on nonzero tiles. Recorded models restore tracked material state when
 replayed; callers do not need to discard the texture cache at each material change.

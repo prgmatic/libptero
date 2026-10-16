@@ -21,6 +21,7 @@ pub fn record(self: *RecordedModel, context: *GeometryEncoder, model: anytype, m
     for (model.parts) |part| if (part.bone) |bone| {
         self.pose_len = @max(self.pose_len, @as(usize, bone) + 1);
     };
+    context.settleTriangles();
     context.render.prepare();
     context.render.invalidateState();
     const previous = MaterialState.read(context);
@@ -36,6 +37,7 @@ pub fn record(self: *RecordedModel, context: *GeometryEncoder, model: anytype, m
 /// Append a call to this recorded model to the active render queue.
 pub fn draw(self: *const RecordedModel, context: *GeometryEncoder) void {
     if (self.pose_len > context.pose_len) @panic(GeometryEncoder.pose_panic);
+    context.settleTriangles();
     context.queue.runBlock(&self.commands);
     self.final_state.restore(context);
     context.render.invalidateState();
