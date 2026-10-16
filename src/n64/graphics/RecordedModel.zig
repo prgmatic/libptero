@@ -10,10 +10,17 @@ const RecordedModel = @This();
 buffer: [rsp.CommandBuffer.rdram_buffer_word_count]u32 align(rsp.CommandBuffer.fetch_window_byte_len) = undefined,
 commands: rsp.CommandBuffer = undefined,
 final_state: MaterialState = undefined,
+/// One more than the highest bone the recorded parts use; replay requires a
+/// pose at least this long.
+pose_len: usize = 0,
 
 /// Encode a model and its material setup once for later draws.
 pub fn record(self: *RecordedModel, context: *GeometryEncoder, model: anytype, materials: anytype) void {
     self.commands = rsp.CommandBuffer.init(self.buffer[0..]);
+    self.pose_len = 0;
+    for (model.parts) |part| if (part.bone) |bone| {
+        self.pose_len = @max(self.pose_len, @as(usize, bone) + 1);
+    };
     context.render.prepare();
     context.render.invalidateState();
     const previous = MaterialState.read(context);
@@ -28,6 +35,7 @@ pub fn record(self: *RecordedModel, context: *GeometryEncoder, model: anytype, m
 
 /// Append a call to this recorded model to the active render queue.
 pub fn draw(self: *const RecordedModel, context: *GeometryEncoder) void {
+    if (self.pose_len > context.pose_len) @panic(GeometryEncoder.pose_panic);
     context.queue.runBlock(&self.commands);
     self.final_state.restore(context);
     context.render.invalidateState();

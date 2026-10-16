@@ -88,7 +88,8 @@ fn passRendering() !void {
             .{ .point = .{ .position = .init(0, 0, 100), .strength = 100 } },
         },
     } });
-    var pose = [_]n64.math.FixedMat4{ .identity, .identity };
+    // One matrix per skeleton node: the joint model's parts use nodes 1 and 2.
+    var pose = [_]n64.math.FixedMat4{ .identity, .identity, .identity };
     try world.setPose(&pose);
     try world.recordModel(&recorded, assets.joint_resident);
     try world.drawRecorded(&recorded, &transform);

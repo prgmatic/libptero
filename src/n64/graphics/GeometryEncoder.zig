@@ -27,6 +27,8 @@ fog_enabled: bool = false,
 vertex_effect: VertexEffect = .none,
 last_draw_flags: ?DrawFlags = null,
 last_material_tile: u3 = 0,
+/// Matrices in the pose bound by setPose; model bones index into it.
+pose_len: usize = 0,
 
 /// Attach geometry to an idle renderer. Borrows its RSP queue and RDP state,
 /// registering geometry only when needed. Keep both at stable addresses.
@@ -46,6 +48,7 @@ pub fn init(self: *GeometryEncoder, renderer: *RdpRenderer) void {
     self.fog_enabled = false;
     self.vertex_effect = .none;
     self.last_draw_flags = null;
+    self.pose_len = 0;
     self.last_material_tile = 0;
     cache.writebackData(&self.matrix_stack);
     const program = self.geometry_overlay.program;
@@ -280,10 +283,16 @@ fn emitDrawFlags(self: *GeometryEncoder) void {
 /// independent of the current pose buffer.
 pub fn setPose(self: *GeometryEncoder, matrices: []const math.FixedMat4) void {
     cache.writebackData(matrices);
+    self.pose_len = matrices.len;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, rsp.programs.geometry_overlay_symbols.segment_table + 4, &.{physical(matrices.ptr)});
 }
 
+pub const pose_panic = "model bone is outside the bound pose; bind one matrix per skeleton node";
+
 pub fn setBoneMatrix(self: *GeometryEncoder, node: u16, push: bool) void {
+    // The RSP reads pose[node] without bounds; a short pose draws garbage.
+    // Recorded blocks bind their pose at replay, so RecordedModel checks then.
+    if (self.queue.recording == null and node >= self.pose_len) @panic(pose_panic);
     const address = (@as(u32, 4) << 24) | @as(u32, node) * 64;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, (if (push) @as(u32, 64 << 8) else 0) | 1, &.{address});
 }
