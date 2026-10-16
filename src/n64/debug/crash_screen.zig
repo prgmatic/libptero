@@ -93,6 +93,9 @@ fn present() void {
 /// SI waits are bounded. A disconnected controller or stalled transfer leaves
 /// the crash display intact. Neither interrupts nor graphics hardware is needed.
 pub fn waitForInput() noreturn {
+    // Tell a deploy listener the run failed so it exits now instead of
+    // waiting for its timeout. The crash screen stays up for inspection.
+    @import("../debug.zig").finish(.failure);
     var input: controls.Controller = .{};
     var last_poll = cp0.regRead(.Count);
     while (true) {
