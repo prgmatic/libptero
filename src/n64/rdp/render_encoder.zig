@@ -272,9 +272,13 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         /// Reset the surface state as well as setting it, avoiding leakage
         /// when switching from a translucent material back to opaque geometry.
         pub fn setSurfaceType(rq: *Self, translucent: bool) void {
+            // Antialiased opaque surfaces keep real edge coverage (clamped)
+            // and feed it to the blender, as libultra's AA_ZB_OPA_SURF does.
+            const aa_opaque = !translucent and rq.mode.antialias_en;
             rq.mode.z_mode = if (translucent) .transparent else .opaque_surface;
-            rq.mode.cvg_dest = if (translucent) .wrap else .full;
+            rq.mode.cvg_dest = if (translucent) .wrap else if (aa_opaque) .clamp else .full;
             rq.mode.write_on_cvg_overflow = translucent;
+            rq.mode.blender_alpha = if (aa_opaque) .coverage else .combiner;
         }
 
         /// Skips a repeated color. A change syncs the pipe first, as the

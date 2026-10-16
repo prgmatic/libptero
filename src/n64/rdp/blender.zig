@@ -19,6 +19,16 @@ pub const BlendMode = struct {
 
     /// Pixel color passes straight through; blender is disabled.
     pub const opaque_surface: BlendMode = .{};
+    /// Edge-antialiased opaque surface (libultra's AA_ZB_OPA_SURF): blends
+    /// partially covered edge pixels with memory by coverage, so the VI's
+    /// resample filter can smooth them. Pair with `cvg_dest = .clamp` and
+    /// `blender_alpha = .coverage`; `setSurfaceType` does that when the pass
+    /// enables `antialias_en`.
+    pub const antialiased_opaque: BlendMode = .{
+        .image_read_en = true,
+        .pass1 = .{ .p = .pixel, .a = .pixel_alpha, .m = .memory, .b = .memory_cvg },
+        .pass2 = .{ .m = .pixel },
+    };
     /// Two-cycle opaque rendering must preserve color through the first
     /// blender cycle, even when combiner alpha encodes a lighting effect.
     pub const opaque_two_cycle: BlendMode = .{

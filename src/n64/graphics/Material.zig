@@ -85,7 +85,7 @@ fn applyPipeline(self: Material, rq: anytype, fog: bool) void {
     rq.setPerspectiveTexture(self.flags.textured);
     rq.setTextureFilter(self.filter);
     rq.setCycleType(if (fog and self.translucent) .two_cycle else self.cycle_type);
-    rq.setBlendMode(self.blend orelse self.blendMode(fog));
+    rq.setBlendMode(self.blend orelse self.blendMode(fog, rq.getModes().antialias_en));
     rq.setAlphaCompare(if (self.alpha_cutoff != null) .threshold else .disabled);
     if (self.alpha_cutoff) |cutoff| rq.setBlendColor(.fromBytes(0, 0, 0, cutoff));
 }
@@ -102,9 +102,12 @@ fn applyColors(self: Material, rq: anytype) void {
     if (self.environment) |color| rq.setEnvironmentColor(color);
 }
 
-fn blendMode(self: Material, fog: bool) rdp.BlendMode {
+fn blendMode(self: Material, fog: bool, antialias: bool) rdp.BlendMode {
     if (fog) return rdp.BlendMode.fogVisibility(self.translucent);
-    if (!self.translucent) return if (self.cycle_type == .two_cycle) .opaque_two_cycle else .opaque_surface;
+    if (!self.translucent) {
+        if (self.cycle_type == .two_cycle) return .opaque_two_cycle;
+        return if (antialias) .antialiased_opaque else .opaque_surface;
+    }
     return if (self.cycle_type == .two_cycle) .alpha_two_cycle else .alpha;
 }
 
