@@ -95,11 +95,25 @@ pub fn reportRenderTimeout(label: []const u8, queue: ?*const rsp.Queue) void {
     print("render timeout: {s}\n", .{label[0..@min(80, label.len)]});
     print("RSP status={x:0>8} pc={x:0>8} dma_busy={d} dma_full={d}\n", .{ state.rsp_status, state.rsp_pc, state.dma_busy, state.dma_full });
     print("RDP status={x:0>8} start={x:0>8} end={x:0>8} current={x:0>8}\n", .{ state.rdp_status, state.rdp_start, state.rdp_end, state.rdp_current });
+    reportRdpWindow(state.rdp_current);
     if (queue) |q| {
         print("queue priority={s} write_index={d} submitted={} syncpoint_pending={} recording={}\n", .{ @tagName(q.priority), q.storage.write_index, q.storage.submitted, q.storage.syncpoint_pending, q.recording != null });
         for (&q.storage.queues, 0..) |*commands, index| {
             print("queue[{d}] addr={x:0>8} words={d}/{d} sealed={} next={} call={} swap={}\n", .{ index, @intFromPtr(commands.buffer.ptr), commands.index, commands.buffer.len, commands.sealed, commands.next != null, commands.call_target != null, commands.swap_target != null });
         }
+    }
+}
+
+/// The RDP commands around its read pointer, from uncached RDRAM. A hung
+/// RDP usually stops at or just after the offending command.
+fn reportRdpWindow(current: u32) void {
+    if (current < 0x40 or current >= 0x00800000) return;
+    const start = (current - 0x40) & ~@as(u32, 7);
+    var address = start;
+    while (address < current + 0x40) : (address += 16) {
+        const words: *const volatile [4]u32 = @ptrFromInt(0xa0000000 | address);
+        const mark: []const u8 = if (current >= address and current < address + 16) " <" else "";
+        print("RDP cmd {x:0>8}: {x:0>8} {x:0>8} {x:0>8} {x:0>8}{s}\n", .{ address, words[0], words[1], words[2], words[3], mark });
     }
 }
 

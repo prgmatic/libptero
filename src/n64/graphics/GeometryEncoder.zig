@@ -362,6 +362,7 @@ pub fn loadVertices(self: *GeometryEncoder, vertices: []const VertexPair, offset
 /// Load immutable asset vertices which are already coherent in RDRAM.
 pub fn loadStaticVertices(self: *GeometryEncoder, vertices: []const VertexPair, offset: u8, count: u8) void {
     if (count == 0 or count > vertices.len * 2) @panic("invalid geometry vertex count");
+    if (@intFromPtr(vertices.ptr) & 7 != 0) @panic("geometry vertices must be 8-byte aligned");
     self.settleTriangles();
     const symbols = rsp.programs.geometry_overlay_symbols;
     const vertex_buffer = symbols.vertex_buffer;
@@ -426,6 +427,8 @@ pub fn drawStaticTriangleStrip(self: *GeometryEncoder, indices: []const i16, syn
     const vertex_buffer = symbols.vertex_buffer;
     const strip_buffer_end = symbols.clipping_buffer_temporary;
     if (indices.len < 3 or indices.len * @sizeOf(i16) > strip_buffer_end - vertex_buffer) @panic("invalid geometry strip");
+    // The RSP DMAs the indices: an unaligned table reads garbage and hangs the RDP.
+    if (@intFromPtr(indices.ptr) & 7 != 0) @panic("geometry strip indices must be 8-byte aligned");
     const byte_count: u32 = @intCast(indices.len * @sizeOf(i16));
     var dmem_address = (strip_buffer_end - byte_count) & ~@as(u32, 7);
     if (sync) dmem_address |= 0x8000;
