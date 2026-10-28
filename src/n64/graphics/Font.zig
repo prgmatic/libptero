@@ -83,11 +83,14 @@ pub fn draw(self: Font, render_queue: anytype, x: f32, baseline_y: f32, utf8: []
         render_queue.setCombineMode(.single(.{ .rgb_a = .primitive, .rgb_b = .environment, .rgb_c = .tex0, .rgb_d = .environment, .alpha_a = .tex0, .alpha_c = .primitive }));
         render_queue.setEnvironmentColor(options.outline_color);
         render_queue.setBlendMode(.alpha);
-        var modes = render_queue.getModes();
+        const pass_modes = render_queue.getModes();
+        var modes = pass_modes;
         modes.antialias_en = true;
         modes.blender_alpha = .cvg_times_cc;
         render_queue.setModes(modes);
         render_queue.setPrimColor(options.color);
+        // Later draws, such as materials, read the pass antialias setting.
+        defer restoreCoverage(render_queue, pass_modes);
         return self.layout(@as(?@TypeOf(render_queue), render_queue), x, baseline_y, utf8, options);
     }
     render_queue.setCombineMode(.single(.{
@@ -99,6 +102,13 @@ pub fn draw(self: Font, render_queue: anytype, x: f32, baseline_y: f32, utf8: []
     render_queue.setBlendMode(.alpha);
     render_queue.setPrimColor(options.color);
     return self.layout(@as(?@TypeOf(render_queue), render_queue), x, baseline_y, utf8, options);
+}
+
+fn restoreCoverage(render_queue: anytype, pass_modes: @import("../rdp/modes.zig").OtherModes) void {
+    var modes = render_queue.getModes();
+    modes.antialias_en = pass_modes.antialias_en;
+    modes.blender_alpha = pass_modes.blender_alpha;
+    render_queue.setModes(modes);
 }
 
 /// Format and draw using caller-owned scratch storage. The text is consumed

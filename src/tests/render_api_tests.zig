@@ -343,7 +343,8 @@ var clip_vertices: [2]n64.graphics.VertexPair align(16) = .{
     .{ .pos_a = .{ -200, -20, 60 }, .normal_a = 0, .pos_b = .{ 200, -20, 60 }, .normal_b = 0, .color_a = .white, .color_b = .white },
     .{ .pos_a = .{ 0, -20, -800 }, .normal_a = 0, .pos_b = .{ 0, -20, -800 }, .normal_b = 0, .color_a = .white, .color_b = .white },
 };
-var batch_storage: [2][6]i16 align(8) = undefined;
+// Rows of eight keep each batch 8-byte aligned for RSP DMA.
+var batch_storage: [2][8]i16 align(8) = undefined;
 
 fn beginClipFrame(image: anytype) void {
     owned_renderer.beginFrame(image, .{ .clear_color = .black });

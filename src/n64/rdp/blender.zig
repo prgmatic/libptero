@@ -21,14 +21,31 @@ pub const BlendMode = struct {
     pub const opaque_surface: BlendMode = .{};
     /// Edge-antialiased opaque surface (libultra's AA_ZB_OPA_SURF): blends
     /// partially covered edge pixels with memory by coverage, so the VI's
-    /// resample filter can smooth them. Pair with `cvg_dest = .clamp` and
-    /// `blender_alpha = .coverage`; `setSurfaceType` does that when the pass
-    /// enables `antialias_en`.
+    /// resample filter can smooth them. It reads the framebuffer for every
+    /// pixel, so it is opt-in: use `State.withEdgeAntialias`, which pairs it
+    /// with the clamped coverage and coverage alpha the blend depends on.
     pub const antialiased_opaque: BlendMode = .{
         .image_read_en = true,
-        .pass1 = .{ .p = .pixel, .a = .pixel_alpha, .m = .memory, .b = .memory_cvg },
+        .pass1 = antialiased_edge,
         .pass2 = .{ .m = .pixel },
     };
+    /// Two-cycle form (AA_ZB_OPA_SURF2): the first cycle passes color through
+    /// and the second blends edges.
+    pub const antialiased_opaque_two_cycle: BlendMode = .{
+        .image_read_en = true,
+        .pass1 = .{ .m = .pixel },
+        .pass2 = antialiased_edge,
+    };
+    /// Fogged edge-antialiased opaque surface in two-cycle mode: shade-alpha
+    /// fog in the first cycle, then the `antialiased_opaque` edge blend.
+    pub const antialiased_opaque_fog: BlendMode = .{
+        .image_read_en = true,
+        .pass1 = fogVisibility(false).pass1,
+        .pass2 = antialiased_edge,
+    };
+    /// Pixel weighted by its coverage against memory weighted by memory
+    /// coverage. The A input carries coverage once `blender_alpha` selects it.
+    const antialiased_edge: BlendCycle = .{ .p = .pixel, .a = .pixel_alpha, .m = .memory, .b = .memory_cvg };
     /// Two-cycle opaque rendering must preserve color through the first
     /// blender cycle, even when combiner alpha encodes a lighting effect.
     pub const opaque_two_cycle: BlendMode = .{

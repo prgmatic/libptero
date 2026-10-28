@@ -34,7 +34,7 @@ pub const Part = struct {
     material_index: u16,
     vertex_offset: u8 = 0,
     vertex_count: u8,
-    strip_indices: []const i16 = &.{},
+    strip_indices: []align(8) const i16 = &.{},
     data_usage: DataUsage = .immutable,
     /// Global node index for bind-local RSP skinning; the pose is set on Context.
     bone: ?u16 = null,
@@ -75,14 +75,14 @@ test "model applies changed materials and submits packed batches" {
                 _ = offset;
                 self.loads += count;
             }
-            pub fn drawStaticTriangleStrip(self: *@This(), indices: []const i16, _: bool) void {
+            pub fn drawStaticTriangleStrip(self: *@This(), indices: []align(8) const i16, _: bool) void {
                 if (self.expected_matrix) |expected| {
                     if (self.matrix != expected) self.wrong_matrix = true;
                 }
                 self.draws += indices.len / 3;
                 self.syncs += 1;
             }
-            pub fn drawTriangleStrip(self: *@This(), indices: []const i16, sync: bool) void {
+            pub fn drawTriangleStrip(self: *@This(), indices: []align(8) const i16, sync: bool) void {
                 self.dynamic_draws += 1;
                 self.drawStaticTriangleStrip(indices, sync);
             }
@@ -106,7 +106,7 @@ test "model applies changed materials and submits packed batches" {
         .color_a = .fromBytes(255, 255, 255, 255),
         .color_b = .fromBytes(255, 255, 255, 255),
     }};
-    const strip_indices = [_]i16{ 0, 0x0024, 0x4000 };
+    const strip_indices align(8) = [_]i16{ 0, 0x0024, 0x4000 };
     const parts = [_]Part{
         .{ .vertices = &vertices, .strip_indices = &strip_indices, .material_index = 2, .vertex_count = 2 },
         .{ .vertices = &vertices, .strip_indices = &strip_indices, .material_index = 2, .vertex_count = 2 },

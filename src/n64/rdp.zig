@@ -33,6 +33,7 @@ pub const CoverageDest = modes.CoverageDest;
 pub const RgbDither = modes.RgbDither;
 pub const AlphaDither = modes.AlphaDither;
 pub const AlphaCompare = modes.AlphaCompare;
+pub const BlenderAlphaSrc = modes.BlenderAlphaSrc;
 pub const TlutFormat = modes.TlutFormat;
 pub const SampleType = modes.SampleType;
 

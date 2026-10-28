@@ -26,7 +26,13 @@ primitive: ?Rgba32 = null,
 environment: ?Rgba32 = null,
 vertex_effect: geometry.VertexEffect = .none,
 /// Explicit blender override, e.g. blending against the blend-color register.
+/// An override disables `edge_antialias`, which would replace its alpha.
 blend: ?rdp.BlendMode = null,
+/// Blend partially covered edges of an opaque surface with the framebuffer
+/// so the VI filter smooths them. This reads the framebuffer for every pixel,
+/// so it is off by default. It applies only while the pass enables
+/// `antialias_en`; fogged surfaces switch to two-cycle mode for it.
+edge_antialias: bool = false,
 /// RDP Z compare/update overrides; null derives them from `flags.depth` and
 /// `translucent`. Unlike clearing `flags.depth`, these leave the RSP's
 /// triangle format and lighting unchanged: use them to skip the Z read and
@@ -84,15 +90,30 @@ fn applyDepth(self: Material, rq: anytype) void {
 fn applyPipeline(self: Material, rq: anytype, fog: bool) void {
     rq.setPerspectiveTexture(self.flags.textured);
     rq.setTextureFilter(self.filter);
-    rq.setCycleType(if (fog and self.translucent) .two_cycle else self.cycle_type);
-    rq.setBlendMode(self.blend orelse self.blendMode(fog, rq.getModes().antialias_en));
+    const edges = self.antialiasesEdges(rq.getModes().antialias_en);
+    rq.setCycleType(if (fog and (self.translucent or edges)) .two_cycle else self.cycle_type);
+    self.applyBlend(rq, fog, edges);
     rq.setAlphaCompare(if (self.alpha_cutoff != null) .threshold else .disabled);
     if (self.alpha_cutoff) |cutoff| rq.setBlendColor(.fromBytes(0, 0, 0, cutoff));
 }
 
+fn applyBlend(self: Material, rq: anytype, fog: bool, edges: bool) void {
+    if (self.blend) |blend| return rq.setBlendMode(blend);
+    if (!edges) return rq.setBlendMode(self.blendMode(fog));
+    const cutout = self.alpha_cutoff != null;
+    const state = rq.getState();
+    rq.setState(if (fog) state.withBlend(.antialiased_opaque_fog).withEdgeCoverage(cutout) else state.withEdgeAntialias(cutout));
+}
+
+/// Whether this material blends its edges in a pass with `antialias_en`.
+fn antialiasesEdges(self: Material, pass_antialias: bool) bool {
+    return self.edge_antialias and pass_antialias and !self.translucent and self.blend == null;
+}
+
 fn applyCombiner(self: Material, rq: anytype, fog: bool) void {
     var combine = self.combine;
-    if (fog and self.translucent and self.cycle_type == .one_cycle)
+    // Fog that forces two-cycle mode needs the combined color passed on.
+    if (fog and rq.getModes().cycle_type == .two_cycle and self.cycle_type == .one_cycle)
         combine.cycle1 = .{ .rgb_d = .combined, .alpha_d = .combined };
     rq.setCombineMode(combine);
 }
@@ -102,12 +123,9 @@ fn applyColors(self: Material, rq: anytype) void {
     if (self.environment) |color| rq.setEnvironmentColor(color);
 }
 
-fn blendMode(self: Material, fog: bool, antialias: bool) rdp.BlendMode {
+fn blendMode(self: Material, fog: bool) rdp.BlendMode {
     if (fog) return rdp.BlendMode.fogVisibility(self.translucent);
-    if (!self.translucent) {
-        if (self.cycle_type == .two_cycle) return .opaque_two_cycle;
-        return if (antialias) .antialiased_opaque else .opaque_surface;
-    }
+    if (!self.translucent) return if (self.cycle_type == .two_cycle) .opaque_two_cycle else .opaque_surface;
     return if (self.cycle_type == .two_cycle) .alpha_two_cycle else .alpha;
 }
 
@@ -183,6 +201,68 @@ test "fogged alpha materials restore opaque state and preserve combiner alpha" {
     (Material{ .translucent = true, .z_mode = .decal }).apply(&context);
     try std.testing.expectEqual(rdp.ZMode.decal, context.render.mode.z_mode);
     try std.testing.expect(!context.render.mode.z_update_en);
+}
+
+test "edge antialiasing is opt-in and keeps cutouts, overrides and fog" {
+    const std = @import("std");
+    const TestContext = struct {
+        render: rdp.RenderEncoder(rdp.backend.Direct),
+        fog_enabled: bool = false,
+        pub fn setDrawFlags(_: *@This(), _: geometry.DrawFlags) void {}
+        pub fn setVertexEffect(_: *@This(), _: geometry.VertexEffect) void {}
+        pub fn setFogEnabled(self: *@This(), enabled: bool) void {
+            self.fog_enabled = enabled;
+        }
+    };
+    var commands: [64]u64 = undefined;
+    var context: TestContext = .{ .render = .init(.{ .buffer = &commands }) };
+    context.render.setState(.opaque_geometry);
+    const mode = &context.render.mode;
+
+    // The default opaque material never reads the framebuffer.
+    (Material{}).apply(&context);
+    try std.testing.expect(!mode.image_read_en);
+    try std.testing.expectEqual(rdp.CoverageDest.full, mode.cvg_dest);
+    try std.testing.expectEqual(rdp.BlenderAlphaSrc.combiner, mode.blender_alpha);
+
+    (Material{ .edge_antialias = true }).apply(&context);
+    try std.testing.expect(mode.image_read_en);
+    try std.testing.expectEqual(rdp.CoverageDest.clamp, mode.cvg_dest);
+    try std.testing.expectEqual(rdp.BlenderAlphaSrc.coverage, mode.blender_alpha);
+    try std.testing.expectEqual(rdp.BlendInvSrc.memory_cvg, mode.blend_b0);
+
+    // Cutouts multiply coverage by texture alpha (AA_ZB_TEX_EDGE).
+    (Material{ .edge_antialias = true, .alpha_cutoff = 128 }).apply(&context);
+    try std.testing.expectEqual(rdp.BlenderAlphaSrc.cvg_times_cc, mode.blender_alpha);
+    try std.testing.expectEqual(rdp.AlphaCompare.threshold, mode.alpha_compare);
+
+    // Two-cycle materials blend edges in the second cycle with image reads.
+    (Material{ .edge_antialias = true, .cycle_type = .two_cycle }).apply(&context);
+    try std.testing.expect(mode.image_read_en);
+    try std.testing.expectEqual(rdp.BlendColorSrc.pixel, mode.blend_m0);
+    try std.testing.expectEqual(rdp.BlendInvSrc.memory_cvg, mode.blend_b1);
+
+    // Fog moves the edge blend to the second cycle and passes color on.
+    (Material{ .edge_antialias = true, .fog = true }).apply(&context);
+    try std.testing.expectEqual(rdp.CycleType.two_cycle, mode.cycle_type);
+    try std.testing.expectEqual(rdp.BlendAlphaSrc.shade_alpha, mode.blend_a0);
+    try std.testing.expectEqual(rdp.BlendInvSrc.memory_cvg, mode.blend_b1);
+    try std.testing.expectEqual(@as(@TypeOf(context.render.combine_mode.cycle1.rgb_d), .combined), context.render.combine_mode.cycle1.rgb_d);
+
+    // An explicit blend keeps combiner alpha.
+    (Material{ .edge_antialias = true, .blend = .additive }).apply(&context);
+    try std.testing.expectEqual(rdp.BlenderAlphaSrc.combiner, mode.blender_alpha);
+    try std.testing.expectEqual(rdp.CoverageDest.full, mode.cvg_dest);
+
+    // A pass without antialiasing disables it, as does translucency.
+    context.render.setAntialias(false);
+    (Material{ .edge_antialias = true }).apply(&context);
+    try std.testing.expect(!mode.image_read_en);
+    try std.testing.expect(!mode.antialias_en);
+    context.render.setAntialias(true);
+    (Material{ .edge_antialias = true, .translucent = true }).apply(&context);
+    try std.testing.expectEqual(rdp.CoverageDest.wrap, mode.cvg_dest);
+    try std.testing.expectEqual(rdp.BlenderAlphaSrc.combiner, mode.blender_alpha);
 }
 
 fn boundedMask(mask: u4, size: u32) u4 {

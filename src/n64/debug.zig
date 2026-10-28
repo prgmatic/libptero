@@ -13,11 +13,15 @@ const run_protocol = @import("debug/run_protocol.zig");
 /// the listener handles emulator exit or optional console power-off.
 /// Initialize debug first and call from normal execution, never an interrupt.
 pub fn finish(result: run_protocol.Result) void {
+    finished = true;
     var buffer: [128]u8 = undefined;
     const record = run_protocol.encode(&buffer, result) catch unreachable;
     writeAll("\n");
     writeAll(record);
 }
+
+/// Whether `finish` has reported a run result. A listener stops at the first.
+pub var finished = false;
 
 const std = @import("std");
 

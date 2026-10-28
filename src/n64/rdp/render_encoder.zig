@@ -191,6 +191,8 @@ pub fn RenderEncoder(comptime QueueType: type) type {
             rq.combine_mode = value.combine;
         }
 
+        /// Coverage computation for the VI filter. Materials resolve edge
+        /// antialiasing from this when applied, so set it before them.
         pub fn setAntialias(rq: *Self, enabled: bool) void {
             rq.mode.antialias_en = enabled;
         }
@@ -270,15 +272,13 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         }
 
         /// Reset the surface state as well as setting it, avoiding leakage
-        /// when switching from a translucent material back to opaque geometry.
+        /// when switching from a translucent material back to opaque geometry
+        /// or from edge-antialiased or coverage-alpha state such as text.
         pub fn setSurfaceType(rq: *Self, translucent: bool) void {
-            // Antialiased opaque surfaces keep real edge coverage (clamped)
-            // and feed it to the blender, as libultra's AA_ZB_OPA_SURF does.
-            const aa_opaque = !translucent and rq.mode.antialias_en;
             rq.mode.z_mode = if (translucent) .transparent else .opaque_surface;
-            rq.mode.cvg_dest = if (translucent) .wrap else if (aa_opaque) .clamp else .full;
+            rq.mode.cvg_dest = if (translucent) .wrap else .full;
             rq.mode.write_on_cvg_overflow = translucent;
-            rq.mode.blender_alpha = if (aa_opaque) .coverage else .combiner;
+            rq.mode.blender_alpha = .combiner;
         }
 
         /// Skips a repeated color. A change syncs the pipe first, as the
@@ -709,6 +709,21 @@ test "presets replace translucent and sprite state with complete opaque geometry
     try std.testing.expect(!value.force_blend and !value.image_read_en and !value.write_on_cvg_overflow);
     try std.testing.expectEqual(modes.ZMode.opaque_surface, value.z_mode);
     try std.testing.expect(std.meta.eql(CombineMode.shade, render.getState().combine));
+}
+
+test "edge antialiased opaque preset pairs its blend with clamped coverage" {
+    const State = @import("state.zig").State;
+    const value = State.antialiased_opaque_geometry.modes;
+    try std.testing.expect(value.antialias_en and value.image_read_en and !value.force_blend);
+    try std.testing.expectEqual(modes.CoverageDest.clamp, value.cvg_dest);
+    try std.testing.expectEqual(modes.BlenderAlphaSrc.coverage, value.blender_alpha);
+    try std.testing.expect(!State.opaque_geometry.modes.image_read_en);
+    var commands: [8]u64 = undefined;
+    var render = RenderEncoder(q.Direct).init(.{ .buffer = &commands });
+    render.setState(State.antialiased_opaque_geometry);
+    render.setSurfaceType(false);
+    try std.testing.expectEqual(modes.CoverageDest.full, render.getModes().cvg_dest);
+    try std.testing.expectEqual(modes.BlenderAlphaSrc.combiner, render.getModes().blender_alpha);
 }
 
 test "frame setup binds and preserves targets unless clearing is requested" {

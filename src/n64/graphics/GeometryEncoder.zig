@@ -355,6 +355,11 @@ pub fn popMatrix(self: *GeometryEncoder) void {
     const stack_advance = @as(u32, @bitCast(@as(i32, -64 << 8))) & 0x00ff_ff00;
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, stack_advance, &.{0});
 }
+// The RSP DMAs vertex pairs and index strips, which needs 8-byte alignment.
+comptime {
+    if (@alignOf(VertexPair) < 8) @compileError("vertex pairs must be 8-byte aligned for RSP DMA");
+}
+
 pub fn loadVertices(self: *GeometryEncoder, vertices: []const VertexPair, offset: u8, count: u8) void {
     cache.writebackData(vertices);
     self.loadStaticVertices(vertices, offset, count);
@@ -362,7 +367,6 @@ pub fn loadVertices(self: *GeometryEncoder, vertices: []const VertexPair, offset
 /// Load immutable asset vertices which are already coherent in RDRAM.
 pub fn loadStaticVertices(self: *GeometryEncoder, vertices: []const VertexPair, offset: u8, count: u8) void {
     if (count == 0 or count > vertices.len * 2) @panic("invalid geometry vertex count");
-    if (@intFromPtr(vertices.ptr) & 7 != 0) @panic("geometry vertices must be 8-byte aligned");
     self.settleTriangles();
     const symbols = rsp.programs.geometry_overlay_symbols;
     const vertex_buffer = symbols.vertex_buffer;
@@ -392,7 +396,8 @@ pub const max_batch_triangles = 420;
 /// Encode independent triangles (indices into loaded vertices) as strip
 /// commands in `storage`, which needs three entries per triangle and must
 /// stay alive until submission completes, then draw and sync them once.
-pub fn drawTriangles(self: *GeometryEncoder, triangles: []const [3]u8, storage: []i16) void {
+/// Declare it with `align(8)` so the RSP can DMA it.
+pub fn drawTriangles(self: *GeometryEncoder, triangles: []const [3]u8, storage: []align(8) i16) void {
     if (triangles.len == 0) return;
     self.drawTriangleStrip(encodeTriangles(triangles, storage), true);
 }
@@ -400,7 +405,7 @@ pub fn drawTriangles(self: *GeometryEncoder, triangles: []const [3]u8, storage: 
 /// Encode independent triangles in the strip format used by
 /// `drawTriangleStrip`: each triangle is a three-vertex strip, with the
 /// restart bit on the first index of every strip after the first.
-pub fn encodeTriangles(triangles: []const [3]u8, storage: []i16) []i16 {
+pub fn encodeTriangles(triangles: []const [3]u8, storage: []align(8) i16) []align(8) i16 {
     if (triangles.len > max_batch_triangles or storage.len < triangles.len * 3) @panic("invalid triangle batch");
     for (triangles, 0..) |triangle, index| {
         for (triangle, 0..) |vertex, corner| {
@@ -416,19 +421,17 @@ pub fn encodeTriangles(triangles: []const [3]u8, storage: []i16) []i16 {
 /// Draw a caller-built index strip. With `sync = false` consecutive strips
 /// keep the clipping code resident; the encoder syncs before the next
 /// non-strip geometry command, material change or submission.
-pub fn drawTriangleStrip(self: *GeometryEncoder, indices: []const i16, sync: bool) void {
+pub fn drawTriangleStrip(self: *GeometryEncoder, indices: []align(8) const i16, sync: bool) void {
     cache.writebackData(indices);
     self.drawStaticTriangleStrip(indices, sync);
 }
 /// Draw an immutable asset index strip which is already coherent in RDRAM.
-pub fn drawStaticTriangleStrip(self: *GeometryEncoder, indices: []const i16, sync: bool) void {
+pub fn drawStaticTriangleStrip(self: *GeometryEncoder, indices: []align(8) const i16, sync: bool) void {
     self.beginModelMaterial();
     const symbols = rsp.programs.geometry_overlay_symbols;
     const vertex_buffer = symbols.vertex_buffer;
     const strip_buffer_end = symbols.clipping_buffer_temporary;
     if (indices.len < 3 or indices.len * @sizeOf(i16) > strip_buffer_end - vertex_buffer) @panic("invalid geometry strip");
-    // The RSP DMAs the indices: an unaligned table reads garbage and hangs the RDP.
-    if (@intFromPtr(indices.ptr) & 7 != 0) @panic("geometry strip indices must be 8-byte aligned");
     const byte_count: u32 = @intCast(indices.len * @sizeOf(i16));
     var dmem_address = (strip_buffer_end - byte_count) & ~@as(u32, 7);
     if (sync) dmem_address |= 0x8000;

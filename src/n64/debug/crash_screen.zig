@@ -94,8 +94,10 @@ fn present() void {
 /// the crash display intact. Neither interrupts nor graphics hardware is needed.
 pub fn waitForInput() noreturn {
     // Tell a deploy listener the run failed so it exits now instead of
-    // waiting for its timeout. The crash screen stays up for inspection.
-    @import("../debug.zig").finish(.failure);
+    // waiting for its timeout, unless the run already reported its result.
+    // The crash screen stays up for inspection.
+    const debug = @import("../debug.zig");
+    if (!debug.finished) debug.finish(.failure);
     var input: controls.Controller = .{};
     var last_poll = cp0.regRead(.Count);
     while (true) {

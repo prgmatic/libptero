@@ -265,7 +265,9 @@ test "overlay isolates font state and multiplies sprite tint alpha without reloa
     const outlines = [_]graphics.PalettedImage(graphics.pixel.Ci4Pair){undefined};
     font.outline_atlases = &outlines; // Empty text changes pipeline, never reads this atlas.
     try hud.drawText(font, 0, 0, "", .{});
-    try std.testing.expect(game.renderer.render.getModes().antialias_en);
+    // Outlined text restores the pass coverage modes it changes.
+    try std.testing.expect(!game.renderer.render.getModes().antialias_en);
+    try std.testing.expect(game.renderer.render.getModes().blender_alpha == .combiner);
     try hud.drawSprite(image, .{});
     try std.testing.expectEqualDeep((context.App(.{}).OverlayPass.State{}).state.combine, game.renderer.render.getState().combine);
     try std.testing.expect(!game.renderer.render.getModes().antialias_en);

@@ -5,6 +5,7 @@ const rsp = @import("../rsp.zig");
 const rdp = @import("../rdp.zig");
 const rdp_io = @import("../hw/dp.zig");
 const VertexPair = @import("../graphics/geometry.zig").VertexPair;
+const crash_memory = @import("crash_screen/memory.zig");
 
 fn print(comptime format: []const u8, args: anytype) void {
     var buffer: [256]u8 = undefined;
@@ -95,7 +96,7 @@ pub fn reportRenderTimeout(label: []const u8, queue: ?*const rsp.Queue) void {
     print("render timeout: {s}\n", .{label[0..@min(80, label.len)]});
     print("RSP status={x:0>8} pc={x:0>8} dma_busy={d} dma_full={d}\n", .{ state.rsp_status, state.rsp_pc, state.dma_busy, state.dma_full });
     print("RDP status={x:0>8} start={x:0>8} end={x:0>8} current={x:0>8}\n", .{ state.rdp_status, state.rdp_start, state.rdp_end, state.rdp_current });
-    reportRdpWindow(state.rdp_current);
+    if (rdpWindow(state.rdp_status, state.rdp_current, crash_memory.bounds().rdram_size)) |window| reportRdpWindow(window, state.rdp_current);
     if (queue) |q| {
         print("queue priority={s} write_index={d} submitted={} syncpoint_pending={} recording={}\n", .{ @tagName(q.priority), q.storage.write_index, q.storage.submitted, q.storage.syncpoint_pending, q.recording != null });
         for (&q.storage.queues, 0..) |*commands, index| {
@@ -104,17 +105,36 @@ pub fn reportRenderTimeout(label: []const u8, queue: ?*const rsp.Queue) void {
     }
 }
 
+const RdpWindow = struct { start: u32, end: u32 };
+
+/// RDRAM span around the RDP read pointer, or null when the RDP fetches from
+/// DMEM (XBUS) or the pointer is outside installed RDRAM.
+fn rdpWindow(status: u32, current: u32, rdram_size: u32) ?RdpWindow {
+    if (status & 1 != 0 or current >= rdram_size) return null;
+    return .{
+        .start = (current -| 0x40) & ~@as(u32, 15),
+        .end = @min(current + 0x40, rdram_size) & ~@as(u32, 15),
+    };
+}
+
 /// The RDP commands around its read pointer, from uncached RDRAM. A hung
 /// RDP usually stops at or just after the offending command.
-fn reportRdpWindow(current: u32) void {
-    if (current < 0x40 or current >= 0x00800000) return;
-    const start = (current - 0x40) & ~@as(u32, 7);
-    var address = start;
-    while (address < current + 0x40) : (address += 16) {
+fn reportRdpWindow(window: RdpWindow, current: u32) void {
+    var address = window.start;
+    while (address < window.end) : (address += 16) {
         const words: *const volatile [4]u32 = @ptrFromInt(0xa0000000 | address);
         const mark: []const u8 = if (current >= address and current < address + 16) " <" else "";
         print("RDP cmd {x:0>8}: {x:0>8} {x:0>8} {x:0>8} {x:0>8}{s}\n", .{ address, words[0], words[1], words[2], words[3], mark });
     }
+}
+
+test "RDP command window stays in RDRAM and skips DMEM fetches" {
+    const four_mib = 4 * 1024 * 1024;
+    try std.testing.expectEqual(@as(?RdpWindow, null), rdpWindow(1, 0x1000, four_mib));
+    try std.testing.expectEqual(@as(?RdpWindow, null), rdpWindow(0, four_mib, four_mib));
+    try std.testing.expectEqual(RdpWindow{ .start = 0, .end = 0x50 }, rdpWindow(0, 0x18, four_mib).?);
+    try std.testing.expectEqual(RdpWindow{ .start = 0x1fc0, .end = 0x2040 }, rdpWindow(0, 0x2008, four_mib).?);
+    try std.testing.expectEqual(RdpWindow{ .start = four_mib - 0x50, .end = four_mib }, rdpWindow(0, four_mib - 0x10, four_mib).?);
 }
 
 /// Print the dispatcher's crash scratch word and command fetch window after an

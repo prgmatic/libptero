@@ -307,7 +307,8 @@ index into the loaded vertices (up to `geometry.max_loaded_vertices`):
 ```zig
 renderer.geometry.loadVertices(&quad_vertices, 0, 4);
 // One command and one sync for the whole batch. `storage` holds three i16
-// per triangle and must stay alive until the frame completes.
+// per triangle, is RSP DMA source (declare it `align(8)`), and must stay
+// alive until the frame completes, e.g. `var storage: [6]i16 align(8)`.
 renderer.geometry.drawTriangles(&.{ .{ 0, 1, 2 }, .{ 0, 2, 3 } }, &storage);
 renderer.geometry.drawTriangle(0, 1, 2); // single triangle, synced
 ```

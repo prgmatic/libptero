@@ -24,6 +24,7 @@ test {
     _ = debug.profiler;
     _ = debug.backends.everdrive;
     _ = debug.backends.is_viewer;
+    _ = debug.diagnostics;
     _ = debug.crash_screen.model;
     _ = debug.crash_screen.model.memory;
     _ = debug.crash_screen.font;

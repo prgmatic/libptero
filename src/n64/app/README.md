@@ -58,6 +58,12 @@ Geometry state follows this precedence:
 2. The model's material provider applies its own fields, including depth,
    blending, filtering, combiner, and any explicit colors or fog enable.
    `asset.withOverrides(...)` remains the way to change imported materials.
+
+The pass `antialias_en` computes edge coverage for the VI filter without
+reading the framebuffer. Opaque materials blend their edges with the
+framebuffer only when they set `Material.edge_antialias = true`, which costs a
+framebuffer read per pixel. `rdp.State.antialiased_opaque_geometry` is the
+equivalent state for draws without a material.
 3. The next model draw reapplies the pass baseline. Optional material fields
    therefore inherit pass defaults rather than a preceding model's values.
    Material order *within* a model retains the native material-provider contract.
