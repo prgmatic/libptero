@@ -23,55 +23,46 @@ pub fn generate(allocator: std.mem.Allocator, model: compiler.ConvertedModel, do
     try markGroupSlices(allocator, &bindings, model.batches);
     try compiler.emitImagesWithStorage(allocator, &data, &source, document, binary, true);
     try rig.emit(allocator, &source, document, binary, model.scale);
-    try emitBinding(allocator, &source, bindings.items, model.batches, name, data.items.len);
-    try emitMaterialPrefix(allocator, &source, document);
-    try compiler.emitMaterialsWithStorage(allocator, &source, document, binary, true);
+    try emitBinding(allocator, &source, bindings.items, model, document, binary, name, data.items.len);
     const payload = try data.toOwnedSlice(allocator);
     errdefer allocator.free(payload);
     return .{ .data = payload, .source = try source.toOwnedSlice(allocator) };
 }
 
-fn emitBinding(allocator: std.mem.Allocator, source: *std.ArrayList(u8), bindings: []const u8, batches: []const compiler.Batch, name: []const u8, byte_len: usize) !void {
+fn emitBinding(allocator: std.mem.Allocator, source: *std.ArrayList(u8), bindings: []const u8, model: compiler.ConvertedModel, document: compiler.Document, binary: []const u8, name: []const u8, byte_len: usize) !void {
     try compiler.appendFormat(allocator, source,
         \\pub const {s}: n64.rom.Asset(Definition) = .{{ .asset = @import("rom_data").{s} }};
         \\pub const Definition = struct {{
         \\    pub const byte_len = {d};
-        \\    pub const Value = n64.graphics.ModelAsset(Materials);
-        \\    pub const Storage = struct {{ parts: [{d}]Part }};
-        \\    pub fn bind(model_data: []align(16) const u8, metadata: *Storage, content_id: u64) Value {{
+        \\    pub const Value = n64.graphics.ModelAsset;
+        \\    pub const Storage = struct {{ parts: [{d}]Part, materials: [{d}]n64.graphics.Material }};
         \\
-    , .{ name, name, byte_len, partCount(batches) });
+    , .{ name, name, byte_len, partCount(model.batches), document.materials.len });
+    try @import("material_ids.zig").emit(allocator, source, document.materials);
+    try source.appendSlice(allocator,
+        \\    pub fn bind(model_data: []align(16) const u8, metadata: *Storage, content_id: u64) Value {
+        \\
+    );
+    if (!hasTextures(document)) try source.appendSlice(allocator, "_ = content_id;\n");
     try source.appendSlice(allocator, bindings);
     try source.appendSlice(allocator, "metadata.parts = .{\n");
-    try compiler.emitPartEntries(allocator, source, batches);
+    try compiler.emitPartEntries(allocator, source, model.batches);
+    try source.appendSlice(allocator, "};\nmetadata.materials = .{\n");
+    try compiler.emitMaterialList(allocator, source, document, binary, true);
     try source.appendSlice(allocator,
         \\};
-        \\return .{ .model = .{ .parts = &metadata.parts, .nodes = &nodes, .skins = &skins, .animations = &animations }, .materials = .{ .data = model_data, .content_id = content_id } };
+        \\return .{ .model = .{ .parts = &metadata.parts, .nodes = &nodes, .skins = &skins, .animations = &animations }, .materials = &metadata.materials, .material_names = &material_names };
         \\    }
         \\};
+        \\
     );
 }
 
-fn emitMaterialPrefix(allocator: std.mem.Allocator, source: *std.ArrayList(u8), document: compiler.Document) !void {
-    try source.appendSlice(allocator,
-        \\pub const Materials = struct {
-    );
-    try @import("material_ids.zig").emit(allocator, source, document.materials);
-    try source.appendSlice(allocator,
-        \\    data: []align(16) const u8,
-        \\    content_id: u64,
-        \\    pub fn apply(self: @This(), context: anytype, index: u16) void {
-        \\        self.bind(context, index, self.get(index));
-        \\    }
-        \\    pub fn bind(self: @This(), context: anytype, index: u16, material: n64.graphics.Material) void {
-        \\
-    );
-    // emitMaterials also writes the closing switch and native material accessor.
-    const has_textures = for (document.materials) |material| {
-        if (compiler.materialImageIndex(document, material) != null) break true;
-    } else false;
-    if (!has_textures) try source.appendSlice(allocator, "        _ = self;\n");
-    try source.appendSlice(allocator, "        switch (index) {\n");
+fn hasTextures(document: compiler.Document) bool {
+    for (document.materials) |material| {
+        if (compiler.materialImageIndex(document, material) != null) return true;
+    }
+    return false;
 }
 
 fn partCount(batches: []const compiler.Batch) usize {

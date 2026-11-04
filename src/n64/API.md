@@ -48,8 +48,9 @@ the same distinction. Pixel types live in `graphics.pixel`, including indexed
 and intensity formats. Use `Image(pixel.Rgba16)` rather than a format alias.
 
 `graphics.Model` holds borrowed geometry and metadata. Its supporting types are
-`Model.Part` and `Model.DataUsage`. `ModelAsset(Materials)` pairs a model with a
-typed material provider. Draw through `GeometryEncoder`; use `MutableModel` or
+`Model.Part` and `Model.DataUsage`. `ModelAsset` pairs a model with a
+`[]const Material` table; every model shares this type. `Texture` is the
+format-erased image reference that materials store. Draw through `GeometryEncoder`; use `MutableModel` or
 `SkinnedModel` when writable instance storage is needed. Animation definitions
 and playback live in `graphics.animation`.
 
@@ -101,7 +102,7 @@ for RSP work. Neither completion type owns the submitted resources.
 | `graphics.geometry.Renderer` | `graphics.Renderer` |
 | `graphics.geometry.Viewport`, `VertexPair`, etc. | `graphics.Viewport`, `VertexPair`, etc. |
 | `graphics.model.Model`, `Material`, etc. | `graphics.Model`, `Material`, etc. |
-| `graphics.model.Asset(Materials)` | `graphics.ModelAsset(Materials)` |
+| `graphics.model.Asset(Materials)` | `graphics.ModelAsset` |
 | `graphics.font.Font` | `graphics.Font` |
 | `font.TextOptions`, `font.TextMetrics` | `Font.DrawOptions`, `Font.Metrics` |
 | `graphics.image.Image(Pixel)` | `graphics.Image(Pixel)` |

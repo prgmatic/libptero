@@ -23,43 +23,27 @@ pub const Sampler = struct {
     }
 };
 
-pub inline fn loadTexture(cmd_queue: anytype, image: anytype, tile: u3, tmem_addr: u9, sampler: Sampler) void {
-    const T = @TypeOf(image);
+const Texture = @import("../graphics/Texture.zig");
+
+pub fn loadTexture(cmd_queue: anytype, image: Texture, tile: u3, tmem_addr: u9, sampler: Sampler) void {
     const width: u32 = image.width;
     const height: u32 = image.height;
-
     const load_tile: u3 = tile +% 1;
-
-    const bpp: u32 = switch (T.bit_depth) {
-        .@"4" => 4,
-        .@"8" => 8,
-        .@"16" => 16,
-        .@"32" => 32,
-    };
-
-    const words_per_row: u32 = (width * bpp + 63) / 64;
-
+    const words_per_row: u32 = (width * image.bitsPerTexel() + 63) / 64;
     // dxt: ceil(2048 / words_per_row), 1.11 fixed point.
     const dxt: u12 = @intCast((2048 + words_per_row - 1) / words_per_row);
 
     // Sub-byte formats fake a wider RGBA16 image so LoadBlock sees at most 2048 "texels".
-    const ColorFormat = @import("../graphics/pixel.zig").Format;
-    const BitDepth = @import("../graphics/pixel.zig").BitDepth;
-    const load_format: ColorFormat = switch (T.bit_depth) {
-        .@"4", .@"8" => .rgba,
-        else => T.format,
-    };
-    const load_bit_depth: BitDepth = switch (T.bit_depth) {
-        .@"4", .@"8" => .@"16",
-        else => T.bit_depth,
-    };
-    const load_width: u32 = switch (T.bit_depth) {
+    const narrow = image.bit_depth == .@"4" or image.bit_depth == .@"8";
+    const load_format: @import("../graphics/pixel.zig").Format = if (narrow) .rgba else image.format;
+    const load_bit_depth: @import("../graphics/pixel.zig").BitDepth = if (narrow) .@"16" else image.bit_depth;
+    const load_width: u32 = switch (image.bit_depth) {
         .@"4" => (width + 3) / 4,
         .@"8" => width / 2,
         else => width,
     };
 
-    cmd_queue.setTextureImage(load_format, load_bit_depth, load_width, @intFromPtr(image.texel_data.ptr));
+    cmd_queue.setTextureImage(load_format, load_bit_depth, load_width, @intFromPtr(image.texels));
     cmd_queue.setTile(.{
         .color_format = load_format,
         .bit_depth = load_bit_depth,
@@ -71,7 +55,7 @@ pub inline fn loadTexture(cmd_queue: anytype, image: anytype, tile: u3, tmem_add
     cmd_queue.loadSync();
 
     // LoadBlock texel count adjusted for sub-byte packing.
-    const num_texels: u32 = switch (T.bit_depth) {
+    const num_texels: u32 = switch (image.bit_depth) {
         .@"4" => (width * height + 3) / 4,
         .@"8" => (width * height + 1) / 2,
         else => width * height,
@@ -85,12 +69,13 @@ pub inline fn loadTexture(cmd_queue: anytype, image: anytype, tile: u3, tmem_add
     configureTile(cmd_queue, image, tile, tmem_addr, sampler);
 }
 
-pub fn configureTile(cmd_queue: anytype, image: anytype, tile: u3, tmem_addr: u9, sampler: Sampler) void {
-    const T = @TypeOf(image);
-    const render_line_len: u9 = @intCast((@as(u32, image.width) * (if (T.bit_depth == .@"32") @as(u32, 16) else @as(u32, 4) << @intFromEnum(T.bit_depth)) + 63) / 64);
+pub fn configureTile(cmd_queue: anytype, image: Texture, tile: u3, tmem_addr: u9, sampler: Sampler) void {
+    // 32-bit texels split across both TMEM banks, so each line holds 16-bit halves.
+    const line_bits: u32 = if (image.bit_depth == .@"32") 16 else image.bitsPerTexel();
+    const render_line_len: u9 = @intCast((@as(u32, image.width) * line_bits + 63) / 64);
     cmd_queue.setTile(.{
-        .color_format = T.format,
-        .bit_depth = T.bit_depth,
+        .color_format = image.format,
+        .bit_depth = image.bit_depth,
         .line_length = render_line_len,
         .tmem_addr = tmem_addr,
         .tile_index = tile,

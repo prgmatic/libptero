@@ -21,7 +21,7 @@ pub fn GeometryPass(comptime Context: type) type {
         pipeline: options.GeometryPipeline,
 
         /// Borrow the fixed transform and asset payloads until completion.
-        pub fn drawModel(self: @This(), asset: anytype, transform: *const math.FixedMat4) !void {
+        pub fn drawModel(self: @This(), asset: graphics.ModelAsset, transform: *const math.FixedMat4) !void {
             try validate(self.frame, self.generation);
             self.pipeline.apply(&self.frame.context.geometry);
             self.frame.context.geometry.drawModelWithTransform(asset, transform);
@@ -29,7 +29,7 @@ pub fn GeometryPass(comptime Context: type) type {
 
         /// Record immutable geometry/materials once in caller-owned persistent storage.
         /// Pipeline/material commands are captured. Camera, lighting and pose remain dynamic.
-        pub fn recordModel(self: @This(), recorded: anytype, asset: anytype) !void {
+        pub fn recordModel(self: @This(), recorded: anytype, asset: graphics.ModelAsset) !void {
             try validate(self.frame, self.generation);
             self.pipeline.apply(&self.frame.context.geometry);
             self.frame.context.geometry.recordModel(recorded, asset);

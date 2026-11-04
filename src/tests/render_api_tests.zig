@@ -140,21 +140,11 @@ var model_indices: [3]i16 align(8) = .{ 0, 36, 0x4048 };
 var model_transform: n64.math.FixedMat4 align(16) = .identity;
 var model_viewport = n64.graphics.Viewport.init(8, 8);
 
-const TestMaterials = struct {
-    pub fn get(_: @This(), _: u16) n64.graphics.Material {
-        return .{
-            .flags = .{ .no_light = true },
-            .combine = .primitive,
-            .primitive = .green,
-        };
-    }
-    pub fn bind(_: @This(), context: *n64.graphics.GeometryEncoder, _: u16, material: n64.graphics.Material) void {
-        material.apply(context);
-    }
-    pub fn apply(self: @This(), context: *n64.graphics.GeometryEncoder, index: u16) void {
-        self.bind(context, index, self.get(index));
-    }
-};
+const test_materials = [_]n64.graphics.Material{.{
+    .flags = .{ .no_light = true },
+    .combine = .primitive,
+    .primitive = .green,
+}};
 
 fn mutableModelRollover() !void {
     var memory: [1024]u8 align(64) = undefined;
@@ -166,16 +156,17 @@ fn mutableModelRollover() !void {
         .material_index = 0,
         .vertex_count = 3,
     }};
-    const source: n64.graphics.ModelAsset(TestMaterials) = .{
+    const source: n64.graphics.ModelAsset = .{
         .model = .{ .parts = &parts },
-        .materials = .{},
+        .materials = &test_materials,
     };
     var mesh = try n64.graphics.MutableModel.init(allocator, source.model);
     defer mesh.deinit(allocator);
     var vertices = mesh.vertices(0).iterator();
     while (vertices.next()) |vertex| vertex.position[0] += 1;
     try testing.expectEqual(@as(i16, -1), model_vertices[0].pos_a[0]);
-    const asset = source.withModel(mesh.model()).withOverrides(.{.{ .primitive = n64.graphics.pixel.Rgba32.blue }});
+    var blue_material: [1]n64.graphics.Material = undefined;
+    const asset = try source.withModel(mesh.model()).withOverridesInto(&blue_material, .{.{ .primitive = n64.graphics.pixel.Rgba32.blue }});
     owned_renderer.init();
     const image = try n64.graphics.Image(n64.graphics.pixel.Rgba32).initBuffer(&pixels, 8, 8);
     owned_renderer.beginFrame(image, .{ .clear_color = .black });
@@ -208,9 +199,9 @@ fn transformedModel() !void {
         .vertex_count = 3,
         .data_usage = .dynamic,
     }};
-    const asset: n64.graphics.ModelAsset(TestMaterials) = .{
+    const asset: n64.graphics.ModelAsset = .{
         .model = .{ .parts = &parts },
-        .materials = .{},
+        .materials = &test_materials,
     };
     owned_renderer.geometry.drawModelWithTransform(asset, &model_transform);
     const submitted = owned_renderer.submit();
@@ -270,7 +261,7 @@ fn mixedJointModel() !void {
     };
     n64.cpu.cache.writebackData(&bone_vertices);
     n64.cpu.cache.writebackData(&model_indices);
-    bone_draw.record(&owned_renderer.geometry, n64.graphics.Model{ .parts = &parts }, TestMaterials{});
+    bone_draw.record(&owned_renderer.geometry, .{ .model = .{ .parts = &parts }, .materials = &test_materials });
     for (0..2) |index| {
         pose_buffers[index] = @splat(.identity);
         const translation: f32 = if (index == 0) 1 else -1;
@@ -295,7 +286,7 @@ fn mixedJointModel() !void {
         var reference = model_vertices;
         reference[0].pos_b[0] = if (index == 0) 2 else 0;
         const reference_parts = [_]n64.graphics.Model.Part{.{ .vertices = &reference, .strip_indices = &model_indices, .material_index = 0, .vertex_count = 3, .data_usage = .dynamic }};
-        const asset: n64.graphics.ModelAsset(TestMaterials) = .{ .model = .{ .parts = &reference_parts }, .materials = .{} };
+        const asset: n64.graphics.ModelAsset = .{ .model = .{ .parts = &reference_parts }, .materials = &test_materials };
         owned_renderer.beginFrame(image, .{ .clear_color = .black });
         owned_renderer.geometry.attachViewport(&model_viewport);
         owned_renderer.geometry.drawModelWithTransform(asset, &model_transform);

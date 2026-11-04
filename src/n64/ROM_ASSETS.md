@@ -82,11 +82,13 @@ accept owner-scoped `LoadOptions`/`WaitOptions` with
 `.max_attempts = 1_000_000` by default. For a different bounded budget, use
 `load(.{ .max_attempts = ... })` or `wait(.{ .max_attempts = ... })`.
 
-`view()` returns the same borrowed native `n64.graphics.ModelAsset(Materials)`, `ConstImage`
-or `PalettedImage` used by the embedded path. Existing material overrides,
-recorded models, CPU skinning and first-joint RSP poses work with loaded assets.
-Bindings are established once when DMA completes; `view()` does not traverse
-model parts or allocate. The hot drawing path needs no asset lookup or loader.
+`view()` returns the same borrowed native `n64.graphics.ModelAsset`, `ConstImage`
+or `PalettedImage` used by the embedded path. Recorded models, CPU skinning and
+first-joint RSP poses work with loaded assets. A loaded model is a runtime value,
+so override its materials with `withOverridesInto`; size that storage with
+`assets.room.materialCount()`. Bindings, including the material table and its
+texture references into the payload, are established once when DMA completes;
+`view()` does not traverse model parts or allocate. The hot drawing path needs no asset lookup or loader.
 Model material and rig definitions (including animation tracks and weighted
 influences) remain generated native Zig metadata resident in the program. The
 ROM option moves the binary geometry and image payload, rather than every byte
@@ -191,8 +193,8 @@ try slot.draw(&geometry);
 try slot.retire();
 ```
 
-The slot generates a tagged union of concrete owners, keeps native material
-providers, and allocates no memory. `request` rejects occupied slots; `retire`
+The slot generates a tagged union of concrete owners, keeps each loaded material
+table in its owner, and allocates no memory. `request` rejects occupied slots; `retire`
 rejects pending loads. The caller determines when GPU borrowers have finished.
 Use two slots for background loading while an active room renders, as shown in
 the `room-stream` example. Queue tickets can be cancelled only between chunks;

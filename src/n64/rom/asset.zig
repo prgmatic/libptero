@@ -13,8 +13,14 @@ pub fn Asset(comptime Definition: type) type {
 
         /// Model material identifiers are available before the cartridge payload is loaded.
         pub fn materialIndex(_: @This(), comptime name: []const u8) u16 {
-            if (!@hasDecl(Value, "materialIndex")) @compileError("materialIndex requires a typed model asset");
-            return Value.materialIndex(undefined, name);
+            if (!@hasDecl(Definition, "material_names")) @compileError("materialIndex requires a model asset");
+            return @import("../graphics/model/material_ids.zig").index(&Definition.material_names, name);
+        }
+
+        /// Materials in a loaded model, for sizing `withOverridesInto` storage.
+        pub fn materialCount(_: @This()) usize {
+            if (!@hasDecl(Definition, "material_names")) @compileError("materialCount requires a model asset");
+            return Definition.material_names.len;
         }
 
         pub fn storageSize(_: @This()) usize {

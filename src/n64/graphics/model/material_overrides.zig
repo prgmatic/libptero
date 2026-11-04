@@ -1,54 +1,49 @@
+//! Declarative material overrides applied to plain `Material` data.
+//! Entries form a tuple of anonymous structs whose keys are validated at
+//! compile time; their values may be runtime data.
 const std = @import("std");
 const Material = @import("../Material.zig");
+const Texture = @import("../Texture.zig");
 
-/// Providers expose get(index) and bind(context, index, material), allowing
-/// ordinary overrides to preserve a generated provider's embedded textures.
-pub fn Provider(comptime Base: type, comptime Entries: type) type {
-    comptime validateEntries(Entries);
-    return struct {
-        base: Base,
-        entries: Entries,
-        pub const material_names = if (@hasDecl(Base, "material_names")) Base.material_names else [_][]const u8{};
-
-        pub fn get(self: @This(), index: u16) Material {
-            var material = self.base.get(index);
-            inline for (self.entries) |entry| {
-                if (matches(entry, index)) applyFields(&material, entry);
-            }
-            return material;
+/// Apply every matching entry to `materials` in order, so later entries win.
+/// Entries without `index` affect every material.
+pub fn applyAll(materials: []Material, entries: anytype) void {
+    comptime validateEntries(@TypeOf(entries));
+    for (materials, 0..) |*material, index| {
+        inline for (entries) |entry| {
+            if (matches(entry, index)) applyEntry(material, entry);
         }
-
-        pub fn apply(self: @This(), context: anytype, index: u16) void {
-            self.bind(context, index, self.get(index));
-        }
-
-        pub fn bind(self: @This(), context: anytype, index: u16, material: Material) void {
-            // Find the last texture binding, just as get applies the last state
-            // override. State-only entries retain preceding texture bindings.
-            inline for (0..std.meta.fields(Entries).len) |i| {
-                const entry = self.entries[std.meta.fields(Entries).len - 1 - i];
-                if (comptime @hasField(@TypeOf(entry), "texture")) {
-                    if (matches(entry, index)) {
-                        bindTextures(material, context, entry);
-                        return;
-                    }
-                }
-            }
-            self.base.bind(context, index, material);
-        }
-    };
+    }
 }
 
-fn matches(entry: anytype, index: u16) bool {
+fn matches(entry: anytype, index: usize) bool {
     return if (@hasField(@TypeOf(entry), "index")) entry.index == index else true;
 }
 
-fn applyFields(material: *Material, entry: anytype) void {
-    if (@hasField(@TypeOf(entry), "material")) material.* = entry.material;
+fn applyEntry(material: *Material, entry: anytype) void {
+    const Entry = @TypeOf(entry);
+    if (@hasField(Entry, "material")) replaceState(material, entry.material);
     inline for (std.meta.fields(Material)) |field| {
-        if (@hasField(@TypeOf(entry), field.name)) overrideValue(&@field(material, field.name), @field(entry, field.name));
+        if (comptime isTextureField(field.name)) continue;
+        if (@hasField(Entry, field.name)) overrideValue(&@field(material, field.name), @field(entry, field.name));
     }
-    if (@hasField(@TypeOf(entry), "no_light")) material.flags.no_light = entry.no_light;
+    if (@hasField(Entry, "no_light")) material.flags.no_light = entry.no_light;
+    if (@hasField(Entry, "texture")) {
+        material.texture = .from(entry.texture);
+        // A texture without a partner replaces any earlier pair.
+        material.second_texture = if (@hasField(Entry, "second_texture")) Texture.from(entry.second_texture) else null;
+    }
+}
+
+/// `.material` replaces render state; textures are kept unless it names its own.
+fn replaceState(material: *Material, replacement: Material) void {
+    const texture = material.texture;
+    const second_texture = material.second_texture;
+    material.* = replacement;
+    if (replacement.texture == null) {
+        material.texture = texture;
+        material.second_texture = second_texture;
+    }
 }
 
 fn overrideValue(destination: anytype, value: anytype) void {
@@ -66,41 +61,68 @@ fn isStruct(comptime Value: type) bool {
     return std.meta.activeTag(@typeInfo(Value)) == .@"struct";
 }
 
-fn bindTextures(material: Material, context: anytype, entry: anytype) void {
-    if (@hasField(@TypeOf(entry), "second_texture")) {
-        material.apply(context);
-        context.render.useTexturePair(entry.texture, entry.second_texture, material.sampler, material.second_sampler);
-    } else material.bind(context, entry.texture);
+fn isTextureField(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "texture") or std.mem.eql(u8, name, "second_texture");
 }
 
 const special_fields = std.StaticStringMap(void).initComptime(.{
-    .{ "index", {} },          .{ "material", {} }, .{ "texture", {} },
-    .{ "second_texture", {} }, .{ "no_light", {} },
+    .{ "index", {} }, .{ "material", {} }, .{ "no_light", {} },
 });
 
 fn validateEntries(comptime Entries: type) void {
-    // Iteration in get/bind enforces the tuple contract; validate each entry's
-    // keys separately so misspellings cannot silently leave imported state.
+    // Validate each entry's keys so misspellings cannot silently leave imported state.
     inline for (std.meta.fields(Entries)) |field| validateEntry(field.type);
 }
 
 fn validateEntry(comptime Entry: type) void {
     inline for (std.meta.fields(Entry)) |field| validateField(field.name);
-    validateTexturePair(Entry);
+    if (@hasField(Entry, "second_texture") and !@hasField(Entry, "texture"))
+        @compileError("second_texture requires texture in the same entry");
 }
 
 fn validateField(comptime name: []const u8) void {
-    if (!allowedField(name)) @compileError("unknown material override: " ++ name);
+    if (!@hasField(Material, name) and !special_fields.has(name)) @compileError("unknown material override: " ++ name);
 }
 
-fn allowedField(comptime name: []const u8) bool {
-    return @hasField(Material, name) or special_fields.has(name);
+test "entries compose in order, merge nested state and keep earlier textures" {
+    const pixel = @import("../pixel.zig");
+    const image = @import("../image.zig");
+    const texels = [_]pixel.Rgba16{.white} ** 4;
+    const other_texels = [_]pixel.Rgba16{.red} ** 4;
+    const crate: image.ConstImage(pixel.Rgba16) = .{ .width = 2, .height = 2, .texel_data = &texels };
+    const other: image.ConstImage(pixel.Rgba16) = .{ .width = 2, .height = 2, .texel_data = &other_texels };
+    const base: Material = .{ .flags = .{ .depth = true, .textured = true }, .sampler = .{ .mask_t = 3 }, .texture = .from(crate) };
+    var materials = [_]Material{ base, base };
+    applyAll(&materials, .{
+        .{ .fog = false, .no_light = true },
+        .{ .index = 1, .texture = other, .sampler = .{ .mask_s = 1 } },
+        .{ .index = 1, .no_light = false, .primitive = pixel.Rgba32.red },
+    });
+    try std.testing.expect(materials[0].flags.no_light);
+    try std.testing.expect(!materials[1].flags.no_light);
+    try std.testing.expectEqual(@as(?bool, false), materials[0].fog);
+    try std.testing.expectEqual(pixel.Rgba32.red, materials[1].primitive.?);
+    try std.testing.expectEqual(@as(u4, 1), materials[1].sampler.mask_s);
+    try std.testing.expectEqual(@as(u4, 3), materials[1].sampler.mask_t);
+    try std.testing.expectEqual(@intFromPtr(&texels), @intFromPtr(materials[0].texture.?.texels));
+    try std.testing.expectEqual(@intFromPtr(&other_texels), @intFromPtr(materials[1].texture.?.texels));
+
+    applyAll(&materials, .{.{ .index = 0, .texture = crate, .second_texture = other }});
+    try std.testing.expectEqual(@intFromPtr(&other_texels), @intFromPtr(materials[0].second_texture.?.texels));
+    applyAll(&materials, .{.{ .index = 0, .texture = other }});
+    try std.testing.expect(materials[0].second_texture == null);
 }
 
-fn validateTexturePair(comptime Entry: type) void {
-    if (@hasField(Entry, "second_texture")) requireTexture(Entry);
-}
-
-fn requireTexture(comptime Entry: type) void {
-    if (!@hasField(Entry, "texture")) @compileError("second_texture requires texture in the same entry");
+test "material replacement keeps textures unless the replacement supplies one" {
+    const texels = [_]u8{0} ** 16;
+    const texture: Texture = .{ .format = .intensity, .bit_depth = .@"8", .width = 4, .height = 4, .texels = &texels };
+    var materials = [_]Material{.{ .texture = texture, .fog = true }};
+    applyAll(&materials, .{.{ .material = Material{ .alpha_cutoff = 9 } }});
+    try std.testing.expectEqual(@as(?u8, 9), materials[0].alpha_cutoff);
+    try std.testing.expectEqual(@as(?bool, null), materials[0].fog);
+    try std.testing.expect(materials[0].texture != null);
+    var replaced = texture;
+    replaced.width = 2;
+    applyAll(&materials, .{.{ .material = Material{ .texture = replaced } }});
+    try std.testing.expectEqual(@as(u16, 2), materials[0].texture.?.width);
 }

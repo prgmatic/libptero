@@ -74,12 +74,14 @@ fn models() !void {
         const value = try loaded.load(.{ .max_attempts = timeout });
         const reference = @field(assets, name ++ "_resident");
         if (comptime std.mem.eql(u8, name, "model")) {
-            const id = value.materialIndex("triangle");
+            const id = value.findMaterial("triangle").?;
             try testing.expectEqual(source.materialIndex("triangle"), id);
             try testing.expectEqual(reference.materialIndex("triangle"), id);
-            const overridden = value.withOverrides(.{.{ .index = id, .fog = false }});
-            try testing.expectEqual(id, overridden.withModel(value.model).materialIndex("triangle"));
+            var override_storage: [4]n64.graphics.Material = undefined;
+            const overridden = try value.withOverridesInto(&override_storage, .{.{ .index = id, .fog = false }});
+            try testing.expectEqual(@as(?u16, id), overridden.withModel(value.model).findMaterial("triangle"));
             try testing.expect(overridden.material(id).fog == false);
+            try testing.expect(value.material(id).fog != false);
         }
         try testing.expectEqual(reference.model.parts.len, value.model.parts.len);
         for (value.model.parts, reference.model.parts) |part, expected| {
@@ -89,7 +91,7 @@ fn models() !void {
             try testing.expectEqual(expected.vertex_offset, part.vertex_offset);
             try testing.expectEqual(expected.bone, part.bone);
             try testing.expectEqual(expected.skin, part.skin);
-            try testing.expect(std.meta.eql(value.material(part.material_index), reference.material(part.material_index)));
+            try expectSameMaterial(value.material(part.material_index), reference.material(part.material_index), loaded.bytes);
             for (expected.influences, part.influences) |a, b| try testing.expect(std.meta.eql(a, b));
             try testing.expect(@intFromPtr(part.vertices.ptr) >= @intFromPtr(loaded.bytes.ptr));
             try testing.expect(@intFromPtr(part.vertices.ptr) + std.mem.sliceAsBytes(part.vertices).len <= @intFromPtr(loaded.bytes.ptr) + loaded.bytes.len);
@@ -147,6 +149,22 @@ fn drawModel(asset: anytype) ![64]u32 {
     var result: [64]u32 = undefined;
     for (&result, pixels) |*rgb, pixel| rgb.* = @as(u32, @bitCast(pixel)) >> 8;
     return result;
+}
+
+/// Loaded materials match resident state; their textures point into the loaded payload.
+fn expectSameMaterial(loaded: n64.graphics.Material, resident: n64.graphics.Material, payload: []const u8) !void {
+    var actual = loaded;
+    var expected = resident;
+    try testing.expectEqual(expected.texture == null, actual.texture == null);
+    if (actual.texture) |texture| {
+        const reference = expected.texture.?;
+        try testing.expectEqual(reference.width, texture.width);
+        try testing.expectEqual(reference.format, texture.format);
+        try testing.expect(@intFromPtr(texture.texels) >= @intFromPtr(payload.ptr) and @intFromPtr(texture.texels) < @intFromPtr(payload.ptr) + payload.len);
+    }
+    actual.texture = null;
+    expected.texture = null;
+    try testing.expect(std.meta.eql(actual, expected));
 }
 
 fn renderedModels() !void {

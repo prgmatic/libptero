@@ -14,13 +14,15 @@ Add `.storage = .rom` to keep the geometry and image blob on cartridge until
 explicitly loaded. The generated handle provides `init(allocator)`,
 `initBuffer(memory)` and `storageSize()`. The resulting stable-address owner
 provides `load`, asynchronous `begin`/`poll`/`wait`, `view`, `unload`, and `deinit`.
-Its view is the same native model asset used below. Material, skeleton, animation
-and weighted-influence definitions remain resident Zig metadata. See
+Its view is the same native model asset used below. Skeleton, animation and
+weighted-influence definitions remain resident Zig metadata; the loaded owner
+builds the material table, with texture references into its payload, on load. See
 [typed ROM assets](../../src/n64/ROM_ASSETS.md#typed-textures-and-models) for
 ownership, timeout recovery and direct-DMA behavior.
 
-The resulting value pairs a native `n64.graphics.Model` with a typed
-material provider. Draw it with `geometry_context.drawModel(asset)` or
+The resulting value is an `n64.graphics.ModelAsset`: a native
+`n64.graphics.Model` plus a `[]const n64.graphics.Material` table and the source
+material names. Every model shares this type. Draw it with `geometry_context.drawModel(asset)` or
 `geometry_context.drawModelWithTransform(asset, &matrix)`. Identical native vertices are merged before batching, including their UVs,
 colors, normals, skin influences, and bind-local source attributes so seams are
 preserved. Mesh primitives are remapped into batches that fit
@@ -36,14 +38,14 @@ render-mode preset to distinguish opaque and translucent surfaces.
 
 Legacy Fast64 `extras.f3d_mat.tex0` tile bounds supply UV dimensions when no
 embedded image dimensions are available. External images still need separate
-texture assets and declarative bindings or a material callback; this metadata fallback does not load them.
+texture assets and declarative bindings or an edited material table; this metadata fallback does not load them.
 
 Material state is exposed as `asset.material(index)` (a native
-`n64.graphics.Material`). `context.drawModel(asset)` applies it
-automatically for embedded textures. For external textures, callbacks can use
-`asset.material(index).bind(context, texture)` without recreating material settings.
-For ordinary bindings, use a value such as
-`asset.withOverrides(.{.{ .index = 0, .texture = assets.crate, .fog = false }})`.
+`n64.graphics.Material`). Embedded textures are stored in the material's
+`texture` field as an `n64.graphics.Texture`, and `context.drawModel(asset)`
+binds them automatically. For ordinary bindings, use a value such as
+`asset.withOverrides(.{.{ .index = 0, .texture = assets.crate, .fog = false }})`,
+or `withOverridesInto(&storage, ...)` when the asset or values are runtime data.
 Overrides preserve imported material state and retain embedded textures for
 unmodified materials. Any native material field can be replaced; `no_light`
 updates that draw flag without replacing the other flags. `second_texture`
@@ -59,21 +61,22 @@ const material = robot.material(body);
 ```
 
 The result is the native `u16` material index; there is no runtime name lookup,
-allocation, or changed draw ABI. Overrides (including nested overrides) and
-`withModel` preserve identifiers. Typed ROM model handles expose `materialIndex`
-before loading, and their loaded views expose the same identifiers.
+allocation, or changed draw ABI. `materialIndex` requires a comptime-known asset;
+`findMaterial(name)` performs the same lookup at runtime and returns `?u16`.
+Overrides (including nested overrides) and `withModel` preserve identifiers.
+Typed ROM model handles expose `materialIndex` and `materialCount` before loading,
+and their loaded views carry the same names.
 
 Names are case-sensitive and preserved exactly, including spaces, punctuation,
 and UTF-8. Missing, empty, or duplicate-name lookup is a compile error. Unnamed
 and duplicate-named materials still convert and remain addressable by numeric
 index; give a material a unique source name to use an identifier. Identifiers
 follow source material reordering automatically, so game code does not hardcode
-exporter indices. Custom providers may define `pub const material_names` as an
-array of source-name strings in numeric material order to support this API.
+exporter indices. Hand-built assets can set `material_names` to support this API.
 
-Pass a custom provider through `context.drawModelWithMaterials(asset.model, provider)`;
-it implements `apply(context, material_index)`. Asset values contain borrowed geometry
-and their provider, with no drawing methods or hidden renderer ownership.
+Pass an explicit table through `context.drawModelWithMaterials(asset.model, &materials)`.
+Asset values contain borrowed geometry and materials, with no drawing methods or
+hidden renderer ownership.
 The legacy Fast64 subset preserves front/back culling, unlit shading, fog enable,
 sampler masks/clamping/mirroring/signed shifts for both texture units, point/median/
 bilinear filtering, one/two-cycle combiners, primitive/environment colors, and
@@ -159,7 +162,7 @@ Node matrix transforms, instanced skinned mesh nodes, animated rigid meshes, mor
 targets, sparse accessors, external buffers/images, embedded texture palettes, automatic
 loading of multiple texture units, and the full modern Fast64
 combiner/render-mode extension are not implemented. External textures can be
-bound with declarative asset overrides or a custom typed material provider.
+bound with declarative asset overrides or an edited material table.
 External CI4/CI8 textures and their palettes are supported by the public texture SDK.
 Two external textures can be bound with `render.useTexturePair`; identical
 images share their TMEM storage while retaining separate sampler settings.

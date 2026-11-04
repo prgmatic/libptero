@@ -1,17 +1,19 @@
-//! Native model material state, independent of how textures are supplied.
-//! Generated assets expose these values for external-texture callbacks too.
+//! Native model material: plain render state plus optional borrowed textures.
+//! Every model shares this type, so materials can be stored, copied, and
+//! edited at runtime. Texture storage must outlive GPU use of the material.
 
 const geometry = @import("geometry.zig");
 const rdp = @import("../rdp.zig");
 const modes = @import("../rdp/modes.zig");
-const texture = @import("../rdp/texture.zig");
+const rdp_texture = @import("../rdp/texture.zig");
 const Rgba32 = @import("pixel.zig").Rgba32;
+const Texture = @import("Texture.zig");
 
 const Material = @This();
 
 flags: geometry.DrawFlags = .{ .depth = true, .shaded = true },
-sampler: texture.Sampler = .{},
-second_sampler: texture.Sampler = .{},
+sampler: rdp_texture.Sampler = .{},
+second_sampler: rdp_texture.Sampler = .{},
 filter: modes.TextureSample = .point,
 translucent: bool = false,
 z_mode: ?rdp.ZMode = null,
@@ -39,8 +41,22 @@ edge_antialias: bool = false,
 /// write for a surface drawn in painter's order, such as a ground plane.
 depth_test: ?bool = null,
 depth_write: ?bool = null,
+/// Bound with `sampler` when the material is applied. Null leaves TMEM alone.
+texture: ?Texture = null,
+/// With `texture`, both load into adjacent tiles for two-cycle combiners.
+second_texture: ?Texture = null,
 
+/// Apply render state and bind this material's own textures, if any.
 pub fn apply(self: Material, context: anytype) void {
+    const first = self.texture orelse return self.applyState(context);
+    if (self.second_texture) |second| {
+        self.applyState(context);
+        context.render.useTexturePair(first, second, self.sampler, self.second_sampler);
+    } else self.bind(context, first);
+}
+
+/// Apply render state only, leaving texture residency unchanged.
+pub fn applyState(self: Material, context: anytype) void {
     const fog = self.resolvedFog(context);
     self.applyGeometry(context, fog);
     const rq = if (@typeInfo(@TypeOf(context.render)) == .pointer) context.render else &context.render;
@@ -129,14 +145,15 @@ fn blendMode(self: Material, fog: bool) rdp.BlendMode {
     return if (self.cycle_type == .two_cycle) .alpha_two_cycle else .alpha;
 }
 
-/// Apply state and bind an externally supplied, typed texture.
+/// Apply state and bind `image` (a typed image or `Texture`) in place of the
+/// material's own textures. Sphere maps and wrap masks adapt to its size.
 pub fn bind(self: Material, context: anytype, image: anytype) void {
     var resolved = self;
     if (self.vertex_effect == .spherical)
         resolved.vertex_effect = .{ .spherical = .{ .width = @intCast(image.width), .height = @intCast(image.height) } };
     resolved.sampler.mask_s = boundedMask(self.sampler.mask_s, image.width);
     resolved.sampler.mask_t = boundedMask(self.sampler.mask_t, image.height);
-    resolved.apply(context);
+    resolved.applyState(context);
     _ = context.render.useTextureSampler(image, resolved.sampler);
 }
 

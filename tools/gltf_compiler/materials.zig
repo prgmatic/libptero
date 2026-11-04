@@ -123,9 +123,11 @@ pub fn filter(material: anytype, point: bool) ![]const u8 {
     return names[index];
 }
 
-pub fn emit(allocator: std.mem.Allocator, output: *std.ArrayList(u8), material: anytype, culling: anytype, unlit: bool, blended: bool, has_image: bool, image_sampler: Sampler, filtering: []const u8) !void {
+/// Emit a native `n64.graphics.Material` literal. `texture` is a Zig
+/// expression producing the material's image, or null when it has none.
+pub fn emit(allocator: std.mem.Allocator, output: *std.ArrayList(u8), material: anytype, culling: anytype, unlit: bool, blended: bool, texture: ?[]const u8, image_sampler: Sampler, filtering: []const u8) !void {
     const f = legacy(material);
-    const flags = nativeFlags(f, culling, unlit, has_image);
+    const flags = nativeFlags(f, culling, unlit, texture != null);
     try validateFlags(flags);
     const first_sampler = if (f) |value| try sampler(value.tex0) else image_sampler;
     const second_sampler = if (f) |value| try sampler(value.tex1) else Sampler{};
@@ -142,7 +144,13 @@ pub fn emit(allocator: std.mem.Allocator, output: *std.ArrayList(u8), material: 
         try emitRegisters(allocator, output, value);
         try emitDepthMode(allocator, output, value.rdp_settings);
     }
+    try emitTexture(allocator, output, texture);
     try output.appendSlice(allocator, "}");
+}
+
+fn emitTexture(allocator: std.mem.Allocator, output: *std.ArrayList(u8), texture: ?[]const u8) !void {
+    const expression = texture orelse return;
+    try append(allocator, output, ".texture = n64.graphics.Texture.from({s}), ", .{expression});
 }
 
 const NativeFlags = struct { depth: bool = true, textured: bool, shaded: bool = true, cull_front: bool, cull_back: bool, no_light: bool = false };

@@ -6,6 +6,8 @@ const rdp = @import("../rdp.zig");
 const RdpRenderer = @import("../rdp/Renderer.zig");
 const Rgba32 = @import("pixel.zig").Rgba32;
 const RecordedModel = @import("RecordedModel.zig");
+const ModelAsset = @import("ModelAsset.zig");
+const Material = @import("Material.zig");
 const geometry = @import("geometry.zig");
 const DrawFlags = geometry.DrawFlags;
 const VertexEffect = geometry.VertexEffect;
@@ -155,25 +157,25 @@ pub fn submit(self: *GeometryEncoder) rdp.Completion {
     return self.render.submit();
 }
 
-/// Draw a model asset with its typed material provider. Does not submit or wait.
-pub fn drawModel(self: *GeometryEncoder, asset: anytype) void {
+/// Draw a model asset with its material table. Does not submit or wait.
+pub fn drawModel(self: *GeometryEncoder, asset: ModelAsset) void {
     self.drawModelWithMaterials(asset.model, asset.materials);
 }
 
-/// Draw packed model geometry using custom material bindings.
-pub fn drawModelWithMaterials(self: *GeometryEncoder, model: @import("Model.zig"), materials: anytype) void {
+/// Draw packed model geometry using an explicit material table.
+pub fn drawModelWithMaterials(self: *GeometryEncoder, model: @import("Model.zig"), materials: []const Material) void {
     @import("model/draw.zig").draw(self, model, materials);
 }
 
 /// Push a borrowed transform, draw an asset, and restore the previous matrix.
-/// Keep the transform and asset storage alive until submission completes.
-pub fn drawModelWithTransform(self: *GeometryEncoder, asset: anytype, matrix: *const math.FixedMat4) void {
+/// Keep the transform and texture storage alive until submission completes.
+pub fn drawModelWithTransform(self: *GeometryEncoder, asset: ModelAsset, matrix: *const math.FixedMat4) void {
     @import("model/draw.zig").drawWithTransform(self, asset, matrix);
 }
 
-/// Record a typed asset's immutable geometry and material commands.
-pub fn recordModel(self: *GeometryEncoder, recorded: *RecordedModel, asset: anytype) void {
-    recorded.record(self, asset.model, asset.materials);
+/// Record an asset's immutable geometry and material commands.
+pub fn recordModel(self: *GeometryEncoder, recorded: *RecordedModel, asset: ModelAsset) void {
+    recorded.record(self, asset);
 }
 
 /// Replay recorded commands with a borrowed transform, restoring the matrix stack.

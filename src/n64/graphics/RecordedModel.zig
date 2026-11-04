@@ -15,7 +15,8 @@ final_state: MaterialState = undefined,
 pose_len: usize = 0,
 
 /// Encode a model and its material setup once for later draws.
-pub fn record(self: *RecordedModel, context: *GeometryEncoder, model: anytype, materials: anytype) void {
+pub fn record(self: *RecordedModel, context: *GeometryEncoder, asset: @import("ModelAsset.zig")) void {
+    const model = asset.model;
     self.commands = rsp.CommandBuffer.init(self.buffer[0..]);
     self.pose_len = 0;
     for (model.parts) |part| if (part.bone) |bone| {
@@ -27,7 +28,7 @@ pub fn record(self: *RecordedModel, context: *GeometryEncoder, model: anytype, m
     const previous = MaterialState.read(context);
     context.last_draw_flags = null;
     context.queue.beginBlock(&self.commands);
-    @import("model/draw.zig").draw(context, model, materials);
+    @import("model/draw.zig").draw(context, model, asset.materials);
     context.queue.endBlock(&self.commands);
     self.final_state = MaterialState.read(context);
     previous.restore(context);

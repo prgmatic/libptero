@@ -346,8 +346,9 @@ fn addMaterialIdentifierChecks(b: *std.Build, test_step: *std.Build.Step) void {
     inline for (.{ .{ "missing", "UnknownMaterialName" }, .{ "body", "AmbiguousMaterialName" } }) |check| {
         const source = b.addWriteFiles().add(b.fmt("material-id-{s}.zig", .{check[0]}), b.fmt(
             \\const n64 = @import("n64");
-            \\const Provider = struct {{ pub const material_names = [_][]const u8{{ "body", "body" }}; }};
-            \\comptime {{ _ = @as(n64.graphics.ModelAsset(Provider), undefined).materialIndex("{s}"); }}
+            \\const names = [_][]const u8{{ "body", "body" }};
+            \\const asset: n64.graphics.ModelAsset = .{{ .model = .{{ .parts = &.{{}} }}, .material_names = &names }};
+            \\comptime {{ _ = asset.materialIndex("{s}"); }}
         , .{check[0]}));
         const invalid = b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = source,

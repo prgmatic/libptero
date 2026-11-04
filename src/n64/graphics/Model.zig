@@ -45,6 +45,9 @@ pub const Part = struct {
 test "model applies changed materials and submits packed batches" {
     const Testing = struct {
         const Context = struct {
+            render: @import("../rdp.zig").RenderEncoder(@import("../rdp.zig").backend.Direct) = undefined,
+            fog_enabled: bool = false,
+            applications: usize = 0,
             matrix: ?*const math.FixedMat4 = null,
             saved_matrix: ?*const math.FixedMat4 = null,
             expected_matrix: ?*const math.FixedMat4 = null,
@@ -90,14 +93,17 @@ test "model applies changed materials and submits packed batches" {
                 unreachable;
             }
             pub fn beginModelMaterial(_: *@This()) void {}
-        };
-        const Materials = struct {
-            applications: *usize,
-            pub fn apply(self: @This(), _: *Context, _: u16) void {
-                self.applications.* += 1;
+            pub fn setDrawFlags(self: *@This(), _: geometry.DrawFlags) void {
+                self.applications += 1;
+            }
+            pub fn setVertexEffect(_: *@This(), _: geometry.VertexEffect) void {}
+            pub fn setFogEnabled(self: *@This(), enabled: bool) void {
+                self.fog_enabled = enabled;
             }
         };
+        const materials = [_]Material{.{}} ** 8;
     };
+    var commands: [64]u64 = undefined;
     const vertices = [_]geometry.VertexPair{.{
         .pos_a = .{ 0, 0, 0 },
         .normal_a = 0,
@@ -112,12 +118,11 @@ test "model applies changed materials and submits packed batches" {
         .{ .vertices = &vertices, .strip_indices = &strip_indices, .material_index = 2, .vertex_count = 2 },
         .{ .vertices = &vertices, .strip_indices = &strip_indices, .material_index = 7, .vertex_count = 2, .data_usage = .dynamic },
     };
-    var context: Testing.Context = .{};
-    var applications: usize = 0;
-    drawing.draw(&context, .{ .parts = &parts }, Testing.Materials{ .applications = &applications });
+    var context: Testing.Context = .{ .render = .init(.{ .buffer = &commands }) };
+    drawing.draw(&context, .{ .parts = &parts }, &Testing.materials);
     try @import("std").testing.expectEqual(@as(usize, 6), context.loads);
     try @import("std").testing.expectEqual(@as(usize, 3), context.draws);
-    try @import("std").testing.expectEqual(@as(usize, 2), applications);
+    try @import("std").testing.expectEqual(@as(usize, 2), context.applications);
     try @import("std").testing.expectEqual(@as(usize, 3), context.syncs);
     try @import("std").testing.expectEqual(@as(usize, 1), context.dynamic_loads);
     try @import("std").testing.expectEqual(@as(usize, 1), context.dynamic_draws);
@@ -125,19 +130,15 @@ test "model applies changed materials and submits packed batches" {
     const previous: math.FixedMat4 align(16) = .identity;
     var transform: math.FixedMat4 align(16) = .identity;
     transform.set(3, 0, 4);
-    context = .{ .matrix = &previous, .expected_matrix = &transform };
-    applications = 0;
-    const asset: @import("model_asset.zig").ModelAsset(Testing.Materials) = .{
-        .model = .{ .parts = &parts },
-        .materials = .{ .applications = &applications },
-    };
+    context = .{ .render = .init(.{ .buffer = &commands }), .matrix = &previous, .expected_matrix = &transform };
+    const asset: @import("ModelAsset.zig") = .{ .model = .{ .parts = &parts }, .materials = &Testing.materials };
     drawing.drawWithTransform(&context, asset, &transform);
     try @import("std").testing.expect(!context.wrong_matrix);
     try @import("std").testing.expect(context.matrix == &previous);
     try @import("std").testing.expectEqual(@as(usize, 1), context.pushes);
     try @import("std").testing.expectEqual(@as(usize, 1), context.pops);
     try @import("std").testing.expectEqual(@as(usize, 3), context.draws);
-    try @import("std").testing.expectEqual(@as(usize, 2), applications);
+    try @import("std").testing.expectEqual(@as(usize, 2), context.applications);
     var empty = asset;
     empty.model.parts = &.{};
     drawing.drawWithTransform(&context, empty, &transform);
@@ -145,75 +146,42 @@ test "model applies changed materials and submits packed batches" {
     try @import("std").testing.expectEqual(@as(usize, 2), context.pushes);
     try @import("std").testing.expectEqual(@as(usize, 2), context.pops);
     try @import("std").testing.expectEqual(@as(usize, 3), context.draws);
-    try @import("std").testing.expectEqual(@as(usize, 2), applications);
+    try @import("std").testing.expectEqual(@as(usize, 2), context.applications);
 }
 
-test "asset overrides preserve embedded bindings, compose, and bind typed textures" {
+test "materials bind their own single and paired textures" {
     const std = @import("std");
     const rdp = @import("../rdp.zig");
     const colors = @import("pixel.zig");
+    const Texture = @import("Texture.zig");
+    const pixels = [_]colors.Rgba16{.white} ** 4;
+    const other_pixels = [_]colors.Rgba16{.red} ** 4;
     const image = @import("image.zig");
-    const Fixture = struct {
-        const pixels = [_]colors.Rgba16{.white} ** 4;
-        const other_pixels = [_]colors.Rgba16{.red} ** 4;
-        const texture: image.ConstImage(colors.Rgba16) = .{ .width = 2, .height = 2, .texel_data = &pixels };
-        const other: image.ConstImage(colors.Rgba16) = .{ .width = 2, .height = 2, .texel_data = &other_pixels };
-        const Context = struct {
-            render: rdp.RenderEncoder(rdp.backend.Direct),
-            fog_enabled: bool = true,
-            flags: geometry.DrawFlags = .{},
-            fallback_bindings: usize = 0,
-            pub fn setDrawFlags(self: *@This(), flags: geometry.DrawFlags) void {
-                self.flags = flags;
-            }
-            pub fn setVertexEffect(self: *@This(), _: geometry.VertexEffect) void {
-                _ = self;
-            }
-            pub fn setFogEnabled(self: *@This(), enabled: bool) void {
-                self.fog_enabled = enabled;
-            }
-        };
-        const Materials = struct {
-            pub fn get(_: @This(), _: u16) Material {
-                return .{ .flags = .{ .depth = true, .textured = true }, .sampler = .{ .mask_t = 3 }, .combine = .shade };
-            }
-            pub fn bind(_: @This(), context: *Context, _: u16, material: Material) void {
-                context.fallback_bindings += 1;
-                material.bind(context, texture);
-            }
-        };
+    const texture: Texture = .from(image.ConstImage(colors.Rgba16){ .width = 2, .height = 2, .texel_data = &pixels });
+    const other: Texture = .from(image.ConstImage(colors.Rgba16){ .width = 2, .height = 2, .texel_data = &other_pixels });
+    const Context = struct {
+        render: rdp.RenderEncoder(rdp.backend.Direct),
+        fog_enabled: bool = true,
+        pub fn setDrawFlags(_: *@This(), _: geometry.DrawFlags) void {}
+        pub fn setVertexEffect(_: *@This(), _: geometry.VertexEffect) void {}
+        pub fn setFogEnabled(self: *@This(), enabled: bool) void {
+            self.fog_enabled = enabled;
+        }
     };
-    const original: @import("model_asset.zig").ModelAsset(Fixture.Materials) = .{ .model = .{ .parts = &.{} }, .materials = .{} };
-    const overridden = original.withOverrides(.{
-        .{ .fog = false, .no_light = true },
-        .{ .index = 1, .texture = Fixture.other, .sampler = rdp.Sampler{ .mask_s = 1 } },
-    }).withOverrides(.{.{ .index = 1, .no_light = false, .primitive = colors.Rgba32.red }});
-    try std.testing.expect(overridden.material(0).flags.no_light);
-    try std.testing.expect(!overridden.material(1).flags.no_light);
-    try std.testing.expectEqual(colors.Rgba32.red, overridden.material(1).primitive.?);
-    try std.testing.expectEqual(@as(?bool, null), original.material(0).fog);
-    const literal_override = original.withOverrides(.{.{ .sampler = .{ .mask_s = 2 }, .flags = .{ .shaded = true }, .primitive = colors.Rgba32.blue }});
-    try std.testing.expectEqual(@as(u4, 2), literal_override.material(0).sampler.mask_s);
-    try std.testing.expectEqual(@as(u4, 3), literal_override.material(0).sampler.mask_t);
-    try std.testing.expect(literal_override.material(0).flags.depth);
-    try std.testing.expect(literal_override.material(0).flags.shaded);
-    try std.testing.expectEqual(colors.Rgba32.blue, literal_override.material(0).primitive.?);
     var commands: [256]u64 = undefined;
-    var context: Fixture.Context = .{ .render = .init(.{ .buffer = &commands }) };
-    overridden.materials.apply(&context, 0);
-    try std.testing.expectEqual(@as(usize, 1), context.fallback_bindings);
-    try std.testing.expectEqual(@intFromPtr(Fixture.pixels[0..].ptr), context.render.tex_cache[0].ptr);
-    overridden.materials.apply(&context, 1);
-    try std.testing.expectEqual(@as(usize, 1), context.fallback_bindings);
-    try std.testing.expectEqual(@intFromPtr(Fixture.other_pixels[0..].ptr), context.render.tex_cache[1].ptr);
-    try std.testing.expectEqual(@as(u4, 1), context.render.tex_cache[1].sampler.mask_s);
+    var context: Context = .{ .render = .init(.{ .buffer = &commands }) };
+    (Material{ .sampler = .{ .mask_s = 6 }, .texture = texture, .fog = false }).apply(&context);
     try std.testing.expect(!context.fog_enabled);
-    const pair = original.withOverrides(.{.{ .texture = Fixture.texture, .second_texture = Fixture.other }});
-    pair.materials.apply(&context, 0);
-    try std.testing.expectEqual(@as(usize, 1), context.fallback_bindings);
-    const replacement: Model = .{ .parts = &.{}, .animations = &.{.{ .name = "idle", .duration = 1, .tracks = &.{} }} };
-    try std.testing.expect(overridden.withModel(replacement).model.findAnimation("idle") != null);
-    try std.testing.expect(replacement.findAnimation("missing") == null);
+    try std.testing.expectEqual(@intFromPtr(&pixels), context.render.tex_cache[0].ptr);
+    // Wrap masks are bounded by the bound texture's power-of-two size.
+    try std.testing.expectEqual(@as(u4, 1), context.render.tex_cache[0].sampler.mask_s);
+    (Material{ .texture = texture, .second_texture = other, .second_sampler = .{ .shift_s = 2 } }).apply(&context);
+    try std.testing.expectEqual(@as(u3, 0), context.render.material_tile);
+    try std.testing.expectEqual(@as(u10, 4), context.render.tmem_next);
+    const before = context.render.cmd_queue.queue.index;
+    (Material{}).apply(&context);
+    try std.testing.expectEqual(@as(u10, 4), context.render.tmem_next);
+    try std.testing.expect(context.render.cmd_queue.queue.index > before);
 }
 
 test {

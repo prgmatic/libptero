@@ -55,7 +55,7 @@ Geometry state follows this precedence:
    Its default is `rdp.State.opaque_geometry`, white primitive/environment
    colors, and disabled fog. Edit the state value to choose antialiasing, dithering,
    or other defaults. Fog includes its color and near/far distances.
-2. The model's material provider applies its own fields, including depth,
+2. The model's material table applies its own fields, including depth,
    blending, filtering, combiner, and any explicit colors or fog enable.
    `asset.withOverrides(...)` remains the way to change imported materials.
 
@@ -66,7 +66,7 @@ framebuffer read per pixel. `rdp.State.antialiased_opaque_geometry` is the
 equivalent state for draws without a material.
 3. The next model draw reapplies the pass baseline. Optional material fields
    therefore inherit pass defaults rather than a preceding model's values.
-   Material order *within* a model retains the native material-provider contract.
+   Within a model, each material change applies that table entry in part order.
 
 The borrowed camera is attached before lights are transformed. `Lighting.lights`
 accepts directional and point lights in world space, up to

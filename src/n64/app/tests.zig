@@ -2,6 +2,7 @@ const rdp = @import("../rdp.zig");
 const std = @import("std");
 const context = @import("../app.zig");
 const graphics = @import("../graphics.zig");
+const empty_model: graphics.ModelAsset = .{ .model = .{ .parts = &.{} } };
 const math = @import("../math.zig");
 
 const Backend = struct {
@@ -49,12 +50,12 @@ const Backend = struct {
         pub fn attachViewport(self: *@This(), camera: *const graphics.Viewport) void {
             self.camera = camera;
         }
-        pub fn drawModelWithTransform(self: *@This(), asset: anytype, matrix: *const math.FixedMat4) void {
+        pub fn drawModelWithTransform(self: *@This(), asset: graphics.ModelAsset, matrix: *const math.FixedMat4) void {
             self.matrix = matrix;
-            if (@TypeOf(asset) != void) self.vertices = asset.vertices;
+            if (asset.model.parts.len != 0) self.vertices = asset.model.parts[0].vertices;
             self.draws += 1;
         }
-        pub fn recordModel(self: *@This(), recorded: anytype, _: anytype) void {
+        pub fn recordModel(self: *@This(), recorded: anytype, _: graphics.ModelAsset) void {
             recorded.* = self.render.getState();
         }
         pub fn drawRecordedWithTransform(self: *@This(), recorded: anytype, matrix: *const math.FixedMat4) void {
@@ -158,16 +159,16 @@ test "frame tokens borrow caller buffers and reject duplicate acquire and stale 
     var transform = math.FixedMat4.identity;
     try frame.setCamera(&camera);
     try std.testing.expectEqual(&camera, game.geometry.camera.?);
-    try frame.drawModel({}, &transform);
+    try frame.drawModel(empty_model, &transform);
     try std.testing.expectEqual(&transform, game.geometry.matrix.?);
     _ = try frame.submit();
-    try std.testing.expectError(error.FrameSubmitted, frame.drawModel({}, &transform));
+    try std.testing.expectError(error.FrameSubmitted, frame.drawModel(empty_model, &transform));
     const next = try game.beginFrame(.{});
     try std.testing.expectEqual(@as(usize, 1), game.display.presents);
     try std.testing.expectError(error.InvalidFrame, frame.present());
     // The prior submission is complete; the caller can now update its buffer.
     transform.set(3, 0, 17);
-    try next.drawModel({}, &transform);
+    try next.drawModel(empty_model, &transform);
     try std.testing.expectEqual(@as(f32, 17), game.geometry.matrix.?.get(3, 0));
     try next.discard();
     try std.testing.expectEqual(@as(usize, 1), game.display.releases);
@@ -179,7 +180,7 @@ test "presentation timeouts preserve the submission and caller-buffer lifetime" 
     try game.init(std.testing.failing_allocator, .{});
     const frame = try game.beginFrame(.{});
     var transform = math.FixedMat4.identity;
-    try frame.drawModel({}, &transform);
+    try frame.drawModel(empty_model, &transform);
     game.display.timeout = true;
     try std.testing.expectError(error.VBlankTimeout, frame.present());
     try std.testing.expectError(error.VBlankTimeout, game.beginFrame(.{}));
@@ -224,27 +225,27 @@ test "passes borrow cameras, reset material state and reject earlier handles" {
     // Simulate state left by an imported translucent/fogged material.
     game.renderer.render.setState(.translucent_geometry);
     game.geometry.fog_enabled = true;
-    try world.drawModel({}, &transform);
+    try world.drawModel(empty_model, &transform);
     try std.testing.expectEqualDeep(pipeline.state, game.renderer.render.getState());
     try std.testing.expect(!game.geometry.fog_enabled);
     const too_many = [_]graphics.Light{.{ .directional = .{ .direction = .init(0, 1, 0) } }} ** (graphics.max_lights + 1);
     const before_failure = game.renderer.render.cmd_queue.queue.index;
     try std.testing.expectError(error.TooManyLights, frame.beginGeometry(.{ .camera = &camera, .lighting = .{ .lights = &too_many } }));
     try std.testing.expectEqual(before_failure, game.renderer.render.cmd_queue.queue.index);
-    try world.drawModel({}, &transform); // Failed begin preserves the current pass.
+    try world.drawModel(empty_model, &transform); // Failed begin preserves the current pass.
     const overlay = try frame.beginOverlay(.{});
-    try std.testing.expectError(error.InvalidPass, world.drawModel({}, &transform));
+    try std.testing.expectError(error.InvalidPass, world.drawModel(empty_model, &transform));
     const next = try frame.beginGeometry(.{ .camera = &second_camera });
     try std.testing.expectEqual(&second_camera, game.geometry.camera.?);
     try std.testing.expectEqual(@as(u16, 320), camera.width);
     try std.testing.expectEqual(@as(u8, 0), game.geometry.light_count);
     try std.testing.expectError(error.InvalidPass, overlay.drawText(emptyFont(), 0, 0, "", .{}));
     // Draws borrow caller storage; there is no implicit transform-slot limit.
-    for (0..140) |_| try next.drawModel({}, &transform);
+    for (0..140) |_| try next.drawModel(empty_model, &transform);
     _ = try frame.submit();
-    try std.testing.expectError(error.FrameSubmitted, next.drawModel({}, &transform));
+    try std.testing.expectError(error.FrameSubmitted, next.drawModel(empty_model, &transform));
     try frame.present();
-    try std.testing.expectError(error.InvalidFrame, next.drawModel({}, &transform));
+    try std.testing.expectError(error.InvalidFrame, next.drawModel(empty_model, &transform));
     try game.deinit(std.testing.failing_allocator);
 }
 
@@ -381,15 +382,17 @@ test "recorded draws and poses borrow final buffers through timeout recovery" {
     var transform = math.FixedMat4.identity;
     var bones = [_]math.FixedMat4{.identity};
     var vertices = [_]graphics.VertexPair{std.mem.zeroes(graphics.VertexPair)};
+    const parts = [_]graphics.Model.Part{.{ .vertices = vertices[0..], .material_index = 0, .vertex_count = 1 }};
+    const vertex_model: graphics.ModelAsset = .{ .model = .{ .parts = &parts } };
     const world = try frame.beginGeometry(.{ .camera = &camera });
     var recorded: rdp.State = undefined;
-    try world.recordModel(&recorded, {});
+    try world.recordModel(&recorded, empty_model);
     try world.drawRecorded(&recorded, &transform);
     try std.testing.expectEqual(&transform, game.geometry.matrix.?);
     try world.setPose(&bones);
     try std.testing.expectEqual(bones[0..].ptr, game.geometry.pose.ptr);
     try std.testing.expectError(error.EmptyPose, world.setPose(&.{}));
-    try world.drawModel(.{ .vertices = vertices[0..] }, &transform);
+    try world.drawModel(vertex_model, &transform);
     try std.testing.expectEqual(vertices[0..].ptr, game.geometry.vertices.ptr);
     game.display.timeout = true;
     try std.testing.expectError(error.VBlankTimeout, frame.present());
@@ -406,7 +409,7 @@ test "recorded draws and poses borrow final buffers through timeout recovery" {
     const next = try game.beginFrame(.{});
     const next_world = try next.beginGeometry(.{ .camera = &camera });
     try next_world.setPose(&bones);
-    try next_world.drawModel(.{ .vertices = vertices[0..] }, &transform);
+    try next_world.drawModel(vertex_model, &transform);
     try std.testing.expectEqual(@as(f32, 9), game.geometry.matrix.?.get(3, 0));
     try std.testing.expectEqual(@as(f32, 10), game.geometry.pose[0].get(3, 0));
     try std.testing.expectEqual(@as(i16, 20), game.geometry.vertices[0].pos_a[0]);

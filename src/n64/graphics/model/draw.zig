@@ -1,14 +1,16 @@
 //! Borrowed model traversal shared by geometry encoding and recorded draws.
 const Model = @import("../Model.zig");
+const ModelAsset = @import("../ModelAsset.zig");
+const Material = @import("../Material.zig");
 const math = @import("../../math.zig");
 
-pub fn draw(context: anytype, model: Model, materials: anytype) void {
+pub fn draw(context: anytype, model: Model, materials: []const Material) void {
     var active_material: ?u16 = null;
     var bone_active = false;
     defer if (bone_active) context.popMatrix();
     for (model.parts) |part| {
         if (active_material == null or active_material.? != part.material_index) {
-            materials.apply(context, part.material_index);
+            ModelAsset.materialAt(materials, part.material_index).apply(context);
             context.beginModelMaterial();
             active_material = part.material_index;
         }
@@ -32,7 +34,7 @@ pub fn draw(context: anytype, model: Model, materials: anytype) void {
     }
 }
 
-pub fn drawWithTransform(context: anytype, asset: anytype, matrix: *const math.FixedMat4) void {
+pub fn drawWithTransform(context: anytype, asset: ModelAsset, matrix: *const math.FixedMat4) void {
     context.pushMatrix(matrix);
     defer context.popMatrix();
     draw(context, asset.model, asset.materials);

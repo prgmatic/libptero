@@ -1,5 +1,5 @@
-//! Heterogeneous typed assets in one reusable owner slot. Metadata and material
-//! providers stay concrete; selection never adds a vtable to model drawing.
+//! Heterogeneous typed ROM owners in one reusable slot. Each owner keeps its
+//! own loaded material table; drawing goes through the shared ModelAsset type.
 const std = @import("std");
 const scheduling = @import("scheduler.zig");
 

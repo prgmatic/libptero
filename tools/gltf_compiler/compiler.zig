@@ -498,19 +498,10 @@ fn emitParts(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: 
     try emitPartEntries(allocator, source, batches);
     try appendFormat(allocator, source,
         \\}};
-        \\pub const {s}: ModelAsset = .{{ .model = .{{ .parts = &parts, .nodes = &nodes, .skins = &skins, .animations = &animations }}, .materials = .{{}} }};
-        \\pub const ModelAsset = n64.graphics.ModelAsset(Materials);
-        \\pub const Materials = struct {{
+        \\pub const {s}: n64.graphics.ModelAsset = .{{ .model = .{{ .parts = &parts, .nodes = &nodes, .skins = &skins, .animations = &animations }}, .materials = &materials, .material_names = &material_names }};
+        \\
     , .{name});
     try @import("material_ids.zig").emit(allocator, source, document.materials);
-    try source.appendSlice(allocator,
-        \\    pub fn apply(self: @This(), context: anytype, index: u16) void {
-        \\        self.bind(context, index, self.get(index));
-        \\    }
-        \\    pub fn bind(_: @This(), context: anytype, index: u16, material: n64.graphics.Material) void {
-        \\        switch (index) {
-        \\
-    );
 }
 
 pub fn emitPartEntries(allocator: std.mem.Allocator, source: *std.ArrayList(u8), batches: []const Batch) !void {
@@ -535,50 +526,26 @@ pub fn emitPartEntries(allocator: std.mem.Allocator, source: *std.ArrayList(u8),
 }
 
 fn emitMaterials(allocator: std.mem.Allocator, source: *std.ArrayList(u8), document: Document, binary: []const u8) !void {
-    return emitMaterialsWithStorage(allocator, source, document, binary, false);
+    try source.appendSlice(allocator, "const materials = [_]n64.graphics.Material{\n");
+    try emitMaterialList(allocator, source, document, binary, false);
+    try source.appendSlice(allocator, "};\n");
 }
 
-pub fn emitMaterialsWithStorage(allocator: std.mem.Allocator, source: *std.ArrayList(u8), document: Document, binary: []const u8, comptime rom_storage: bool) !void {
-    for (document.materials, 0..) |material, material_index| {
-        const texture_index = materialImageIndex(document, material);
-        if (texture_index) |image_index| {
-            try appendFormat(
-                allocator,
-                source,
-                if (rom_storage) "            {d} => material.bind(context, texture_{d}(self.data, self.content_id)),\n" else "            {d} => material.bind(context, texture_{d}),\n",
-                .{ material_index, image_index },
-            );
-        } else {
-            try appendFormat(allocator, source, "            {d} => material.apply(context),\n", .{material_index});
-        }
-    }
-    try source.appendSlice(
-        allocator,
-        "            65535 => material.apply(context),\n",
-    );
-    try source.appendSlice(allocator,
-        \\            else => @panic("invalid model material index"),
-        \\        }
-        \\    }
-        \\    pub fn get(_: @This(), index: u16) n64.graphics.Material {
-        \\        return switch (index) {
-        \\
-    );
-    for (document.materials, 0..) |material, index| {
+/// Emit one native material literal per source material, in source order.
+/// ROM-backed textures are built from the loaded payload by `texture_N` calls.
+pub fn emitMaterialList(allocator: std.mem.Allocator, source: *std.ArrayList(u8), document: Document, binary: []const u8, comptime rom_storage: bool) !void {
+    for (document.materials) |material| {
         const image = materialImageIndex(document, material);
         const sampler = if (image) |i| materialSampler(document, binary, material, i) else materials.Sampler{};
-        try appendFormat(allocator, source, "            {d} => ", .{index});
-        try materials.emit(allocator, source, material, materialCulling(material), materialIsUnlit(material), materialIsBlended(material), image != null, sampler, try materialFilter(document, material));
+        var expression: [64]u8 = undefined;
+        const texture = if (image) |i|
+            try std.fmt.bufPrint(&expression, if (rom_storage) "texture_{d}(model_data, content_id)" else "texture_{d}", .{i})
+        else
+            null;
+        try source.appendSlice(allocator, "    ");
+        try materials.emit(allocator, source, material, materialCulling(material), materialIsUnlit(material), materialIsBlended(material), texture, sampler, try materialFilter(document, material));
         try source.appendSlice(allocator, ",\n");
     }
-    try source.appendSlice(allocator,
-        \\            65535 => .{},
-        \\            else => @panic("invalid model material index"),
-        \\        };
-        \\    }
-        \\};
-        \\
-    );
 }
 
 const Culling = struct { front: bool, back: bool };
@@ -1365,6 +1332,8 @@ test "generated model uses packed big-endian vertex data" {
     try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "n64.rom.Asset(Definition)") != null);
     try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "parts: [1]Part") != null);
     try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "metadata.parts = .{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cartridge.source, "metadata.materials = .{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, generated.source, "pub const fixture_model: n64.graphics.ModelAsset") != null);
     try std.testing.expectError(error.InvalidAssetName, generateWithStorage(std.testing.allocator, model, document, &.{}, "not-valid", .rom));
 }
 
@@ -1404,7 +1373,7 @@ test "blend materials preserve order and incomplete skinning is rejected" {
     defer source.deinit(std.testing.allocator);
     try emitMaterials(std.testing.allocator, &source, blend_document, &.{});
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".translucent = true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.items, "material.apply(context)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "const materials = [_]n64.graphics.Material{") != null);
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".alpha_d = .shade") != null);
 
     const primitive: Primitive = .{
@@ -1430,7 +1399,7 @@ test "Fast64 blend wrapper uses its N64 render mode" {
     defer source.deinit(std.testing.allocator);
     try emitMaterials(std.testing.allocator, &source, document, &.{});
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".translucent = false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source.items, "material.apply(context)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source.items, "const materials = [_]n64.graphics.Material{") != null);
     try std.testing.expect(std.mem.indexOf(u8, source.items, ".alpha_d = .one") != null);
 
     const translucent = Material{

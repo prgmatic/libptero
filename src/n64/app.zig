@@ -231,7 +231,7 @@ fn AppImpl(comptime config: Config, comptime Backend: type) type {
                 self.context.geometry.attachViewport(viewport);
             }
 
-            pub fn drawModel(self: Frame, asset: anytype, transform: *const math.FixedMat4) !void {
+            pub fn drawModel(self: Frame, asset: graphics.ModelAsset, transform: *const math.FixedMat4) !void {
                 if (!config.geometry) @compileError("drawModel requires App(.{ .geometry = true })");
                 try self.recording();
                 self.context.pass_generation +%= 1;

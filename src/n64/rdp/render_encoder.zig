@@ -5,6 +5,7 @@ const modes = @import("modes.zig");
 const cc = @import("combiner.zig");
 const tri = @import("triangles.zig");
 const texture = @import("texture.zig");
+const Texture = @import("../graphics/Texture.zig");
 
 pub const SpriteDrawOptions = texture.SpriteDrawOptions;
 pub const Pivot = texture.Pivot;
@@ -210,8 +211,9 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         }
 
         /// Make a texture resident with explicit sampler state and return its render tile.
+        /// Accepts a typed image or a `graphics.Texture`.
         pub fn useTextureSampler(rq: *Self, image: anytype, sampler: texture.Sampler) u3 {
-            rq.material_tile = rq.ensureTexture(image, sampler);
+            rq.material_tile = rq.ensureTexture(.from(image), sampler);
             return rq.material_tile;
         }
 
@@ -219,15 +221,17 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         /// Replaces TMEM residency and selects tile 0 for geometry draws.
         /// Identical texels share TMEM while retaining independent tile state.
         /// The pair must fit in TMEM; 32-bit formats are not supported here.
-        pub fn useTexturePair(rq: *Self, first: anytype, second: anytype, first_sampler: texture.Sampler, second_sampler: texture.Sampler) void {
+        pub fn useTexturePair(rq: *Self, first_image: anytype, second_image: anytype, first_sampler: texture.Sampler, second_sampler: texture.Sampler) void {
+            rq.bindTexturePair(.from(first_image), .from(second_image), first_sampler, second_sampler);
+        }
+
+        fn bindTexturePair(rq: *Self, first: Texture, second: Texture, first_sampler: texture.Sampler, second_sampler: texture.Sampler) void {
             validateTexturePair(first, second);
-            const first_indexed = @TypeOf(first).format == .color_indexed;
-            const second_indexed = @TypeOf(second).format == .color_indexed;
-            if (first_indexed) rq.configureTexture(first) else rq.configureTexture(second);
-            const capacity: u32 = if (first_indexed or second_indexed) 256 else 512;
-            const first_words = textureWords(first);
-            const shared = sharesTexels(first, second);
-            const second_words = if (shared) 0 else textureWords(second);
+            if (first.isIndexed()) rq.configureTexture(first) else rq.configureTexture(second);
+            const capacity: u32 = if (first.isIndexed() or second.isIndexed()) 256 else 512;
+            const first_words = first.tmemWords();
+            const shared = first.sharesTexels(second);
+            const second_words = if (shared) 0 else second.tmemWords();
             if (first_words + second_words > capacity) @panic("texture pair exceeds TMEM");
             rq.tex_cache_len = 0;
             rq.loadTexture(first, 0, 0, first_sampler);
@@ -239,11 +243,6 @@ pub fn RenderEncoder(comptime QueueType: type) type {
             rq.tmem_next = @intCast(first_words + second_words);
             rq.next_tile = 2;
             rq.material_tile = 0;
-        }
-
-        fn textureWords(image: anytype) u32 {
-            const bits = @as(u32, 4) << @intFromEnum(@TypeOf(image).bit_depth);
-            return ((@as(u32, image.width) * bits + 63) / 64) * image.height;
         }
 
         pub fn setDepthState(rq: *Self, compare: bool, update: bool) void {
@@ -404,7 +403,7 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         }
 
         // Explicit texture load into TMEM (bypasses cache).
-        fn loadTexture(rq: *Self, image: anytype, tile: u3, tmem_addr: u9, sampler: texture.Sampler) void {
+        fn loadTexture(rq: *Self, image: Texture, tile: u3, tmem_addr: u9, sampler: texture.Sampler) void {
             // Finish primitives that can still reference the tiles or TMEM
             // about to be reused, including glyphs from the previous atlas.
             rq.cmd_queue.pipeSync();
@@ -413,10 +412,10 @@ pub fn RenderEncoder(comptime QueueType: type) type {
 
         // Returns the render tile for `image`, loading it into TMEM if not cached.
         // Emits a tileSync when a load occurs. TMEM cache is evicted when full.
-        fn ensureTexture(rq: *Self, image: anytype, sampler: texture.Sampler) u3 {
+        fn ensureTexture(rq: *Self, image: Texture, sampler: texture.Sampler) u3 {
             rq.configureTexture(image);
-            const ptr = @intFromPtr(image.texel_data.ptr);
-            const content_id = imageContentId(image);
+            const ptr = @intFromPtr(image.texels);
+            const content_id = image.content_id;
             for (rq.tex_cache[0..rq.tex_cache_len]) |entry| {
                 if (entry.ptr == ptr and entry.content_id == content_id and entry.sampler.eql(sampler)) return entry.tile;
             }
@@ -434,8 +433,8 @@ pub fn RenderEncoder(comptime QueueType: type) type {
                     return tile;
                 }
             }
-            const required_words = textureWords(image);
-            const capacity: u32 = if (@TypeOf(image).format == .color_indexed) 256 else 512;
+            const required_words = image.tmemWords();
+            const capacity: u32 = if (image.isIndexed()) 256 else 512;
             if (required_words > capacity) @panic("texture exceeds TMEM capacity");
             const tmem_words: u10 = @intCast(required_words);
             // Evict entire cache when TMEM is full or all 4 render slots are used.
@@ -460,23 +459,22 @@ pub fn RenderEncoder(comptime QueueType: type) type {
             rq.next_tile = 0;
         }
 
-        fn configureTexture(rq: *Self, image: anytype) void {
-            const indexed = @TypeOf(image).format == .color_indexed;
+        fn configureTexture(rq: *Self, image: Texture) void {
+            const indexed = image.isIndexed();
             rq.mode.tlut_en = indexed;
-            rq.mode.tlut_format = if (@hasField(@TypeOf(image), "palette_format")) switch (image.palette_format) {
+            rq.mode.tlut_format = switch (image.palette_format) {
                 .rgba16 => .rgba16,
                 .ia16 => .ia16,
-            } else .rgba16;
+            };
             if (indexed) {
-                if (!@hasField(@TypeOf(image), "palette")) @compileError("CI textures require PalettedImage with an RGBA16 palette");
                 const palette = image.palette;
                 std.debug.assert(palette.len > 0 and palette.len <= 256);
                 const address = @intFromPtr(palette.ptr);
-                if (rq.palette_ptr == address and rq.palette_content_id == imageContentId(image)) return;
+                if (rq.palette_ptr == address and rq.palette_content_id == image.content_id) return;
                 rq.resetTextureCache();
                 rq.loadPalette(palette);
                 rq.palette_ptr = address;
-                rq.palette_content_id = imageContentId(image);
+                rq.palette_content_id = image.content_id;
             } else if (rq.palette_ptr != 0) {
                 rq.resetTextureCache();
                 rq.palette_ptr = 0;
@@ -498,7 +496,7 @@ pub fn RenderEncoder(comptime QueueType: type) type {
 
         /// Integer glyph path: one rectangle and a resident atlas/palette bank.
         pub fn drawGlyph(rq: *Self, atlas: anytype, x: i16, y: i16, s: u8, t: u8, width: u16, height: u16, palette: u4) void {
-            const tile = rq.ensureTexture(atlas, .{ .palette = palette });
+            const tile = rq.ensureTexture(.from(atlas), .{ .palette = palette });
             rq.flushPendingModes();
             const left: i32 = @as(i32, x) * 4;
             const top: i32 = @as(i32, y) * 4;
@@ -517,7 +515,7 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         /// tile stays valid while `texture_epoch` and the render state are
         /// unchanged, so repeated sprites can skip straight to drawSpriteOnTile.
         pub fn bindSprite(rq: *Self, image: anytype, palette: u4) u3 {
-            const tile = rq.ensureTexture(image, .{ .palette = palette });
+            const tile = rq.ensureTexture(.from(image), .{ .palette = palette });
             rq.flushPendingModes();
             return tile;
         }
@@ -563,35 +561,19 @@ pub fn RenderEncoder(comptime QueueType: type) type {
         }
 
         pub fn drawTexturedTriangle(rq: *Self, image: anytype, v1: TexVertex, v2: TexVertex, v3: TexVertex) void {
-            const tile = rq.ensureTexture(image, .{});
+            const tile = rq.ensureTexture(.from(image), .{});
             rq.flushPendingModes();
             tri.emitTexturedTriangle(&rq.cmd_queue, tile, v1, v2, v3);
         }
     };
 }
 
-fn imageContentId(image: anytype) u64 {
-    return if (@hasField(@TypeOf(image), "content_id")) image.content_id else 0;
-}
-
-fn sharesTexels(first: anytype, second: anytype) bool {
-    if (@TypeOf(first).Pixel != @TypeOf(second).Pixel) return false;
-    if (first.width != second.width or first.height != second.height) return false;
-    return @intFromPtr(first.texel_data.ptr) == @intFromPtr(second.texel_data.ptr) and
-        imageContentId(first) == imageContentId(second);
-}
-
-fn validateTexturePair(first: anytype, second: anytype) void {
+fn validateTexturePair(first: Texture, second: Texture) void {
     // RGBA32 occupies both TMEM banks and needs a different allocator.
-    if (@TypeOf(first).bit_depth == .@"32" or @TypeOf(second).bit_depth == .@"32")
+    if (first.bit_depth == .@"32" or second.bit_depth == .@"32")
         @panic("32-bit texture pairs are not supported");
-    validatePairPalette(first, second);
-}
-
-fn validatePairPalette(first: anytype, second: anytype) void {
-    if (@TypeOf(first).format == .color_indexed and @TypeOf(second).format == .color_indexed) {
-        if (first.palette.ptr != second.palette.ptr) @panic("texture pairs require a shared palette");
-    }
+    if (first.isIndexed() and second.isIndexed() and first.palette.ptr != second.palette.ptr)
+        @panic("texture pairs require a shared palette");
 }
 
 const TexCacheEntry = struct {
@@ -888,10 +870,10 @@ test "full-TMEM texture pairs share one upload and distinct images remain separa
     try std.testing.expectEqual(@as(usize, 1), uploads);
     var changed = shared;
     changed.content_id += 1;
-    try std.testing.expect(!sharesTexels(shared, changed));
+    try std.testing.expect(!Texture.from(shared).sharesTexels(.from(changed)));
     changed = shared;
     changed.width = 32;
-    try std.testing.expect(!sharesTexels(shared, changed));
+    try std.testing.expect(!Texture.from(shared).sharesTexels(.from(changed)));
     const first: images.Image(@import("../graphics/pixel.zig").Rgba16) = .{ .width = 32, .height = 32, .texel_data = @as([*]colors.Rgba16, @ptrFromInt(0x80404000))[0..1024] };
     var second = first;
     second.texel_data = @as([*]colors.Rgba16, @ptrFromInt(0x80405000))[0..1024];
@@ -903,5 +885,5 @@ test "full-TMEM texture pairs share one upload and distinct images remain separa
     };
     try std.testing.expectEqual(@as(usize, 2), uploads);
     try std.testing.expectEqual(@as(u10, 512), render.tmem_next);
-    try std.testing.expect(!sharesTexels(shared, first));
+    try std.testing.expect(!Texture.from(shared).sharesTexels(.from(first)));
 }

@@ -281,23 +281,34 @@ shifts and offsets; `useTexturePair` uploads identical images once.
 
 ## Drawing model data
 
-Models contain packed parts; generated `n64.graphics.ModelAsset(Materials)` values pair that
-geometry with a typed material provider. They carry no renderer or drawing
+Models contain packed parts. Every generated or loaded model is an
+`n64.graphics.ModelAsset`: one concrete type pairing that geometry with a
+`[]const Material` table, so models can be stored in variables, arrays and
+struct fields and chosen at runtime. Assets carry no renderer or drawing
 methods. Submit model draws through the geometry context:
 
 ```zig
-renderer.geometry.drawModel(assets.model);
+var current: n64.graphics.ModelAsset = assets.crate;
+current = assets.barrel;
+renderer.geometry.drawModel(current);
 renderer.geometry.drawModelWithTransform(assets.model, &model_matrix);
-// For custom material bindings:
-renderer.geometry.drawModelWithMaterials(assets.model.model, MyMaterials{});
+// With an explicit material table:
+renderer.geometry.drawModelWithMaterials(assets.model.model, &my_materials);
 ```
 
 `drawModelWithTransform` queues push/draw/pop, restoring the previous matrix while
 leaving material/pipeline changes visible. The matrix is borrowed, not copied;
 keep it unchanged and alive until RSP/RDP completion. Neither draw method submits,
-waits, or allocates. Custom providers implement `apply(context, material_index)`;
-texture types remain known at compile time. `asset.material(index)` still reads
-native material metadata. Use `GeometryEncoder.drawModelWithMaterials` for a custom material provider.
+waits, or allocates.
+
+A `Material` is plain data: render state plus optional `texture` and
+`second_texture` fields holding an `n64.graphics.Texture`, a format-erased
+reference built from any typed image with `Texture.from(image)`. When the
+material index changes between parts, the draw applies the material's state and
+binds its textures; one bind routine serves every model. Material tables are read
+on the CPU while encoding, so a table may live on the stack; texel and palette
+storage must stay alive until GPU completion. `asset.material(index)` reads a
+material, and `Material.bind(context, image)` applies one with a different image.
 
 ## Immediate triangles
 
@@ -343,7 +354,7 @@ defer mesh.deinit(allocator);
 player.update(&skeleton, delta_seconds);
 skeleton.update();
 mesh.update(&skeleton);
-renderer.geometry.drawModelWithMaterials(mesh.model(), assets.snake.materials);
+renderer.geometry.drawModel(assets.snake.withModel(mesh.model()));
 const completion = renderer.submit();
 try completion.wait(.{});
 ```
@@ -392,7 +403,7 @@ var pose: [assets.snake.poseLen()]n64.math.FixedMat4 align(16) = undefined;
 // Reuse pose only after GPU completion.
 skeleton.writeMatrices(&pose);
 renderer.geometry.setPose(&pose);
-renderer.geometry.drawModelWithMaterials(assets.snake.model, assets.snake.materials);
+renderer.geometry.drawModel(assets.snake);
 ```
 
 `setPose` writes back the fixed matrices and selects the pose for subsequent
@@ -478,8 +489,9 @@ backend enum tags are `none`, `is_viewer`, and `sc64`.
 
 ## Model overrides and writable instances
 
-Generated model assets expose declarative overrides while retaining typed texture
-bindings, imported pipeline state, and embedded textures on unmodified materials:
+Because materials are data, an override is an edited copy of the material
+table. `withOverrides` builds that copy at compile time for comptime-known assets,
+retaining imported pipeline state and embedded textures on unmodified fields:
 
 ```zig
 const map = assets.map.withOverrides(.{
@@ -491,20 +503,33 @@ renderer.geometry.drawModelWithTransform(map, &matrix);
 ```
 
 Entries are a heterogeneous tuple. They may contain any `Material` field, a full
-`material` replacement, `no_light`, and a typed `texture`. `second_texture` binds
-a pair and requires `texture` in the same entry. Imported samplers are retained
+`material` replacement (which keeps existing textures unless it names its own),
+`no_light`, and a typed image or `Texture` as `texture`. `second_texture` binds a
+pair and requires `texture` in the same entry; a `texture` alone replaces any
+earlier pair. Imported samplers are retained
 unless overridden. Anonymous nested structs such as `.sampler = .{ .mask_s = 5 }`
 patch only their named fields; explicitly typed values replace the whole field.
 Binding textures preserves the material's draw flags and
 combiner: override those explicitly when adding texturing to an untextured source.
 Later entries win; an omitted index affects all materials. Repeated
 `withOverrides` calls compose and retain earlier texture bindings.
-`asset.material(index)` reads the resulting state. Generated providers implement
-`get(index)` and `bind(context, index, material)`; custom draw providers can still
-implement just `apply(context, index)`.
+`asset.material(index)` reads the resulting state.
+
+For runtime assets (such as loaded ROM models) or runtime values (such as a
+per-frame sampler offset), copy into caller storage instead. The storage must
+hold `asset.materials.len` entries and outlive the draw or recording call:
+
+```zig
+var materials: [assets.lava.materials.len]n64.graphics.Material = undefined;
+const lava = try assets.lava.withOverridesInto(&materials, .{.{ .sampler = scrolled }});
+renderer.geometry.drawModel(lava);
+```
+
+`withMaterials(table)` substitutes a whole table, and plain edits work too:
+copy `asset.materials` into an array, change fields, and pass the array.
 
 `withModel(model)` replaces borrowed geometry while retaining the asset's
-material provider. Use it for both skinned and otherwise mutable instances:
+materials. Use it for both skinned and otherwise mutable instances:
 
 ```zig
 var mesh = try n64.graphics.MutableModel.init(allocator, assets.lava.model);
