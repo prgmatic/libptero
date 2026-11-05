@@ -1,7 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
-const asm_writer = @import("../asm_writer.zig");
-const asm_optimizer = @import("../asm_optimizer.zig");
+const codegen = @import("../codegen.zig");
+const optimizer = @import("../optimizer.zig");
 const parser_mod = @import("../parser.zig");
 
 const testing = std.testing;

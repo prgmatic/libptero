@@ -1,7 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
-const asm_writer = @import("../asm_writer.zig");
-const asm_optimizer = @import("../asm_optimizer.zig");
+const codegen = @import("../codegen.zig");
+const optimizer = @import("../optimizer.zig");
 const parser_mod = @import("../parser.zig");
 
 const testing = std.testing;
@@ -813,7 +813,7 @@ test "transpose interfaces include the complete register bank and reject invalid
     defer ast.freeFunctions(testing.allocator, functions);
     var interface = std.Io.Writer.Allocating.init(testing.allocator);
     defer interface.deinit();
-    try asm_writer.writeInterface(&interface.writer, functions, null);
+    try @import("../interface.zig").writeInterface(testing.allocator, &interface.writer, functions, null);
     try testing.expect(std.mem.indexOf(u8, interface.written(), "writes($v08, $v09, $v10, $v11, $v12, $v13, $v14, $v15)") != null);
     try expectAsmError(
         \\fn test() noreturn {
@@ -823,4 +823,64 @@ test "transpose interfaces include the complete register bank and reject invalid
         \\  rsp.halt();
         \\}
     , error.TransposeRequiresRegisterBank);
+}
+
+test "vector zeroing, inversion, and swizzled initialization" {
+    try @import("support.zig").expectAsmContains(
+        \\fn entry() {
+        \\  reg($v01) source: vec16 = 0;
+        \\  reg($v02) broadcast: vec16 = source.xxxxxxxx;
+        \\  reg($v03) inverted: vec16 = undefined;
+        \\  inverted = ~source;
+        \\  inverted = 0;
+        \\  reg($v04) wide: vec32 = undefined;
+        \\  reg($v06) wide_source: vec32 = 0;
+        \\  wide = ~wide_source;
+        \\  rsp.cp0.setSpStatus(0);
+        \\  store(vec16, 0, broadcast);
+        \\  store(vec16, 16, inverted);
+        \\  store(vec32, 32, wide);
+        \\}
+    , &.{
+        "# vor $v02, $v00, $v01\n",
+        "# vnor $v03, $v01, $v01\n",
+        "# vxor $v03, $v03, $v03\n",
+        "# vnor $v04, $v06, $v06\n",
+        "# vnor $v05, $v07, $v07\n",
+    });
+}
+
+test "automatic vectors passed in a register that a call clobbers are rejected" {
+    try expectAsmError(
+        \\fn clobber() {
+        \\  reg($v07) left: vec16 = undefined;
+        \\  reg($v08) scratch: vec16 = undefined;
+        \\  scratch = left + left;
+        \\}
+        \\fn consume(reg($v08) input: vec16) {
+        \\  reg($v09) result: vec16 = undefined;
+        \\  result = input + input;
+        \\}
+        \\fn test() noreturn {
+        \\  reg value: vec16 = undefined;
+        \\  clobber();
+        \\  consume(value);
+        \\  rsp.halt();
+        \\}
+    , error.AutomaticRegisterClobberedByCall);
+}
+
+test "transposed loads reject banks holding live automatic vectors" {
+    try expectAsmError(
+        \\fn test() noreturn {
+        \\  reg($t0) ptr: dmem = 8;
+        \\  reg($v01) a: vec16 = undefined;
+        \\  reg live: vec16 = undefined;
+        \\  live = a + a;
+        \\  reg($v00) bank: vec16 = undefined;
+        \\  rsp.vector.loadTranspose(bank, 0, ptr, 0);
+        \\  a = live + live;
+        \\  rsp.halt();
+        \\}
+    , error.RegisterAlreadyInUse);
 }

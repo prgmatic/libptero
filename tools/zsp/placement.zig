@@ -49,7 +49,7 @@ fn resolveTargets(functions: []const ast.Function, targets: []?usize, claimed: [
 
 fn emittableTarget(functions: []const ast.Function, target: ?usize) ?usize {
     const index = target orelse return null;
-    if (functions[index].external or functions[index].inline_call) return null;
+    if (!functions[index].emitsBody()) return null;
     return index;
 }
 

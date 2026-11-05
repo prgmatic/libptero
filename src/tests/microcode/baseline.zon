@@ -1,0 +1,13 @@
+.{
+    .tolerance_percent = 2,
+    .workloads = .{
+        .{ .name = "dispatcher", .instructions = 2034, .cycles = 2179, .digest = "0b968d31d91b12c4322e5aba9edb1e9b" },
+        .{ .name = "rdp_state", .instructions = 3719, .cycles = 4390, .digest = "05877b5578bf8bd176f53407a6d83657" },
+        .{ .name = "rdp", .instructions = 4933, .cycles = 4791, .digest = "937c61eee11e44e0810a3665b4c2209c" },
+        .{ .name = "vadpcm_mono", .instructions = 4380, .cycles = 5245, .digest = "d060f75275d4e6a8ecba40d1328fc326" },
+        .{ .name = "vadpcm_stereo_batches", .instructions = 9544, .cycles = 10592, .digest = "bd75989fe114833b5b7488512ae71803" },
+        .{ .name = "mixer_4voice", .instructions = 30501, .cycles = 35544, .digest = "e62d1c5ea7cb6e353bebd1932a848044" },
+        .{ .name = "geometry_lit_mesh", .instructions = 17954, .cycles = 12027, .digest = "4474f43290444a1bda8410115cb64889" },
+        .{ .name = "geometry_clipped_mesh", .instructions = 18473, .cycles = 13170, .digest = "875b2e1f8e6dcb613bf0727a662021b3" },
+    },
+}

@@ -3,6 +3,7 @@ const n64 = @import("n64");
 const runner = @import("runner.zig");
 const testing = @import("assert.zig");
 const zsp_programs = @import("zsp_test_programs");
+const program_cases = @import("zsp_program_cases.zig");
 
 const rsp = n64.rsp;
 const rdp = n64.rdp;
@@ -80,21 +81,7 @@ var geometry_api_context: geometry.GeometryEncoder = undefined;
 var geometry_strip_indices: [4]i16 align(8) = .{ 0, 0x0024, 0x4048, 0 };
 var diagnostic_vertices: [1]geometry.VertexPair align(16) = undefined;
 
-pub const tests = [_]runner.Test{
-    .{ .name = "ZSP: arithmetic", .run = arithmetic },
-    .{ .name = "ZSP: signed arithmetic", .run = signedArithmetic },
-    .{ .name = "ZSP: bitwise", .run = bitwise },
-    .{ .name = "ZSP: branches", .run = branches },
-    .{ .name = "ZSP: comparisons", .run = comparisons },
-    .{ .name = "ZSP: loops", .run = loops },
-    .{ .name = "ZSP: shifts", .run = shifts },
-    .{ .name = "ZSP: register operations", .run = registerOperations },
-    .{ .name = "ZSP: large immediates", .run = largeImmediates },
-    .{ .name = "ZSP: memory offsets", .run = memoryOffsets },
-    .{ .name = "ZSP: scalar stores", .run = scalarStores },
-    .{ .name = "ZSP: scalar loads", .run = scalarLoads },
-    .{ .name = "ZSP: vector operations", .run = vectorOperations },
-    .{ .name = "ZSP: data blocks", .run = dataBlocks },
+pub const tests = programCaseTests() ++ [_]runner.Test{
     .{ .name = "ZSP: DMA in", .run = dmaIn },
     .{ .name = "ZSP: Geometry productive RDP rollover", .run = geometryProductiveRdpRollover },
     .{ .name = "ZSP: command dispatcher", .run = commandDispatcher },
@@ -326,151 +313,34 @@ fn geometryContextInitialization() !void {
     geometry_runtime.deinit();
 }
 
-fn arithmetic() !void {
-    try run(zsp_programs.arithmetic);
-    try expectDmemWord(u32, 0, 15);
+/// Hardware runners for the shared standalone-program expectations; the host
+/// RSP interpreter executes the same table in `zsp_interp_tests.zig`.
+fn programCaseTests() [program_cases.all.len]runner.Test {
+    var result: [program_cases.all.len]runner.Test = undefined;
+    inline for (program_cases.all, &result) |case, *entry| {
+        entry.* = .{ .name = "ZSP: " ++ case.name, .run = struct {
+            fn run_case() !void {
+                try runProgramCase(case);
+            }
+        }.run_case };
+    }
+    return result;
 }
 
-fn signedArithmetic() !void {
-    try run(zsp_programs.signed_arithmetic);
-    try expectDmemWord(i32, 0, -24);
-    try expectDmemWord(i32, 4, -9);
-    try expectDmemWord(i32, 8, -18);
-}
-
-fn bitwise() !void {
-    try run(zsp_programs.bitwise);
-    try expectDmemWord(u32, 0, 0x4f);
-}
-
-fn branches() !void {
-    try run(zsp_programs.branches);
-    try expectDmemWord(u32, 0, 2);
-}
-
-fn comparisons() !void {
-    try run(zsp_programs.comparisons);
-    try expectDmemWord(u32, 0, 4095);
-}
-
-fn loops() !void {
-    try run(zsp_programs.loops);
-    try expectDmemWord(u32, 0, 4);
-}
-
-fn shifts() !void {
-    try run(zsp_programs.shifts);
-    try expectDmemWord(u32, 0, 4);
-}
-
-fn registerOperations() !void {
-    try run(zsp_programs.register_ops);
-    try expectDmemWord(u32, 0, 0x08000000);
-    try expectDmemWord(i32, 4, -4);
-    try expectDmemWord(i32, 8, 0x3ffffffc);
-    try expectDmemWord(u32, 12, 0xf0f0ff00);
-}
-
-fn largeImmediates() !void {
-    try run(zsp_programs.immediates);
-    try expectDmemWord(u32, 0, 0x89abcdef);
-    try expectDmemWord(i32, 4, -2147483648);
-    try expectDmemWord(u32, 8, 0x12340000);
-    try expectDmemWord(i32, 12, -32768);
-}
-
-fn memoryOffsets() !void {
-    try run(zsp_programs.memory_offsets);
-    try expectDmemWord(u32, 0, 0x11aa3344);
-    try expectDmemWord(u32, 4, 0x5566beef);
-    try expectDmemWord(u32, 8, 0x99aabb80);
-    try expectDmemWord(u32, 16, 0xaa);
-    try expectDmemWord(i32, 20, -128);
-    try expectDmemWord(u32, 24, 0xbeef);
-    try expectDmemWord(u32, 28, 0xaa334455);
-}
-
-fn scalarStores() !void {
-    try run(zsp_programs.scalar_stores);
-    try expectDmemWord(u8, 0, 0xab);
-    try expectDmemWord(i8, 1, -85);
-    try expectDmemWord(u16, 2, 0xabcd);
-    try expectDmemWord(i16, 4, -21555);
-    try expectDmemWord(u32, 8, 0x0abcdef0);
-    try expectDmemWord(i32, 12, 0x00abcdef);
-}
-
-fn scalarLoads() !void {
-    seedLoadSource(0x80ff8001);
-    try run(zsp_programs.scalar_loads);
-    try expectDmemWord(u32, 4, 0x00000080);
-    try expectDmemWord(i32, 8, -128);
-    try expectDmemWord(u32, 12, 0x000080ff);
-    try expectDmemWord(i32, 16, -32513);
-    try expectDmemWord(u32, 20, 0x80ff8001);
-    try expectDmemWord(i32, 24, -2130739199);
-}
-
-fn vectorOperations() !void {
-    try run(zsp_programs.vector_ops);
-
-    const add_expected = [_]u32{ 0x00040006, 0x00007fff, 0x80003456, 0xb9b94645 };
-    const sub_expected = [_]u32{ 0xfffefffe, 0xfffe8001, 0x7ffef012, 0x9b9b9b9b };
-    const and_expected = [_]u32{ 0x00010000, 0x00018000, 0x00010220, 0x0a0a5050 };
-    const or_expected = [_]u32{ 0x00030006, 0xffffffff, 0x7fff3236, 0xafaff5f5 };
-    const xor_expected = [_]u32{ 0x00020006, 0xfffe7fff, 0x7ffe3016, 0xa5a5a5a5 };
-    const not_expected = [_]u32{ 0xfffefffd, 0x00007fff, 0x8000edcb, 0x55550f0f };
-    const nor_expected = [_]u32{ 0xfffcfff9, 0x00000000, 0x8000cdc9, 0x50500a0a };
-
-    try expectDmemWords(0x100, &add_expected);
-    try expectDmemWords(0x110, &sub_expected);
-    try expectDmemWords(0x120, &and_expected);
-    try expectDmemWords(0x130, &or_expected);
-    try expectDmemWords(0x140, &xor_expected);
-    try expectDmemWords(0x150, &not_expected);
-    try expectDmemWords(0x180, &nor_expected);
-    const multiply_expected = [_]u32{ 0, 0, 0, 0 };
-    try expectDmemWords(0x1a0, &multiply_expected);
-    const reciprocal_expected = [_]u32{ 0x0002c000, 0x7fff0000, 0, 0 };
-    try expectDmemWords(0x1b0, &reciprocal_expected);
-    const reciprocal_sqrt_expected = [_]u32{ 0xc0000000, 0, 0, 0 };
-    try expectDmemWords(0x210, &reciprocal_sqrt_expected);
-    const unsigned_bytes_expected = [_]u32{ 0x00000080, 0x00000100, 0x7f807f80, 0x40000000 };
-    try expectDmemWords(0x1c0, &unsigned_bytes_expected);
-    const partial_words_expected = [_]u32{ 0x00010002, 0, 0x7fff1234, 0 };
-    try expectDmemWords(0x1d0, &partial_words_expected);
-    const shifted_left_expected = [_]u32{ 0x40008000, 0xc0000000, 0xc0000000, 0x80000000 };
-    const shifted_arithmetic_expected = [_]u32{ 0x00000000, 0xffffe000, 0x1fff048d, 0xeaaafc3c };
-    const shifted_logical_expected = [_]u32{ 0x00000000, 0x01ff0100, 0x00ff0024, 0x015501e1 };
-    try expectDmemWords(0x1e0, &shifted_left_expected);
-    try expectDmemWords(0x1f0, &shifted_arithmetic_expected);
-    try expectDmemWords(0x200, &shifted_logical_expected);
-
-    const wide_expected = [_]u32{
-        0x00040004, 0x00040004, 0x00040004, 0x00040004,
-        0x00000000, 0x00000000, 0x00000000, 0x00000000,
-    };
-    try expectDmemWords(0x160, &wide_expected);
-}
-
-fn dataBlocks() !void {
-    try run(zsp_programs.data_blocks);
-
-    try expectDmemWord(u32, 0x100, 0x12345678);
-    try expectDmemWord(u32, 0x104, 0x11);
-    try expectDmemWord(u32, 0x108, 0x44);
-    try expectDmemWord(u32, 0x10c, 0x89abcdef);
-    try expectDmemWord(u32, 0x110, 0x76543210);
-
-    try expectDmemWord(u32, 0x114, 0xdeadbeef);
-    try expectDmemWord(u32, 0x118, 0xbeef);
-    try expectDmemWord(u32, 0x11c, 0xcafe);
-
-    try expectDmemWord(u32, 0x120, 0x00);
-    try expectDmemWord(u32, 0x124, 0x10);
-    try expectDmemWord(u32, 0x128, 0x04);
-    try expectDmemWord(u32, 0x12c, 0x14);
-    try expectDmemWord(u32, 0x130, 0x08);
+fn runProgramCase(comptime case: program_cases.Case) !void {
+    if (case.seed) |seed| seedDmemWord(seed.offset, seed.value);
+    try run(@field(zsp_programs, case.program));
+    for (case.checks) |check| {
+        for (check.expected, 0..) |expected, index| {
+            try expectDmemWord(u8, check.offset + @as(u32, @intCast(index)), expected);
+        }
+    }
+    for (case.orderings) |ordering| {
+        const smaller = readDmemInt(u32, ordering.smaller);
+        const larger = readDmemInt(u32, ordering.larger);
+        @import("n64").debug.print(" {d} <= {d}", .{ smaller, larger });
+        try testing.expect(smaller <= larger + ordering.slack);
+    }
 }
 
 fn dmaIn() !void {
@@ -2688,10 +2558,10 @@ fn run(program: rsp.Program) !void {
     try waitBrokeTimeout();
 }
 
-fn seedLoadSource(value: u32) void {
+fn seedDmemWord(offset: u32, value: u32) void {
     rsp.halt();
     rsp.waitHalted();
-    @import("n64").hw.sp.readDmem(u32, 0).* = value;
+    @import("n64").hw.sp.readDmem(u32, offset).* = value;
 }
 
 fn waitBrokeTimeout() !void {

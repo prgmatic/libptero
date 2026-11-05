@@ -8,6 +8,10 @@ const rsp = @import("../rsp.zig");
 
 const Runtime = @This();
 
+/// Overlay id of the RDP overlay. Its commands occupy queue ids 0xC0-0xFF so
+/// each command header doubles as the raw RDP command word it forwards.
+pub const rdp_overlay_id = 12;
+
 rdp_overlay: rsp.Overlay,
 renderer_attached: bool,
 mixer_attached: bool,
@@ -19,7 +23,7 @@ pub fn init(self: *Runtime) void {
     rsp.waitHalted();
     rsp.loadResident(rsp.programs.command_dispatcher);
     self.rdp_overlay.init(rsp.programs.rdp_overlay);
-    rsp.registerOverlayStatic(&self.rdp_overlay, 12);
+    rsp.registerOverlayStatic(&self.rdp_overlay, rdp_overlay_id);
     self.renderer_attached = false;
     self.mixer_attached = false;
 }

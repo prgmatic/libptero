@@ -1,7 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
-const asm_writer = @import("../asm_writer.zig");
-const asm_optimizer = @import("../asm_optimizer.zig");
+const codegen = @import("../codegen.zig");
+const optimizer = @import("../optimizer.zig");
 const parser_mod = @import("../parser.zig");
 
 const testing = std.testing;
@@ -25,8 +25,8 @@ test "assembly emission is deterministic" {
     defer first.deinit();
     var second = std.Io.Writer.Allocating.init(testing.allocator);
     defer second.deinit();
-    try asm_writer.write(&first.writer, functions);
-    try asm_writer.write(&second.writer, functions);
+    try codegen.write(testing.allocator, &first.writer, functions);
+    try codegen.write(testing.allocator, &second.writer, functions);
     try testing.expectEqualStrings(first.written(), second.written());
 }
 
@@ -544,13 +544,29 @@ test "pinned registers can be reused after their last use" {
     );
 }
 
-test "parameters outside the default scalar convention require explicit registers" {
+test "boundary parameters outside the default scalar convention require explicit registers" {
     try expectParseError(
-        \\fn invalid(a: u32, b: u32, c: u32, d: u32, value: u32) {}
-    , .expected_fixed_register_parameter, 1, 12);
+        \\export fn invalid(a: u32, b: u32, c: u32, d: u32, value: u32) {}
+    , .expected_fixed_register_parameter, 1, 19);
     try expectParseError(
-        \\fn invalid(value: vec16) {}
-    , .expected_fixed_register_parameter, 1, 12);
+        \\export fn invalid(value: vec16) {}
+    , .expected_fixed_register_parameter, 1, 19);
+}
+
+test "internal functions let the compiler choose parameter registers" {
+    try @import("support.zig").expectAsmContains(
+        \\fn scale(a: u32, b: u32, c: u32, d: u32, value: u32, vector: vec16) {
+        \\  value += a;
+        \\  vector += vector;
+        \\  rsp.cp0.setSpStatus(value);
+        \\}
+        \\export fn entry() noreturn {
+        \\  reg($t6) count: u32 = 1;
+        \\  reg($v09) data: vec16 = 0;
+        \\  scale(1, 2, 3, 4, count, data);
+        \\  rsp.halt();
+        \\}
+    , &.{ "  add $t6, $t6, $a0\n", "# vaddc $v09, $v09, $v09\n", "  jal scale\n" });
 }
 
 test "automatic scalar allocation reuses a register after its final use" {
@@ -726,4 +742,32 @@ test "semantic rejects function variable redefining global" {
         \\  reg a: u16 = 2;
         \\}
     , error.SymbolAlreadyDefined);
+}
+
+test "bit-cast operands reinterpret registers in arithmetic and comparisons" {
+    try @import("support.zig").expectAsmContains(
+        \\fn entry() {
+        \\  reg($t1) total: u32 = 1;
+        \\  reg($t0) signed: i32 = 2;
+        \\  total +%= bitCast(signed);
+        \\  reg($t2) below: u32 = 0;
+        \\  below = total < bitCast(signed);
+        \\  rsp.cp0.setSpStatus(below);
+        \\}
+    , &.{ "  addu $t1, $t1, $t0\n", "  sltu $t2, $t1, $t0\n" });
+    try expectAsmError(
+        \\fn entry() {
+        \\  reg($t1) total: u32 = 1;
+        \\  reg($v01) vector: vec16 = 0;
+        \\  total +%= bitCast(vector);
+        \\}
+    , error.ArithmeticRhsMustBeRegisterOrNumber);
+    try expectAsmError(
+        \\fn entry() {
+        \\  reg($t1) total: u32 = 1;
+        \\  reg($v01) vector: vec16 = 0;
+        \\  reg($t2) below: u32 = 0;
+        \\  below = total < bitCast(vector);
+        \\}
+    , error.ExpectedScalarType);
 }

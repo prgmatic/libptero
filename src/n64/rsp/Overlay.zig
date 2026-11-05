@@ -1,12 +1,14 @@
 const io = @import("../hw/sp.zig");
 const Program = @import("Program.zig");
 
-pub const max_id = 15;
-pub const commands_per_id = 16;
+const layout = @import("overlay_layout.zig");
+
+pub const max_id = layout.max_id;
+pub const commands_per_id = layout.commands_per_id;
 pub const max_command_count = max_id * commands_per_id;
-pub const dmem_offset = 0x1f8;
-pub const program_data_offset = 0x0a00;
-pub const backing_len = io.dmem_len - dmem_offset;
+pub const dmem_offset = layout.header_dmem_offset;
+pub const program_data_offset = layout.program_data_offset;
+pub const backing_len = layout.backing_len;
 
 const Overlay = @This();
 
@@ -43,6 +45,4 @@ pub inline fn commandId(self: *const Overlay, command_index: u8) u8 {
     return (self.id << 4) +% command_index;
 }
 
-pub fn dataAddress(program: Program) u16 {
-    return program.data_address orelse program_data_offset;
-}
+pub const dataAddress = layout.dataAddress;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
-const asm_writer = @import("../asm_writer.zig");
-const asm_optimizer = @import("../asm_optimizer.zig");
+const codegen = @import("../codegen.zig");
+const optimizer = @import("../optimizer.zig");
 const parser_mod = @import("../parser.zig");
 
 const testing = std.testing;
@@ -25,7 +25,7 @@ test "named exports generate structural external interfaces" {
 
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
-    try asm_writer.writeInterface(&output.writer, functions, null);
+    try @import("../interface.zig").writeInterface(testing.allocator, &output.writer, functions, null);
     try testing.expectEqualStrings(
         "// @zsp-symbol increment increment\n" ++
             "pub extern fn increment(reg($a0) value: u32) writes($a0) noreturn;\n\n",
@@ -578,15 +578,24 @@ test "function calls order argument moves before destructive setup" {
     );
 }
 
-test "function calls reject scalar argument move cycles" {
-    try expectAsmError(
+test "function calls break scalar argument move cycles through a scratch register" {
+    try @import("support.zig").expectAsmContains(
         \\fn callee(reg($t0) first: u32, reg($t1) second: u32) {}
         \\fn caller() {
         \\  reg($t0) second: u32 = 1;
         \\  reg($t1) first: u32 = 2;
         \\  callee(first, second);
         \\}
-    , error.FunctionArgumentMoveCycle);
+    , &.{"  or $at, $t0, $zero\n  or $t0, $t1, $zero\n  or $t1, $at, $zero\n  jal callee\n"});
+    try @import("support.zig").expectAsmContains(
+        \\fn callee(reg($t0) a: u32, reg($t1) b: u32, reg($at) c: u32) {}
+        \\fn caller() {
+        \\  reg($t1) x: u32 = 1;
+        \\  reg($t0) y: u32 = 2;
+        \\  reg($t2) z: u32 = 3;
+        \\  callee(x, y, z);
+        \\}
+    , &.{"  or $v1, $t0, $zero\n"});
 }
 
 test "function calls require matching registers for written scalar arguments" {
@@ -656,5 +665,22 @@ test "read-only pinned ABI bindings do not claim hardware writes" {
     defer ast.freeFunctions(testing.allocator, functions);
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
-    try asm_writer.write(&output.writer, functions);
+    try codegen.write(testing.allocator, &output.writer, functions);
+}
+
+test "bit-cast arguments move into the parameter register" {
+    try @import("support.zig").expectAsmContains(
+        \\fn callee(reg($a0) value: u32) { rsp.nop(); }
+        \\fn entry() {
+        \\  reg($t0) signed: i32 = -1;
+        \\  callee(bitCast(signed));
+        \\}
+    , &.{ "  or $a0, $zero, $t0\n", "  jal callee\n" });
+    try expectAsmError(
+        \\fn callee(reg($a0) value: u32) { rsp.nop(); }
+        \\fn entry() {
+        \\  reg($v01) vector: vec16 = 0;
+        \\  callee(bitCast(vector));
+        \\}
+    , error.FunctionArgumentTypeMismatch);
 }

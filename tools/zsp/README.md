@@ -23,42 +23,52 @@ optimization hints.
 
 ## Compiler stages
 
-`parser.zig` owns parser state, declarations, and shared grammar metadata.
-`parse_statements.zig`, `parse_values.zig`, and `parse_memory.zig` handle
-statements, expressions, and shared memory operands. The parser produces the
-source AST and a statement source map. `rspq.zig` owns the framework-specific
-semantic stage by resolving the command-table declaration and validating command indices, encoded
-sizes, and parameter ABI bindings. Its `CommandAnalysis` is the invariant the
-assembly writer consumes for command-table layout and manifest serialization;
-the writer no longer rediscovers or validates those facts.
+Parsing. `parser.zig` owns parser state, symbol tables, token helpers, and
+shared grammar metadata. `parse_declarations.zig` parses functions,
+parameters, register and constant declarations, compile-time enums and flags,
+imports, packed structs, and storage blocks. `parse_statements.zig`,
+`parse_values.zig`, `parse_builtins.zig`, and `parse_memory.zig` handle
+statements, expressions, `rsp.*` builtins, and memory operands. The parser
+produces the source AST and a statement source map; `ast_walk.zig` gives
+passes uniform access to nested statement lists.
 
-`main.zig` owns process behavior and output files; `options.zig` parses CLI
-arguments without IO. `root.zig` exposes the programmatic API. `modules.zig`
-loads and links modules, retaining source locations and owning each module's
-parsed allocations through `source.Program`, which releases partial ASTs on
-parse failure. `compiler.zig` runs the shared compilation and
-explain pipeline, including the final IMEM limit check.
+Program setup. `cli.zig` owns the command's behavior and output files behind
+injected writers, `main.zig` only connects it to the process, and
+`options.zig` parses arguments without IO. `root.zig` exposes the
+programmatic API. `modules.zig` loads and links modules, retaining source
+locations and owning each module's parsed allocations through
+`source.Program`, which releases partial ASTs on parse failure. `rspq.zig`
+validates command indices, encoded sizes, and parameter ABI bindings; its
+`CommandAnalysis` is what emission uses for the command table.
+`compiler.zig` runs the shared compilation and explain pipeline, including the
+final IMEM limit check.
 
-`analysis.zig` owns writes inference, control-flow/lifetime analysis, and register
-allocation. `placement.zig` computes deterministic function order and tail
-fallthrough before emission. `asm_writer.zig` owns scalar and control-flow
-instruction selection, interfaces, and assembly printing; `emit_vectors.zig`
-owns vector encodings and `emit_operands.zig` handles common address/immediate
-materialization. `registers.zig` supplies shared register metadata, and
-`explain.zig` formats allocation and write reports.
+Analysis. `param_alloc.zig` chooses registers for unpinned parameters of
+internal functions (see [Functions, calls, and modules](#functions-calls-and-modules)).
+`clobbers.zig` infers each function's transitive write set.
+`lifetime_scan.zig` and `flow.zig` record statement positions, reads and
+writes, and control-flow edges into `lifetimes.zig`; `call_requirements.zig`
+adds the registers call arguments must arrive in, and
+`lifetime_analysis.zig` runs these steps. `context.zig` holds one function's
+symbols and allocates registers over those lifetimes. `analysis.zig` is a
+facade over these files. `placement.zig` computes function order and tail
+fallthrough.
 
-The current post-parse dependency map is:
+Emission. `codegen.zig` writes each function through `emit_statements.zig`,
+which dispatches to `emit_scalar.zig`, `emit_control.zig`, `emit_calls.zig`,
+`emit_memory.zig`, `emit_vectors.zig`, `emit_builtins.zig`, and
+`emit_storage.zig`; `emit_common.zig` and `emit_operands.zig` hold shared type
+rules and operand materialization. Emitters append typed instructions to an
+`Emitter.zig` buffer rather than text. `ir.zig` defines the instruction IR,
+whose `encode()` gives the machine word; `ir_print.zig` prints assembly and
+`ir_parse.zig` reads assembly, including `asm` lines, back into the IR.
 
-- `rspq.analyzeCommands` validates command metadata and produces
-  `CommandAnalysis`.
-- `FunctionClobberRegistry.init` combines call/write analysis with the current
-  lifetime and allocation simulation.
-- `FunctionContext.prepareLifetimes` builds statement-position control flow and
-  live ranges; `bindParameters` and the allocation helpers select registers.
-- `placement.Plan.init` produces the emission order and selected fallthrough
-  edges; `writeFunction` and `writeStatements` consume that plan and perform
-  instruction selection and assembly printing. `asm_optimizer.zig` then
-  optimizes assembly text.
+Optimization. `optimizer.zig` runs the passes in `peephole.zig` and
+`schedule.zig` over the IR (see [Optimizer](#optimizer)), using the
+instruction effects in `ir_effects.zig` and the dependence graph in
+`ir_deps.zig`. `registers.zig` supplies register metadata, `interface.zig`
+writes `--interface` declarations, and `explain.zig` formats allocation
+reports and diagnostics.
 
 `tests.zig` imports the complete host suite. The `tests/` directory groups
 regressions by analysis, optimizer, vectors, memory, commands, control flow,
@@ -78,14 +88,22 @@ locations when available.
 ## Building and running
 
 ```sh
-zig build-exe tools/zsp/main.zig -femit-bin=/tmp/zsp
-/tmp/zsp input.zsp output.s
+zig build install          # installs zig-out/bin/zsp
+zig-out/bin/zsp input.zsp output.s
 zig cc -target mips-freestanding-none -c output.s -o output.o
 ```
 
-`zsp.zig` remains a compatibility entry point for existing standalone build
-commands. Invoking the tool without arguments or with `--help` prints usage.
-Invalid arguments and compilation failures exit with a concise diagnostic.
+The scheduler scores instruction orders with the RSP interpreter's timing
+model, so a standalone build must supply that module:
+
+```sh
+zig build-exe --dep rsp_timing -Mroot=tools/zsp/main.zig \
+    -Mrsp_timing=tools/rsp_interp/timing.zig -femit-bin=/tmp/zsp
+```
+
+`zsp.zig` remains a compatibility entry point for existing build commands.
+Invoking the tool without arguments or with `--help` prints usage. Invalid
+arguments and compilation failures exit with a concise diagnostic.
 
 The command-line syntax is:
 
@@ -348,14 +366,31 @@ export fn _start() noreturn {
 }
 ```
 
-The first four unpinned scalar parameters use `$a0` through `$a3`. Parameters
-outside that default, and all vector parameters, must specify a register. Calls
-remain stackless, but scalar input arguments are moved into the lowered
-signature's registers when allocation cannot coalesce them there directly.
-Constants and literals can be materialized in pinned scalar parameters. Vector
-arguments and parameters written by the callee still require exact register
-matches, and cyclic scalar move permutations are not yet supported. Signed and
-unsigned scalar arguments of the same width are representation-compatible.
+Parameters of internal functions need no register. The compiler gives each
+unpinned parameter the register its callers most often already hold the
+argument in, avoiding registers the function pins or its callees write, so
+calls usually need no argument moves. This covers vector parameters too:
+
+```zig
+fn scale(value: u32, vector: vec16) { ... }   // registers chosen per callers
+```
+
+Functions whose convention other code depends on keep the structural one:
+`export` functions, commands, `extern` declarations, and functions whose
+address is taken. There the first four unpinned scalar parameters use `$a0`
+through `$a3`, and other parameters, including all vector ones, must specify
+a register.
+
+Calls remain stackless. Scalar input arguments are moved into the callee's
+registers when allocation cannot place them there directly; moves that form a
+cycle, such as swapped arguments, go through `$at` (or `$v1` when an argument
+is in `$at`). Constants and literals can be materialized in pinned scalar
+parameters. Vector arguments and parameters written by the callee require
+exact register matches. Signed and unsigned scalar arguments of the same width
+are representation-compatible.
+
+A function that calls another overwrites its own `$ra`, so only code that
+never returns, such as `_start`, can make nested calls without saving it.
 `inline` functions are expanded at the call site; other functions use the
 repository's stackless fixed-register calling convention. `export` emits a
 global assembly symbol, while `pub` permits access from another ZSP module.
@@ -842,6 +877,21 @@ rsp.cp0.write(9, command_end);
 rsp.cp0.readRegister(5, $at);
 ```
 
+## Verifying microcode changes
+
+ZSP output is no longer compared byte for byte with libdragon/Tiny3D. Check
+changes to the compiler or to shipped `.zsp` sources with:
+
+```sh
+zig build test            # includes the RSP interpreter workloads and baseline gate
+zig build rsp-baseline    # estimated cycles per workload and hottest functions
+```
+
+The host workloads must reproduce their recorded outputs and stay within 2% of
+the recorded cycles. Record intended improvements with
+`zig build rsp-baseline -- --update`. Run the hardware tests as well. See
+`src/tests/microcode/README.md` and `tools/rsp_interp/README.md`.
+
 ## Explain
 
 `zsp explain <input.zsp>` compiles and links the program without writing an
@@ -859,14 +909,49 @@ Module lookup flags and `--no-optimize` work the same way as normal compilation.
 The report comes from the resolved allocator and write analysis, not from
 guessing register use after assembly emission.
 
+## Diagnostics
+
+Compilation errors name the source position, the function, and the value
+concerned, with a hint for the usual fix. When register allocation fails, the
+message also lists the values occupying registers over that value's lifetime:
+
+```text
+kernel.zsp:12:5: zsp: error in function 'blend' for 'weight': scalar register allocation failed; ... (OutOfFreeRegisters)
+  21 live values: a in $t0, b in $t1, ... (+9 more)
+```
+
 ## Optimizer
 
-The assembly optimizer performs conservative RSP scheduling. It can fill
-branch delay slots, hide scalar load latency, pair independent scalar and
-vector pipeline instructions, and tighten common CP0 polling loops. It tracks
-register and memory dependencies, preserves memory order, leaves already-filled
-delay slots intact, and treats unknown raw assembly as a barrier. Use
-`--no-optimize` when inspecting direct code generation.
+The optimizer works on the instruction IR, so it sees real operands rather
+than assembly text. Its passes run in order:
+
+1. Relocation folding merges `symbol + constant` address arithmetic into the
+   memory operand.
+2. Dead-write removal drops register writes that are overwritten before any
+   read.
+3. Polling-loop folding tightens common CP0 busy-wait loops.
+4. List scheduling reorders each straight-line block together with the branch
+   that ends it and that branch's delay slot. A beam search (16 candidates,
+   windows of up to 64 instructions) scores orders with the RSP interpreter's
+   calibrated timing model (`tools/rsp_interp/timing.zig`), so it accounts for
+   load latency, vector result latency, and dual issue.
+5. Delay-slot filling moves an independent instruction into each remaining
+   branch slot.
+
+Dependences come from per-instruction effects: registers, the vector
+accumulator, VCO/VCC/VCE, the divide unit, memory, and IO. Partial vector
+writes count as read-modify-write, `ltv`/`stv` touch their whole eight-register
+bank, and CP0 accesses order all memory. Memory operations with the same base
+register and symbol whose byte ranges are disjoint are independent. Writes to
+state that is dead afterwards are ordered only against the live ranges around
+them.
+
+Instructions in `exact` blocks are never moved or removed, and `asm` lines
+are parsed into the IR when possible and otherwise act as barriers. Use
+`--no-optimize` to inspect direct code generation. Shipped microcode can be
+written plainly: `src/tests/ucode/matrix_kernels.zsp` checks on hardware that
+plain matrix multiply and normalization, written without pins or `exact`,
+match the hand-scheduled versions to within one cycle.
 
 ## Current limitations
 
@@ -875,11 +960,10 @@ ternary expressions, general vector shifts, general-purpose annotations, and
 macros. Selected unaligned and transposed transfers are supported through the
 explicit `rsp.vector.*` operations described above.
 
-Function analysis currently has bounded tables: 128 lifetimes, labels, edges,
-and calls; 2048 lifetime events and statement positions; and 32 nested flow
-loops. Exhausting an analysis table reports `AnalysisCapacityExceeded` rather
-than silently disabling validation. Raw assembly still uses conservative
-register allocation because its effects cannot be inferred from source.
+Analysis and parser tables grow as needed, so function size is limited only by
+IMEM. Function pointer types take at most 16 parameters. Raw assembly still
+uses conservative register allocation because its effects cannot be inferred
+from source.
 
 See `tools/zsp/tests/` and the `.zsp` files under `src/n64/rsp/ucode/` and
 `src/tests/ucode/` for executable examples of the supported subset.

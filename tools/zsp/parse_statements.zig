@@ -90,15 +90,15 @@ pub fn parsePackedKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement 
 }
 
 pub fn parseDataKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
-    return .{ .data_block = try self.parseStorageBlock(false, true) };
+    return .{ .data_block = try self.parseStorageBlock(true) };
 }
 
 pub fn parseBssKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
-    return .{ .bss_block = try self.parseStorageBlock(false, false) };
+    return .{ .bss_block = try self.parseStorageBlock(false) };
 }
 
 pub fn parseStateKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
-    return .{ .state_block = try self.parseStorageBlock(false, true) };
+    return .{ .state_block = try self.parseStorageBlock(true) };
 }
 
 pub fn parseExactKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
@@ -149,7 +149,6 @@ pub fn parseJumpKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
     return .{ .builtin = .{ .jump = .{
         .address = address,
         .delay_slot = try self.parseOptionalDelaySlot(),
-        .typed = false,
     } } };
 }
 
@@ -172,14 +171,21 @@ pub fn parseAsmKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
 }
 
 pub fn parseWhileKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
+    return parseWhile(self, null);
+}
+
+/// `while (condition) { ... }` after the keyword.
+fn parseWhile(self: *Parser, label: ?[]const u8) !ast.Statement {
     _ = try self.expect(.l_paren);
     const condition = try self.parseCondition();
     _ = try self.expect(.r_paren);
+    return .{ .while_loop = .{ .label = label, .condition = condition, .statements = try parseBraced(self) } };
+}
+
+/// `{ ... }`
+fn parseBraced(self: *Parser) ![]ast.Statement {
     _ = try self.expect(.l_brace);
-    return .{ .while_loop = .{
-        .condition = condition,
-        .statements = try self.parseBlockStatements(),
-    } };
+    return self.parseBlockStatements();
 }
 
 pub fn parseDoKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
@@ -198,99 +204,60 @@ pub fn parseBreakKeyword(self: *Parser, first: token.Token) anyerror!ast.Stateme
     return .{ .continue_loop = label };
 }
 
+/// `label:` alone, or naming the block or loop that follows.
 pub fn parseLabeledStatement(self: *Parser, first: token.Token) anyerror!ast.Statement {
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "block")) {
-        _ = try self.expect(.ident);
-        _ = try self.expect(.l_brace);
-        const statements = try self.parseBlockStatements();
-        var exit_delay: ?[]ast.Statement = null;
-        if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "exit")) {
-            _ = try self.expect(.ident);
-            const slot = try self.expect(.ident);
-            if (!std.mem.eql(u8, slot.text, "slot")) return self.fail(slot, .unexpected_token);
-            _ = try self.expect(.l_brace);
-            exit_delay = try self.parseBlockStatements();
-        }
-        return .{ .labeled_block = .{
-            .label = first.text,
-            .statements = statements,
-            .exit_delay = exit_delay,
-        } };
-    }
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "while")) {
-        _ = try self.expect(.ident);
-        _ = try self.expect(.l_paren);
-        const condition = try self.parseCondition();
-        _ = try self.expect(.r_paren);
-        _ = try self.expect(.l_brace);
-        return .{ .while_loop = .{
-            .label = first.text,
-            .condition = condition,
-            .statements = try self.parseBlockStatements(),
-        } };
-    }
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "do")) {
-        _ = try self.expect(.ident);
-        return self.parseDoWhileStatement(first.text);
-    }
+    if (try self.eatKeyword("block")) return parseLabeledBlock(self, first.text);
+    if (try self.eatKeyword("while")) return parseWhile(self, first.text);
+    if (try self.eatKeyword("do")) return self.parseDoWhileStatement(first.text);
     return .{ .label = first.text };
 }
 
+/// `block { ... }`, optionally followed by `exit slot { ... }`.
+fn parseLabeledBlock(self: *Parser, label: []const u8) !ast.Statement {
+    const statements = try parseBraced(self);
+    return .{ .labeled_block = .{ .label = label, .statements = statements, .exit_delay = try parseExitSlot(self) } };
+}
+
+fn parseExitSlot(self: *Parser) !?[]ast.Statement {
+    if (!try self.eatKeyword("exit")) return null;
+    const slot = try self.expect(.ident);
+    if (!std.mem.eql(u8, slot.text, "slot")) return self.fail(slot, .unexpected_token);
+    return try parseBraced(self);
+}
+
+/// `if (condition)` followed by `tail`/`jump f(...)`, `goto label`, or a
+/// block with an optional leading `slot { ... }` and trailing `else`.
 pub fn parseIfKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
     _ = try self.expect(.l_paren);
     const condition = try self.parseCondition();
     _ = try self.expect(.r_paren);
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "tail")) {
-        _ = try self.expect(.ident);
-        const target = try self.parseFunctionReference();
-        _ = try self.expect(.l_paren);
-        const arguments = try self.parseCallArguments();
-        return .{ .conditional_direct_goto = .{
-            .condition = condition,
-            .target = target,
-            .arguments = arguments,
-            .typed = true,
-            .delay_slot = try self.parseOptionalDelaySlot(),
-        } };
-    }
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "jump")) {
-        _ = try self.expect(.ident);
-        const target = try self.parseFunctionReference();
-        _ = try self.expect(.l_paren);
-        const arguments = try self.parseCallArguments();
-        return .{ .conditional_direct_goto = .{
-            .condition = condition,
-            .target = target,
-            .arguments = arguments,
-            .typed = true,
-            .delay_slot = try self.parseOptionalDelaySlot(),
-        } };
-    }
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "goto")) {
-        _ = try self.expect(.ident);
-        const target = try self.expect(.ident);
-        return .{ .conditional_goto = .{
-            .condition = condition,
-            .target = target.text,
-            .delay_slot = try self.parseOptionalDelaySlot(),
-        } };
-    }
-    var delay_slot: ?[]ast.Statement = null;
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "slot")) {
-        _ = try self.expect(.ident);
-        _ = try self.expect(.l_brace);
-        delay_slot = try self.parseBlockStatements();
-    }
-    _ = try self.expect(.l_brace);
-    const then_statements = try self.parseBlockStatements();
+    if (try self.eatKeyword("tail") or try self.eatKeyword("jump")) return parseConditionalDirectGoto(self, condition);
+    if (try self.eatKeyword("goto")) return parseConditionalGoto(self, condition);
+    return parseIfStatement(self, condition);
+}
 
-    var else_statements: ?[]ast.Statement = null;
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "else")) {
-        _ = try self.expect(.ident);
-        _ = try self.expect(.l_brace);
-        else_statements = try self.parseBlockStatements();
-    }
+fn parseConditionalDirectGoto(self: *Parser, condition: ast.Condition) !ast.Statement {
+    const target = try self.parseFunctionReference();
+    _ = try self.expect(.l_paren);
+    const arguments = try self.parseCallArguments();
+    return .{ .conditional_direct_goto = .{
+        .condition = condition,
+        .target = target,
+        .arguments = arguments,
+        .typed = true,
+        .delay_slot = try self.parseOptionalDelaySlot(),
+    } };
+}
 
+fn parseConditionalGoto(self: *Parser, condition: ast.Condition) !ast.Statement {
+    const target = try self.expect(.ident);
+    return .{ .conditional_goto = .{ .condition = condition, .target = target.text, .delay_slot = try self.parseOptionalDelaySlot() } };
+}
+
+fn parseIfStatement(self: *Parser, condition: ast.Condition) !ast.Statement {
+    const delay_slot = if (try self.eatKeyword("slot")) try parseBraced(self) else null;
+    const then_statements = try parseBraced(self);
+    const else_statements = if (try self.eatKeyword("else")) try parseBraced(self) else null;
     return .{ .if_statement = .{
         .condition = condition,
         .delay_slot = delay_slot,
@@ -359,100 +326,60 @@ pub fn parseReservedKeyword(self: *Parser, _: token.Token) anyerror!ast.Statemen
     return .{ .var_decl = declaration };
 }
 
+/// A statement starting with a name: an assignment to it, a call of it,
+/// or a call into the module it names.
 pub fn parseAssignmentOrCall(self: *Parser, first: token.Token) anyerror!ast.Statement {
-    var destination_lane: ?u3 = null;
-    var destination_view: ?ast.VectorView = null;
-    if (self.current.tag == .l_bracket or self.isVectorDotSuffix()) {
-        const access = try self.parseVectorAccess(first.text);
-        destination_lane = access.lane;
-        destination_view = access.view;
-        if (access.lane == null and access.view == null) {
-            return self.fail(first, .unsupported_destination_swizzle);
-        }
-    }
-
+    const destination = try parseDestination(self, first);
     if (try self.parseCompoundAssignOp()) |op| {
-        const value = valueFromRef(try self.parseValueRef());
-        _ = try self.expect(.semicolon);
-        return .{ .assignment = .{
-            .destination = first.text,
-            .destination_lane = destination_lane,
-            .destination_view = destination_view,
-            .lhs = .{ .ident = first.text },
-            .op = op,
-            .rhs = value,
-        } };
+        return finishAssignment(self, destination, .{ .ident = first.text }, op, valueFromRef(try self.parseValueRef()));
     }
+    if (try self.eat(.equal)) return parseAssignedValue(self, destination);
+    if (try self.eat(.l_paren)) return parseCall(self, null, first.text);
+    if (!try self.eat(.dot)) return self.fail(first, .unsupported_statement);
+    const member = try self.expect(.ident);
+    _ = try self.expect(.l_paren);
+    return parseCall(self, first.text, member.text);
+}
 
-    if (try self.eat(.equal)) {
-        if (try self.eat(.minus)) {
-            const value = valueFromRef(try self.parseValueRef());
-            _ = try self.expect(.semicolon);
-            return .{ .assignment = .{
-                .destination = first.text,
-                .destination_lane = destination_lane,
-                .destination_view = destination_view,
-                .lhs = value,
-                .op = .negate,
-                .rhs = null,
-            } };
-        }
-        if (try self.eat(.tilde)) {
-            const value = valueFromRef(try self.parseValueRef());
-            _ = try self.expect(.semicolon);
-            return .{ .assignment = .{
-                .destination = first.text,
-                .destination_lane = destination_lane,
-                .destination_view = destination_view,
-                .lhs = value,
-                .op = .bit_not,
-                .rhs = null,
-            } };
-        }
+const Destination = struct { name: []const u8, lane: ?u3 = null, view: ?ast.VectorView = null };
 
-        const lhs = try self.parseScalarExpression(0);
-        const comparison = try self.parseComparisonOperator();
-        const assignment_lhs: ast.Value = if (comparison) |comparison_op| .{ .scalar_comparison = .{
-            .lhs = try valueRefFromValue(lhs),
-            .op = comparison_op,
-            .rhs = try self.parseValueRef(),
-        } } else lhs;
-        _ = try self.expect(.semicolon);
-        return .{ .assignment = .{
-            .destination = first.text,
-            .destination_lane = destination_lane,
-            .destination_view = destination_view,
-            .lhs = assignment_lhs,
-            .op = .set,
-            .rhs = null,
-        } };
-    }
+/// A name, or a vector name with one lane or a typed view selected.
+fn parseDestination(self: *Parser, first: token.Token) !Destination {
+    if (self.current.tag != .l_bracket and !self.isVectorDotSuffix()) return .{ .name = first.text };
+    const access = try self.parseVectorAccess(first.text);
+    if (access.lane == null and access.view == null) return self.fail(first, .unsupported_destination_swizzle);
+    return .{ .name = first.text, .lane = access.lane, .view = access.view };
+}
 
-    if (try self.eat(.l_paren)) {
-        const arguments = try self.parseCallArguments();
-        const delay_slot = try self.parseOptionalDelaySlot();
-        return .{ .call = .{
-            .module = null,
-            .name = first.text,
-            .arguments = arguments,
-            .delay_slot = delay_slot,
-        } };
-    }
+/// `= -x;`, `= ~x;`, `= expression;`, or `= a < b;`.
+fn parseAssignedValue(self: *Parser, destination: Destination) !ast.Statement {
+    if (try self.eat(.minus)) return finishAssignment(self, destination, valueFromRef(try self.parseValueRef()), .negate, null);
+    if (try self.eat(.tilde)) return finishAssignment(self, destination, valueFromRef(try self.parseValueRef()), .bit_not, null);
+    const lhs = try self.parseScalarExpression(0);
+    const comparison = try self.parseComparisonOperator() orelse return finishAssignment(self, destination, lhs, .set, null);
+    const value: ast.Value = .{ .scalar_comparison = .{
+        .lhs = try valueRefFromValue(lhs),
+        .op = comparison,
+        .rhs = try self.parseValueRef(),
+    } };
+    return finishAssignment(self, destination, value, .set, null);
+}
 
-    if (try self.eat(.dot)) {
-        const member = try self.expect(.ident);
-        _ = try self.expect(.l_paren);
-        const arguments = try self.parseCallArguments();
-        const delay_slot = try self.parseOptionalDelaySlot();
-        return .{ .call = .{
-            .module = first.text,
-            .name = member.text,
-            .arguments = arguments,
-            .delay_slot = delay_slot,
-        } };
-    }
+fn finishAssignment(self: *Parser, destination: Destination, lhs: ast.Value, op: ast.AssignOp, rhs: ?ast.Value) !ast.Statement {
+    _ = try self.expect(.semicolon);
+    return .{ .assignment = .{
+        .destination = destination.name,
+        .destination_lane = destination.lane,
+        .destination_view = destination.view,
+        .lhs = lhs,
+        .op = op,
+        .rhs = rhs,
+    } };
+}
 
-    return self.fail(first, .unsupported_statement);
+fn parseCall(self: *Parser, module: ?[]const u8, name: []const u8) !ast.Statement {
+    const arguments = try self.parseCallArguments();
+    return .{ .call = .{ .module = module, .name = name, .arguments = arguments, .delay_slot = try self.parseOptionalDelaySlot() } };
 }
 
 pub fn parseDoWhileStatement(self: *Parser, label: ?[]const u8) !ast.Statement {
@@ -472,12 +399,9 @@ pub fn parseDoWhileStatement(self: *Parser, label: ?[]const u8) !ast.Statement {
     } };
 }
 
+/// `slot { ... }` after a transfer, or the terminating `;`.
 pub fn parseOptionalDelaySlot(self: *Parser) !?[]ast.Statement {
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "slot")) {
-        _ = try self.expect(.ident);
-        _ = try self.expect(.l_brace);
-        return try self.parseBlockStatements();
-    }
+    if (try self.eatKeyword("slot")) return try parseBraced(self);
     _ = try self.expect(.semicolon);
     return null;
 }

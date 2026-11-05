@@ -32,6 +32,17 @@ pub fn vectorRegName(reg: ast.VectorRegister) []const u8 {
     return @tagName(reg);
 }
 
+/// `$v01`, as written in source and diagnostics.
+pub fn vectorDollarName(reg: ast.VectorRegister) []const u8 {
+    return vector_dollar_names.get(reg);
+}
+
+const vector_dollar_names = blk: {
+    var table = std.EnumArray(ast.VectorRegister, []const u8).initUndefined();
+    for (std.enums.values(ast.VectorRegister)) |reg| table.set(reg, "$" ++ @tagName(reg));
+    break :blk table;
+};
+
 const scalar_names = std.EnumArray(Register, []const u8).init(.{
     .zero = "$zero",
     .at = "$at",
@@ -69,6 +80,21 @@ const scalar_names = std.EnumArray(Register, []const u8).init(.{
 
 pub fn regName(reg: Register) []const u8 {
     return scalar_names.get(reg);
+}
+
+/// Parses a scalar register spelled as in assembly, such as `$t0`.
+pub fn parseScalar(text: []const u8) ?Register {
+    for (std.enums.values(Register)) |reg| {
+        if (std.mem.eql(u8, scalar_names.get(reg), text)) return reg;
+    }
+    return null;
+}
+
+test "scalar register names parse back to registers" {
+    try std.testing.expectEqual(@as(?Register, .t0), parseScalar("$t0"));
+    try std.testing.expectEqual(@as(?Register, .zero), parseScalar("$zero"));
+    try std.testing.expectEqual(@as(?Register, null), parseScalar("$v01"));
+    try std.testing.expectEqual(@as(?Register, null), parseScalar("t0"));
 }
 
 pub const compiler_scratch: Register = .at;

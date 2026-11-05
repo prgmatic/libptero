@@ -7,6 +7,7 @@ pub const command_dispatcher_symbols = assets.command_dispatcher_symbols;
 
 pub const rdp_overlay_rsp align(8) = assets.rdp_overlay;
 pub const rdp_overlay = Program.fromBlob(&rdp_overlay_rsp);
+pub const rdp_overlay_symbols = assets.rdp_overlay_symbols;
 
 pub const audio_mixer_rsp align(8) = assets.audio_mixer;
 pub const audio_mixer = Program.fromBlob(&audio_mixer_rsp);

@@ -1,825 +1,540 @@
-const backendScratch2 = @import("emit_operands.zig").backendScratch2;
-const loadDataAddress = @import("emit_operands.zig").loadDataAddress;
-const loadImmediateInto = @import("emit_operands.zig").loadImmediateInto;
-const valueAsAddressReg = @import("emit_operands.zig").valueAsAddressReg;
-const valueAsDmemReg = @import("emit_operands.zig").valueAsDmemReg;
-const valueAsImmediate = @import("emit_operands.zig").valueAsImmediate;
-const valueAsStoreReg = @import("emit_operands.zig").valueAsStoreReg;
-const FunctionClobberRegistry = @import("analysis.zig").FunctionClobberRegistry;
-const FunctionContext = @import("analysis.zig").FunctionContext;
-const ParameterWriteVisit = @import("analysis.zig").ParameterWriteVisit;
-const Symbol = @import("analysis.zig").Symbol;
-const bindParameters = @import("analysis.zig").bindParameters;
-const countFlowStatements = @import("analysis.zig").countFlowStatements;
-const findFunction = @import("analysis.zig").findFunction;
-const functionParameterIsWritten = @import("analysis.zig").functionParameterIsWritten;
-const isPureScalarExpression = @import("analysis.zig").isPureScalarExpression;
-const isScalarRegister = @import("analysis.zig").isScalarRegister;
-const isVectorType = @import("analysis.zig").isVectorType;
-const reserveTransposeBank = @import("analysis.zig").reserveTransposeBank;
-const validateVectorRegisterBinding = @import("analysis.zig").validateVectorRegisterBinding;
-const valueReadsName = @import("analysis.zig").valueReadsName;
-const vectorRegisterForView = @import("analysis.zig").vectorRegisterForView;
-const regName = @import("registers.zig").regName;
-const vectorRegName = @import("registers.zig").vectorRegName;
-const nextVectorRegister = @import("registers.zig").nextVectorRegister;
-const allAutomaticVectorRegisters = @import("registers.zig").allAutomaticVectorRegisters;
-const allAutomaticScalarRegisters = @import("registers.zig").allAutomaticScalarRegisters;
-const vectorRegisterBit = @import("registers.zig").vectorRegisterBit;
-const registerBit = @import("registers.zig").registerBit;
-const alloc_vector_registers = @import("registers.zig").alloc_vector_registers;
-const alloc_scalar_registers = @import("registers.zig").alloc_scalar_registers;
-const command_return = @import("registers.zig").command_return;
-const compiler_scratch_2 = @import("registers.zig").compiler_scratch_2;
-const compiler_scratch = @import("registers.zig").compiler_scratch;
+//! Vector-unit instruction selection: copies, arithmetic, multiplies,
+//! lane operations, accumulator reads, and vector memory transfers.
 const std = @import("std");
 const ast = @import("ast.zig");
-const rspq = @import("rspq.zig");
+const analysis = @import("analysis.zig");
+const common = @import("emit_common.zig");
+const ir = @import("ir.zig");
+const operands = @import("emit_operands.zig");
+const registers = @import("registers.zig");
+const Emitter = @import("Emitter.zig");
 
-const Register = ast.Register;
+const Gen = common.Gen;
 const DataType = ast.DataType;
+const Register = ast.Register;
+const VReg = ast.VectorRegister;
+const Symbol = analysis.Symbol;
+const next = registers.nextVectorRegister;
+const ValueTag = std.meta.Tag(ast.Value);
 
-pub const Diagnostic = @import("explain.zig").Diagnostic;
-pub const ExplainReport = @import("explain.zig").ExplainReport;
-
-pub fn writeVectorInitialValue(
-    writer: *std.Io.Writer,
-    context: *FunctionContext,
-    destination: ast.VectorRegister,
-    data_type: DataType,
-    value: ast.Value,
-) !void {
-    switch (value) {
-        .load => |load| {
-            if (load.data_type != data_type) return error.RegisterTypeMismatch;
-            try writeVectorLoad(writer, context, destination, load);
-        },
-        .ident => |name| {
-            const source = try context.lookup(name);
-            if (source.data_type != data_type) return error.RegisterTypeMismatch;
-            const source_reg = source.vector_reg orelse return error.ExpectedVectorRegister;
-            try writeVectorOp(writer, .vor, destination, source_reg, source_reg, 0);
-            if (data_type == .vec32) {
-                try writeVectorOp(
-                    writer,
-                    .vor,
-                    nextVectorRegister(destination).?,
-                    nextVectorRegister(source_reg).?,
-                    nextVectorRegister(source_reg).?,
-                    0,
-                );
-            }
-        },
-        .vector_access => |access| {
-            if (access.lane != null) return error.VectorLaneInitializationUnsupported;
-            const source = try context.lookup(access.name);
-            const source_reg = try vectorRegisterForView(source, access.view);
-            if (data_type != .vec16 or source.data_type != .vec16) {
-                return error.RegisterTypeMismatch;
-            }
-            try writeVectorOp(writer, .vor, destination, .v00, source_reg, access.element);
-        },
-        .vector_operation => |operation| {
-            if (data_type != .vec16) return error.Vec32ViewRequired;
-            const lhs = try vectorOperand(context, operation.lhs);
-            const rhs = try vectorOperand(context, operation.rhs);
-            if (lhs.data_type != .vec16 or rhs.data_type != .vec16) {
-                return error.VectorMultiplyRequiresVec16Operands;
-            }
-            if (lhs.element != 0) return error.VectorSwizzleOnlyAllowedOnRhs;
-            try writeEncodedVectorOp(
-                writer,
-                @tagName(operation.op),
-                @intFromEnum(operation.op),
-                destination,
-                lhs.reg,
-                rhs.reg,
-                rhs.element,
-            );
-        },
-        .vector_shift => |shift| {
-            if (data_type != .vec16) return error.UnsupportedVectorShift;
-            try writeNamedVectorShift(writer, context, destination, shift);
-        },
-        .accumulator_read => |part| {
-            if (data_type != .vec16) return error.AccumulatorReadRequiresVec16;
-            try writeEncodedVectorOp(
-                writer,
-                "vsar",
-                0b011101,
-                destination,
-                .v00,
-                .v00,
-                @intFromEnum(part),
-            );
-        },
-        .vector_control_read => return error.RegisterTypeMismatch,
-        .hardware_read => return error.RegisterTypeMismatch,
-        .scalar_comparison => return error.RegisterTypeMismatch,
-        .signed_less_than => return error.RegisterTypeMismatch,
-        .scalar_materialize => return error.RegisterTypeMismatch,
-        .number => |number| {
-            if (number != 0) return error.VectorImmediateUnsupported;
-            try writeVectorOp(writer, .vxor, destination, destination, destination, 0);
-            if (data_type == .vec32) {
-                const fraction = nextVectorRegister(destination).?;
-                try writeVectorOp(writer, .vxor, fraction, fraction, fraction, 0);
-            }
-        },
-        .scalar_expression => return error.UnsupportedScalarExpressionTree,
-        .bit_cast, .function_address, .code_address, .data_address => return error.RegisterTypeMismatch,
-    }
+/// The IR op for a source-level vector operation.
+pub fn irOp(op: ast.VectorOp) ir.Op {
+    return vector_ops.get(op);
 }
 
-const VectorAluOp = enum(u6) {
-    vadd = 0b010000,
-    vsub = 0b010001,
-    vaddc = 0b010100,
-    vsubc = 0b010101,
-    vand = 0b101000,
-    vnor = 0b101011,
-    vor = 0b101010,
-    vxor = 0b101100,
+const vector_ops = blk: {
+    var table = std.EnumArray(ast.VectorOp, ir.Op).initUndefined();
+    for (std.enums.values(ast.VectorOp)) |op| table.set(op, @field(ir.Op, @tagName(op)));
+    break :blk table;
 };
 
-pub fn writeVectorAssignment(writer: *std.Io.Writer, context: *FunctionContext, destination: Symbol, assignment: ast.Assignment) !void {
-    _ = destination.vector_reg orelse return error.ExpectedVectorRegister;
-    return switch (assignment.lhs) {
-        .accumulator_read => writeAccumulatorAssignment(writer, context, destination, assignment),
-        .vector_operation => writeVectorOperationAssignment(writer, context, destination, assignment),
-        .vector_shift => writeVectorShiftAssignment(writer, context, destination, assignment),
-        else => writeVectorValueAssignment(writer, context, destination, assignment),
-    };
+fn secondHalf(reg: VReg) VReg {
+    return next(reg).?;
 }
 
-fn writeVectorValueAssignment(writer: *std.Io.Writer, context: *FunctionContext, destination: Symbol, assignment: ast.Assignment) !void {
-    if (assignment.destination_lane != null) return writeVectorLaneAssignment(writer, context, destination, assignment);
-    if (assignment.op == .set and assignment.lhs == .number) return writeVectorZeroAssignment(writer, context, destination, assignment);
-    return writeVectorBasicAssignment(writer, context, destination, assignment);
-}
-
-fn writeVectorBasicAssignment(writer: *std.Io.Writer, context: *FunctionContext, destination: Symbol, assignment: ast.Assignment) !void {
-    const destination_reg = destination.vector_reg.?;
-    const lhs_operand = switch (assignment.lhs) {
-        .ident => |name| try vectorOperand(context, .{ .name = name }),
-        .vector_access => |access| try vectorOperand(context, access),
-        .vector_operation => return error.InvalidAssignment,
-        .vector_shift => return error.InvalidAssignment,
-        .accumulator_read => return error.InvalidAssignment,
-        .vector_control_read => return error.InvalidAssignment,
-        .hardware_read => return error.InvalidAssignment,
-        .scalar_comparison => return error.InvalidAssignment,
-        .signed_less_than => return error.InvalidAssignment,
-        .scalar_materialize => return error.InvalidAssignment,
-        .scalar_expression => return error.UnsupportedVectorExpressionTree,
-        .bit_cast, .function_address, .code_address, .data_address => return error.RegisterTypeMismatch,
-        .number => return error.VectorImmediateUnsupported,
-        .load => |load| {
-            if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
-            if (load.data_type != destination.data_type) return error.RegisterTypeMismatch;
-            return writeVectorLoad(writer, context, destination_reg, load);
-        },
-    };
-    const destination_type: DataType = if (assignment.destination_view != null) .vec16 else destination.data_type;
-    if (lhs_operand.data_type != destination_type) return error.RegisterTypeMismatch;
-    const destination_view_reg = try vectorRegisterForView(destination, assignment.destination_view);
-    const lhs_reg = lhs_operand.reg;
-
-    if (assignment.op == .set) {
-        if (assignment.rhs != null) return error.InvalidAssignment;
-        try writeVectorOp(
-            writer,
-            .vor,
-            destination_view_reg,
-            if (lhs_operand.element == 0) lhs_reg else .v00,
-            lhs_reg,
-            lhs_operand.element,
-        );
-        if (destination_type == .vec32) {
-            try writeVectorOp(
-                writer,
-                .vor,
-                nextVectorRegister(destination_reg).?,
-                nextVectorRegister(lhs_reg).?,
-                nextVectorRegister(lhs_reg).?,
-                0,
-            );
-        }
-        return;
-    }
-
-    if (assignment.op == .bit_not) {
-        if (assignment.rhs != null) return error.InvalidAssignment;
-        try writeVectorOp(writer, .vnor, destination_view_reg, lhs_reg, lhs_reg, lhs_operand.element);
-        if (destination_type == .vec32) {
-            try writeVectorOp(
-                writer,
-                .vnor,
-                nextVectorRegister(destination_reg).?,
-                nextVectorRegister(lhs_reg).?,
-                nextVectorRegister(lhs_reg).?,
-                0,
-            );
-        }
-        return;
-    }
-
-    if (assignment.op == .logical_shift_right or assignment.op == .shift_right or assignment.op == .shift_left) {
-        const amount = switch (assignment.rhs orelse return error.InvalidAssignment) {
-            .number => |number| number,
-            else => return error.UnsupportedVectorShift,
-        };
-        if (destination_type != .vec16) return error.UnsupportedVectorShift;
-        const shift_reg: ast.VectorRegister = .v31;
-        if ((assignment.op == .logical_shift_right or assignment.op == .shift_right) and amount >= 1 and amount <= 8) {
-            const op: ast.VectorOp = if (assignment.op == .shift_right) .vmudm else .vmudl;
-            return writeEncodedVectorOp(
-                writer,
-                if (assignment.op == .shift_right) "vsra" else "vsrl",
-                @intFromEnum(op),
-                destination_view_reg,
-                lhs_reg,
-                shift_reg,
-                @intCast(7 + amount),
-            );
-        }
-        if (assignment.op == .shift_left and amount >= 8 and amount <= 15) {
-            return writeEncodedVectorOp(
-                writer,
-                "vsll8",
-                @intFromEnum(ast.VectorOp.vmudn),
-                destination_view_reg,
-                lhs_reg,
-                shift_reg,
-                @intCast(23 - amount),
-            );
-        }
-        return error.UnsupportedVectorShift;
-    }
-
-    const rhs_value = assignment.rhs orelse return error.InvalidAssignment;
-    const rhs_operand = switch (rhs_value) {
-        .ident => |name| try vectorOperand(context, .{ .name = name }),
-        .vector_access => |access| try vectorOperand(context, access),
-        else => return error.VectorImmediateUnsupported,
-    };
-    if (rhs_operand.data_type != destination_type) return error.RegisterTypeMismatch;
-    if (lhs_operand.element != 0) return error.VectorSwizzleOnlyAllowedOnRhs;
-    const rhs_reg = rhs_operand.reg;
-    const element = rhs_operand.element;
-
-    if (destination_type == .vec32) {
-        const destination_fraction = nextVectorRegister(destination_reg).?;
-        const lhs_fraction = nextVectorRegister(lhs_reg).?;
-        const rhs_fraction = nextVectorRegister(rhs_reg).?;
-        switch (assignment.op) {
-            .add => {
-                try writeVectorOp(writer, .vaddc, destination_fraction, lhs_fraction, rhs_fraction, element);
-                try writeVectorOp(writer, .vadd, destination_reg, lhs_reg, rhs_reg, element);
-            },
-            .sub => {
-                try writeVectorOp(writer, .vsubc, destination_fraction, lhs_fraction, rhs_fraction, element);
-                try writeVectorOp(writer, .vsub, destination_reg, lhs_reg, rhs_reg, element);
-            },
-            .bit_and, .bit_or, .bit_xor, .bit_nor => {
-                const op = vectorLogicOp(assignment.op);
-                try writeVectorOp(writer, op, destination_reg, lhs_reg, rhs_reg, element);
-                try writeVectorOp(writer, op, destination_fraction, lhs_fraction, rhs_fraction, element);
-            },
-            else => return error.UnsupportedVectorOperator,
-        }
-        return;
-    }
-
-    const op: VectorAluOp = switch (assignment.op) {
-        .add => .vaddc,
-        .sub => .vsubc,
-        .bit_and, .bit_or, .bit_xor, .bit_nor => vectorLogicOp(assignment.op),
-        else => return error.UnsupportedVectorOperator,
-    };
-    try writeVectorOp(writer, op, destination_view_reg, lhs_reg, rhs_reg, element);
-}
-
-fn writeAccumulatorAssignment(writer: *std.Io.Writer, _: *FunctionContext, destination: Symbol, assignment: ast.Assignment) !void {
-    if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
-    if (assignment.destination_lane != null) return error.InvalidVectorLaneAssignment;
-    const result_reg = try vectorRegisterForView(destination, assignment.destination_view);
-    if (destination.data_type == .vec32 and assignment.destination_view == null) {
-        return error.AccumulatorReadRequiresVec16;
-    }
-    return writeEncodedVectorOp(
-        writer,
-        "vsar",
-        0b011101,
-        result_reg,
-        .v00,
-        .v00,
-        @intFromEnum(assignment.lhs.accumulator_read),
-    );
-}
-
-fn writeVectorOperationAssignment(writer: *std.Io.Writer, context: *FunctionContext, destination: Symbol, assignment: ast.Assignment) !void {
-    if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
-    const operation = assignment.lhs.vector_operation;
-    if (operation.op == .vrcp or operation.op == .vrcpl or operation.op == .vrcph or
-        operation.op == .vrsq or operation.op == .vrsql or operation.op == .vrsqh or
-        operation.op == .vmov)
-    {
-        const destination_lane = assignment.destination_lane orelse return error.VectorLaneOperationRequiresLane;
-        const result_reg = try vectorRegisterForView(destination, assignment.destination_view);
-        if (destination.data_type == .vec32 and assignment.destination_view == null) {
-            return error.Vec32ViewRequired;
-        }
-        const source = try vectorOperand(context, operation.lhs);
-        if (source.data_type != .vec16 or source.element < 8 or operation.lhs.lane == null) {
-            return error.VectorLaneOperationRequiresLane;
-        }
-        return writeVectorLaneOp(
-            writer,
-            operation.op,
-            result_reg,
-            destination_lane + @as(u4, if (operation.explicit_lane_encoding) 8 else 0),
-            source.reg,
-            source.element,
-        );
-    }
-    if (assignment.destination_lane != null) return error.InvalidVectorLaneAssignment;
-    const lhs = try vectorOperand(context, operation.lhs);
-    const rhs = try vectorOperand(context, operation.rhs);
-    if (lhs.data_type != .vec16 or rhs.data_type != .vec16) {
-        return error.VectorMultiplyRequiresVec16Operands;
-    }
-    if (lhs.element != 0) return error.VectorSwizzleOnlyAllowedOnRhs;
-    const result_reg = try vectorRegisterForView(destination, assignment.destination_view);
-    if (destination.data_type == .vec32 and assignment.destination_view == null) {
-        return error.Vec32ViewRequired;
-    }
-    return writeEncodedVectorOp(
-        writer,
-        @tagName(operation.op),
-        @intFromEnum(operation.op),
-        result_reg,
-        lhs.reg,
-        rhs.reg,
-        rhs.element,
-    );
-}
-
-fn writeVectorShiftAssignment(writer: *std.Io.Writer, context: *FunctionContext, destination: Symbol, assignment: ast.Assignment) !void {
-    if (assignment.op != .set or assignment.rhs != null or assignment.destination_lane != null or
-        (destination.data_type != .vec16 and assignment.destination_view == null))
-    {
-        return error.UnsupportedVectorShift;
-    }
-    return writeNamedVectorShift(
-        writer,
-        context,
-        try vectorRegisterForView(destination, assignment.destination_view),
-        assignment.lhs.vector_shift,
-    );
-}
-
-fn writeVectorLaneAssignment(writer: *std.Io.Writer, context: *FunctionContext, destination: Symbol, assignment: ast.Assignment) !void {
-    const lane = assignment.destination_lane.?;
-    if (assignment.op != .set or assignment.rhs != null) return error.InvalidVectorLaneAssignment;
-    const result_reg = try vectorRegisterForView(destination, assignment.destination_view);
-    if (destination.data_type == .vec32 and assignment.destination_view == null) {
-        return error.Vec32ViewRequired;
-    }
-    if (assignment.lhs == .load) {
-        const load = assignment.lhs.load;
-        if (load.data_type != .vec16) return error.PartialVectorMemoryRequiresVec16;
-        const address_reg = try valueAsDmemReg(writer, context, load.address);
-        return writeVectorLaneMemory(
-            writer,
-            true,
-            result_reg,
-            lane,
-            address_reg,
-            load.offset,
-        );
-    }
-    const source_reg = switch (assignment.lhs) {
-        .ident => |name| (try context.lookup(name)).reg orelse
-            return error.VectorLaneSourceMustBeScalarRegister,
-        .vector_access => |access| {
-            const source = try vectorOperand(context, access);
-            if (source.data_type != .vec16 or source.element < 8 or access.lane == null) {
-                return error.VectorLaneOperationRequiresLane;
-            }
-            return writeVectorLaneOp(
-                writer,
-                .vmov,
-                result_reg,
-                lane,
-                source.reg,
-                source.element,
-            );
-        },
-        else => return error.VectorLaneSourceMustBeScalarRegister,
-    };
-    return writeMtc2(writer, source_reg, result_reg, lane);
-}
-
-fn writeVectorZeroAssignment(writer: *std.Io.Writer, _: *FunctionContext, destination: Symbol, assignment: ast.Assignment) !void {
-    const destination_reg = destination.vector_reg.?;
-    if (assignment.lhs.number != 0 or assignment.rhs != null) return error.VectorImmediateUnsupported;
-    return writeVectorOp(writer, .vxor, destination_reg, destination_reg, destination_reg, 0);
-}
-
-fn writeVectorLaneOp(
-    writer: *std.Io.Writer,
-    op: ast.VectorOp,
-    destination: ast.VectorRegister,
-    destination_element: u4,
-    source: ast.VectorRegister,
-    source_element: u4,
-) !void {
-    const word: u32 = 0x4a000000 |
-        (@as(u32, source_element) << 21) |
-        (@as(u32, @intFromEnum(source)) << 16) |
-        (@as(u32, destination_element) << 11) |
-        (@as(u32, @intFromEnum(destination)) << 6) |
-        @as(u32, @intFromEnum(op));
-    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], ${s}[{d}]\n", .{
-        word,
-        @tagName(op),
-        vectorRegName(destination),
-        if (destination_element >= 8) destination_element - 8 else destination_element,
-        vectorRegName(source),
-        source_element - 8,
-    });
-}
+// ---------------------------------------------------------------- operands
 
 const VectorOperand = struct {
     data_type: DataType,
-    reg: ast.VectorRegister,
+    reg: VReg,
     element: u4,
 };
 
-fn vectorOperand(context: *FunctionContext, access: ast.VectorAccess) !VectorOperand {
-    const symbol = try context.lookup(access.name);
-    if (!isVectorType(symbol.data_type)) return error.ExpectedVectorType;
+fn vectorOperand(g: Gen, access: ast.VectorAccess) !VectorOperand {
+    const symbol = try g.lookup(access.name);
+    if (!analysis.isVectorType(symbol.data_type)) return error.ExpectedVectorType;
     return .{
         .data_type = if (access.view != null) .vec16 else symbol.data_type,
-        .reg = try vectorRegisterForView(symbol, access.view),
+        .reg = try analysis.vectorRegisterForView(symbol, access.view),
         .element = access.element,
     };
 }
 
-fn vectorLogicOp(op: ast.AssignOp) VectorAluOp {
+/// Two-operand vector values; only the right operand may be swizzled.
+fn vec16Operands(g: Gen, operation: ast.VectorOperation) ![2]VectorOperand {
+    const lhs = try vectorOperand(g, operation.lhs);
+    const rhs = try vectorOperand(g, operation.rhs);
+    if (lhs.data_type != .vec16 or rhs.data_type != .vec16) return error.VectorMultiplyRequiresVec16Operands;
+    if (lhs.element != 0) return error.VectorSwizzleOnlyAllowedOnRhs;
+    return .{ lhs, rhs };
+}
+
+/// A view-selected destination; whole `vec32` values need a view.
+fn viewDestination(destination: Symbol, view: ?ast.VectorView, failure: anyerror) !VReg {
+    const reg = try analysis.vectorRegisterForView(destination, view);
+    if (destination.data_type == .vec32 and view == null) return failure;
+    return reg;
+}
+
+// ------------------------------------------------------- primitive emission
+
+/// Applies `op` to one register, or to both halves of a `vec32`.
+fn emitPair(out: *Emitter, op: ir.Op, data_type: DataType, vd: VReg, vs: VReg, vt: VReg) !void {
+    try out.vector(op, vd, vs, vt, 0);
+    if (data_type == .vec32) try out.vector(op, secondHalf(vd), secondHalf(vs), secondHalf(vt), 0);
+}
+
+fn emitCopy(out: *Emitter, data_type: DataType, destination: VReg, source: VReg) !void {
+    try emitPair(out, .vor, data_type, destination, source, source);
+}
+
+fn emitZero(out: *Emitter, data_type: DataType, destination: VReg) !void {
+    try emitPair(out, .vxor, data_type, destination, destination, destination);
+}
+
+fn emitAccumulatorRead(out: *Emitter, destination: VReg, part: ast.AccumulatorPart) !void {
+    try out.vector(.vsar, destination, .v00, .v00, @intFromEnum(part));
+}
+
+fn emitOperation(out: *Emitter, destination: VReg, operation: ast.VectorOp, operands_: [2]VectorOperand) !void {
+    try out.vector(irOp(operation), destination, operands_[0].reg, operands_[1].reg, operands_[1].element);
+}
+
+pub fn writeMfc2(out: *Emitter, destination: Register, source: VReg, lane: u3) !void {
+    try out.laneMove(.mfc2, destination, source, lane);
+}
+
+const ShiftForm = struct { op: ir.Op, element: u4 };
+
+fn shiftForm(kind: @FieldType(ast.VectorShift, "kind"), amount: u8) ShiftForm {
+    return switch (kind) {
+        .left_8 => .{ .op = .vsll8, .element = @intCast(23 - amount) },
+        .right_arithmetic => .{ .op = .vsra, .element = @intCast(7 + amount) },
+        .right_logical => .{ .op = .vsrl, .element = @intCast(7 + amount) },
+    };
+}
+
+/// Multiply-based shifts read their power-of-two factors from `$v31`.
+fn emitShift(out: *Emitter, destination: VReg, source: VReg, form: ShiftForm) !void {
+    try out.vector(form.op, destination, source, .v31, form.element);
+}
+
+fn writeNamedVectorShift(g: Gen, destination: VReg, shift: ast.VectorShift) !void {
+    const source = try vectorOperand(g, shift.source);
+    if (source.data_type != .vec16 or source.element != 0) return error.UnsupportedVectorShift;
+    try emitShift(g.out, destination, source.reg, shiftForm(shift.kind, shift.amount));
+}
+
+// ------------------------------------------------------- initial values
+
+const InitialValue = struct { g: Gen, destination: VReg, data_type: DataType, value: ast.Value };
+const InitialWriter = *const fn (InitialValue) anyerror!void;
+
+pub fn writeVectorInitialValue(g: Gen, destination: VReg, data_type: DataType, value: ast.Value) !void {
+    const request: InitialValue = .{ .g = g, .destination = destination, .data_type = data_type, .value = value };
+    return initial_writers.get(std.meta.activeTag(value))(request);
+}
+
+const initial_writers = blk: {
+    var table = std.EnumArray(ValueTag, InitialWriter).initFill(&initialTypeMismatch);
+    table.set(.load, &initialLoad);
+    table.set(.ident, &initialCopy);
+    table.set(.vector_access, &initialSwizzle);
+    table.set(.vector_operation, &initialOperation);
+    table.set(.vector_shift, &initialShift);
+    table.set(.accumulator_read, &initialAccumulator);
+    table.set(.number, &initialZero);
+    table.set(.scalar_expression, &initialExpression);
+    break :blk table;
+};
+
+fn initialTypeMismatch(_: InitialValue) !void {
+    return error.RegisterTypeMismatch;
+}
+
+fn initialExpression(_: InitialValue) !void {
+    return error.UnsupportedScalarExpressionTree;
+}
+
+fn initialLoad(request: InitialValue) !void {
+    const load = request.value.load;
+    if (load.data_type != request.data_type) return error.RegisterTypeMismatch;
+    try writeVectorLoad(request.g, request.destination, load);
+}
+
+fn initialCopy(request: InitialValue) !void {
+    const source = try request.g.lookup(request.value.ident);
+    if (source.data_type != request.data_type) return error.RegisterTypeMismatch;
+    const source_reg = source.vector_reg orelse return error.ExpectedVectorRegister;
+    try emitCopy(request.g.out, request.data_type, request.destination, source_reg);
+}
+
+fn initialSwizzle(request: InitialValue) !void {
+    const access = request.value.vector_access;
+    if (access.lane != null) return error.VectorLaneInitializationUnsupported;
+    const source = try request.g.lookup(access.name);
+    const source_reg = try analysis.vectorRegisterForView(source, access.view);
+    if (request.data_type != .vec16 or source.data_type != .vec16) return error.RegisterTypeMismatch;
+    try request.g.out.vector(.vor, request.destination, .v00, source_reg, access.element);
+}
+
+fn initialOperation(request: InitialValue) !void {
+    if (request.data_type != .vec16) return error.Vec32ViewRequired;
+    const operation = request.value.vector_operation;
+    try emitOperation(request.g.out, request.destination, operation.op, try vec16Operands(request.g, operation));
+}
+
+fn initialShift(request: InitialValue) !void {
+    if (request.data_type != .vec16) return error.UnsupportedVectorShift;
+    try writeNamedVectorShift(request.g, request.destination, request.value.vector_shift);
+}
+
+fn initialAccumulator(request: InitialValue) !void {
+    if (request.data_type != .vec16) return error.AccumulatorReadRequiresVec16;
+    try emitAccumulatorRead(request.g.out, request.destination, request.value.accumulator_read);
+}
+
+fn initialZero(request: InitialValue) !void {
+    if (request.value.number != 0) return error.VectorImmediateUnsupported;
+    try emitZero(request.g.out, request.data_type, request.destination);
+}
+
+// ------------------------------------------------------------ assignments
+
+pub fn writeVectorAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
+    _ = destination.vector_reg orelse return error.ExpectedVectorRegister;
+    return switch (assignment.lhs) {
+        .accumulator_read => writeAccumulatorAssignment(g, destination, assignment),
+        .vector_operation => writeVectorOperationAssignment(g, destination, assignment),
+        .vector_shift => writeVectorShiftAssignment(g, destination, assignment),
+        else => writeVectorValueAssignment(g, destination, assignment),
+    };
+}
+
+fn expectPlainSet(assignment: ast.Assignment) !void {
+    if (assignment.op != .set or assignment.rhs != null) return error.InvalidAssignment;
+}
+
+fn writeAccumulatorAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
+    try expectPlainSet(assignment);
+    if (assignment.destination_lane != null) return error.InvalidVectorLaneAssignment;
+    const result = try viewDestination(destination, assignment.destination_view, error.AccumulatorReadRequiresVec16);
+    try emitAccumulatorRead(g.out, result, assignment.lhs.accumulator_read);
+}
+
+fn isLaneOperation(op: ast.VectorOp) bool {
+    return switch (op) {
+        .vrcp, .vrcpl, .vrcph, .vrsq, .vrsql, .vrsqh, .vmov => true,
+        else => false,
+    };
+}
+
+fn writeVectorOperationAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
+    try expectPlainSet(assignment);
+    const operation = assignment.lhs.vector_operation;
+    if (isLaneOperation(operation.op)) return writeLaneOperation(g, destination, assignment, operation);
+    if (assignment.destination_lane != null) return error.InvalidVectorLaneAssignment;
+    const pair = try vec16Operands(g, operation);
+    const result = try viewDestination(destination, assignment.destination_view, error.Vec32ViewRequired);
+    try emitOperation(g.out, result, operation.op, pair);
+}
+
+/// A lane-selected source: `vector[lane]` encodes elements 8 through 15.
+fn laneSource(g: Gen, access: ast.VectorAccess) !VectorOperand {
+    const source = try vectorOperand(g, access);
+    if (source.data_type != .vec16 or source.element < 8 or access.lane == null) {
+        return error.VectorLaneOperationRequiresLane;
+    }
+    return source;
+}
+
+fn writeLaneOperation(g: Gen, destination: Symbol, assignment: ast.Assignment, operation: ast.VectorOperation) !void {
+    const destination_lane = assignment.destination_lane orelse return error.VectorLaneOperationRequiresLane;
+    const result = try viewDestination(destination, assignment.destination_view, error.Vec32ViewRequired);
+    const source = try laneSource(g, operation.lhs);
+    const encoded_lane = destination_lane + @as(u4, if (operation.explicit_lane_encoding) 8 else 0);
+    try g.out.vectorLane(irOp(operation.op), result, encoded_lane, source.reg, source.element);
+}
+
+fn writeVectorShiftAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
+    const whole_vec32 = destination.data_type != .vec16 and assignment.destination_view == null;
+    if (assignment.op != .set or assignment.rhs != null or assignment.destination_lane != null or whole_vec32) {
+        return error.UnsupportedVectorShift;
+    }
+    const result = try analysis.vectorRegisterForView(destination, assignment.destination_view);
+    try writeNamedVectorShift(g, result, assignment.lhs.vector_shift);
+}
+
+fn writeVectorValueAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
+    if (assignment.destination_lane != null) return writeVectorLaneAssignment(g, destination, assignment);
+    if (assignment.op == .set and assignment.lhs == .number) return writeVectorZeroAssignment(g, destination, assignment);
+    if (assignment.lhs == .load) return writeVectorLoadAssignment(g, destination, assignment);
+    return writeVectorBasicAssignment(g, destination, assignment);
+}
+
+fn writeVectorZeroAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
+    if (assignment.lhs.number != 0 or assignment.rhs != null) return error.VectorImmediateUnsupported;
+    const reg = destination.vector_reg.?;
+    try g.out.vector(.vxor, reg, reg, reg, 0);
+}
+
+fn writeVectorLoadAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
+    try expectPlainSet(assignment);
+    const load = assignment.lhs.load;
+    if (load.data_type != destination.data_type) return error.RegisterTypeMismatch;
+    try writeVectorLoad(g, destination.vector_reg.?, load);
+}
+
+fn writeVectorLaneAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
+    expectPlainSet(assignment) catch return error.InvalidVectorLaneAssignment;
+    const lane = assignment.destination_lane.?;
+    const result = try viewDestination(destination, assignment.destination_view, error.Vec32ViewRequired);
+    return switch (assignment.lhs) {
+        .load => |load| writeLaneLoad(g, result, lane, load),
+        .ident => |name| writeLaneInsert(g, result, lane, name),
+        .vector_access => |access| writeLaneMove(g, result, lane, access),
+        else => error.VectorLaneSourceMustBeScalarRegister,
+    };
+}
+
+fn writeLaneLoad(g: Gen, result: VReg, lane: u3, load: ast.Load) !void {
+    if (load.data_type != .vec16) return error.PartialVectorMemoryRequiresVec16;
+    const address = try operands.valueAsDmemReg(g, load.address);
+    try vectorMemory(g.out, .lsv, result, lane, address, load.offset);
+}
+
+fn writeLaneInsert(g: Gen, result: VReg, lane: u3, name: []const u8) !void {
+    const source = (try g.lookup(name)).reg orelse return error.VectorLaneSourceMustBeScalarRegister;
+    try g.out.laneMove(.mtc2, source, result, lane);
+}
+
+fn writeLaneMove(g: Gen, result: VReg, lane: u3, access: ast.VectorAccess) !void {
+    const source = try laneSource(g, access);
+    try g.out.vectorLane(.vmov, result, lane, source.reg, source.element);
+}
+
+/// The vector operand an assignment's left side names, or why it cannot.
+fn assignmentOperand(g: Gen, value: ast.Value) !VectorOperand {
+    return switch (value) {
+        .ident => |name| vectorOperand(g, .{ .name = name }),
+        .vector_access => |access| vectorOperand(g, access),
+        else => operand_errors.get(std.meta.activeTag(value)),
+    };
+}
+
+const operand_errors = blk: {
+    var table = std.EnumArray(ValueTag, anyerror).initFill(error.InvalidAssignment);
+    table.set(.scalar_expression, error.UnsupportedVectorExpressionTree);
+    for ([_]ValueTag{ .bit_cast, .function_address, .code_address, .data_address }) |tag| table.set(tag, error.RegisterTypeMismatch);
+    table.set(.number, error.VectorImmediateUnsupported);
+    break :blk table;
+};
+
+const Basic = struct {
+    g: Gen,
+    destination: Symbol,
+    assignment: ast.Assignment,
+    lhs: VectorOperand,
+    data_type: DataType,
+    view_reg: VReg,
+};
+
+/// A view selects one register of a `vec32`.
+fn assignedType(destination: Symbol, view: ?ast.VectorView) DataType {
+    return if (view != null) .vec16 else destination.data_type;
+}
+
+fn writeVectorBasicAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
+    const lhs = try assignmentOperand(g, assignment.lhs);
+    const data_type = assignedType(destination, assignment.destination_view);
+    if (lhs.data_type != data_type) return error.RegisterTypeMismatch;
+    const basic: Basic = .{
+        .g = g,
+        .destination = destination,
+        .assignment = assignment,
+        .lhs = lhs,
+        .data_type = data_type,
+        .view_reg = try analysis.vectorRegisterForView(destination, assignment.destination_view),
+    };
+    return switch (assignment.op) {
+        .set => writeBasicCopy(basic),
+        .bit_not => writeBasicInvert(basic),
+        .logical_shift_right, .shift_right, .shift_left => writeBasicShift(basic),
+        else => writeBasicBinary(basic),
+    };
+}
+
+fn writeBasicCopy(basic: Basic) !void {
+    if (basic.assignment.rhs != null) return error.InvalidAssignment;
+    const lhs = basic.lhs;
+    try basic.g.out.vector(.vor, basic.view_reg, if (lhs.element == 0) lhs.reg else .v00, lhs.reg, lhs.element);
+    if (basic.data_type == .vec32) try emitCopy(basic.g.out, .vec16, secondHalf(basic.destination.vector_reg.?), secondHalf(lhs.reg));
+}
+
+fn writeBasicInvert(basic: Basic) !void {
+    if (basic.assignment.rhs != null) return error.InvalidAssignment;
+    const lhs = basic.lhs;
+    try basic.g.out.vector(.vnor, basic.view_reg, lhs.reg, lhs.reg, lhs.element);
+    if (basic.data_type == .vec32) {
+        const half = secondHalf(lhs.reg);
+        try basic.g.out.vector(.vnor, secondHalf(basic.destination.vector_reg.?), half, half, 0);
+    }
+}
+
+/// `vec16 >> n`, `>>> n`, and `<< n` lower to multiply-based shifts.
+fn writeBasicShift(basic: Basic) !void {
+    const rhs = basic.assignment.rhs orelse return error.InvalidAssignment;
+    if (rhs != .number) return error.UnsupportedVectorShift;
+    if (basic.data_type != .vec16) return error.UnsupportedVectorShift;
+    const form = basicShiftForm(basic.assignment.op, rhs.number) orelse return error.UnsupportedVectorShift;
+    try emitShift(basic.g.out, basic.view_reg, basic.lhs.reg, form);
+}
+
+fn basicShiftForm(op: ast.AssignOp, amount: i64) ?ShiftForm {
+    if (op == .shift_left) return leftShiftForm(amount);
+    if (amount < 1 or amount > 8) return null;
+    return shiftForm(if (op == .shift_right) .right_arithmetic else .right_logical, @intCast(amount));
+}
+
+fn leftShiftForm(amount: i64) ?ShiftForm {
+    if (amount < 8 or amount > 15) return null;
+    return shiftForm(.left_8, @intCast(amount));
+}
+
+fn rhsOperand(g: Gen, value: ast.Value) !VectorOperand {
+    return switch (value) {
+        .ident => |name| vectorOperand(g, .{ .name = name }),
+        .vector_access => |access| vectorOperand(g, access),
+        else => error.VectorImmediateUnsupported,
+    };
+}
+
+fn logicOp(op: ast.AssignOp) ?ir.Op {
     return switch (op) {
         .bit_and => .vand,
         .bit_or => .vor,
         .bit_xor => .vxor,
         .bit_nor => .vnor,
-        else => unreachable,
+        else => null,
     };
 }
 
-fn writeNamedVectorShift(
-    writer: *std.Io.Writer,
-    context: *FunctionContext,
-    destination: ast.VectorRegister,
-    shift: ast.VectorShift,
-) !void {
-    const source = try vectorOperand(context, shift.source);
-    if (source.data_type != .vec16 or source.element != 0) return error.UnsupportedVectorShift;
-    const op: ast.VectorOp = switch (shift.kind) {
-        .left_8 => .vmudn,
-        .right_arithmetic => .vmudm,
-        .right_logical => .vmudl,
+fn writeBasicBinary(basic: Basic) !void {
+    const rhs = try rhsOperand(basic.g, basic.assignment.rhs orelse return error.InvalidAssignment);
+    if (rhs.data_type != basic.data_type) return error.RegisterTypeMismatch;
+    if (basic.lhs.element != 0) return error.VectorSwizzleOnlyAllowedOnRhs;
+    if (basic.data_type == .vec32) return writeVec32Binary(basic, rhs);
+    const op = vec16BinaryOp(basic.assignment.op) orelse return error.UnsupportedVectorOperator;
+    try basic.g.out.vector(op, basic.view_reg, basic.lhs.reg, rhs.reg, rhs.element);
+}
+
+/// Scalar-style vector addition and subtraction propagate carry and borrow.
+fn vec16BinaryOp(op: ast.AssignOp) ?ir.Op {
+    return switch (op) {
+        .add => .vaddc,
+        .sub => .vsubc,
+        else => logicOp(op),
     };
-    const element: u4 = switch (shift.kind) {
-        .left_8 => @intCast(23 - @as(u8, shift.amount)),
-        .right_arithmetic, .right_logical => @intCast(7 + @as(u8, shift.amount)),
+}
+
+/// 16.16 arithmetic: the fraction half produces the carry the integer
+/// half consumes; logic applies to both halves independently.
+fn writeVec32Binary(basic: Basic, rhs: VectorOperand) !void {
+    const out = basic.g.out;
+    const destination = basic.destination.vector_reg.?;
+    const lhs = basic.lhs.reg;
+    const e = rhs.element;
+    const carry: ?[2]ir.Op = switch (basic.assignment.op) {
+        .add => .{ .vaddc, .vadd },
+        .sub => .{ .vsubc, .vsub },
+        else => null,
     };
-    try writeEncodedVectorOp(
-        writer,
-        switch (shift.kind) {
-            .left_8 => "vsll8",
-            .right_arithmetic => "vsra",
-            .right_logical => "vsrl",
-        },
-        @intFromEnum(op),
-        destination,
-        source.reg,
-        .v31,
-        element,
-    );
-}
-
-fn writeVectorOp(
-    writer: *std.Io.Writer,
-    op: VectorAluOp,
-    destination: ast.VectorRegister,
-    lhs: ast.VectorRegister,
-    rhs: ast.VectorRegister,
-    element: u4,
-) !void {
-    return writeEncodedVectorOp(
-        writer,
-        @tagName(op),
-        @intFromEnum(op),
-        destination,
-        lhs,
-        rhs,
-        element,
-    );
-}
-
-fn writeEncodedVectorOp(
-    writer: *std.Io.Writer,
-    name: []const u8,
-    opcode: u6,
-    destination: ast.VectorRegister,
-    lhs: ast.VectorRegister,
-    rhs: ast.VectorRegister,
-    element: u4,
-) !void {
-    const word: u32 = 0x4a000000 |
-        (@as(u32, element) << 21) |
-        (@as(u32, @intFromEnum(rhs)) << 16) |
-        (@as(u32, @intFromEnum(lhs)) << 11) |
-        (@as(u32, @intFromEnum(destination)) << 6) |
-        @as(u32, opcode);
-    try writer.print("  .word 0x{x:0>8} # {s} ${s}, ${s}, ${s}\n", .{
-        word,
-        name,
-        vectorRegName(destination),
-        vectorRegName(lhs),
-        vectorRegName(rhs),
-    });
-}
-
-fn writeMtc2(
-    writer: *std.Io.Writer,
-    source: Register,
-    destination: ast.VectorRegister,
-    lane: u3,
-) !void {
-    const word: u32 = 0x48800000 |
-        (@as(u32, @intFromEnum(source)) << 16) |
-        (@as(u32, @intFromEnum(destination)) << 11) |
-        (@as(u32, lane) << 8);
-    try writer.print("  .word 0x{x:0>8} # mtc2 {s}, ${s}[{d}]\n", .{
-        word, regName(source), vectorRegName(destination), lane,
-    });
-}
-
-pub fn writeMfc2(
-    writer: *std.Io.Writer,
-    destination: Register,
-    source: ast.VectorRegister,
-    lane: u3,
-) !void {
-    const word: u32 = 0x48000000 |
-        (@as(u32, @intFromEnum(destination)) << 16) |
-        (@as(u32, @intFromEnum(source)) << 11) |
-        (@as(u32, lane) << 8);
-    try writer.print("  .word 0x{x:0>8} # mfc2 {s}, ${s}[{d}]\n", .{
-        word, regName(destination), vectorRegName(source), lane,
-    });
-}
-
-pub fn writeQuarterVectorMemory(
-    writer: *std.Io.Writer,
-    load: bool,
-    vector_reg: ast.VectorRegister,
-    lane: u3,
-    address_reg: Register,
-    offset: i64,
-) !void {
-    if (@mod(offset, 4) != 0) return error.VectorMemoryOffsetUnaligned;
-    const scaled_offset = @divExact(offset, 4);
-    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
-    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
-    const opcode: u32 = if (load) 0x32 else 0x3a;
-    const word = (opcode << 26) |
-        (@as(u32, @intFromEnum(address_reg)) << 21) |
-        (@as(u32, @intFromEnum(vector_reg)) << 16) |
-        (0b00010 << 11) |
-        (@as(u32, lane) << 8) |
-        encoded_offset;
-    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], {d}({s})\n", .{
-        word,
-        if (load) "llv" else "slv",
-        vectorRegName(vector_reg),
-        lane,
-        offset,
-        regName(address_reg),
-    });
-}
-
-pub fn writeHalfVectorMemory(
-    writer: *std.Io.Writer,
-    load: bool,
-    vector_reg: ast.VectorRegister,
-    lane: u3,
-    address_reg: Register,
-    offset: i64,
-) !void {
-    if (@mod(offset, 8) != 0) return error.VectorMemoryOffsetUnaligned;
-    const scaled_offset = @divExact(offset, 8);
-    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
-    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
-    const opcode: u32 = if (load) 0x32 else 0x3a;
-    const word = (opcode << 26) |
-        (@as(u32, @intFromEnum(address_reg)) << 21) |
-        (@as(u32, @intFromEnum(vector_reg)) << 16) |
-        (0b00011 << 11) |
-        (@as(u32, lane) << 8) |
-        encoded_offset;
-    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], {d}({s})\n", .{
-        word,
-        if (load) "ldv" else "sdv",
-        vectorRegName(vector_reg),
-        lane,
-        offset,
-        regName(address_reg),
-    });
-}
-
-pub fn writeVectorLaneMemory(
-    writer: *std.Io.Writer,
-    load: bool,
-    vector_reg: ast.VectorRegister,
-    lane: u3,
-    address_reg: Register,
-    offset: i64,
-) !void {
-    if (@mod(offset, 2) != 0) return error.VectorMemoryOffsetUnaligned;
-    const scaled_offset = @divExact(offset, 2);
-    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
-    const opcode: u32 = if (load) 0x32 else 0x3a;
-    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
-    const word = (opcode << 26) |
-        (@as(u32, @intFromEnum(address_reg)) << 21) |
-        (@as(u32, @intFromEnum(vector_reg)) << 16) |
-        (0b00001 << 11) |
-        (@as(u32, lane) << 8) |
-        encoded_offset;
-    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], {d}({s})\n", .{
-        word,
-        if (load) "lsv" else "ssv",
-        vectorRegName(vector_reg),
-        lane,
-        offset,
-        regName(address_reg),
-    });
-}
-
-pub fn writeVectorLoad(
-    writer: *std.Io.Writer,
-    context: *FunctionContext,
-    destination: ast.VectorRegister,
-    load: ast.Load,
-) !void {
-    if (load.label_offset != null) return error.SymbolicOffsetRequiresScalarLoad;
-    const address_reg = try valueAsDmemReg(writer, context, load.address);
-    if (load.packed_u8 or load.packed_unsigned_u8) {
-        if (@mod(load.offset, 8) != 0) return error.VectorMemoryOffsetUnaligned;
-        const scaled_offset = @divExact(load.offset, 8);
-        if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
-        const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
-        const word: u32 = (0x32 << 26) |
-            (@as(u32, @intFromEnum(address_reg)) << 21) |
-            (@as(u32, @intFromEnum(destination)) << 16) |
-            (@as(u32, if (load.packed_unsigned_u8) 0b00111 else 0b00110) << 11) | encoded_offset;
-        try writer.print("  .word 0x{x:0>8} # {s} ${s}, {d}({s})\n", .{
-            word, if (load.packed_unsigned_u8) "luv" else "lpv", vectorRegName(destination), load.offset, regName(address_reg),
-        });
-        return;
+    if (carry) |ops| {
+        try out.vector(ops[0], secondHalf(destination), secondHalf(lhs), secondHalf(rhs.reg), e);
+        return out.vector(ops[1], destination, lhs, rhs.reg, e);
     }
-    if (load.partial_u32_lane) |lane| {
-        if (@mod(load.offset, 4) != 0) return error.VectorMemoryOffsetUnaligned;
-        const scaled_offset = @divExact(load.offset, 4);
-        if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
-        const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
-        const word: u32 = (0x32 << 26) |
-            (@as(u32, @intFromEnum(address_reg)) << 21) |
-            (@as(u32, @intFromEnum(destination)) << 16) |
-            (0b00010 << 11) | (@as(u32, lane) << 8) | encoded_offset;
-        try writer.print("  .word 0x{x:0>8} # llv ${s}[{d}], {d}({s})\n", .{
-            word, vectorRegName(destination), lane, load.offset, regName(address_reg),
-        });
-        return;
-    }
-    try writeVectorMemory(writer, true, destination, address_reg, load.offset);
-    if (load.unaligned) try writeVectorReverseLoad(writer, destination, address_reg, load.offset + 16);
-    if (load.data_type == .vec32) {
-        try writeVectorMemory(
-            writer,
-            true,
-            nextVectorRegister(destination).?,
-            address_reg,
-            load.offset + 16,
-        );
-        if (load.unaligned) try writeVectorReverseLoad(
-            writer,
-            nextVectorRegister(destination).?,
-            address_reg,
-            load.offset + 32,
-        );
-    }
+    const op = logicOp(basic.assignment.op) orelse return error.UnsupportedVectorOperator;
+    try out.vector(op, destination, lhs, rhs.reg, e);
+    try out.vector(op, secondHalf(destination), secondHalf(lhs), secondHalf(rhs.reg), e);
 }
 
-pub fn writePackedVectorStore(
-    writer: *std.Io.Writer,
-    unsigned: bool,
-    vector_reg: ast.VectorRegister,
-    lane: u3,
-    address_reg: Register,
-    offset: i64,
-) !void {
-    if (@mod(offset, 8) != 0) return error.VectorMemoryOffsetUnaligned;
-    const scaled_offset = @divExact(offset, 8);
-    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
-    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
-    const word: u32 = (0x3a << 26) |
-        (@as(u32, @intFromEnum(address_reg)) << 21) |
-        (@as(u32, @intFromEnum(vector_reg)) << 16) |
-        (@as(u32, if (unsigned) 0b00111 else 0b00110) << 11) |
-        (@as(u32, lane) << 7) |
-        encoded_offset;
-    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], {d}({s})\n", .{
-        word, if (unsigned) "suv" else "spv", vectorRegName(vector_reg), lane, offset, regName(address_reg),
-    });
+// ---------------------------------------------------------------- memory
+
+/// Emits a vector transfer after checking its offset against the op's
+/// scaled, signed seven-bit encoding.
+pub fn vectorMemory(out: *Emitter, op: ir.Op, vt: VReg, lane: u4, base: Register, offset: i64) !void {
+    try vectorTransfer(out, op, vt, lane, base, offset, true);
 }
 
-fn writeVectorReverseLoad(
-    writer: *std.Io.Writer,
-    vector_reg: ast.VectorRegister,
-    address_reg: Register,
-    offset: i64,
-) !void {
-    if (@mod(offset, 16) != 0) return error.VectorMemoryOffsetUnaligned;
-    const scaled_offset = @divExact(offset, 16);
-    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
-    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
-    const word: u32 = (0x32 << 26) |
-        (@as(u32, @intFromEnum(address_reg)) << 21) |
-        (@as(u32, @intFromEnum(vector_reg)) << 16) |
-        (0b00101 << 11) | encoded_offset;
-    try writer.print("  .word 0x{x:0>8} # lrv ${s}, {d}({s})\n", .{
-        word, vectorRegName(vector_reg), offset, regName(address_reg),
-    });
+fn vectorTransfer(out: *Emitter, op: ir.Op, vt: VReg, lane: u4, base: Register, offset: i64, show_lane: bool) !void {
+    try validateOffset(op, offset);
+    try out.vectorMemory(op, vt, lane, base, offset, show_lane);
 }
 
-pub fn writeSpecialVectorMemory(
-    writer: *std.Io.Writer,
-    operation: ast.VectorMemoryOperation,
-    vector: ast.VectorRegister,
-    lane: u3,
-    address: Register,
-    offset: i64,
-) !void {
-    if (@mod(offset, 16) != 0) return error.VectorMemoryOffsetUnaligned;
-    const scaled = @divExact(offset, 16);
+fn validateOffset(op: ir.Op, offset: i64) !void {
+    const scale: i64 = op.info().scale;
+    if (@mod(offset, scale) != 0) return error.VectorMemoryOffsetUnaligned;
+    const scaled = @divExact(offset, scale);
     if (scaled < -64 or scaled > 63) return error.VectorMemoryOffsetOutOfRange;
-    if (operation == .load_transpose and @intFromEnum(vector) % 8 != 0) return error.TransposeRequiresRegisterBank;
-    const store = operation == .store_right;
-    const op: u32 = switch (operation) {
-        .load_quad_lane => 4,
-        .load_right, .store_right => 5,
-        .load_transpose => 11,
-        else => unreachable,
-    };
-    const mnemonic = switch (operation) {
-        .load_quad_lane => "lqv",
-        .load_right => "lrv",
-        .store_right => "srv",
-        .load_transpose => "ltv",
-        else => unreachable,
-    };
-    const word = (@as(u32, if (store) 0x3a else 0x32) << 26) |
-        (@as(u32, @intFromEnum(address)) << 21) | (@as(u32, @intFromEnum(vector)) << 16) |
-        (op << 11) | (@as(u32, lane) << 8) | @as(u7, @bitCast(@as(i7, @intCast(scaled))));
-    try writer.print("  .word 0x{x:0>8} # {s} ${s}[{d}], {d}({s})\n", .{ word, mnemonic, vectorRegName(vector), lane, offset, regName(address) });
 }
 
-pub fn writeVectorMemory(
-    writer: *std.Io.Writer,
-    load: bool,
-    vector_reg: ast.VectorRegister,
-    address_reg: Register,
-    offset: i64,
-) !void {
-    if (@mod(offset, 16) != 0) return error.VectorMemoryOffsetUnaligned;
-    const scaled_offset = @divExact(offset, 16);
-    if (scaled_offset < -64 or scaled_offset > 63) return error.VectorMemoryOffsetOutOfRange;
-    const opcode: u32 = if (load) 0x32 else 0x3a;
-    const encoded_offset: u32 = @as(u7, @bitCast(@as(i7, @intCast(scaled_offset))));
-    const word = (opcode << 26) |
-        (@as(u32, @intFromEnum(address_reg)) << 21) |
-        (@as(u32, @intFromEnum(vector_reg)) << 16) |
-        (0b00100 << 11) |
-        encoded_offset;
-    try writer.print("  .word 0x{x:0>8} # {s} ${s}, {d}({s})\n", .{
-        word,
-        if (load) "lqv" else "sqv",
-        vectorRegName(vector_reg),
-        offset,
-        regName(address_reg),
-    });
+/// Full 128-bit `lqv`/`sqv`.
+pub fn writeVectorMemory(out: *Emitter, load: bool, vt: VReg, base: Register, offset: i64) !void {
+    try vectorTransfer(out, if (load) .lqv else .sqv, vt, 0, base, offset, false);
+}
+
+/// Statement-form vector memory operations.
+pub fn writeVectorMemoryOperation(g: Gen, operation: ast.VectorMemoryOperation, vt: VReg, lane: u3, base: Register, offset: i64) !void {
+    const form = memory_forms.get(operation);
+    try validateOffset(form.op, offset);
+    if (operation == .load_transpose and @intFromEnum(vt) % 8 != 0) return error.TransposeRequiresRegisterBank;
+    try g.out.vectorMemory(form.op, vt, if (form.show_lane) lane else 0, base, offset, form.show_lane);
+}
+
+const MemoryForm = struct { op: ir.Op, show_lane: bool = true };
+
+const memory_forms = std.EnumArray(ast.VectorMemoryOperation, MemoryForm).init(.{
+    .load16 = .{ .op = .lsv },
+    .store16 = .{ .op = .ssv },
+    .load32 = .{ .op = .llv },
+    .store32 = .{ .op = .slv },
+    .load64 = .{ .op = .ldv },
+    .store64 = .{ .op = .sdv },
+    .load128 = .{ .op = .lqv, .show_lane = false },
+    .store128 = .{ .op = .sqv, .show_lane = false },
+    .load_quad_lane = .{ .op = .lqv },
+    .load_right = .{ .op = .lrv },
+    .store_right = .{ .op = .srv },
+    .load_transpose = .{ .op = .ltv },
+    .load_packed_signed = .{ .op = .lpv, .show_lane = false },
+    .load_packed_unsigned = .{ .op = .luv, .show_lane = false },
+    .store_packed_signed = .{ .op = .spv },
+    .store_packed_unsigned = .{ .op = .suv },
+});
+
+/// Expression-form vector loads: full, packed, one word lane, or unaligned.
+pub fn writeVectorLoad(g: Gen, destination: VReg, load: ast.Load) !void {
+    if (load.label_offset != null) return error.SymbolicOffsetRequiresScalarLoad;
+    const base = try operands.valueAsDmemReg(g, load.address);
+    if (packedLoadOp(load)) |op| return vectorTransfer(g.out, op, destination, 0, base, load.offset, false);
+    if (load.partial_u32_lane) |lane| return vectorMemory(g.out, .llv, destination, lane, base, load.offset);
+    try writeQuadLoad(g.out, destination, base, load.offset, load.unaligned);
+    if (load.data_type == .vec32) try writeQuadLoad(g.out, secondHalf(destination), base, load.offset + 16, load.unaligned);
+}
+
+/// Packed byte loads expand eight bytes into the vector's lanes.
+fn packedLoadOp(load: ast.Load) ?ir.Op {
+    if (load.packed_unsigned_u8) return .luv;
+    if (load.packed_u8) return .lpv;
+    return null;
+}
+
+/// An `lqv`, plus the `lrv` completing an unaligned load.
+fn writeQuadLoad(out: *Emitter, destination: VReg, base: Register, offset: i64, unaligned: bool) !void {
+    try writeVectorMemory(out, true, destination, base, offset);
+    if (unaligned) try vectorTransfer(out, .lrv, destination, 0, base, offset + 16, false);
+}
+
+const testing = std.testing;
+
+test "vector memory validates the scaled offset encoding" {
+    var out = Emitter.init(testing.allocator);
+    defer out.deinit();
+    try vectorMemory(&out, .lsv, .v01, 2, .t0, 4);
+    try testing.expectError(error.VectorMemoryOffsetUnaligned, vectorMemory(&out, .llv, .v01, 0, .t0, 2));
+    try testing.expectError(error.VectorMemoryOffsetOutOfRange, vectorMemory(&out, .lqv, .v01, 0, .t0, 1024));
+    try testing.expectEqual(@as(usize, 1), out.len());
+    try testing.expectEqual(ir.Op.vmadh, irOp(.vmadh));
+    try testing.expectEqual(@as(?ShiftForm, null), basicShiftForm(.shift_left, 7));
+    try testing.expectEqual(@as(?ir.Op, null), vec16BinaryOp(.mul));
 }

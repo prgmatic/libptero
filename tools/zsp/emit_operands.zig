@@ -1,170 +1,146 @@
-const FunctionClobberRegistry = @import("analysis.zig").FunctionClobberRegistry;
-const FunctionContext = @import("analysis.zig").FunctionContext;
-const ParameterWriteVisit = @import("analysis.zig").ParameterWriteVisit;
-const Symbol = @import("analysis.zig").Symbol;
-const bindParameters = @import("analysis.zig").bindParameters;
-const countFlowStatements = @import("analysis.zig").countFlowStatements;
-const findFunction = @import("analysis.zig").findFunction;
-const functionParameterIsWritten = @import("analysis.zig").functionParameterIsWritten;
-const isPureScalarExpression = @import("analysis.zig").isPureScalarExpression;
-const isScalarRegister = @import("analysis.zig").isScalarRegister;
-const isVectorType = @import("analysis.zig").isVectorType;
-const reserveTransposeBank = @import("analysis.zig").reserveTransposeBank;
-const validateVectorRegisterBinding = @import("analysis.zig").validateVectorRegisterBinding;
-const valueReadsName = @import("analysis.zig").valueReadsName;
-const vectorRegisterForView = @import("analysis.zig").vectorRegisterForView;
-const regName = @import("registers.zig").regName;
-const vectorRegName = @import("registers.zig").vectorRegName;
-const nextVectorRegister = @import("registers.zig").nextVectorRegister;
-const allAutomaticVectorRegisters = @import("registers.zig").allAutomaticVectorRegisters;
-const allAutomaticScalarRegisters = @import("registers.zig").allAutomaticScalarRegisters;
-const vectorRegisterBit = @import("registers.zig").vectorRegisterBit;
-const registerBit = @import("registers.zig").registerBit;
-const alloc_vector_registers = @import("registers.zig").alloc_vector_registers;
-const alloc_scalar_registers = @import("registers.zig").alloc_scalar_registers;
-const command_return = @import("registers.zig").command_return;
-const compiler_scratch_2 = @import("registers.zig").compiler_scratch_2;
-const compiler_scratch = @import("registers.zig").compiler_scratch;
+//! Materializes immediates, data addresses, and scalar operands in registers.
 const std = @import("std");
 const ast = @import("ast.zig");
-const rspq = @import("rspq.zig");
+const analysis = @import("analysis.zig");
+const common = @import("emit_common.zig");
+const registers = @import("registers.zig");
+const Emitter = @import("Emitter.zig");
 
+const Gen = common.Gen;
 const Register = ast.Register;
-const DataType = ast.DataType;
+const Symbol = analysis.Symbol;
+const compiler_scratch = registers.compiler_scratch;
+const compiler_scratch_2 = registers.compiler_scratch_2;
 
-pub const Diagnostic = @import("explain.zig").Diagnostic;
-pub const ExplainReport = @import("explain.zig").ExplainReport;
+pub fn valueAsImmediate(g: Gen, value: ast.Value) !i64 {
+    if (value == .number) return value.number;
+    const name = common.identName(value) orelse return error.ExpectedConstant;
+    return (try g.lookup(name)).constant orelse error.ExpectedConstant;
+}
 
-pub fn valueAsImmediate(context: *FunctionContext, value: ast.Value) !i64 {
+/// A register holding `value`, using `$at` to materialize constants.
+pub fn valueAsAddressReg(g: Gen, value: ast.ValueRef) !Register {
     return switch (value) {
-        .number => |number| number,
-        .ident => |name| (try context.lookup(name)).constant orelse error.ExpectedConstant,
-        .vector_access => error.ExpectedConstant,
-        .vector_operation => error.ExpectedConstant,
-        .vector_shift => error.ExpectedConstant,
-        .accumulator_read => error.ExpectedConstant,
-        .vector_control_read => error.ExpectedConstant,
-        .hardware_read => error.ExpectedConstant,
-        .scalar_comparison => error.ExpectedConstant,
-        .signed_less_than => error.ExpectedConstant,
-        .scalar_materialize => error.ExpectedConstant,
-        .load => error.ExpectedConstant,
-        .scalar_expression => error.ExpectedConstant,
-        .bit_cast, .function_address, .code_address, .data_address => error.ExpectedConstant,
+        .ident => |name| symbolAsAddressReg(g, try g.lookup(name)),
+        .bit_cast => |name| bitCastRegister(g, name, error.AddressMustBeRegister, error.AddressMustBeRegister),
+        .number => |number| constantInScratch(g, number),
+        .vector_access => error.AddressMustBeRegister,
     };
 }
 
-pub fn valueAsAddressReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.ValueRef) !Register {
-    switch (value) {
-        .ident => |name| {
-            const symbol = try context.lookup(name);
-            if (symbol.reg) |reg| return reg;
-            if (symbol.data_label) |label| {
-                try loadDataAddress(writer, compiler_scratch, label);
-                return compiler_scratch;
-            }
-            const address = symbol.constant orelse return error.AddressMustBeRegister;
-            if (address == 0) return .zero;
-            try loadImmediateInto(writer, compiler_scratch, address);
-            return compiler_scratch;
-        },
-        .bit_cast => |name| {
-            const symbol = try context.lookup(name);
-            if (isVectorType(symbol.data_type)) return error.AddressMustBeRegister;
-            return symbol.reg orelse error.AddressMustBeRegister;
-        },
-        .number => |number| {
-            if (number == 0) return .zero;
-            try loadImmediateInto(writer, compiler_scratch, number);
-            return compiler_scratch;
-        },
-        .vector_access => return error.AddressMustBeRegister,
-    }
+fn symbolAsAddressReg(g: Gen, symbol: Symbol) !Register {
+    if (symbol.reg) |reg| return reg;
+    if (symbol.data_label) |label| return labelInScratch(g, label);
+    return constantInScratch(g, symbol.constant orelse return error.AddressMustBeRegister);
 }
 
-pub fn valueAsDmemReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.ValueRef) !Register {
-    switch (value) {
-        .ident => |name| {
-            const symbol = try context.lookup(name);
-            if (symbol.data_label) |label| {
-                try loadDataAddress(writer, compiler_scratch, label);
-                return compiler_scratch;
-            }
-            if (symbol.data_type != .dmem) return error.ExpectedDmemAddress;
-            if (symbol.reg) |reg| return reg;
-            const address = symbol.constant orelse return error.AddressMustBeRegister;
-            if (address < 0 or address >= 4096) return error.DmemAddressOutOfRange;
-            if (address == 0) return .zero;
-            try loadImmediateInto(writer, compiler_scratch, address);
-            return compiler_scratch;
-        },
-        .bit_cast => |name| {
-            const symbol = try context.lookup(name);
-            if (isVectorType(symbol.data_type)) return error.ExpectedDmemAddress;
-            return symbol.reg orelse error.AddressMustBeRegister;
-        },
-        .number => |number| {
-            if (number < 0 or number >= 4096) return error.DmemAddressOutOfRange;
-            if (number == 0) return .zero;
-            try loadImmediateInto(writer, compiler_scratch, number);
-            return compiler_scratch;
-        },
-        .vector_access => return error.ExpectedDmemAddress,
-    }
+fn bitCastRegister(g: Gen, name: []const u8, vector_error: anyerror, missing_error: anyerror) !Register {
+    const symbol = try g.lookup(name);
+    if (analysis.isVectorType(symbol.data_type)) return vector_error;
+    return symbol.reg orelse missing_error;
 }
 
-pub fn loadDataAddress(writer: *std.Io.Writer, reg: Register, label: []const u8) !void {
-    try writer.print("  addiu {s}, $zero, %lo({s})\n", .{ regName(reg), label });
+fn labelInScratch(g: Gen, label: []const u8) !Register {
+    try loadDataAddress(g.out, compiler_scratch, label);
+    return compiler_scratch;
 }
 
-pub fn valueAsStoreReg(writer: *std.Io.Writer, context: *FunctionContext, value: ast.ValueRef) !Register {
-    switch (value) {
-        .ident => |name| {
-            const symbol = try context.lookup(name);
-            if (symbol.reg) |reg| return reg;
-            return try loadImmediate(writer, context, symbol.constant orelse return error.StoreValueMustBeRegister);
-        },
-        .bit_cast => |name| {
-            const symbol = try context.lookup(name);
-            if (isVectorType(symbol.data_type)) return error.StoreValueMustBeRegister;
-            return symbol.reg orelse error.StoreValueMustBeRegister;
-        },
-        .number => |number| return try loadImmediate(writer, context, number),
-        .vector_access => return error.StoreValueMustBeRegister,
-    }
-}
-
-fn loadImmediate(writer: *std.Io.Writer, context: *FunctionContext, value: i64) !Register {
+fn constantInScratch(g: Gen, value: i64) !Register {
     if (value == 0) return .zero;
-    const scratch = try backendScratch2(context);
-    try loadImmediateInto(writer, scratch, value);
+    try loadImmediateInto(g.out, compiler_scratch, value);
+    return compiler_scratch;
+}
+
+/// A register holding a DMEM address; constants must be dereferenceable.
+pub fn valueAsDmemReg(g: Gen, value: ast.ValueRef) !Register {
+    return switch (value) {
+        .ident => |name| symbolAsDmemReg(g, try g.lookup(name)),
+        .bit_cast => |name| bitCastRegister(g, name, error.ExpectedDmemAddress, error.AddressMustBeRegister),
+        .number => |number| dmemConstant(g, number),
+        .vector_access => error.ExpectedDmemAddress,
+    };
+}
+
+fn symbolAsDmemReg(g: Gen, symbol: Symbol) !Register {
+    if (symbol.data_label) |label| return labelInScratch(g, label);
+    if (symbol.data_type != .dmem) return error.ExpectedDmemAddress;
+    if (symbol.reg) |reg| return reg;
+    return dmemConstant(g, symbol.constant orelse return error.AddressMustBeRegister);
+}
+
+fn dmemConstant(g: Gen, address: i64) !Register {
+    if (address < 0 or address >= 4096) return error.DmemAddressOutOfRange;
+    return constantInScratch(g, address);
+}
+
+pub fn loadDataAddress(out: *Emitter, reg: Register, label: []const u8) !void {
+    try out.immediateSymbol(.addiu, reg, .zero, label, 0);
+}
+
+/// A register holding a stored value, using `$v1` for constants.
+pub fn valueAsStoreReg(g: Gen, value: ast.ValueRef) !Register {
+    return switch (value) {
+        .ident => |name| symbolAsStoreReg(g, try g.lookup(name)),
+        .bit_cast => |name| bitCastRegister(g, name, error.StoreValueMustBeRegister, error.StoreValueMustBeRegister),
+        .number => |number| loadImmediate(g, number),
+        .vector_access => error.StoreValueMustBeRegister,
+    };
+}
+
+fn symbolAsStoreReg(g: Gen, symbol: Symbol) !Register {
+    if (symbol.reg) |reg| return reg;
+    return loadImmediate(g, symbol.constant orelse return error.StoreValueMustBeRegister);
+}
+
+/// Materializes a constant in the second backend scratch register.
+pub fn loadImmediate(g: Gen, value: i64) !Register {
+    if (value == 0) return .zero;
+    const scratch = try backendScratch2(g.context);
+    try loadImmediateInto(g.out, scratch, value);
     return scratch;
 }
 
-pub fn backendScratch2(context: *const FunctionContext) !Register {
+pub fn backendScratch2(context: *const analysis.FunctionContext) !Register {
     if (context.isRegisterInUse(compiler_scratch_2)) return error.BackendScratchRegisterUnavailable;
     return compiler_scratch_2;
 }
 
-pub fn loadImmediateInto(writer: *std.Io.Writer, reg: Register, value: i64) !void {
-    if (value >= std.math.minInt(i16) and value <= std.math.maxInt(i16)) {
-        try writer.print("  addiu {s}, {s}, {d}\n", .{ regName(reg), regName(.zero), value });
-        return;
-    }
-    if (value >= 0 and value <= std.math.maxInt(u16)) {
-        try writer.print("  ori {s}, {s}, {d}\n", .{ regName(reg), regName(.zero), value });
-        return;
-    }
+/// The shortest `addiu`, `ori`, or `lui`/`ori` sequence for a 32-bit value.
+pub fn loadImmediateInto(out: *Emitter, reg: Register, value: i64) !void {
+    if (common.fitsSigned16(value)) return out.immediate(.addiu, reg, .zero, value);
+    if (common.fitsUnsigned16(value)) return out.immediate(.ori, reg, .zero, value);
     if (value < std.math.minInt(i32) or value > std.math.maxInt(u32)) return error.ImmediateOutOfRange;
-
-    const bits: u32 = if (value < 0)
-        @bitCast(@as(i32, @intCast(value)))
-    else
-        @intCast(value);
-    const upper: u16 = @truncate(bits >> 16);
+    const bits: u32 = @truncate(@as(u64, @bitCast(value)));
+    try out.upper(reg, @truncate(bits >> 16));
     const lower: u16 = @truncate(bits);
-    try writer.print("  lui {s}, {d}\n", .{ regName(reg), upper });
-    if (lower != 0) {
-        try writer.print("  ori {s}, {s}, {d}\n", .{ regName(reg), regName(reg), lower });
-    }
+    if (lower != 0) try out.immediate(.ori, reg, reg, lower);
+}
+
+const testing = std.testing;
+
+fn printed(out: *const Emitter) ![]u8 {
+    var text: std.Io.Writer.Allocating = .init(testing.allocator);
+    errdefer text.deinit();
+    try @import("ir_print.zig").writeItems(&text.writer, out.items.items);
+    return text.toOwnedSlice();
+}
+
+test "immediates use the shortest materialization" {
+    var out = Emitter.init(testing.allocator);
+    defer out.deinit();
+    try loadImmediateInto(&out, .t0, -5);
+    try loadImmediateInto(&out, .t0, 0xffff);
+    try loadImmediateInto(&out, .t0, 0x12340000);
+    try loadImmediateInto(&out, .t0, -0x12345678);
+    try testing.expectError(error.ImmediateOutOfRange, loadImmediateInto(&out, .t0, 1 << 33));
+    const text = try printed(&out);
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings(
+        \\  addiu $t0, $zero, -5
+        \\  ori $t0, $zero, 65535
+        \\  lui $t0, 4660
+        \\  lui $t0, 60875
+        \\  ori $t0, $t0, 43400
+        \\
+    , text);
 }

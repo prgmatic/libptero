@@ -11,27 +11,27 @@ pub fn analyzeAssembly(assembly: []const u8) AssemblyReport {
     var lines = std.mem.splitScalar(u8, assembly, '\n');
     while (lines.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
-        if (std.mem.eql(u8, trimmed, ".text")) {
-            in_text = true;
-            continue;
-        }
-        if (std.mem.startsWith(u8, trimmed, ".section") or
-            std.mem.eql(u8, trimmed, ".data") or
-            std.mem.eql(u8, trimmed, ".bss"))
-        {
-            in_text = false;
-            continue;
-        }
-        if (!in_text or trimmed.len == 0 or trimmed[0] == '#' or
-            std.mem.endsWith(u8, trimmed, ":")) continue;
-        if (trimmed[0] != '.' or std.mem.startsWith(u8, trimmed, ".word")) {
+        if (sectionChange(trimmed)) |text| {
+            in_text = text;
+        } else if (in_text and isInstructionLine(trimmed)) {
             instruction_count += 1;
         }
     }
-    return .{
-        .instruction_count = instruction_count,
-        .text_bytes = instruction_count * 4,
-    };
+    return .{ .instruction_count = instruction_count, .text_bytes = instruction_count * 4 };
+}
+
+/// True on entering `.text`, false on entering another section.
+fn sectionChange(line: []const u8) ?bool {
+    if (std.mem.eql(u8, line, ".text")) return true;
+    if (std.mem.startsWith(u8, line, ".section") or std.mem.eql(u8, line, ".data") or std.mem.eql(u8, line, ".bss")) return false;
+    return null;
+}
+
+/// Instructions and `.word`-encoded instructions; not labels, comments, or
+/// other directives.
+fn isInstructionLine(line: []const u8) bool {
+    if (line.len == 0 or line[0] == '#' or std.mem.endsWith(u8, line, ":")) return false;
+    return line[0] != '.' or std.mem.startsWith(u8, line, ".word");
 }
 
 const error_hints = std.StaticStringMap([]const u8).initComptime(.{
@@ -48,7 +48,7 @@ const error_hints = std.StaticStringMap([]const u8).initComptime(.{
     .{ "FunctionArgumentCountMismatch", "transfer argument count does not match the target function signature" },
     .{ "FunctionArgumentTypeMismatch", "transfer argument type does not match the target function signature" },
     .{ "FunctionArgumentRegisterMismatch", "a vector or callee-written argument is not in the register required by the target function signature" },
-    .{ "FunctionArgumentMoveCycle", "scalar argument moves form a register cycle; reorder the values or use a non-conflicting temporary register" },
+    .{ "FunctionArgumentMoveCycle", "scalar argument moves form a register cycle and no backend scratch register is free to break it; reorder the values or pass one in a different register" },
     .{ "UnknownFunction", "transfer target could not be resolved; check its import alias, visibility, and spelling" },
     .{ "UnknownModule", "transfer target could not be resolved; check its import alias, visibility, and spelling" },
     .{ "UnresolvedModuleCall", "transfer target could not be resolved; check its import alias, visibility, and spelling" },

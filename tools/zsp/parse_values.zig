@@ -267,44 +267,48 @@ pub fn parseScalarExpression(self: *Parser, minimum_precedence: u4) !ast.Value {
     return lhs;
 }
 
+/// A literal, a name, `bitCast(name)`, a compile-time member such as
+/// `Mode.fast`, or a vector access.
 pub fn parseValueRef(self: *Parser) !ast.ValueRef {
-    if (try self.eat(.minus)) {
-        const tok = try self.expect(.number);
-        const value = try self.parseNumberValue(tok);
-        return .{ .number = std.math.negate(value) catch return self.fail(tok, .invalid_number) };
-    }
+    if (try self.eat(.minus)) return parseNegativeNumber(self);
+    return switch (self.current.tag) {
+        .ident => parseNamedRef(self, try self.expect(.ident)),
+        .number => .{ .number = try self.parseNumberValue(try self.expect(.number)) },
+        else => self.fail(self.current, .expected_value),
+    };
+}
 
-    switch (self.current.tag) {
-        .ident => {
-            const tok = try self.expect(.ident);
-            if (std.mem.eql(u8, tok.text, "bitCast") and self.current.tag == .l_paren) {
-                _ = try self.expect(.l_paren);
-                const source = try self.expect(.ident);
-                _ = try self.expect(.r_paren);
-                return .{ .bit_cast = source.text };
-            }
-            if (self.current.tag == .dot) {
-                var lookahead = self.lexer;
-                const member_token = try lookahead.next();
-                if (member_token.tag == .ident) {
-                    if (self.lookupCompileTimeMember(tok.text, member_token.text)) |member| {
-                        _ = try self.expect(.dot);
-                        _ = try self.expect(.ident);
-                        return .{ .number = member.value };
-                    }
-                }
-            }
-            if (self.current.tag == .l_bracket or self.isVectorDotSuffix()) {
-                return .{ .vector_access = try self.parseVectorAccess(tok.text) };
-            }
-            return .{ .ident = tok.text };
-        },
-        .number => {
-            const tok = try self.expect(.number);
-            return .{ .number = try self.parseNumberValue(tok) };
-        },
-        else => return self.fail(self.current, .expected_value),
+fn parseNegativeNumber(self: *Parser) !ast.ValueRef {
+    const tok = try self.expect(.number);
+    const value = try self.parseNumberValue(tok);
+    return .{ .number = std.math.negate(value) catch return self.fail(tok, .invalid_number) };
+}
+
+fn parseNamedRef(self: *Parser, tok: token.Token) !ast.ValueRef {
+    if (std.mem.eql(u8, tok.text, "bitCast") and self.current.tag == .l_paren) return parseBitCastRef(self);
+    if (compileTimeMemberAhead(self, tok.text)) |member| {
+        _ = try self.expect(.dot);
+        _ = try self.expect(.ident);
+        return .{ .number = member.value };
     }
+    if (self.current.tag == .l_bracket or self.isVectorDotSuffix()) return .{ .vector_access = try self.parseVectorAccess(tok.text) };
+    return .{ .ident = tok.text };
+}
+
+fn parseBitCastRef(self: *Parser) !ast.ValueRef {
+    _ = try self.expect(.l_paren);
+    const source = try self.expect(.ident);
+    _ = try self.expect(.r_paren);
+    return .{ .bit_cast = source.text };
+}
+
+/// The member a following `.name` selects when `type_name` is an enum or
+/// flags type.
+fn compileTimeMemberAhead(self: *const Parser, type_name: []const u8) ?Parser.CompileTimeMember {
+    if (self.current.tag != .dot) return null;
+    const next = self.peek(1) orelse return null;
+    if (next[0].tag != .ident) return null;
+    return self.lookupCompileTimeMember(type_name, next[0].text);
 }
 
 pub fn isVectorDotSuffix(self: *const Parser) bool {
@@ -364,21 +368,10 @@ pub fn parseLiteralOffset(self: *Parser) !i64 {
 }
 
 pub fn packedStructFieldOffset(self: *Parser, type_name: token.Token, field_name: token.Token) !i64 {
-    for (self.packed_structs.items) |declaration| {
-        if (!std.mem.eql(u8, declaration.name, type_name.text)) continue;
-        var offset: i64 = 0;
-        for (declaration.fields) |field| {
-            if (std.mem.eql(u8, field.name, field_name.text)) return offset;
-            offset += switch (field.data_type) {
-                .u8, .i8 => 1,
-                .u16, .i16 => 2,
-                .u32, .i32, .dmem => 4,
-                .vec16, .vec32 => unreachable,
-            };
-        }
+    const declaration = self.findPackedStruct(type_name.text) orelse return self.fail(type_name, .expected_literal_offset);
+    const field = @import("parse_declarations.zig").packedField(declaration, field_name.text) orelse
         return self.fail(field_name, .expected_literal_offset);
-    }
-    return self.fail(type_name, .expected_literal_offset);
+    return field.offset;
 }
 
 pub fn parseCondition(self: *Parser) !ast.Condition {

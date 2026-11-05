@@ -11,6 +11,7 @@ pub const Program = @import("Program.zig");
 const command_queue = @import("CommandBuffer.zig");
 pub const CommandBuffer = command_queue;
 const overlay = @import("Overlay.zig");
+const overlay_layout = @import("overlay_layout.zig");
 pub const Overlay = overlay;
 pub const Runtime = @import("Runtime.zig");
 
@@ -42,35 +43,7 @@ const overlay_dmem_offset = overlay.dmem_offset;
 
 var dma_staging: [io.dmem_len]u8 align(8) = undefined;
 
-pub const OverlayHeader = extern struct {
-    state_start: u16 = 0,
-    state_size: u16 = 0,
-    state_rdram: u32 = 0,
-    command_base: u16,
-    overlay_id: u16,
-    text_rdram: u32,
-    text_size: u16,
-    text_start: u16,
-    extra_rdram: u32 = 0,
-    extra_size: u16 = 0,
-    extra_start: u16 = 0,
-
-    const byte_len = 28;
-
-    fn write(self: OverlayHeader, destination: *[byte_len]u8) void {
-        std.mem.writeInt(u16, destination[0..2], self.state_start, .big);
-        std.mem.writeInt(u16, destination[2..4], self.state_size, .big);
-        std.mem.writeInt(u32, destination[4..8], self.state_rdram, .big);
-        std.mem.writeInt(u16, destination[8..10], self.command_base, .big);
-        std.mem.writeInt(u16, destination[10..12], self.overlay_id, .big);
-        std.mem.writeInt(u32, destination[12..16], self.text_rdram, .big);
-        std.mem.writeInt(u16, destination[16..18], self.text_size, .big);
-        std.mem.writeInt(u16, destination[18..20], self.text_start, .big);
-        std.mem.writeInt(u32, destination[20..24], self.extra_rdram, .big);
-        std.mem.writeInt(u16, destination[24..26], self.extra_size, .big);
-        std.mem.writeInt(u16, destination[26..28], self.extra_start, .big);
-    }
-};
+pub const OverlayHeader = overlay_layout.Header;
 
 pub fn runProgram(program: Program) void {
     halt();
@@ -497,124 +470,45 @@ fn registerOverlayInternal(registered: *Overlay, static_id: ?u8) u8 {
         @panic("RSP overlay is already registered");
     }
     const program = registered.program;
-    if (program.text.len == 0 or program.text.len & 7 != 0) {
-        @panic("RSP overlay text must have a nonzero DMA-aligned size");
-    }
-    const imem_offset = program.text_offset;
-    if (imem_offset > io.imem_len or
-        program.text.len > @as(usize, io.imem_len - imem_offset))
-    {
-        @panic("RSP overlay text does not fit in IMEM");
-    }
-    if (program.data.len & 7 != 0) {
-        @panic("RSP overlay data must be DMA-aligned");
-    }
-    const data_address = overlay.dataAddress(program);
-    if (@as(usize, data_address) + program.data.len > io.dmem_len) {
-        @panic("RSP overlay program data does not fit in DMEM");
-    }
-    if (program.commandCount() == 0) {
-        @panic("RSP overlay does not define any commands");
-    }
-    var highest_command_index: u8 = 0;
-    for (0..program.commandCount()) |metadata_index| {
-        highest_command_index = @max(highest_command_index, program.commandAt(metadata_index).index);
-    }
-    const slot_count: u8 = highest_command_index / overlay.commands_per_id + 1;
-    if ((program.state_len != 0 and (program.state_offset & 7 != 0 or program.state_len & 7 != 0)) or
-        @as(u32, program.state_offset) + program.state_len > io.dmem_len)
-    {
-        @panic("RSP overlay persistent state must be DMA-aligned");
-    }
-    const overlay_data_len = std.mem.alignForward(
-        usize,
-        OverlayHeader.byte_len + (@as(usize, highest_command_index) + 1) * @sizeOf(u16),
-        16,
-    );
-    if (overlay_data_len > io.dmem_len - overlay_dmem_offset) {
-        @panic("RSP overlay data does not fit in DMEM");
-    }
-
-    const imem_address = io.dma_imem_addr + imem_offset;
-    const dmem_address = io.dma_dmem_addr + overlay_dmem_offset;
+    const shape = overlay_layout.shape(program) catch |err| @panic(overlay_layout.errorMessage(err));
 
     halt();
     waitHalted();
-    const overlay_id = static_id orelse findFreeOverlayId(slot_count);
-    if (overlay_id == 0 or @as(u16, overlay_id) + slot_count > overlay.max_id + 1) {
+    const overlay_id = static_id orelse findFreeOverlayId(shape.slot_count);
+    if (overlay_id == 0 or @as(u16, overlay_id) + shape.slot_count > overlay.max_id + 1) {
         @panic("RSP overlay ID range is outside the overlay table");
     }
-    for (0..slot_count) |slot| {
+    for (0..shape.slot_count) |slot| {
         if (io.readDmem(u32, overlay_table_dmem + (@as(u32, overlay_id) + @as(u32, @intCast(slot))) * @sizeOf(u32)).* != 0) {
             @panic("RSP overlay table slot is already occupied");
         }
     }
     registered.id = overlay_id;
-    registered.slot_count = slot_count;
-    const overlay_data = registered.data[0..overlay_data_len];
-    registered.data_len = overlay_data_len;
-    @memset(overlay_data, 0);
+    registered.slot_count = shape.slot_count;
+    const overlay_data = registered.data[0..shape.block_len];
+    registered.data_len = shape.block_len;
 
     const state = registered.state[program.state_offset..][0..program.state_len];
-    const image_start: u16 = if (program.data.len == 0)
-        program.state_offset
-    else
-        @min(data_address, program.state_offset);
-    const image_end: u16 = @intCast(@max(
-        @as(usize, data_address) + program.data.len,
-        @as(usize, program.state_offset) + program.state_len,
-    ));
-    const image = registered.state[image_start..image_end];
-    const has_image = program.data.len != 0 or program.state_init.len != 0;
-    const header_dmem_end: u16 = @intCast(overlay_dmem_offset + overlay_data.len);
-    if (has_image and header_dmem_end > image_start) {
-        const overlap_start: u16 = @max(@as(u16, overlay_dmem_offset), image_start);
-        const overlap_end: u16 = @min(header_dmem_end, image_end);
-        if (overlap_end > overlap_start) {
-            @memcpy(
-                overlay_data[overlap_start - overlay_dmem_offset ..][0 .. overlap_end - overlap_start],
-                registered.state[overlap_start..overlap_end],
-            );
-        }
-    }
-    const header = OverlayHeader{
-        .state_start = program.state_offset,
-        .state_size = if (program.state_len == 0) std.math.maxInt(u16) else program.state_len - 1,
+    const image = registered.state[shape.image_start..shape.image_end];
+    overlay_layout.writeBlock(program, shape, .{
+        .id = overlay_id,
         .state_rdram = physicalAddress(@intFromPtr(state.ptr)),
-        .command_base = @as(u16, overlay_id) << 5,
-        .overlay_id = @as(u16, overlay_id) << 2,
-        .text_rdram = physicalAddress(@intFromPtr(program.text.ptr)) |
-            if (has_image) @as(u32, 0x80000000) else 0,
-        .text_size = @intCast(program.text.len - 1),
-        .text_start = @intCast(imem_address),
-        .extra_rdram = if (has_image) physicalAddress(@intFromPtr(image.ptr)) else 0,
-        .extra_size = if (has_image) @intCast(image.len - 1) else 0,
-        .extra_start = if (has_image) image_start else 0,
-    };
-    header.write(overlay_data[0..OverlayHeader.byte_len]);
-    for (0..program.commandCount()) |command_index| {
-        const command = program.commandAt(command_index);
-        if (command.handler_offset & 3 != 0 or command.handler_offset >> 2 > 0x3ff) {
-            @panic("RSP overlay command metadata cannot be encoded");
-        }
-        const descriptor = @as(u16, command.size) << 8 | command.handler_offset >> 2;
-        const descriptor_offset = OverlayHeader.byte_len + @as(usize, command.index) * @sizeOf(u16);
-        std.mem.writeInt(u16, overlay_data[descriptor_offset..][0..2], descriptor, .big);
-    }
+        .text_rdram = physicalAddress(@intFromPtr(program.text.ptr)),
+        .image_rdram = physicalAddress(@intFromPtr(image.ptr)),
+    }, &registered.state, overlay_data) catch |err| @panic(overlay_layout.errorMessage(err));
 
-    assertRspDma(program.text, imem_address);
-    assertRspDma(overlay_data, dmem_address);
+    assertRspDma(program.text, io.dma_imem_addr + program.text_offset);
+    assertRspDma(overlay_data, io.dma_dmem_addr + overlay_dmem_offset);
 
     cache.writebackData(program.text);
     cache.writebackData(overlay_data);
     cache.writebackData(image);
 
-    const packed_data = physicalAddress(@intFromPtr(overlay_data.ptr)) & 0x00ffffff |
-        @as(u32, @intCast((overlay_data.len - 1) >> 4)) << 24;
-    for (0..slot_count) |slot| {
+    const packed_data = overlay_layout.tableEntry(physicalAddress(@intFromPtr(overlay_data.ptr)), overlay_data.len);
+    for (0..shape.slot_count) |slot| {
         const slot_id = overlay_id + @as(u8, @intCast(slot));
         io.readDmem(u32, overlay_table_dmem + @as(u32, slot_id) * @sizeOf(u32)).* = packed_data;
-        writeDmemByte(overlay_idmap_dmem + slot_id, overlay_id << 2);
+        writeDmemByte(overlay_idmap_dmem + slot_id, overlay_layout.idmapValue(overlay_id));
     }
     return overlay_id;
 }

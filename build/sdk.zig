@@ -168,42 +168,18 @@ pub const Sdk = struct {
 
     fn addBuiltinRspPrograms(self: *Sdk) void {
         var assets = self.createAssets("libptero_rsp_assets");
-        const resident = assets.addZspResident(
-            "command_dispatcher",
-            self.root.path(self.b, "src/n64/rsp/ucode/command_dispatcher.zsp"),
-        );
-        assets.addZspOverlay(
-            "rdp_overlay",
-            self.root.path(self.b, "src/n64/rsp/ucode/rdp_overlay.zsp"),
-            resident,
-        );
-        assets.addZspOverlayWithLayout(
-            "audio_mixer",
-            self.root.path(self.b, "src/n64/rsp/ucode/audio_mixer.zsp"),
-            resident,
-            0x0220,
-            0x0220,
-        );
-        assets.addZspOverlayWithLayout(
-            "audio_vadpcm",
-            self.root.path(self.b, "src/n64/rsp/ucode/audio_vadpcm.zsp"),
-            resident,
-            0x0220,
-            0x0220,
-        );
-        assets.addZspOverlayWithStateStart(
-            "geometry_overlay",
-            self.root.path(self.b, "src/n64/rsp/ucode/geometry_overlay.zsp"),
-            resident,
-            0x0230,
-        );
-        assets.addZspOverlayWithStateStart(
-            "geometry_clipping",
-            self.root.path(self.b, "src/n64/rsp/ucode/geometry_clipping.zsp"),
-            resident,
-            0x0230,
-        );
+        addBuiltinRspProgramsTo(self, &assets);
         self.n64_module.addImport("libptero_rsp_assets", assets.createModule());
+    }
+
+    /// Host-target module exposing the built-in packed RSP programs and their
+    /// generated symbols, for running shipped microcode in the RSP interpreter.
+    pub fn createHostRspProgramsModule(self: *Sdk) *std.Build.Module {
+        var assets = self.createAssets("libptero_host_rsp_assets");
+        assets.target = self.b.graph.host;
+        assets.asset_module.target = self.b.graph.host;
+        addBuiltinRspProgramsTo(self, &assets);
+        return assets.createModule();
     }
 };
 
@@ -274,3 +250,41 @@ const target_query: std.Target.Query = .{
     .os_tag = .freestanding,
     .abi = .none,
 };
+
+fn addBuiltinRspProgramsTo(sdk: *Sdk, assets: *AssetBundle) void {
+    const resident = assets.addZspResident(
+        "command_dispatcher",
+        sdk.root.path(sdk.b, "src/n64/rsp/ucode/command_dispatcher.zsp"),
+    );
+    assets.addZspOverlay(
+        "rdp_overlay",
+        sdk.root.path(sdk.b, "src/n64/rsp/ucode/rdp_overlay.zsp"),
+        resident,
+    );
+    assets.addZspOverlayWithLayout(
+        "audio_mixer",
+        sdk.root.path(sdk.b, "src/n64/rsp/ucode/audio_mixer.zsp"),
+        resident,
+        0x0220,
+        0x0220,
+    );
+    assets.addZspOverlayWithLayout(
+        "audio_vadpcm",
+        sdk.root.path(sdk.b, "src/n64/rsp/ucode/audio_vadpcm.zsp"),
+        resident,
+        0x0220,
+        0x0220,
+    );
+    assets.addZspOverlayWithStateStart(
+        "geometry_overlay",
+        sdk.root.path(sdk.b, "src/n64/rsp/ucode/geometry_overlay.zsp"),
+        resident,
+        0x0230,
+    );
+    assets.addZspOverlayWithStateStart(
+        "geometry_clipping",
+        sdk.root.path(sdk.b, "src/n64/rsp/ucode/geometry_clipping.zsp"),
+        resident,
+        0x0230,
+    );
+}

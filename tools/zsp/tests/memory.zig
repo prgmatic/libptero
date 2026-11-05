@@ -1,7 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
-const asm_writer = @import("../asm_writer.zig");
-const asm_optimizer = @import("../asm_optimizer.zig");
+const codegen = @import("../codegen.zig");
+const optimizer = @import("../optimizer.zig");
 const parser_mod = @import("../parser.zig");
 
 const testing = std.testing;
@@ -1088,8 +1088,25 @@ test "symbolic address addition distinguishes trapping and wrapping operators" {
     defer ast.freeFunctions(testing.allocator, functions);
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
-    try asm_writer.write(&output.writer, functions);
+    try codegen.write(testing.allocator, &output.writer, functions);
     const bytes = output.writer.buffered();
     try testing.expect(std.mem.indexOf(u8, bytes, "addi $t0, $t0, %lo(target)") != null);
     try testing.expect(std.mem.indexOf(u8, bytes, "addiu $t0, $t0, %lo(target)") != null);
+}
+
+test "bit-cast addresses use the source register directly" {
+    try @import("support.zig").expectAsmContains(
+        \\fn entry() {
+        \\  reg($t0) address: u32 = 64;
+        \\  reg($t1) value: u32 = 1;
+        \\  store(u32, bitCast(address), value);
+        \\  rsp.cp0.setDmaRdramAddress(bitCast(address));
+        \\}
+    , &.{ "  sw $t1, 0($t0)\n", "  mtc0 $t0, $1\n" });
+    try expectAsmError(
+        \\fn entry() {
+        \\  reg($v01) vector: vec16 = 0;
+        \\  rsp.cp0.setDmaRdramAddress(bitCast(vector));
+        \\}
+    , error.AddressMustBeRegister);
 }

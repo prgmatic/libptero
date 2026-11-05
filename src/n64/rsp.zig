@@ -2,6 +2,8 @@
 const control = @import("rsp/control.zig");
 pub const programs = control.programs;
 pub const Program = @import("rsp/Program.zig");
+/// Host-compilable program and queue ABI shared with host tools.
+pub const host_abi = @import("rsp/host_abi.zig");
 pub const CommandBuffer = @import("rsp/CommandBuffer.zig");
 pub const Overlay = @import("rsp/Overlay.zig");
 pub const Runtime = @import("rsp/Runtime.zig");

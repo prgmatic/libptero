@@ -18,6 +18,9 @@ const vertex_output_size = 36;
 
 const GeometryEncoder = @This();
 
+/// Static overlay id of the geometry overlay.
+pub const overlay_id = 1;
+
 renderer: *RdpRenderer,
 queue: *rsp.Queue,
 geometry_overlay: rsp.Overlay,
@@ -48,7 +51,7 @@ pub fn init(self: *GeometryEncoder, renderer: *RdpRenderer) void {
     self.queue = &renderer.queue;
     self.render = &renderer.render;
     self.geometry_overlay.init(rsp.programs.geometry_overlay);
-    rsp.registerOverlayStatic(&self.geometry_overlay, 1);
+    rsp.registerOverlayStatic(&self.geometry_overlay, overlay_id);
     renderer.geometry_attached = true;
     @memset(&self.matrix_stack, math.FixedMat4.identity);
     self.view_matrix = .identity;
@@ -78,21 +81,10 @@ pub fn init(self: *GeometryEncoder, renderer: *RdpRenderer) void {
     rsp.flush(self.queue);
     rsp.wait(self.queue);
 
-    const clipping = rsp.programs.geometry_clipping;
-    const clipping_imem_start = symbols._start;
-    if (symbols.geometry_RDPQ_Triangle_Send_Async != 0x400 or
-        symbols.geometry_RDPQ_Triangle_Send_End != 0x85c or
-        clipping_imem_start != 0x880)
-    {
-        @panic("geometry clipping payload jump targets need relocation");
-    }
-    if (rsp.programs.geometry_clipping_symbols.geometry_clipping_code_start != clipping_imem_start)
-        @panic("geometry clipping overlays disagree on their linked IMEM target");
-    const clipping_payload_offset = clipping_imem_start - clipping.text_offset;
-    const geometry_restore_offset = clipping_imem_start - self.geometry_overlay.program.text_offset;
-    const clipping_size: u16 = @intCast(clipping.text.len - clipping_payload_offset);
-    const clipping_address = physical(clipping.text.ptr + clipping_payload_offset);
-    const original_address = physical(self.geometry_overlay.program.text.ptr + geometry_restore_offset);
+    const patch = clippingPatch(physical(self.geometry_overlay.program.text.ptr), physical(rsp.programs.geometry_clipping.text.ptr));
+    const clipping_size = patch.size;
+    const clipping_address = patch.clipping_address;
+    const original_address = patch.original_address;
     state = rsp.overlayState(&self.geometry_overlay);
     const clipping_code_size_offset = symbols.clipping_code_size - state_start;
     const clipping_code_address_offset = symbols.clipping_code_address - state_start;
@@ -127,6 +119,44 @@ pub fn attachViewport(self: *GeometryEncoder, viewport: *const Viewport) void {
     self.settleTriangles();
     self.view_matrix = viewport.camera_float;
     cache.writebackData(viewport);
+    const screen = screenSizeCommand(viewport);
+    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 1, screen.inline_argument, &screen.arguments);
+    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 7, physical(&viewport.projection), &.{});
+    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, 0, &.{physical(&viewport.camera)});
+}
+
+/// Where the clipping payload and the geometry code it temporarily replaces
+/// live in RDRAM, given the RDRAM addresses of both overlays' text.
+pub const ClippingPatch = struct { size: u16, clipping_address: u32, original_address: u32 };
+
+pub fn clippingPatch(geometry_text_rdram: u32, clipping_text_rdram: u32) ClippingPatch {
+    const symbols = rsp.programs.geometry_overlay_symbols;
+    const clipping = rsp.programs.geometry_clipping;
+    const clipping_imem_start = symbols._start;
+    if (symbols.geometry_RDPQ_Triangle_Send_Async != 0x400 or
+        symbols.geometry_RDPQ_Triangle_Send_End != 0x85c or
+        clipping_imem_start != 0x880)
+    {
+        @panic("geometry clipping payload jump targets need relocation");
+    }
+    if (rsp.programs.geometry_clipping_symbols.geometry_clipping_code_start != clipping_imem_start)
+        @panic("geometry clipping overlays disagree on their linked IMEM target");
+    const clipping_payload_offset = clipping_imem_start - clipping.text_offset;
+    const geometry_restore_offset = clipping_imem_start - rsp.programs.geometry_overlay.text_offset;
+    return .{
+        .size = @intCast(clipping.text.len - clipping_payload_offset),
+        .clipping_address = clipping_text_rdram + clipping_payload_offset,
+        .original_address = geometry_text_rdram + geometry_restore_offset,
+    };
+}
+
+/// Overlay command arguments for one queued geometry command.
+pub fn Command(comptime argument_count: usize) type {
+    return struct { inline_argument: u32, arguments: [argument_count]u32 };
+}
+
+/// Arguments of setScreenSize (command 1) for a viewport.
+pub fn screenSizeCommand(viewport: *const Viewport) Command(3) {
     const normalized_w: u16 = @intFromFloat(@round(65535.0 * viewport.w_normalization));
     const normalized_w_float = @as(f32, @floatFromInt(normalized_w)) / 65535.0;
     const scale_x: i32 = @intFromFloat(@ceil(@as(f32, @floatFromInt(viewport.width)) * normalized_w_float * 1024.0));
@@ -139,9 +169,39 @@ pub fn attachViewport(self: *GeometryEncoder, viewport: *const Viewport) void {
         32767.0,
     ));
     const depth_and_w_scale = @as(u32, depth_scale) << 16 | normalized_w;
-    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 1, 2 | (0x2a00 / viewport.width) << 8, &.{ offset, scale, depth_and_w_scale });
-    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 7, physical(&viewport.projection), &.{});
-    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 2, 0, &.{physical(&viewport.camera)});
+    return .{ .inline_argument = 2 | (0x2a00 / @as(u32, viewport.width)) << 8, .arguments = .{ offset, scale, depth_and_w_scale } };
+}
+
+/// Arguments of setRenderMode (command 6) for draw flags and a material tile.
+pub fn renderModeCommand(flags: DrawFlags, material_tile: u3) Command(1) {
+    // Match Tiny3D's host-side ABI (the triangle include's historical
+    // comment describes these two selector values in reverse).
+    const culling: u32 = if (flags.cull_front) 1 else if (flags.cull_back) 0 else 2;
+    var bits: u32 = @as(u17, @bitCast(flags));
+    bits &= ~@as(u32, (1 << 3) | (1 << 4));
+    return .{ .inline_argument = culling, .arguments = .{0xc000 | ((bits | 8) << 8) | @as(u32, material_tile)} };
+}
+
+/// Arguments of loadVertices (command 4): `count` vertices from `rdram`
+/// into vertex buffer slots starting at `offset`.
+pub fn vertexLoadCommand(rdram: u32, offset: u8, count: u8) Command(2) {
+    const symbols = rsp.programs.geometry_overlay_symbols;
+    const vertex_input_end = symbols.clipping_buffer_result + 6 * 16;
+    const input_size: u32 = ((@as(u32, count) + 1) & ~@as(u32, 1)) * 16;
+    const temp_address = (vertex_input_end - input_size) & ~@as(u32, 0xf);
+    const output_address = symbols.vertex_buffer + @as(u32, offset) * vertex_output_size;
+    return .{ .inline_argument = input_size, .arguments = .{ rdram, temp_address << 16 | output_address } };
+}
+
+/// Arguments of drawTriangleStrip (command 11) for `index_count` indices at `rdram`.
+pub fn stripCommand(rdram: u32, index_count: usize, sync: bool) Command(1) {
+    const symbols = rsp.programs.geometry_overlay_symbols;
+    const strip_buffer_end = symbols.clipping_buffer_temporary;
+    if (index_count < 3 or index_count * @sizeOf(i16) > strip_buffer_end - symbols.vertex_buffer) @panic("invalid geometry strip");
+    const byte_count: u32 = @intCast(index_count * @sizeOf(i16));
+    var dmem_address = (strip_buffer_end - byte_count) & ~@as(u32, 7);
+    if (sync) dmem_address |= 0x8000;
+    return .{ .inline_argument = rdram, .arguments = .{dmem_address << 16 | (byte_count - 1)} };
 }
 
 /// Bind borrowed frame targets and perform explicitly requested clears.
@@ -306,12 +366,8 @@ fn emitDrawFlags(self: *GeometryEncoder) void {
     self.settleTriangles();
     self.last_draw_flags = flags;
     self.last_material_tile = self.render.material_tile;
-    // Match Tiny3D's host-side ABI (the triangle include's historical
-    // comment describes these two selector values in reverse).
-    const culling: u32 = if (flags.cull_front) 1 else if (flags.cull_back) 0 else 2;
-    var bits: u32 = @as(u17, @bitCast(flags));
-    bits &= ~@as(u32, (1 << 3) | (1 << 4));
-    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 6, culling, &.{0xc000 | ((bits | 8) << 8) | @as(u32, self.render.material_tile)});
+    const mode = renderModeCommand(flags, self.render.material_tile);
+    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 6, mode.inline_argument, &mode.arguments);
 }
 /// Bind fixed global bone matrices for first-joint assets. Borrowed until
 /// submission completes. Segmented addresses keep recorded model blocks
@@ -370,13 +426,8 @@ pub fn loadVertices(self: *GeometryEncoder, vertices: []const VertexPair, offset
 pub fn loadStaticVertices(self: *GeometryEncoder, vertices: []const VertexPair, offset: u8, count: u8) void {
     if (count == 0 or count > vertices.len * 2) @panic("invalid geometry vertex count");
     self.settleTriangles();
-    const symbols = rsp.programs.geometry_overlay_symbols;
-    const vertex_buffer = symbols.vertex_buffer;
-    const vertex_input_end = symbols.clipping_buffer_result + 6 * 16;
-    const input_size: u32 = ((@as(u32, count) + 1) & ~@as(u32, 1)) * 16;
-    const temp_address = (vertex_input_end - input_size) & ~@as(u32, 0xf);
-    const output_address = vertex_buffer + @as(u32, offset) * vertex_output_size;
-    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 4, input_size, &.{ physical(vertices.ptr), temp_address << 16 | output_address });
+    const load = vertexLoadCommand(physical(vertices.ptr), offset, count);
+    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 4, load.inline_argument, &load.arguments);
 }
 /// Draw one triangle from loaded vertices and sync it. Clipping replaces
 /// part of the geometry microcode until the next sync, so an unsynced
@@ -430,19 +481,8 @@ pub fn drawTriangleStrip(self: *GeometryEncoder, indices: []align(8) const i16, 
 /// Draw an immutable asset index strip which is already coherent in RDRAM.
 pub fn drawStaticTriangleStrip(self: *GeometryEncoder, indices: []align(8) const i16, sync: bool) void {
     self.beginModelMaterial();
-    const symbols = rsp.programs.geometry_overlay_symbols;
-    const vertex_buffer = symbols.vertex_buffer;
-    const strip_buffer_end = symbols.clipping_buffer_temporary;
-    if (indices.len < 3 or indices.len * @sizeOf(i16) > strip_buffer_end - vertex_buffer) @panic("invalid geometry strip");
-    const byte_count: u32 = @intCast(indices.len * @sizeOf(i16));
-    var dmem_address = (strip_buffer_end - byte_count) & ~@as(u32, 7);
-    if (sync) dmem_address |= 0x8000;
-    self.queue.writeOverlayCommandKnown(
-        &self.geometry_overlay,
-        11,
-        physical(indices.ptr),
-        &.{dmem_address << 16 | (byte_count - 1)},
-    );
+    const strip = stripCommand(physical(indices.ptr), indices.len, sync);
+    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 11, strip.inline_argument, &strip.arguments);
     self.triangles_pending = !sync;
 }
 /// Wait for queued triangles and restore microcode replaced by clipping.

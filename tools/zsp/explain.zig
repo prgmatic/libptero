@@ -13,6 +13,32 @@ pub const Diagnostic = struct {
     location: ?ast.SourceLocation = null,
     function_name: ?[]const u8 = null,
     symbol_name: ?[]const u8 = null,
+    /// The values occupying registers when an allocation failed.
+    live: [max_live]LiveValue = undefined,
+    live_count: usize = 0,
+    live_total: usize = 0,
+
+    pub const max_live = 12;
+    pub const LiveValue = struct { name: []const u8, reg: []const u8 };
+
+    pub fn recordLive(self: *Diagnostic, name: []const u8, reg: []const u8) void {
+        if (self.live_count < max_live) {
+            self.live[self.live_count] = .{ .name = name, .reg = reg };
+            self.live_count += 1;
+        }
+        self.live_total += 1;
+    }
+
+    /// `  live: a in $t0, b in $t1 (+3 more)`
+    pub fn writeLive(self: *const Diagnostic, writer: *std.Io.Writer) !void {
+        if (self.live_total == 0) return;
+        try writer.print("  {d} live values:", .{self.live_total});
+        for (self.live[0..self.live_count], 0..) |value, index| {
+            try writer.print("{s} {s} in {s}", .{ if (index == 0) "" else ",", value.name, value.reg });
+        }
+        if (self.live_total > self.live_count) try writer.print(" (+{d} more)", .{self.live_total - self.live_count});
+        try writer.writeByte('\n');
+    }
 
     pub fn selectStatement(self: *Diagnostic, functions: []const ast.Function, statement: *const ast.Statement) void {
         for (functions) |function| {
@@ -27,6 +53,18 @@ pub const Diagnostic = struct {
         }
     }
 };
+
+test "allocation failures list the values occupying registers" {
+    var diagnostic: Diagnostic = .{};
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try diagnostic.writeLive(&writer);
+    try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    for (0..Diagnostic.max_live + 2) |_| diagnostic.recordLive("x", "$t0");
+    try diagnostic.writeLive(&writer);
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "  14 live values: x in $t0, x in $t0"));
+    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), " (+2 more)\n"));
+}
 
 pub const ExplainAllocation = struct {
     function_name: []const u8,

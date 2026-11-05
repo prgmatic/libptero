@@ -1,0 +1,364 @@
+// Compares a hand-scheduled 4x4 fixed-point matrix multiply, written with
+// pinned registers and an exact block, against the same computation written
+// plainly: automatic registers, loads, multiplies, and stores in source
+// order, and no exact block. The scheduler must produce the same matrix in
+// no more cycles.
+//
+// Results: 0x100 is 1 when both products match, 0x104 and 0x108 are the
+// DPC_CLOCK cycles of the hand and plain kernels. Products are written to
+// 0x200 (hand) and 0x240 (plain). The vector normalization kernels report
+// the same way at 0x10c, 0x110, and 0x114, writing to 0x280 and 0x2a0.
+
+data {
+    // Rows are four integer halfwords followed by four fraction halfwords.
+    left: [32]u16 = .{
+        0x0001, 0x0002, 0xffff, 0x0000, 0x8000, 0x4000, 0x0000, 0xc000,
+        0x0000, 0x0003, 0x0001, 0x0002, 0x1234, 0x0000, 0x8000, 0x0001,
+        0xfffe, 0x0000, 0x0002, 0x0001, 0x0000, 0xffff, 0x4000, 0x2000,
+        0x0000, 0x0000, 0x0000, 0x0001, 0x0000, 0x0000, 0x0000, 0x0000,
+    };
+    right: [32]u16 = .{
+        0x0002, 0x0000, 0x0001, 0x0000, 0x0000, 0x8000, 0x0000, 0x4000,
+        0x0000, 0x0001, 0x0000, 0xffff, 0xc000, 0x0000, 0x2000, 0x0000,
+        0x0001, 0x0001, 0x0003, 0x0000, 0x0000, 0x0000, 0x8000, 0x8000,
+        0x0005, 0xfffd, 0x0000, 0x0001, 0x1000, 0x0100, 0x0010, 0x0000,
+    };
+    // Two 16.16 vectors: integer halfwords, then fraction halfwords.
+    vectors: [16]u16 = .{
+        0x0003, 0x0004, 0x0000, 0x0000, 0x0000, 0x8000, 0x0000, 0x0000,
+        0xffff, 0x0002, 0x0002, 0x0000, 0x4000, 0x0000, 0xc000, 0x0000,
+    };
+}
+
+// Fixed registers and instruction order from Tiny3D's hand-scheduled kernel.
+fn handMultiply(
+    reg($s2) output: dmem,
+    reg($s3) left_matrix: dmem,
+    reg($s4) right_matrix: dmem,
+) {
+    reg($v01) l0i: vec16 = undefined;
+    reg($v02) l0f: vec16 = undefined;
+    reg($v03) l1i: vec16 = undefined;
+    reg($v04) l1f: vec16 = undefined;
+    reg($v05) l2i: vec16 = undefined;
+    reg($v06) l2f: vec16 = undefined;
+    reg($v07) l3i: vec16 = undefined;
+    reg($v08) l3f: vec16 = undefined;
+    reg($v09) r01i: vec16 = undefined;
+    reg($v10) r01f: vec16 = undefined;
+    reg($v11) r23i: vec16 = undefined;
+    reg($v12) r23f: vec16 = undefined;
+    reg($v13) result_i: vec16 = undefined;
+    reg($v14) result_f: vec16 = undefined;
+    reg($v29) accumulator_scratch: vec16 = undefined;
+
+    exact {
+        rsp.vector.load64(l0i, 0, left_matrix, 0);
+        rsp.vector.load64(r01f, 0, right_matrix, 8);
+        rsp.vector.load64(l0f, 0, left_matrix, 8);
+        rsp.vector.load64(r01i, 0, right_matrix, 0);
+        rsp.vector.load64(l0f, 4, left_matrix, 8);
+        rsp.vector.load64(r01f, 4, right_matrix, 24);
+        rsp.vector.load64(l0i, 4, left_matrix, 0);
+        rsp.vector.load64(r01i, 4, right_matrix, 16);
+        rsp.vector.load64(l1i, 0, left_matrix, 16);
+        rsp.vector.load64(l2i, 0, left_matrix, 32);
+        accumulator_scratch = vmudl(l0f, r01f.xxxxXXXX);
+        rsp.vector.load64(l1f, 0, left_matrix, 24);
+        rsp.vector.load64(l2f, 0, left_matrix, 40);
+        rsp.vector.load64(l2f, 4, left_matrix, 40);
+        rsp.vector.load64(l1f, 4, left_matrix, 24);
+        accumulator_scratch = vmadm(l0i, r01f.xxxxXXXX);
+        rsp.vector.load64(l1i, 4, left_matrix, 16);
+        result_f = vmadn(l0f, r01i.xxxxXXXX);
+        rsp.vector.load64(l3i, 0, left_matrix, 48);
+        rsp.vector.load64(l3f, 0, left_matrix, 56);
+        result_i = vmadh(l0i, r01i.xxxxXXXX);
+        accumulator_scratch = vmadl(l1f, r01f.yyyyYYYY);
+        rsp.vector.load64(l2i, 4, left_matrix, 32);
+        accumulator_scratch = vmadm(l1i, r01f.yyyyYYYY);
+        rsp.vector.load64(r23i, 0, right_matrix, 32);
+        rsp.vector.load64(r23f, 0, right_matrix, 40);
+        result_f = vmadn(l1f, r01i.yyyyYYYY);
+        result_i = vmadh(l1i, r01i.yyyyYYYY);
+        rsp.vector.load64(l3f, 4, left_matrix, 56);
+        accumulator_scratch = vmadl(l2f, r01f.zzzzZZZZ);
+        rsp.vector.load64(r23f, 4, right_matrix, 56);
+        rsp.vector.load64(l3i, 4, left_matrix, 48);
+        accumulator_scratch = vmadm(l2i, r01f.zzzzZZZZ);
+        result_f = vmadn(l2f, r01i.zzzzZZZZ);
+        rsp.vector.load64(r23i, 4, right_matrix, 48);
+        result_i = vmadh(l2i, r01i.zzzzZZZZ);
+        accumulator_scratch = vmadl(l3f, r01f.wwwwWWWW);
+        accumulator_scratch = vmadm(l3i, r01f.wwwwWWWW);
+        r01f = vmadn(l3f, r01i.wwwwWWWW);
+        r01i = vmadh(l3i, r01i.wwwwWWWW);
+
+        accumulator_scratch = vmudl(l0f, r23f.xxxxXXXX);
+        accumulator_scratch = vmadm(l0i, r23f.xxxxXXXX);
+        result_f = vmadn(l0f, r23i.xxxxXXXX);
+        result_i = vmadh(l0i, r23i.xxxxXXXX);
+        accumulator_scratch = vmadl(l1f, r23f.yyyyYYYY);
+        accumulator_scratch = vmadm(l1i, r23f.yyyyYYYY);
+        rsp.vector.store64(r01i, 0, output, 0);
+        result_f = vmadn(l1f, r23i.yyyyYYYY);
+        result_i = vmadh(l1i, r23i.yyyyYYYY);
+        accumulator_scratch = vmadl(l2f, r23f.zzzzZZZZ);
+        rsp.vector.store64(r01f, 4, output, 24);
+        rsp.vector.store64(r01i, 4, output, 16);
+        accumulator_scratch = vmadm(l2i, r23f.zzzzZZZZ);
+        result_f = vmadn(l2f, r23i.zzzzZZZZ);
+        result_i = vmadh(l2i, r23i.zzzzZZZZ);
+        accumulator_scratch = vmadl(l3f, r23f.wwwwWWWW);
+        accumulator_scratch = vmadm(l3i, r23f.wwwwWWWW);
+        r23f = vmadn(l3f, r23i.wwwwWWWW);
+        r23i = vmadh(l3i, r23i.wwwwWWWW);
+        rsp.vector.store64(r01f, 0, output, 8);
+        rsp.vector.store64(r23f, 0, output, 40);
+        rsp.vector.store64(r23i, 0, output, 32);
+        rsp.vector.store64(r23f, 4, output, 56);
+    }
+    return slot {
+        rsp.vector.store64(r23i, 4, output, 48);
+    }
+}
+
+// The same product written for readability: load each operand, run each
+// accumulator chain in order, then store the results.
+fn plainMultiply(
+    reg($s2) output: dmem,
+    reg($s3) left_matrix: dmem,
+    reg($s4) right_matrix: dmem,
+) {
+    reg l0i: vec16 = undefined;
+    reg l0f: vec16 = undefined;
+    reg l1i: vec16 = undefined;
+    reg l1f: vec16 = undefined;
+    reg l2i: vec16 = undefined;
+    reg l2f: vec16 = undefined;
+    reg l3i: vec16 = undefined;
+    reg l3f: vec16 = undefined;
+    reg r01i: vec16 = undefined;
+    reg r01f: vec16 = undefined;
+    reg r23i: vec16 = undefined;
+    reg r23f: vec16 = undefined;
+
+    // Each left row fills both halves of its registers.
+    rsp.vector.load64(l0i, 0, left_matrix, 0);
+    rsp.vector.load64(l0i, 4, left_matrix, 0);
+    rsp.vector.load64(l0f, 0, left_matrix, 8);
+    rsp.vector.load64(l0f, 4, left_matrix, 8);
+    rsp.vector.load64(l1i, 0, left_matrix, 16);
+    rsp.vector.load64(l1i, 4, left_matrix, 16);
+    rsp.vector.load64(l1f, 0, left_matrix, 24);
+    rsp.vector.load64(l1f, 4, left_matrix, 24);
+    rsp.vector.load64(l2i, 0, left_matrix, 32);
+    rsp.vector.load64(l2i, 4, left_matrix, 32);
+    rsp.vector.load64(l2f, 0, left_matrix, 40);
+    rsp.vector.load64(l2f, 4, left_matrix, 40);
+    rsp.vector.load64(l3i, 0, left_matrix, 48);
+    rsp.vector.load64(l3i, 4, left_matrix, 48);
+    rsp.vector.load64(l3f, 0, left_matrix, 56);
+    rsp.vector.load64(l3f, 4, left_matrix, 56);
+
+    // Right rows 0 and 1 share one register pair, rows 2 and 3 another.
+    rsp.vector.load64(r01i, 0, right_matrix, 0);
+    rsp.vector.load64(r01i, 4, right_matrix, 16);
+    rsp.vector.load64(r01f, 0, right_matrix, 8);
+    rsp.vector.load64(r01f, 4, right_matrix, 24);
+    rsp.vector.load64(r23i, 0, right_matrix, 32);
+    rsp.vector.load64(r23i, 4, right_matrix, 48);
+    rsp.vector.load64(r23f, 0, right_matrix, 40);
+    rsp.vector.load64(r23f, 4, right_matrix, 56);
+
+    reg partial: vec16 = vmudl(l0f, r01f.xxxxXXXX);
+    partial = vmadm(l0i, r01f.xxxxXXXX);
+    partial = vmadn(l0f, r01i.xxxxXXXX);
+    partial = vmadh(l0i, r01i.xxxxXXXX);
+    partial = vmadl(l1f, r01f.yyyyYYYY);
+    partial = vmadm(l1i, r01f.yyyyYYYY);
+    partial = vmadn(l1f, r01i.yyyyYYYY);
+    partial = vmadh(l1i, r01i.yyyyYYYY);
+    partial = vmadl(l2f, r01f.zzzzZZZZ);
+    partial = vmadm(l2i, r01f.zzzzZZZZ);
+    partial = vmadn(l2f, r01i.zzzzZZZZ);
+    partial = vmadh(l2i, r01i.zzzzZZZZ);
+    partial = vmadl(l3f, r01f.wwwwWWWW);
+    partial = vmadm(l3i, r01f.wwwwWWWW);
+    reg rows01f: vec16 = vmadn(l3f, r01i.wwwwWWWW);
+    reg rows01i: vec16 = vmadh(l3i, r01i.wwwwWWWW);
+
+    partial = vmudl(l0f, r23f.xxxxXXXX);
+    partial = vmadm(l0i, r23f.xxxxXXXX);
+    partial = vmadn(l0f, r23i.xxxxXXXX);
+    partial = vmadh(l0i, r23i.xxxxXXXX);
+    partial = vmadl(l1f, r23f.yyyyYYYY);
+    partial = vmadm(l1i, r23f.yyyyYYYY);
+    partial = vmadn(l1f, r23i.yyyyYYYY);
+    partial = vmadh(l1i, r23i.yyyyYYYY);
+    partial = vmadl(l2f, r23f.zzzzZZZZ);
+    partial = vmadm(l2i, r23f.zzzzZZZZ);
+    partial = vmadn(l2f, r23i.zzzzZZZZ);
+    partial = vmadh(l2i, r23i.zzzzZZZZ);
+    partial = vmadl(l3f, r23f.wwwwWWWW);
+    partial = vmadm(l3i, r23f.wwwwWWWW);
+    reg rows23f: vec16 = vmadn(l3f, r23i.wwwwWWWW);
+    reg rows23i: vec16 = vmadh(l3i, r23i.wwwwWWWW);
+
+    rsp.vector.store64(rows01i, 0, output, 0);
+    rsp.vector.store64(rows01f, 0, output, 8);
+    rsp.vector.store64(rows01i, 4, output, 16);
+    rsp.vector.store64(rows01f, 4, output, 24);
+    rsp.vector.store64(rows23i, 0, output, 32);
+    rsp.vector.store64(rows23f, 0, output, 40);
+    rsp.vector.store64(rows23i, 4, output, 48);
+    rsp.vector.store64(rows23f, 4, output, 56);
+}
+
+// Tiny3D's hand-scheduled vector normalization.
+fn handNormalize(
+    reg($s4) input: dmem,
+    reg($t1) output: dmem,
+) {
+    reg($v01) value_i: vec16 = undefined;
+    reg($v02) value_f: vec16 = undefined;
+    reg($v03) inverse_i: vec16 = undefined;
+    reg($v04) inverse_f: vec16 = undefined;
+    reg($v05) sum_i: vec16 = undefined;
+    reg($v06) sum_f: vec16 = undefined;
+    reg($v29) accumulator_scratch: vec16 = undefined;
+    reg($v30) shift_constants: vec16 = undefined;
+    reg($v00) vector_zero: vec16 = undefined;
+
+    exact {
+        rsp.vector.load64(value_f, 0, input, 8);
+        rsp.vector.load64(value_i, 0, input, 0);
+        accumulator_scratch = vmudl(value_f, value_f.xyzwXYZW);
+        accumulator_scratch = vmadm(value_i, value_f.xyzwXYZW);
+        inverse_f = vmadn(value_f, value_i.xyzwXYZW);
+        input +%= 16;
+        inverse_i = vmadh(value_i, value_i.xyzwXYZW);
+        sum_f = vectorAddCarry(inverse_f, inverse_f.yyyyYYYY);
+        sum_i = vectorAdd(inverse_i, inverse_i.yyyyYYYY);
+        inverse_f = vectorAddCarry(inverse_f, sum_f.zzzzZZZZ);
+        inverse_i = vectorAdd(inverse_i, sum_i.zzzzZZZZ);
+        inverse_i[3] = vectorReciprocalSquareRootHigh(inverse_i[0]);
+        inverse_f[3] = vectorReciprocalSquareRootLow(inverse_f[0]);
+        inverse_i[3] = vectorReciprocalSquareRootHigh(vector_zero[0]);
+        inverse_f = vmudl(inverse_f, shift_constants.x);
+        inverse_i = vmadm(inverse_i, shift_constants.x);
+        inverse_f = vmadn(vector_zero, vector_zero);
+        accumulator_scratch = vmudl(value_f, inverse_f.wwwwWWWW);
+        accumulator_scratch = vmadm(value_i, inverse_f.wwwwWWWW);
+        value_f = vmadn(value_f, inverse_i.wwwwWWWW);
+        value_i = vmadh(value_i, inverse_i.wwwwWWWW);
+        value_f = vectorAdd(value_f, value_f.xyzwXYZW);
+        rsp.vector.store64(value_f, 0, output, 0);
+    }
+    return slot {
+        output +%= 8;
+    }
+}
+
+// The same normalization in source order: square, sum the lanes, take the
+// inverse square root, and scale.
+fn plainNormalize(
+    reg($s4) input: dmem,
+    reg($t1) output: dmem,
+) {
+    reg($v30) shift_constants: vec16 = undefined;
+    reg($v00) vector_zero: vec16 = undefined;
+    reg value_i: vec16 = undefined;
+    reg value_f: vec16 = undefined;
+    rsp.vector.load64(value_i, 0, input, 0);
+    rsp.vector.load64(value_f, 0, input, 8);
+    input +%= 16;
+
+    reg partial: vec16 = vmudl(value_f, value_f.xyzwXYZW);
+    partial = vmadm(value_i, value_f.xyzwXYZW);
+    reg square_f: vec16 = vmadn(value_f, value_i.xyzwXYZW);
+    reg square_i: vec16 = vmadh(value_i, value_i.xyzwXYZW);
+    reg sum_f: vec16 = vectorAddCarry(square_f, square_f.yyyyYYYY);
+    reg sum_i: vec16 = vectorAdd(square_i, square_i.yyyyYYYY);
+    square_f = vectorAddCarry(square_f, sum_f.zzzzZZZZ);
+    square_i = vectorAdd(square_i, sum_i.zzzzZZZZ);
+
+    square_i[3] = vectorReciprocalSquareRootHigh(square_i[0]);
+    square_f[3] = vectorReciprocalSquareRootLow(square_f[0]);
+    square_i[3] = vectorReciprocalSquareRootHigh(vector_zero[0]);
+    square_f = vmudl(square_f, shift_constants.x);
+    square_i = vmadm(square_i, shift_constants.x);
+    square_f = vmadn(vector_zero, vector_zero);
+
+    partial = vmudl(value_f, square_f.wwwwWWWW);
+    partial = vmadm(value_i, square_f.wwwwWWWW);
+    value_f = vmadn(value_f, square_i.wwwwWWWW);
+    value_i = vmadh(value_i, square_i.wwwwWWWW);
+    value_f = vectorAdd(value_f, value_f.xyzwXYZW);
+    rsp.vector.store64(value_f, 0, output, 0);
+    output +%= 8;
+}
+
+/// Writes 1 to `result` when the `bytes` at `first` and `second` match.
+fn compareRegions(
+    reg($a0) first: dmem,
+    reg($a1) second: dmem,
+    reg($a2) bytes: dmem,
+    reg($a3) result: dmem,
+) {
+    reg equal: u32 = 1;
+    while (bytes != 0) {
+        bytes -%= 4;
+        reg first_word: u32 = load(u32, first, 0);
+        reg second_word: u32 = load(u32, second, 0);
+        if (first_word != second_word) {
+            equal = 0;
+        }
+        first +%= 4;
+        second +%= 4;
+    }
+    store(u32, result, equal);
+}
+
+// Calls are stackless, so only `_start` calls the kernels.
+export fn _start() noreturn {
+    reg($s3) left_matrix: dmem = dmem.addressOf(left);
+    reg($s4) operand: dmem = dmem.addressOf(right);
+    reg($s2) output: dmem = 0x200;
+    reg($t1) normalized: dmem = 0x280;
+
+    reg start: u32 = rsp.cp0.read(12);
+    handMultiply(output, left_matrix, operand);
+    reg hand_end: u32 = rsp.cp0.read(12);
+    output = 0x240;
+    reg plain_start: u32 = rsp.cp0.read(12);
+    plainMultiply(output, left_matrix, operand);
+    reg plain_end: u32 = rsp.cp0.read(12);
+    hand_end -%= start;
+    plain_end -%= plain_start;
+    store(u32, 0x104, hand_end);
+    store(u32, 0x108, plain_end);
+    compareRegions(0x200, 0x240, 64, 0x100);
+
+    reg($v00) vector_zero: vec16 = 0;
+    reg($v30) shift_constants: vec16 = 0;
+    reg shift_value: u32 = 0x0200;
+    shift_constants[0] = shift_value;
+    operand = dmem.addressOf(vectors);
+    start = rsp.cp0.read(12);
+    handNormalize(operand, normalized);
+    handNormalize(operand, normalized);
+    hand_end = rsp.cp0.read(12);
+    operand = dmem.addressOf(vectors);
+    normalized = 0x2a0;
+    plain_start = rsp.cp0.read(12);
+    plainNormalize(operand, normalized);
+    plainNormalize(operand, normalized);
+    plain_end = rsp.cp0.read(12);
+    hand_end -%= start;
+    plain_end -%= plain_start;
+    store(u32, 0x110, hand_end);
+    store(u32, 0x114, plain_end);
+    compareRegions(0x280, 0x2a0, 16, 0x10c);
+    rsp.halt();
+}

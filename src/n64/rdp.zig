@@ -3,6 +3,8 @@ pub const backend = @import("rdp/backend.zig");
 pub const CommandEncoder = queue.CommandEncoder;
 pub const RenderEncoder = rq.RenderEncoder;
 const queue = @import("rdp/command_encoder.zig");
+/// Raw RDP packet helpers shared by queue backends and host tooling.
+pub const command_encoder = queue;
 const rq = @import("rdp/render_encoder.zig");
 const blender = @import("rdp/blender.zig");
 const modes = @import("rdp/modes.zig");

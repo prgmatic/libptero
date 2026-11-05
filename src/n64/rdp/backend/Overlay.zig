@@ -165,24 +165,9 @@ inline fn writeNativeVertex(
 }
 
 fn emitPacket(self: *Overlay) void {
-    var arguments: [43]u32 = undefined;
-    const first = self.packet[0];
-    arguments[0] = @truncate(first);
-    var argument_len: usize = 1;
-    for (self.packet[1..self.packet_len]) |word| {
-        arguments[argument_len] = @truncate(word >> 32);
-        arguments[argument_len + 1] = @truncate(word);
-        argument_len += 2;
-    }
-    const opcode: u8 = @truncate(first >> 56);
-    // Packet size and command index are validated by the fixed RDP ABI
-    // above; avoid scanning overlay metadata for every glyph rectangle.
-    self.rsp_queue.writeOverlayCommandKnown(
-        self.overlay,
-        overlayCommandIndex(opcode),
-        @as(u32, @truncate(first >> 32)) & 0x00ffffff,
-        arguments[0..argument_len],
-    );
+    var storage: [43]u32 = undefined;
+    const command = encoding.overlayPacket(self.packet[0..self.packet_len], &storage);
+    self.rsp_queue.writeOverlayCommandKnown(self.overlay, command.index, command.inline_argument, command.arguments);
     self.packet_len = 0;
     self.packet_expected = 0;
 }

@@ -46,11 +46,13 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
             .{ .name = "srcmap_format", .module = srcmap_format },
         }),
         .elf_pack = addTool(b, root, "elf_pack", "tools/build/elf_pack.zig", &.{}),
-        .rsp_pack = addTool(b, root, "rsp_pack", "tools/build/rsp_pack.zig", &.{}),
+        .rsp_pack = addTool(b, root, "rsp_pack", "tools/build/rsp_pack/main.zig", &.{}),
         .rsp_overlay_link = addTool(b, root, "rsp_overlay_link", "tools/build/rsp_overlay_link.zig", &.{}),
         .ipl3_cat = addTool(b, root, "ipl3_cat", "tools/build/ipl3_cat.zig", &.{}),
         .console_font_conv = addTool(b, root, "console_font_conv", "tools/console_font_conv.zig", &.{}),
-        .zsp = addTool(b, root, "zsp", "tools/zsp/main.zig", &.{}),
+        .zsp = addTool(b, root, "zsp", "tools/zsp/main.zig", &.{
+            .{ .name = "rsp_timing", .module = rspTimingModule(b, root) },
+        }),
         .texture_compiler = addTool(b, root, "texture-compiler", "tools/texture_compiler/main.zig", &.{
             .{ .name = "texture_compiler", .module = texture_compiler },
         }),
@@ -89,6 +91,24 @@ pub fn deployModule(b: *std.Build, root: std.Build.LazyPath) *std.Build.Module {
     });
 }
 
+/// Host RSP interpreter library; shares the packed program parser with the runtime.
+pub fn rspInterpModule(b: *std.Build, root: std.Build.LazyPath) *std.Build.Module {
+    return rspInterpModuleWithAbi(b, root, b.createModule(.{
+        .root_source_file = root.path(b, "src/n64/rsp/host_abi.zig"),
+        .target = b.graph.host,
+    }));
+}
+
+/// Interpreter module whose ABI comes from `abi`, e.g. a shim over a host
+/// `n64` module when both are used in one compilation.
+pub fn rspInterpModuleWithAbi(b: *std.Build, root: std.Build.LazyPath, abi: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = root.path(b, "tools/rsp_interp/root.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "rsp_abi", .module = abi }},
+    });
+}
+
 fn addTool(
     b: *std.Build,
     root: std.Build.LazyPath,
@@ -103,6 +123,14 @@ fn addTool(
             .target = b.graph.host,
             .imports = imports,
         }),
+    });
+}
+
+/// The RSP issue-timing model shared by the interpreter and ZSP's scheduler.
+pub fn rspTimingModule(b: *std.Build, root: std.Build.LazyPath) *std.Build.Module {
+    return b.createModule(.{
+        .root_source_file = root.path(b, "tools/rsp_interp/timing.zig"),
+        .target = b.graph.host,
     });
 }
 

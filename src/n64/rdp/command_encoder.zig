@@ -329,6 +329,39 @@ pub fn packetWordCount(opcode: u8) usize {
     };
 }
 
+/// An RDP packet expressed as an RDP-overlay queue command.
+pub const OverlayPacket = struct {
+    index: u8,
+    inline_argument: u32,
+    arguments: []const u32,
+};
+
+/// Splits a complete raw RDP packet into the overlay command that forwards it:
+/// the first word's low 24 bits become the inline argument and the remaining
+/// words become 32-bit arguments. `storage` must hold `2 * packet.len - 1` words.
+pub fn overlayPacket(packet: []const u64, storage: []u32) OverlayPacket {
+    const first = packet[0];
+    storage[0] = @truncate(first);
+    for (packet[1..], 0..) |word, index| {
+        storage[1 + index * 2] = @truncate(word >> 32);
+        storage[2 + index * 2] = @truncate(word);
+    }
+    const opcode: u8 = @truncate(first >> 56);
+    return .{
+        .index = overlayCommandIndex(opcode),
+        .inline_argument = @as(u32, @truncate(first >> 32)) & 0x00ffffff,
+        .arguments = storage[0 .. packet.len * 2 - 1],
+    };
+}
+
+test "raw packets split into overlay commands" {
+    var storage: [3]u32 = undefined;
+    const command = overlayPacket(&.{ 0xe412_3456_0000_0001, 0x1122_3344_5566_7788 }, &storage);
+    try std.testing.expectEqual(@as(u8, 0x24), command.index);
+    try std.testing.expectEqual(@as(u32, 0x12_3456), command.inline_argument);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 0x1122_3344, 0x5566_7788 }, command.arguments);
+}
+
 pub fn overlayCommandIndex(opcode: u8) u8 {
     // SET_SCISSOR must update the resident scissor shadow. SET_OTHER_MODES
     // (slot 47 / opcode EF) re-emits that shadow, so routing ED through its

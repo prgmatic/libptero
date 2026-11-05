@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const parser_mod = @import("parser.zig");
+const ast_walk = @import("ast_walk.zig");
 
 pub const ParseDiagnostic = struct { path: []const u8, detail: parser_mod.Diagnostic };
 
@@ -59,175 +60,162 @@ pub const Loader = struct {
 
     pub fn load(self: *Loader, path: []const u8) anyerror!usize {
         const resolved = try std.fs.path.resolve(self.allocator, &.{path});
-        var appended = false;
-        errdefer if (!appended) self.allocator.free(resolved);
-
-        for (self.modules.items, 0..) |module, index| {
-            if (!std.mem.eql(u8, module.path, resolved)) continue;
+        if (self.findLoaded(resolved)) |found| {
             self.allocator.free(resolved);
-            appended = true;
-            if (module.state == .loading) return error.ImportCycle;
-            return index;
+            return found;
         }
-
-        const source = try std.Io.Dir.cwd().readFileAlloc(
-            self.io,
-            resolved,
-            self.allocator,
-            .limited(1024 * 1024),
-        );
-        errdefer if (!appended) self.allocator.free(source);
-
-        var parse_diagnostic: ?parser_mod.Diagnostic = null;
-        var program = @import("source.zig").Program.parse(self.allocator, source, &parse_diagnostic) catch |err| {
-            if (parse_diagnostic) |detail| try self.saveDiagnostic(resolved, detail);
-            return err;
-        };
-        errdefer if (!appended) program.deinit();
-        const functions = program.functions;
-        const imports = program.imports;
-        for (functions) |*function| function.source_path = resolved;
-        const targets = try self.allocator.alloc(usize, imports.len);
-        errdefer if (!appended) self.allocator.free(targets);
-
-        const index = self.modules.items.len;
-        try self.modules.append(self.allocator, .{
-            .path = resolved,
-            .source = source,
-            .functions = functions,
-            .imports = imports,
-            .targets = targets,
-            .state = .loading,
-            .program = program,
-        });
-        appended = true;
-
-        for (imports, 0..) |import, import_index| {
-            if (self.module_override_name) |override_name| {
-                if (std.mem.eql(u8, import.path, override_name)) {
-                    self.modules.items[index].targets[import_index] = try self.load(self.module_override_path.?);
-                    continue;
-                }
-            }
-            const parent = std.fs.path.dirname(resolved) orelse ".";
-            const relative = try std.fs.path.resolve(self.allocator, &.{ parent, import.path });
-            defer self.allocator.free(relative);
-            const target = self.load(relative) catch |err| switch (err) {
-                error.FileNotFound => if (self.module_dir) |module_dir| blk: {
-                    const fallback = try std.fs.path.resolve(self.allocator, &.{ module_dir, import.path });
-                    defer self.allocator.free(fallback);
-                    break :blk try self.load(fallback);
-                } else return err,
-                else => return err,
-            };
-            self.modules.items[index].targets[import_index] = target;
-        }
+        const index = try self.appendModule(resolved);
+        try self.loadImports(index);
         self.modules.items[index].state = .loaded;
         return index;
     }
 
+    /// An already loaded module; reaching one still loading is a cycle.
+    fn findLoaded(self: *const Loader, resolved: []const u8) ?anyerror!usize {
+        for (self.modules.items, 0..) |module, index| {
+            if (!std.mem.eql(u8, module.path, resolved)) continue;
+            return if (module.state == .loading) error.ImportCycle else index;
+        }
+        return null;
+    }
+
+    /// Reads and parses a module; the loader owns `resolved` afterwards.
+    fn appendModule(self: *Loader, resolved: []u8) !usize {
+        errdefer self.allocator.free(resolved);
+        const source = try std.Io.Dir.cwd().readFileAlloc(self.io, resolved, self.allocator, .limited(1024 * 1024));
+        errdefer self.allocator.free(source);
+        var program = try self.parse(resolved, source);
+        errdefer program.deinit();
+        for (program.functions) |*function| function.source_path = resolved;
+        const targets = try self.allocator.alloc(usize, program.imports.len);
+        errdefer self.allocator.free(targets);
+        try self.modules.append(self.allocator, .{
+            .path = resolved,
+            .source = source,
+            .functions = program.functions,
+            .imports = program.imports,
+            .targets = targets,
+            .state = .loading,
+            .program = program,
+        });
+        return self.modules.items.len - 1;
+    }
+
+    fn parse(self: *Loader, path: []const u8, source: []const u8) !@import("source.zig").Program {
+        var parse_diagnostic: ?parser_mod.Diagnostic = null;
+        return @import("source.zig").Program.parse(self.allocator, source, &parse_diagnostic) catch |err| {
+            if (parse_diagnostic) |detail| try self.saveDiagnostic(path, detail);
+            return err;
+        };
+    }
+
+    fn loadImports(self: *Loader, index: usize) !void {
+        for (0..self.modules.items[index].imports.len) |import_index| {
+            const module = self.modules.items[index];
+            module.targets[import_index] = try self.loadImport(module.path, module.imports[import_index].path);
+        }
+    }
+
+    /// The override module, else a path relative to the importer, else one
+    /// in the module directory.
+    fn loadImport(self: *Loader, importer: []const u8, import_path: []const u8) !usize {
+        if (self.overrides(import_path)) return self.load(self.module_override_path.?);
+        const parent = std.fs.path.dirname(importer) orelse ".";
+        return self.loadUnder(parent, import_path) catch |err| {
+            if (err != error.FileNotFound) return err;
+            return self.loadUnder(self.module_dir orelse return err, import_path);
+        };
+    }
+
+    fn overrides(self: *const Loader, import_path: []const u8) bool {
+        const name = self.module_override_name orelse return false;
+        return std.mem.eql(u8, import_path, name);
+    }
+
+    fn loadUnder(self: *Loader, directory: []const u8, import_path: []const u8) !usize {
+        const path = try std.fs.path.resolve(self.allocator, &.{ directory, import_path });
+        defer self.allocator.free(path);
+        return self.load(path);
+    }
+
     pub fn link(self: *Loader, root: usize) ![]ast.Function {
         for (self.modules.items, 0..) |*module, module_index| {
-            if (module_index == root) continue;
-            const stem = std.fs.path.stem(module.path);
-            for (module.functions) |*function| {
-                if (!function.emit_label or function.external) continue;
-                const generated = try std.fmt.allocPrint(
-                    self.allocator,
-                    "zsp_m{d}_{s}__{s}",
-                    .{ module_index, stem, function.source_name },
-                );
-                try self.generated_names.append(self.allocator, generated);
-                function.name = generated;
-            }
+            if (module_index != root) try self.prefixNames(module, module_index);
         }
-
-        for (self.modules.items, 0..) |*module, module_index| {
-            for (module.functions) |*function| {
-                try self.resolveCalls(module_index, function.statements);
-            }
+        for (self.modules.items, 0..) |module, module_index| {
+            for (module.functions) |function| try self.resolveCalls(module_index, function.statements);
         }
-
         var flattened: std.ArrayList(ast.Function) = .empty;
         errdefer flattened.deinit(self.allocator);
-        for (self.modules.items) |module| {
-            try flattened.appendSlice(self.allocator, module.functions);
-        }
+        for (self.modules.items) |module| try flattened.appendSlice(self.allocator, module.functions);
         return flattened.toOwnedSlice(self.allocator);
     }
 
-    fn resolveCalls(self: *Loader, module_index: usize, statements: []ast.Statement) anyerror!void {
-        for (statements) |*statement| {
-            switch (statement.*) {
-                .var_decl => |*declaration| if (declaration.value) |*value| {
-                    try self.resolveValue(module_index, value);
-                },
-                .assignment => |*assignment| {
-                    try self.resolveValue(module_index, &assignment.lhs);
-                    if (assignment.rhs) |*rhs| try self.resolveValue(module_index, rhs);
-                },
-                .call => |*call| {
-                    var target_module = module_index;
-                    if (call.module) |alias| {
-                        target_module = try self.resolveImport(module_index, alias);
-                    }
-                    const function = findSourceFunction(
-                        self.modules.items[target_module].functions,
-                        call.name,
-                    ) orelse return error.UnknownFunction;
-                    if (call.module != null and !function.public) return error.PrivateFunction;
-                    call.module = null;
-                    call.name = function.name;
-                    if (call.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
-                },
-                .builtin => |*builtin| switch (builtin.*) {
-                    .direct_goto => |*branch| {
-                        try self.resolveFunctionRef(module_index, &branch.target);
-                        if (branch.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
-                    },
-                    .tail => |*tail| {
-                        try self.resolveFunctionRef(module_index, &tail.target);
-                        if (tail.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
-                    },
-                    .jump => |*jump| {
-                        if (jump.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
-                    },
-                    .return_from_function => |delay_slot| if (delay_slot) |return_statements| {
-                        try self.resolveCalls(module_index, return_statements);
-                    },
-                    else => {},
-                },
-                .while_loop => |*loop| try self.resolveCalls(module_index, loop.statements),
-                .do_while_loop => |*loop| {
-                    try self.resolveCalls(module_index, loop.statements);
-                    if (loop.delay_slot) |delay| try self.resolveCalls(module_index, delay);
-                },
-                .labeled_block => |*block| {
-                    try self.resolveCalls(module_index, block.statements);
-                    if (block.exit_delay) |delay| try self.resolveCalls(module_index, delay);
-                },
-                .break_loop => |*transfer| if (transfer.delay_slot) |delay| try self.resolveCalls(module_index, delay),
-                .ordered_block => |ordered| try self.resolveCalls(module_index, ordered),
-                .goto => |*branch| if (branch.delay_slot) |delay_slot| {
-                    try self.resolveCalls(module_index, delay_slot);
-                },
-                .conditional_goto => |*branch| if (branch.delay_slot) |delay_slot| {
-                    try self.resolveCalls(module_index, delay_slot);
-                },
-                .conditional_direct_goto => |*branch| {
-                    try self.resolveFunctionRef(module_index, &branch.target);
-                    if (branch.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
-                },
-                .if_statement => |*if_statement| {
-                    if (if_statement.delay_slot) |delay_slot| try self.resolveCalls(module_index, delay_slot);
-                    try self.resolveCalls(module_index, if_statement.then_statements);
-                    if (if_statement.else_statements) |else_statements| {
-                        try self.resolveCalls(module_index, else_statements);
-                    }
-                },
-                else => {},
-            }
+    /// Emitted functions of imported modules get unique symbol names.
+    fn prefixNames(self: *Loader, module: *Module, module_index: usize) !void {
+        const stem = std.fs.path.stem(module.path);
+        for (module.functions) |*function| {
+            if (!function.emit_label or function.external) continue;
+            const generated = try std.fmt.allocPrint(self.allocator, "zsp_m{d}_{s}__{s}", .{ module_index, stem, function.source_name });
+            errdefer self.allocator.free(generated);
+            try self.generated_names.append(self.allocator, generated);
+            function.name = generated;
         }
+    }
+
+    /// Rewrites module-qualified function references to linked names.
+    fn resolveCalls(self: *Loader, module_index: usize, statements: []const ast.Statement) anyerror!void {
+        for (statements) |*item| {
+            // Statement lists are owned, mutable allocations of the module's program.
+            const statement = @constCast(item);
+            try resolvers.get(std.meta.activeTag(statement.*))(self, module_index, statement);
+            const nested = ast_walk.children(statement);
+            for (nested.slice()) |list| try self.resolveCalls(module_index, list);
+        }
+    }
+
+    const Resolver = *const fn (*Loader, usize, *ast.Statement) anyerror!void;
+
+    const resolvers = blk: {
+        var table = std.EnumArray(std.meta.Tag(ast.Statement), Resolver).initFill(&resolveNothing);
+        table.set(.var_decl, &resolveDeclaration);
+        table.set(.assignment, &resolveAssignment);
+        table.set(.call, &resolveCall);
+        table.set(.builtin, &resolveBuiltin);
+        table.set(.conditional_direct_goto, &resolveConditionalDirectGoto);
+        break :blk table;
+    };
+
+    fn resolveNothing(_: *Loader, _: usize, _: *ast.Statement) !void {}
+
+    fn resolveDeclaration(self: *Loader, module_index: usize, statement: *ast.Statement) !void {
+        if (statement.var_decl.value) |*value| try self.resolveValue(module_index, value);
+    }
+
+    fn resolveAssignment(self: *Loader, module_index: usize, statement: *ast.Statement) !void {
+        const assignment = &statement.assignment;
+        try self.resolveValue(module_index, &assignment.lhs);
+        if (assignment.rhs) |*rhs| try self.resolveValue(module_index, rhs);
+    }
+
+    fn resolveCall(self: *Loader, module_index: usize, statement: *ast.Statement) !void {
+        const call = &statement.call;
+        var target: ast.FunctionRef = .{ .module = call.module, .name = call.name };
+        try self.resolveFunctionRef(module_index, &target);
+        call.module = null;
+        call.name = target.name;
+    }
+
+    fn resolveBuiltin(self: *Loader, module_index: usize, statement: *ast.Statement) !void {
+        switch (statement.builtin) {
+            .direct_goto => |*branch| try self.resolveFunctionRef(module_index, &branch.target),
+            .tail => |*tail| try self.resolveFunctionRef(module_index, &tail.target),
+            else => {},
+        }
+    }
+
+    fn resolveConditionalDirectGoto(self: *Loader, module_index: usize, statement: *ast.Statement) !void {
+        try self.resolveFunctionRef(module_index, &statement.conditional_direct_goto.target);
     }
 
     fn resolveValue(self: *Loader, module_index: usize, value: *ast.Value) !void {
@@ -242,14 +230,8 @@ pub const Loader = struct {
     }
 
     fn resolveFunctionRef(self: *Loader, module_index: usize, target: *ast.FunctionRef) !void {
-        var target_module = module_index;
-        if (target.module) |alias| {
-            target_module = try self.resolveImport(module_index, alias);
-        }
-        const function = findSourceFunction(
-            self.modules.items[target_module].functions,
-            target.name,
-        ) orelse return error.UnknownFunction;
+        const target_module = if (target.module) |alias| try self.resolveImport(module_index, alias) else module_index;
+        const function = findSourceFunction(self.modules.items[target_module].functions, target.name) orelse return error.UnknownFunction;
         if (target.module != null and !function.public) return error.PrivateFunction;
         target.module = null;
         target.name = function.name;
@@ -328,4 +310,25 @@ test "module cycles and private targets report semantic errors" {
     try std.testing.expectError(error.ImportCycle, loader.load(cycle));
     const root = try loader.load(root_path);
     try std.testing.expectError(error.PrivateFunction, loader.link(root));
+}
+
+test "function addresses resolve through imports" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.writeFile(io, .{ .sub_path = "lib.zsp", .data = "pub fn run() { return; }" });
+    try temp.dir.writeFile(io, .{ .sub_path = "root.zsp", .data =
+        \\const lib = import("lib.zsp");
+        \\fn entry() { reg target: fn() = &lib.run; target = &lib.run; }
+    });
+    const path = try temp.dir.realPathFileAlloc(io, "root.zsp", a);
+    defer a.free(path);
+    var loader = Loader{ .allocator = a, .io = io, .module_dir = null };
+    defer loader.deinit();
+    const functions = try loader.link(try loader.load(path));
+    defer a.free(functions);
+    const target = functions[0].statements[0].var_decl.value.?.function_address;
+    try std.testing.expect(target.module == null);
+    try std.testing.expectEqualStrings(functions[1].name, target.name);
 }

@@ -1,7 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
-const asm_writer = @import("../asm_writer.zig");
-const asm_optimizer = @import("../asm_optimizer.zig");
+const codegen = @import("../codegen.zig");
+const optimizer = @import("../optimizer.zig");
 const parser_mod = @import("../parser.zig");
 
 const testing = std.testing;
@@ -13,7 +13,7 @@ pub fn expectAsm(source: []const u8, expected: []const u8) !void {
 
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
-    try asm_writer.write(&output.writer, functions);
+    try codegen.write(testing.allocator, &output.writer, functions);
 
     const actual = try output.toOwnedSlice();
     defer testing.allocator.free(actual);
@@ -37,7 +37,7 @@ pub fn expectAsmError(source: []const u8, expected_err: anyerror) !void {
 
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
-    try testing.expectError(expected_err, asm_writer.write(&output.writer, functions));
+    try testing.expectError(expected_err, codegen.write(testing.allocator, &output.writer, functions));
 }
 
 pub fn expectSyntaxRejected(source: []const u8) !void {
@@ -52,8 +52,24 @@ pub fn expectSyntaxRejected(source: []const u8) !void {
 pub fn expectOptimizedAsm(input: []const u8, expected: []const u8) !void {
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
-    try asm_optimizer.writeOptimized(testing.allocator, &output.writer, input);
+    try optimizer.writeOptimized(testing.allocator, &output.writer, input);
     const actual = try output.toOwnedSlice();
     defer testing.allocator.free(actual);
     try testing.expectEqualStrings(expected, actual);
+}
+
+/// Checks that unoptimized output contains every expected line.
+pub fn expectAsmContains(source: []const u8, expected_lines: []const []const u8) !void {
+    var parser = try parser_mod.Parser.init(testing.allocator, source);
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    try codegen.write(testing.allocator, &output.writer, functions);
+    for (expected_lines) |line| {
+        if (std.mem.indexOf(u8, output.written(), line) == null) {
+            std.debug.print("missing \"{s}\" in:\n{s}\n", .{ line, output.written() });
+            return error.TestExpectedEqual;
+        }
+    }
 }

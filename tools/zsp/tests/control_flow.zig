@@ -1,7 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
-const asm_writer = @import("../asm_writer.zig");
-const asm_optimizer = @import("../asm_optimizer.zig");
+const codegen = @import("../codegen.zig");
+const optimizer = @import("../optimizer.zig");
 const parser_mod = @import("../parser.zig");
 
 const testing = std.testing;
@@ -897,7 +897,7 @@ test "exact terminal return does not append a second return" {
     defer ast.freeFunctions(testing.allocator, functions);
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
-    try asm_writer.write(&output.writer, functions);
+    try codegen.write(testing.allocator, &output.writer, functions);
     const bytes = output.writer.buffered();
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, bytes, "jr $ra"));
 }

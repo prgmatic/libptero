@@ -24,6 +24,11 @@ pub const Function = struct {
     clobber_vector_regs: []const VectorRegister = &.{},
     parameters: []const Parameter,
     statements: []Statement,
+
+    /// External and inline functions have no body of their own in the output.
+    pub fn emitsBody(self: Function) bool {
+        return !self.external and !self.inline_call;
+    }
 };
 
 pub const Import = struct {
@@ -36,6 +41,9 @@ pub const Parameter = struct {
     data_type: DataType,
     reg: ?Register = null,
     vector_reg: ?VectorRegister = null,
+    /// Written without a register; internal functions let the compiler
+    /// choose one (`param_alloc.zig`).
+    automatic: bool = false,
 };
 
 pub const FunctionType = struct {
@@ -352,7 +360,6 @@ pub const Builtin = union(enum) {
     jump: struct {
         address: ValueRef,
         delay_slot: ?[]Statement,
-        typed: bool = false,
     },
     indirect_call: struct {
         address: ValueRef,
@@ -532,65 +539,73 @@ pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) 
     allocator.free(functions);
 }
 
-fn freeStatements(allocator: std.mem.Allocator, statements: []Statement) void {
-    for (statements) |statement| {
-        switch (statement) {
-            .assignment => |assignment| {
-                freeValue(allocator, assignment.lhs);
-                if (assignment.rhs) |rhs| freeValue(allocator, rhs);
-                for (assignment.continuation) |step| freeValue(allocator, step.rhs);
-                if (assignment.continuation.len != 0) allocator.free(assignment.continuation);
-            },
-            .var_decl => |declaration| if (declaration.value) |value| freeValue(allocator, value),
-            .packed_struct_decl => |declaration| allocator.free(declaration.fields),
-            .data_block, .bss_block, .state_block => |declarations| {
-                for (declarations) |declaration| allocator.free(declaration.values);
-                allocator.free(declarations);
-            },
-            .while_loop => |loop| freeStatements(allocator, loop.statements),
-            .do_while_loop => |loop| {
-                freeStatements(allocator, loop.statements);
-                if (loop.delay_slot) |delay| freeStatements(allocator, delay);
-            },
-            .break_loop => |transfer| if (transfer.delay_slot) |delay| freeStatements(allocator, delay),
-            .labeled_block => |block| {
-                freeStatements(allocator, block.statements);
-                if (block.exit_delay) |delay| freeStatements(allocator, delay);
-            },
-            .ordered_block => |ordered| freeStatements(allocator, ordered),
-            .builtin => |builtin| switch (builtin) {
-                .tail => |tail| {
-                    allocator.free(tail.arguments);
-                    if (tail.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
-                },
-                .jump => |jump| if (jump.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
-                .indirect_call => |call| if (call.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
-                .direct_goto => |branch| {
-                    if (branch.arguments.len != 0) allocator.free(branch.arguments);
-                    if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
-                },
-                .return_from_function => |delay_slot| if (delay_slot) |return_statements| freeStatements(allocator, return_statements),
-                else => {},
-            },
-            .goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
-            .conditional_goto => |branch| if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot),
-            .conditional_direct_goto => |branch| {
-                if (branch.arguments.len != 0) allocator.free(branch.arguments);
-                if (branch.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
-            },
-            .if_statement => |if_statement| {
-                if (if_statement.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
-                freeStatements(allocator, if_statement.then_statements);
-                if (if_statement.else_statements) |else_statements| freeStatements(allocator, else_statements);
-            },
-            .call => |call| {
-                allocator.free(call.arguments);
-                if (call.delay_slot) |delay_slot| freeStatements(allocator, delay_slot);
-            },
-            else => {},
-        }
+fn freeStatements(allocator: std.mem.Allocator, statements: []const Statement) void {
+    for (statements) |*statement| {
+        owned_freers.get(std.meta.activeTag(statement.*))(allocator, statement);
+        const nested = @import("ast_walk.zig").children(statement);
+        for (nested.slice()) |list| freeStatements(allocator, list);
     }
     allocator.free(statements);
+}
+
+/// Frees what a statement owns besides its nested statement lists.
+const OwnedFreer = *const fn (std.mem.Allocator, *const Statement) void;
+
+const owned_freers = blk: {
+    var table = std.EnumArray(std.meta.Tag(Statement), OwnedFreer).initFill(&freeNothing);
+    table.set(.assignment, &freeAssignment);
+    table.set(.var_decl, &freeDeclaration);
+    table.set(.packed_struct_decl, &freePackedStruct);
+    table.set(.data_block, &freeStorage);
+    table.set(.bss_block, &freeStorage);
+    table.set(.state_block, &freeStorage);
+    table.set(.builtin, &freeBuiltin);
+    table.set(.conditional_direct_goto, &freeConditionalDirectGoto);
+    table.set(.call, &freeCall);
+    break :blk table;
+};
+
+fn freeNothing(_: std.mem.Allocator, _: *const Statement) void {}
+
+fn freeAssignment(allocator: std.mem.Allocator, statement: *const Statement) void {
+    const assignment = statement.assignment;
+    freeValue(allocator, assignment.lhs);
+    if (assignment.rhs) |rhs| freeValue(allocator, rhs);
+    for (assignment.continuation) |step| freeValue(allocator, step.rhs);
+    allocator.free(assignment.continuation);
+}
+
+fn freeDeclaration(allocator: std.mem.Allocator, statement: *const Statement) void {
+    if (statement.var_decl.value) |value| freeValue(allocator, value);
+}
+
+fn freePackedStruct(allocator: std.mem.Allocator, statement: *const Statement) void {
+    allocator.free(statement.packed_struct_decl.fields);
+}
+
+fn freeStorage(allocator: std.mem.Allocator, statement: *const Statement) void {
+    const declarations = switch (statement.*) {
+        .data_block, .bss_block, .state_block => |declarations| declarations,
+        else => unreachable,
+    };
+    for (declarations) |declaration| allocator.free(declaration.values);
+    allocator.free(declarations);
+}
+
+fn freeBuiltin(allocator: std.mem.Allocator, statement: *const Statement) void {
+    switch (statement.builtin) {
+        .tail => |tail| allocator.free(tail.arguments),
+        .direct_goto => |branch| allocator.free(branch.arguments),
+        else => {},
+    }
+}
+
+fn freeConditionalDirectGoto(allocator: std.mem.Allocator, statement: *const Statement) void {
+    allocator.free(statement.conditional_direct_goto.arguments);
+}
+
+fn freeCall(allocator: std.mem.Allocator, statement: *const Statement) void {
+    allocator.free(statement.call.arguments);
 }
 
 fn freeValue(allocator: std.mem.Allocator, value: Value) void {

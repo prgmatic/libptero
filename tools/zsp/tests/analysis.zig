@@ -1,7 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast.zig");
-const asm_writer = @import("../asm_writer.zig");
-const asm_optimizer = @import("../asm_optimizer.zig");
+const codegen = @import("../codegen.zig");
+const optimizer = @import("../optimizer.zig");
 const parser_mod = @import("../parser.zig");
 
 const testing = std.testing;
@@ -12,22 +12,29 @@ const expectParseError = @import("support.zig").expectParseError;
 const expectSyntaxRejected = @import("support.zig").expectSyntaxRejected;
 const expectOptimizedAsm = @import("support.zig").expectOptimizedAsm;
 
-test "analysis capacity exhaustion cannot bypass definite assignment checks" {
+test "definite assignment checks reach the end of long functions" {
     var source = std.Io.Writer.Allocating.init(testing.allocator);
     defer source.deinit();
     try source.writer.writeAll("fn large() { reg value: u32;\n");
     for (0..2048) |_| try source.writer.writeAll("rsp.nop();\n");
     try source.writer.writeAll("rsp.cp0.setSpStatus(value); }");
-    try expectAsmError(source.written(), error.AnalysisCapacityExceeded);
+    try expectAsmError(source.written(), error.RegisterReadBeforeAssignment);
 }
 
-test "lifetime event exhaustion reports a capacity error" {
+test "long functions are not limited by analysis capacity" {
     var source = std.Io.Writer.Allocating.init(testing.allocator);
     defer source.deinit();
-    try source.writer.writeAll("fn large() { reg value: u32 = 1;\n");
-    for (0..1100) |_| try source.writer.writeAll("value += 1;\n");
+    try source.writer.writeAll("fn large() {\n");
+    for (0..200) |index| try source.writer.print("reg value_{d}: u32 = {d};\nrsp.cp0.setSpStatus(value_{d});\n", .{ index, index, index });
+    try source.writer.writeAll("reg value: u32 = 1;\n");
+    for (0..3000) |_| try source.writer.writeAll("value += 1;\n");
     try source.writer.writeAll("rsp.cp0.setSpStatus(value); }");
-    try expectAsmError(source.written(), error.AnalysisCapacityExceeded);
+    var parser = try @import("../parser.zig").Parser.init(testing.allocator, source.written());
+    const functions = try parser.parse();
+    defer @import("../ast.zig").freeFunctions(testing.allocator, functions);
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    try codegen.write(testing.allocator, &output.writer, functions);
 }
 
 test "automatic vector allocation reports exhaustion" {
@@ -45,6 +52,17 @@ test "automatic vector allocation reports exhaustion" {
     defer testing.allocator.free(source);
 
     try expectAsmError(source, error.OutOfFreeVectorRegisters);
+
+    var parser = try parser_mod.Parser.init(testing.allocator, source);
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    var diagnostic: codegen.Diagnostic = .{};
+    try testing.expectError(error.OutOfFreeVectorRegisters, codegen.writeWithDiagnostic(testing.allocator, &output.writer, functions, &diagnostic));
+    try testing.expectEqualStrings("value_28", diagnostic.symbol_name.?);
+    try testing.expectEqual(@as(usize, 28), diagnostic.live_total);
+    try testing.expectEqualStrings("$v01", diagnostic.live[0].reg);
 }
 
 test "automatic values live across calls avoid inferred clobbers" {
@@ -662,8 +680,8 @@ test "backend errors retain the nested statement source location" {
     functions[0].source_path = "broken.zsp";
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();
-    var diagnostic: asm_writer.Diagnostic = .{};
-    try testing.expectError(error.UnknownSymbol, asm_writer.writeWithDiagnostic(&output.writer, functions, &diagnostic));
+    var diagnostic: codegen.Diagnostic = .{};
+    try testing.expectError(error.UnknownSymbol, codegen.writeWithDiagnostic(testing.allocator, &output.writer, functions, &diagnostic));
     try testing.expectEqualStrings("broken.zsp", diagnostic.source_path.?);
     try testing.expectEqual(@as(usize, 4), diagnostic.location.?.line);
     try testing.expectEqual(@as(usize, 5), diagnostic.location.?.column);

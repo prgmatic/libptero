@@ -242,7 +242,8 @@ pub fn deinit(self: *Mixer) !void {
     self.* = undefined;
 }
 
-fn frequencyStep(frequency: u32, output_frequency: u32, bytes_per_frame: u32) !u32 {
+/// Per-output-frame source advance in bytes with `position_fraction_bits` of fraction.
+pub fn frequencyStep(frequency: u32, output_frequency: u32, bytes_per_frame: u32) !u32 {
     if (output_frequency == 0 or frequency > 128000) return error.InvalidFrequency;
     // Truncate the sample ratio to .12 before shifting to byte units, exactly
     // as MIXER_FX64(frequency / sample_rate) << bytes_per_sample_shift does.

@@ -28,6 +28,17 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     const deploy_tests = b.addTest(.{ .name = "deploy-tests", .root_module = @import("tools.zig").deployModule(b, b.path(".")) });
     instrumentTests(deploy_tests, coverage, coverage_runtime);
     test_step.dependOn(&b.addRunArtifact(deploy_tests).step);
+    const rsp_interp_module = @import("tools.zig").rspInterpModule(b, b.path("."));
+    const rsp_interp_tests = b.addTest(.{ .name = "rsp-interp-tests", .root_module = rsp_interp_module });
+    instrumentTests(rsp_interp_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(rsp_interp_tests).step);
+    const rsp_interp_cli_tests = b.addTest(.{ .name = "rsp-interp-cli-tests", .root_module = b.createModule(.{
+        .root_source_file = b.path("tools/rsp_interp/main.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "rsp_interp", .module = @import("tools.zig").rspInterpModule(b, b.path(".")) }},
+    }) });
+    instrumentTests(rsp_interp_cli_tests, coverage, coverage_runtime);
+    test_step.dependOn(&b.addRunArtifact(rsp_interp_cli_tests).step);
     if (b.findProgram(&.{"python3"}, &.{}) catch null) |python| {
         const fonts = b.addSystemCommand(&.{ python, b.pathFromRoot("tests/integration/font_dependencies.py"), b.graph.zig_exe, b.pathFromRoot(".") });
         b.step("test-asset-cache", "Verify font page edits invalidate converted assets").dependOn(&fonts.step);
@@ -195,7 +206,8 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
         .{ "asset-options-tests", "build/assets.zig" },
         .{ "zsp-tests", "tools/zsp/tests.zig" },
         .{ "rsp-overlay-link-tests", "tools/build/rsp_overlay_link.zig" },
-        .{ "rsp-pack-tests", "tools/build/rsp_pack.zig" },
+        .{ "rsp-pack-tests", "tools/build/rsp_pack/root.zig" },
+        .{ "rsp-host-abi-tests", "src/n64/rsp/host_abi.zig" },
         .{ "run-protocol-tests", "src/n64/debug/run_protocol.zig" },
         .{ "framebuffer-hex-tests", "src/n64/debug/framebuffer_hex.zig" },
     }) |test_config| {
@@ -204,6 +216,9 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
             .root_module = if (comptime std.mem.eql(u8, test_config[0], "audio-compiler-tests")) @import("tools.zig").audioCompilerModule(b, b.path(".")) else b.createModule(.{
                 .root_source_file = b.path(test_config[1]),
                 .target = b.graph.host,
+                .imports = if (comptime std.mem.eql(u8, test_config[0], "zsp-tests")) &.{
+                    .{ .name = "rsp_timing", .module = @import("tools.zig").rspTimingModule(b, b.path(".")) },
+                } else &.{},
             }),
         });
         instrumentTests(test_artifact, coverage, coverage_runtime);
@@ -220,7 +235,14 @@ fn instrumentTests(tests: *std.Build.Step.Compile, enabled: bool, runtime_path: 
     if (runtime_path) |path| tests.root_module.addObjectFile(.{ .cwd_relative = path });
 }
 
-pub fn addZspPrograms(b: *std.Build, sdk: *Sdk) *std.Build.Module {
+pub const ZspPrograms = struct {
+    /// N64-target module exposing parsed `Program` values for the test ROM.
+    module: *std.Build.Module,
+    /// Host module exposing the raw packed blobs of standalone fixtures.
+    host_blobs: *std.Build.Module,
+};
+
+pub fn addZspPrograms(b: *std.Build, sdk: *Sdk) ZspPrograms {
     const fixtures = findZspFixtures(b, "src/tests/ucode");
 
     var assets = sdk.createAssets("zsp_test_assets");
@@ -288,17 +310,35 @@ pub fn addZspPrograms(b: *std.Build, sdk: *Sdk) *std.Build.Module {
         },
     });
 
+    var host_source: std.ArrayList(u8) = .empty;
+    const host_blobs = b.createModule(.{ .root_source_file = b.addWriteFiles().add("zsp_host_programs.zig", ""), .target = b.graph.host });
     for (fixtures) |fixture| {
         if (isOverlay(fixture)) continue;
         const name = b.fmt("zsp_test_{s}", .{fixture});
-        module.addAnonymousImport(b.fmt("{s}_rsp", .{name}), .{
-            .root_source_file = assets.buildZspProgram(
-                name,
-                b.path(b.fmt("src/tests/ucode/{s}.zsp", .{fixture})),
-            ),
-        });
+        const blob = assets.buildZspProgram(name, b.path(b.fmt("src/tests/ucode/{s}.zsp", .{fixture})));
+        module.addAnonymousImport(b.fmt("{s}_rsp", .{name}), .{ .root_source_file = blob });
+        host_blobs.addAnonymousImport(b.fmt("{s}_rsp", .{name}), .{ .root_source_file = blob });
+        host_source.appendSlice(b.allocator, b.fmt("pub const {s} = @embedFile(\"{s}_rsp\");\n", .{ fixture, name })) catch @panic("OOM");
     }
-    return module;
+    host_blobs.root_source_file = b.addWriteFiles().add("zsp_host_programs.zig", host_source.items);
+    return .{ .module = module, .host_blobs = host_blobs };
+}
+
+/// Runs the shared standalone-program expectations in the host RSP interpreter.
+pub fn addZspInterpreterTests(b: *std.Build, host_blobs: *std.Build.Module, coverage: bool, coverage_runtime: ?[]const u8) void {
+    const tests = b.addTest(.{
+        .name = "zsp-interp-tests",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/zsp_interp_tests.zig"),
+            .target = b.graph.host,
+            .imports = &.{
+                .{ .name = "rsp_interp", .module = @import("tools.zig").rspInterpModule(b, b.path(".")) },
+                .{ .name = "zsp_host_programs", .module = host_blobs },
+            },
+        }),
+    });
+    instrumentTests(tests, coverage, coverage_runtime);
+    b.top_level_steps.get("test").?.step.dependOn(&b.addRunArtifact(tests).step);
 }
 
 fn findZspFixtures(b: *std.Build, comptime dir_path: []const u8) []const []const u8 {
@@ -358,4 +398,39 @@ fn addMaterialIdentifierChecks(b: *std.Build, test_step: *std.Build.Step) void {
         invalid.expect_errors = .{ .contains = b.fmt("material '{s}': {s}; use a unique nonempty source name or a numeric index", .{ check[0], check[1] }) };
         test_step.dependOn(&invalid.step);
     }
+}
+
+/// Host workloads that run every shipped RSP program through the interpreter,
+/// the baseline regression test, and the `rsp-baseline` report/update step.
+pub fn addMicrocodeBaseline(b: *std.Build, sdk: *Sdk, coverage: bool, coverage_runtime: ?[]const u8) void {
+    const n64_host = b.createModule(.{
+        .root_source_file = b.path("src/n64/n64.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "libptero_rsp_assets", .module = sdk.createHostRspProgramsModule() }},
+    });
+    const tools = @import("tools.zig");
+    const imports: []const std.Build.Module.Import = &.{
+        .{ .name = "n64", .module = n64_host },
+        .{ .name = "rsp_interp", .module = tools.rspInterpModuleWithAbi(b, b.path("."), b.createModule(.{
+            .root_source_file = b.path("src/tests/microcode/rsp_abi.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "n64", .module = n64_host }},
+        })) },
+        .{ .name = "audio_compiler", .module = tools.audioCompilerModule(b, b.path(".")) },
+    };
+    const tests = b.addTest(.{
+        .name = "microcode-workload-tests",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/tests/microcode/tests.zig"), .target = b.graph.host, .imports = imports }),
+    });
+    instrumentTests(tests, coverage, coverage_runtime);
+    b.top_level_steps.get("test").?.step.dependOn(&b.addRunArtifact(tests).step);
+
+    const report = b.addExecutable(.{
+        .name = "rsp-baseline",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/tests/microcode/baseline_main.zig"), .target = b.graph.host, .optimize = .ReleaseFast, .imports = imports }),
+    });
+    const run_report = b.addRunArtifact(report);
+    run_report.addArg(b.pathFromRoot("src/tests/microcode/baseline.zon"));
+    if (b.args) |args| run_report.addArgs(args);
+    b.step("rsp-baseline", "Report RSP workload cycles against the baseline (pass -- --update to rewrite it)").dependOn(&run_report.step);
 }

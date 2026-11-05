@@ -74,6 +74,15 @@ pub fn build(b: *std.Build) void {
         }),
     }));
 
+    b.installArtifact(b.addExecutable(.{
+        .name = "rsp-interp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/rsp_interp/main.zig"),
+            .target = b.graph.host,
+            .imports = &.{.{ .name = "rsp_interp", .module = @import("build/tools.zig").rspInterpModule(b, b.path(".")) }},
+        }),
+    }));
+
     const profiler_trace = b.createModule(.{ .root_source_file = b.path("src/n64/debug/profiler/trace.zig"), .target = b.graph.host });
     const profiler_module = b.createModule(.{
         .root_source_file = b.path("tools/profiler/root.zig"),
@@ -90,7 +99,10 @@ pub fn build(b: *std.Build) void {
     }));
     tests_build.addToolTests(b, coverage, coverage_runtime);
     tests_build.addConsumerFixtureTests(b);
-    const zsp_test_programs = tests_build.addZspPrograms(b, &sdk);
+    const zsp_programs = tests_build.addZspPrograms(b, &sdk);
+    tests_build.addZspInterpreterTests(b, zsp_programs.host_blobs, coverage, coverage_runtime);
+    tests_build.addMicrocodeBaseline(b, &sdk, coverage, coverage_runtime);
+    const zsp_test_programs = zsp_programs.module;
 
     _ = sdk.addRom(.{
         .name = "game",
@@ -161,6 +173,11 @@ pub fn build(b: *std.Build) void {
         .assets = &audio_assets,
         .imports = &.{
             .{ .name = "zsp_test_programs", .module = zsp_test_programs },
+            .{ .name = "rsp_calibration", .module = b.createModule(.{
+                .root_source_file = b.path("tools/rsp_interp/calibration.zig"),
+                .target = sdk.target,
+                .optimize = .ReleaseSmall,
+            }) },
         },
         .install = .{
             .outputs = .{ .rom = true, .packed_elf = true, .debug_elf = true, .source_map = true },
