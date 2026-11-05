@@ -98,7 +98,7 @@ const initializers = blk: {
     table.set(.load, &initialLoad);
     table.set(.ident, &initialIdent);
     for ([_]ValueTag{
-        .vector_control_read, .hardware_read, .scalar_comparison, .signed_less_than, .scalar_materialize,
+        .vector_control_read, .hardware_read, .scalar_comparison, .signed_less_than,
         .bit_cast,            .function_address, .code_address,   .data_address,
     }) |tag| table.set(tag, &initialSet);
     break :blk table;
@@ -204,7 +204,6 @@ const setters = std.EnumArray(ValueTag, Setter).init(.{
     .scalar_comparison = &setComparison,
     .signed_less_than = &setSignedLessThan,
     .number = &setNumber,
-    .scalar_materialize = &setMaterialized,
     .load = &setLoad,
     .scalar_expression = &setExpression,
     .bit_cast = &setBitCast,
@@ -272,13 +271,6 @@ fn setSignedLessThan(g: Gen, _: Symbol, destination_reg: Register, value: ast.Va
     try g.out.register(.slt, destination_reg, lhs, rhs);
 }
 
-fn setMaterialized(g: Gen, _: Symbol, destination_reg: Register, value: ast.Value) !void {
-    const materialize = value.scalar_materialize;
-    if (materialize.encoding == .zero) return g.out.register(.@"or", destination_reg, .zero, .zero);
-    if (!common.fitsUnsigned16(materialize.value)) return error.ImmediateOutOfRange;
-    try g.out.immediate(.ori, destination_reg, .zero, materialize.value);
-}
-
 fn setLoad(g: Gen, destination: Symbol, destination_reg: Register, value: ast.Value) !void {
     if (!common.isCompatibleScalarLoad(destination.data_type, value.load.data_type)) return error.RegisterTypeMismatch;
     try memory.writeLoadInto(g, destination_reg, value.load);
@@ -302,14 +294,10 @@ fn setFunctionAddress(g: Gen, destination: Symbol, destination_reg: Register, va
     try g.out.immediateSymbol(.addiu, destination_reg, .zero, target.name, 0);
 }
 
-fn addressOp(unsigned: bool) ir.Op {
-    return if (unsigned) .ori else .addiu;
-}
-
 fn setCodeAddress(g: Gen, destination: Symbol, destination_reg: Register, value: ast.Value) !void {
     const address = value.code_address;
     const symbol = try codeSymbol(g, destination, address.label);
-    try g.out.immediateSymbol(addressOp(address.unsigned), destination_reg, .zero, symbol, 0);
+    try g.out.immediateSymbol(.addiu, destination_reg, .zero, symbol, 0);
 }
 
 /// The assembly symbol of a function or a local label.
@@ -329,7 +317,7 @@ fn setDataAddress(g: Gen, destination: Symbol, destination_reg: Register, value:
     if (destination.data_type != .dmem) return error.ExpectedDmemAddress;
     const data = try g.lookup(address.label);
     const label = data.data_label orelse return error.ExpectedDataLabel;
-    try g.out.immediateSymbol(addressOp(address.unsigned), destination_reg, .zero, label, address.offset);
+    try g.out.immediateSymbol(.addiu, destination_reg, .zero, label, address.offset);
 }
 
 // ----------------------------------------------------------- expressions
@@ -641,7 +629,6 @@ test "operator tables cover the register and immediate forms" {
     try std.testing.expectEqual(@as(?ir.Op, null), registerOp(.mul));
     try std.testing.expectEqual(@as(?ir.Op, .xori), logicImmediateOp(.bit_xor));
     try std.testing.expectEqual(@as(?ir.Op, null), logicImmediateOp(.add));
-    try std.testing.expectEqual(ir.Op.ori, addressOp(true));
     try std.testing.expectError(error.ImmediateOutOfRange, addendFor(.sub, std.math.minInt(i64)));
     try std.testing.expectEqual(@as(u5, 3), try powerOfTwoShift(8));
     try std.testing.expectError(error.PowerOfTwoConstantRequired, powerOfTwoShift(1 << 33));

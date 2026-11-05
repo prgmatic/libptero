@@ -32,6 +32,16 @@ statements, expressions, `rsp.*` builtins, and memory operands. The parser
 produces the source AST and a statement source map; `ast_walk.zig` gives
 passes uniform access to nested statement lists.
 
+Several source forms expand while parsing, so later stages only see the
+ordinary AST: `parse_comptime.zig` evaluates constant expressions, unrolls
+`inline for`, and splits register arrays into one register per element;
+`parse_products.zig` lowers vector products and the `acc` accumulator;
+`parse_lanes.zig` lowers lane-range transfers; `parse_pointers.zig` turns
+typed-pointer dereferences into loads and stores; and `parse_loops.zig`
+attaches `while` continue expressions. The lexer-level substitutions that
+make this work (unrolled indices, per-iteration names, and array elements)
+live in `Parser.advance`.
+
 Program setup. `cli.zig` owns the command's behavior and output files behind
 injected writers, `main.zig` only connects it to the process, and
 `options.zig` parses arguments without IO. `root.zig` exposes the
@@ -101,7 +111,6 @@ zig build-exe --dep rsp_timing -Mroot=tools/zsp/main.zig \
     -Mrsp_timing=tools/rsp_interp/timing.zig -femit-bin=/tmp/zsp
 ```
 
-`zsp.zig` remains a compatibility entry point for existing build commands.
 Invoking the tool without arguments or with `--help` prints usage. Invalid
 arguments and compilation failures exit with a concise diagnostic.
 
@@ -154,6 +163,24 @@ const mask: u32 = 0xff00_ff00;
 reg signed_value: i32 = -32;
 ```
 
+Wherever a literal is expected (memory offsets, lane indices, array
+lengths, `inline for` bounds) a constant expression may be used instead. It
+combines literals, `inline for` indices, enum and flags members,
+`sizeOf(T)`, and `offsetOf(Struct, field)` with the binary operators and
+parentheses. Scalar expressions whose operands are all literals fold to a
+single immediate:
+
+```zig
+reg header_end: u32 = load(u32, base, sizeOf(Header) * 2 + offsetOf(Header, address));
+```
+
+`sizeOf` accepts the scalar types, `vec16` (16 bytes), `vec32` (32 bytes),
+and packed structs.
+
+A typed DMEM pointer `*T` is a `dmem` value that remembers what it points
+at: a scalar type, `vec16`/`vec32`, or a packed struct. See
+[Typed pointers](#typed-pointers).
+
 ## Register variables and constants
 
 Register variables use `reg`, optionally pinned to a hardware register:
@@ -165,7 +192,22 @@ reg inferred = load(u16, address);
 ```
 
 `undefined` reserves a register without emitting initialization. A type may be
-inferred only from a `load`. Unpinned scalar registers are allocated from
+inferred only from a `load`. An initializer may be any expression; it is
+equivalent to a declaration followed by an assignment.
+
+A register array declares one register per element. Index it with a
+constant, usually an `inline for` index; each element is an ordinary
+register named `name[index]` in diagnostics and allocation reports:
+
+```zig
+reg sums: [4]u32 = 0;              // every element starts at 0
+reg rows: [4]vec32 = undefined;
+reg($v08) bank: [8]vec16 = undefined; // consecutive registers $v08-$v15
+sums[2] += 1;
+```
+
+A pinned array must hold vectors; it occupies consecutive registers from
+the one named (two per `vec32` element). Unpinned scalar registers are allocated from
 `$t0` through `$t9`, `$k0`, `$sp`, `$fp`, and `$s0` through `$s7`. `$zero`,
 `$at`, `$v0`, `$v1`, `$gp`, `$k1`, and `$ra` retain explicit ABI or backend
 meaning and are not allocated automatically. `$gp` may still be explicitly
@@ -272,8 +314,8 @@ reg vector: vec16 = load(vec16, address, 16);
 store(vec16, address, vector, 32);
 ```
 
-The offset is optional and must be a literal. A storage label can be combined
-with a runtime base register inside a scalar load or store:
+The offset is optional and must be a constant expression. A storage label can
+be combined with a runtime base register inside a scalar load or store:
 
 ```zig
 reg value: u32 = load(u32, table + index);
@@ -282,9 +324,7 @@ store(u32, table + index, value, 12);
 ```
 
 These forms emit relocation-bearing MIPS memory operands such as
-`%lo(table + 12)($t0)`. A label without a runtime base uses `$zero`. The older
-`load(u32, index, table, 12)` and corresponding `store` spelling remains
-supported for compatibility.
+`%lo(table + 12)($t0)`. A label without a runtime base uses `$zero`.
 
 Scalar loads use signed or unsigned byte/halfword instructions according to
 the type; stores accept every scalar type. Signed narrow loads may widen into
@@ -303,12 +343,30 @@ ZSP cannot prove the range of a register at compile time.
 Full-vector operations lower to `lqv` and `sqv`. Their byte offsets must be
 multiples of 16 in the signed seven-bit scaled range (-1024 through 1008). A
 `vec32` transfer emits two operations, with the fractional register at the next
-16-byte offset. A single `vec16` lane can be transferred with
-`lane = load(vec16, address, offset)` or `store(vec16, address, vector[lane],
-offset)`. `loadVectorBytes(address, offset)` loads eight packed bytes and expands
-them as signed packed values into a `vec16`; `loadVectorBytesUnsigned` performs
-the unsigned form. `loadVectorWords(address, offset, lane)` loads four bytes into
-the selected two-lane position without modifying the rest of the rsp.vector.
+16-byte offset.
+
+Part of a vector is transferred by naming the lanes, `first..end` with the
+end excluded, on the load's destination or in the stored value. One, two,
+four, or eight lanes select `lsv`/`ssv`, `llv`/`slv`, `ldv`/`sdv`, or
+`lqv`/`sqv`; the other lanes keep their values:
+
+```zig
+row[0..4] = load(vec16, matrix, 0);     // ldv: lanes 0-3 from 8 bytes
+row[4..8] = load(vec16, matrix, 0);     // ldv: the same bytes into lanes 4-7
+words[2..4] = load(vec16, input, 4);    // llv
+value[3] = load(vec16, input, 6);       // lsv: one lane
+store(vec16, output, row[4..8], 16);    // sdv
+```
+
+A whole `vec32` transfers its integer lanes at the offset and its fraction
+lanes immediately after them, matching 16.16 rows stored as four integer
+halfwords followed by four fraction halfwords; select one half with a view
+(`pair.sfract[0..4]`) to transfer only that register. Eight lanes must start
+at lane 0, and the selection must stay inside the register.
+
+`loadVectorBytes(address, offset)` loads eight packed bytes and expands
+them as signed packed values into a `vec16`; `loadVectorBytesUnsigned`
+performs the unsigned form.
 
 ZSP supports initialized data, zero/uninitialized storage, and persistent
 overlay state:
@@ -339,13 +397,43 @@ state {
 
 Packed structs contain scalar fields without padding. Use
 `offsetOf(Header, address)` as a compile-time memory offset; it emits the same
-immediate as writing the numeric byte offset directly. `data` requires literal
+immediate as writing the numeric byte offset directly. Storage labels are
+typed pointers to their declared type, so `header.size` and `counter.*`
+read and write them directly (see [Typed pointers](#typed-pointers)). `data` requires literal
 initializers and arrays require exactly the declared number of elements. `bss`
 and `state` reserve addressable storage. The complete `state` section is padded
 to an eight-byte boundary and is intended to survive replacement of an
 overlay. Storage labels are compile-time DMEM addresses. `pub` exports a
 storage label and `extern` references storage
 provided by another linked unit; external declarations have no initializer.
+
+## Typed pointers
+
+`*T` declares a DMEM address that points at a `T`. Fields of a pointed-to
+packed struct are read and written by name, and `.*` dereferences a pointer
+to a scalar or vector. Each access becomes one load or store with the
+field's type and byte offset:
+
+```zig
+packed struct Header { opcode: u8; size: i16; address: u32; }
+
+fn parse(header: *Header, words: *u32, vector: *vec16) {
+    reg size: i16 = header.size;     // lh size, 1(header)
+    header.opcode = size;            // sb
+    reg word: u32 = words.*;
+    reg value: vec16 = vector.*;     // lqv
+    value[0..4] = vector.*;          // ldv: lane ranges work too
+    header += sizeOf(Header);        // pointer arithmetic is in bytes
+    reg next: *Header = header;
+}
+```
+
+A pointer is a `dmem` value everywhere else: it can be passed where `dmem`
+is expected, compared, and advanced. Copying one typed pointer to another
+requires the same pointee. Storage labels are typed pointers too, so
+`header.size` on a `bss { header: Header; }` label reads relative to
+`$zero`. Field reads are values (initializers and assignment sources);
+declare storage before the code that dereferences it.
 
 ## Functions, calls, and modules
 
@@ -459,7 +547,8 @@ unknown modules/functions, and duplicate import aliases are rejected.
 ## Control flow
 
 Structured conditions support `==`, `!=`, `<`, `<=`, `>`, and `>=`, with
-signedness taken from the left register:
+signedness taken from the left register. `while (true)` and
+`do { } while (true)` loop until a transfer leaves them:
 
 ```zig
 if (count < limit) {
@@ -482,7 +571,44 @@ outer: while (active != 0) {
     }
     continue outer;
 }
+
+while (index != count) : (index += 1) {
+    if (skip != 0) {
+        continue;    // runs `index += 1`, then tests the condition
+    }
+    process(index);
+}
+
+while (true) {
+    status = rsp.cp0.spStatus();
+    if (status == 0) {
+        break;
+    }
+}
 ```
+
+A `while` loop is rotated so each iteration costs one branch: the
+condition guards entry and is tested again after the body, as in
+`if (c) do { ... } while (c)`. A continue expression after `:` runs at the
+end of every iteration, including one reached by `continue`.
+`if (c) { break; }` and `if (c) { continue; }` lower to a single branch to
+the loop's exit or condition.
+
+`inline for (first..end) |index| { ... }` repeats its body once per index,
+with `index` a constant expression inside it. Registers and labels declared
+in the body are separate per iteration, so the body can declare its own
+temporaries:
+
+```zig
+inline for (0..4) |row| {
+    left[row][0..4] = load(vec32, matrix, row * 16);
+    reg sum: u32 = load(u32, totals, row * 4);
+    sum += 1;
+    store(u32, totals, sum, row * 4);
+}
+```
+
+An empty range emits nothing; a range may unroll at most 256 iterations.
 
 Structured conditionals may carry an explicit `slot` block when the transfer-slot
 instruction is part of the algorithm rather than merely scheduling:
@@ -524,8 +650,8 @@ done: block {
 }
 ```
 
-`break` and `continue` target the innermost loop unless followed by a loop
-label. A `do`/`while` loop can explicitly fill its backward branch slot
+`break` and `continue` target the innermost loop unless followed by a
+label; labeled blocks are only targeted by name. A `do`/`while` loop can explicitly fill its backward branch slot
 without reverting to labels and gotos:
 
 ```zig
@@ -565,14 +691,11 @@ tail function(arguments);   // tail call; does not return
 jump function(arguments);   // advanced raw direct jump
 jump(address);              // advanced raw indirect jump
 call(function_address);     // indirect call through a typed function pointer
-code.addressOf(label);           // materialize a function or local code label
-code.addressOfUnsigned(label);   // same address using an `ori` relocation
-dmem.addressOf(data, 8);         // materialize a data address plus an optional offset
+code.addressOf(label);      // materialize a function or local code label
+dmem.addressOf(data, 8);    // materialize a data address plus an optional offset
 ```
 
-`dmem.addressOfUnsigned(data, offset)` is the encoding-preserving variant for
-microcode ABIs that materialize the same 12-bit DMEM address with `ori` instead
-of `addiu`. Both forms produce a typed `dmem` value.
+`dmem.addressOf` produces a typed `dmem` value.
 
 Use a normal call unless the callee must not return. Use `tail` for the normal
 non-returning case. `jump` is the advanced escape hatch when code requires an
@@ -585,8 +708,7 @@ jump may also be conditional, for example
 Function addresses are ordinary typed values. Pin a value to `$ra` when raw
 control flow needs an explicit continuation: `reg($ra) next: fn() = &finish;`.
 `code.addressOf` accepts a function or local label and may initialize either a
-typed function pointer or a raw scalar ABI register. Its unsigned variant
-preserves microcode that materializes the low IMEM address using `ori`.
+typed function pointer or a raw scalar ABI register.
 An interior entry point that must be visible to other functions or linked code
 uses `export entryName:`. It emits the label without function-local mangling.
 Conditional `goto` may target such an exported label in another function,
@@ -595,8 +717,6 @@ including register-to-register equality tests.
 `bitCast(value)` reinterprets the bits of one scalar type as the destination
 scalar type. It emits only a register move when the registers differ and no
 instruction when source and destination share a fixed register.
-For encoding-sensitive ABI setup, `scalar.unsigned(value)` materializes a
-16-bit value with `ori`, while `scalar.zero()` uses a zero-register `or`.
 
 Use `tail` for a non-returning transfer with normal function argument checking:
 
@@ -719,7 +839,8 @@ vector[5] = scalar;
 ```
 
 Lane transfers use the RSP COP2 halfword instructions. The single-lane aliases
-`.x`, `.y`, `.z`, `.w`, `.X`, `.Y`, `.Z`, and `.W` are also supported.
+`.x`, `.y`, `.z`, `.w`, `.X`, `.Y`, `.Z`, and `.W` are also supported. Lane
+indices may be constant expressions.
 
 Vector instruction operands accept the native RSP element-selection patterns:
 
@@ -730,8 +851,60 @@ Vector instruction operands accept the native RSP element-selection patterns:
 .XXXXXXXX  .YYYYYYYY  .ZZZZZZZZ  .WWWWWWWW
 ```
 
+The same broadcasts can be selected by a constant index, which suits
+`inline for` bodies: `.lane(i)` repeats lane `i` in every lane (`.lane(0)`
+is `.xxxxxxxx`), `.halfLane(i)` repeats lane `i` of each four-lane half
+(`.halfLane(1)` is `.yyyyYYYY`), and `.quarterLane(i)` repeats lane `i` of
+each pair (`.quarterLane(0)` is `.xxzzXXZZ`).
+
 Typed views select how multiplication operands and results are interpreted:
-`.sint`, `.uint`, `.sfract`, and `.ufract`.
+`.sint`, `.uint`, `.sfract`, and `.ufract`. On a `vec32`, `.sint`/`.uint`
+select the integer register and `.sfract`/`.ufract` the fraction register.
+
+## Vector products and the accumulator
+
+Multiplication is written with `*` and the RSP multiply accumulator is
+named `acc`. `acc = a * b;` starts a chain, `acc += a * b;` adds a product,
+and `r = acc;` (or `reg r: T = acc;`) reads the result. `r = a * b;` is a
+one-product chain. The operand types choose the multiplies:
+
+| Product | Multiplies | Readable result |
+| --- | --- | --- |
+| `vec32 * vec32` | `vmudl`, `vmadm`, `vmadn`, `vmadh` | `vec32`, or either half |
+| `vec32 * vec16` | `vmudn`, `vmadh` | `vec32`, or either half |
+| `vec16 * vec32` | `vmudm`, `vmadh` | integer half (`vec16`) |
+| `vec16 * vec16` | `vmudh` | `vec16` |
+| `a.sint * b.ufract` | `vmudm` | `vec16` |
+| `a.ufract * b.sint` | `vmudn` | `vec16` |
+| `a.ufract * b.ufract` | `vmudl` | `vec16` |
+| `a.sfract * b.sfract` | `vmulf` | `vec16` |
+
+A `vec32` operand is a 16.16 pair; a `vec16` without a view is an integer.
+The first multiply of a chain clears the accumulator (`vmud*`/`vmulf`) and
+every later one accumulates (`vmad*`/`vmacf`). Only the right operand may
+be swizzled:
+
+```zig
+acc = left[0] * right.halfLane(0);
+inline for (1..4) |row| {
+    acc += left[row] * right.halfLane(row);
+}
+reg rows: vec32 = acc;
+```
+
+The read is folded into the last product: its multiplies write their
+clamped accumulator slices straight into `r` (the fraction from
+`vmadn`, the integer from `vmadh`), and the other multiplies write a
+compiler-chosen scratch register. The read must therefore directly follow
+the product it reads; other statements may sit between the products of a
+chain, but vector instructions there also change the accumulator. A whole
+`vec32` result needs a final product whose left operand is a `vec32`. For
+raw, unclamped slices use `accumulator(.high)`, `.middle`, or `.low`. A
+program variable named `acc` is an ordinary register and disables the
+syntax in its scope.
+
+The instruction forms below remain available for multiplies the table does
+not cover, such as `vmulu`, and for code that must name each instruction.
 
 ## Vector multiply, accumulator, and comparison
 
@@ -792,9 +965,8 @@ result[0] = vectorReciprocalHigh(source[0]);
 destination[3] = vectorMove(source[6]);
 ```
 
-`vectorMove` emits the RSP's native `VMOV` destination-element encoding. A
-plain lane-to-lane assignment retains the legacy encoding; assigning a scalar
-register to a vector lane emits `MTC2`.
+`vectorMove` and a plain lane-to-lane assignment both emit `VMOV`;
+assigning a scalar register to a vector lane emits `MTC2`.
 
 The vector control registers use their full hardware names. Reads return a
 scalar value and writes consume one:
@@ -813,18 +985,11 @@ rsp.vector.setCompareExtension(extension);
 `vectorShiftRightLogical(source, amount)` accepts amounts 1 through 8. They
 describe the RSP multiply-based vector shift forms explicitly.
 
-Partial and packed vector transfers are statement builtins. Their lane and
+Partial transfers use lane ranges (see [Memory and storage](#memory-and-storage)).
+The remaining specialized transfers are statement builtins. Their lane and
 offset arguments are compile-time integers:
 
 ```zig
-rsp.vector.load16(vector, lane, address, offset);
-rsp.vector.load32(vector, lane, address, offset);
-rsp.vector.load64(vector, lane, address, offset);
-rsp.vector.load128(vector, address, offset);
-rsp.vector.store16(vector, lane, address, offset);
-rsp.vector.store32(vector, lane, address, offset);
-rsp.vector.store64(vector, lane, address, offset);
-rsp.vector.store128(vector, address, offset);
 rsp.vector.loadQuad(vector, lane, address, offset); // lqv starting at lane
 rsp.vector.loadRight(vector, address, offset);      // lrv unaligned suffix
 rsp.vector.storeRight(vector, address, offset);     // srv unaligned suffix
@@ -950,14 +1115,17 @@ Instructions in `exact` blocks are never moved or removed, and `asm` lines
 are parsed into the IR when possible and otherwise act as barriers. Use
 `--no-optimize` to inspect direct code generation. Shipped microcode can be
 written plainly: `src/tests/ucode/matrix_kernels.zsp` checks on hardware that
-plain matrix multiply and normalization, written without pins or `exact`,
-match the hand-scheduled versions to within one cycle.
+matrix multiply and normalization written with `vec32` rows, `*` products,
+register arrays, and `inline for`, without pins or `exact`, match the
+hand-scheduled Tiny3D versions, and the host interpreter checks that they
+take no more cycles.
 
 ## Current limitations
 
 Notable omissions include general scalar multiplication/division, casts,
 ternary expressions, general vector shifts, general-purpose annotations, and
-macros. Selected unaligned and transposed transfers are supported through the
+macros. Register-array indices and `inline for` bounds must be constants;
+typed-pointer fields cannot be arrays. Selected unaligned and transposed transfers are supported through the
 explicit `rsp.vector.*` operations described above.
 
 Analysis and parser tables grow as needed, so function size is limited only by

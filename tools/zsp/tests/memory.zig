@@ -805,10 +805,10 @@ test "function address initialization materializes a typed function label" {
     );
 }
 
-test "code addresses materialize local continuations with selectable signedness" {
+test "code addresses materialize local continuations" {
     try expectAsm(
         \\fn dispatch(reg($t0) handler: u32) noreturn {
-        \\  reg($ra) continuation: fn() = code.addressOfUnsigned(done);
+        \\  reg($ra) continuation: fn() = code.addressOf(done);
         \\  jump(handler);
         \\done:
         \\  rsp.halt();
@@ -819,7 +819,7 @@ test "code addresses materialize local continuations with selectable signedness"
         \\.text
         \\
         \\dispatch:
-        \\  ori $ra, $zero, %lo(LABEL_dispatch_done_0)
+        \\  addiu $ra, $zero, %lo(LABEL_dispatch_done_0)
         \\  jr $t0
         \\  nop
         \\LABEL_dispatch_done_0:
@@ -834,7 +834,7 @@ test "dmem address values materialize a data label with an offset" {
         \\bss { cached: [2]u32; }
         \\fn send() noreturn {
         \\  reg($s3) end: dmem = dmem.addressOf(cached, 8);
-        \\  reg($s4) unsigned_end: dmem = dmem.addressOfUnsigned(cached, 8);
+        \\  reg($s4) unsigned_end: dmem = dmem.addressOf(cached, 8);
         \\  rsp.halt();
         \\}
     ,
@@ -850,7 +850,7 @@ test "dmem address values materialize a data label with an offset" {
         \\
         \\send:
         \\  addiu $s3, $zero, %lo(cached + 8)
-        \\  ori $s4, $zero, %lo(cached + 8)
+        \\  addiu $s4, $zero, %lo(cached + 8)
         \\  break
         \\
         \\
@@ -937,7 +937,7 @@ test "scalar loads support symbolic offsets from an index register" {
         \\  table: [16]u16;
         \\}
         \\fn test(reg($t0) index: u32) {
-        \\  reg($t1) value: u32 = load(u16, index, table);
+        \\  reg($t1) value: u32 = load(u16, table + index);
         \\  value = load(u16, table + index, 6);
         \\}
     ,
@@ -967,7 +967,7 @@ test "scalar stores support symbolic offsets from an index register" {
         \\  table: [16]u32;
         \\}
         \\fn test(reg($t0) index: u32, reg($t1) value: u32) {
-        \\  store(u32, index, value, table);
+        \\  store(u32, table + index, value);
         \\  store(u32, table + index, value, 12);
         \\}
     ,

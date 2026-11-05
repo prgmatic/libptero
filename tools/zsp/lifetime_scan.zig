@@ -66,7 +66,6 @@ const scanners = blk: {
     table.set(.conditional_direct_goto, &conditionalDirectGoto);
     table.set(.goto, &goto);
     table.set(.break_loop, &breakLoop);
-    table.set(.while_loop, &whileLoop);
     table.set(.do_while_loop, &doWhileLoop);
     table.set(.if_statement, &ifStatement);
     table.set(.labeled_block, &labeledBlock);
@@ -150,17 +149,12 @@ fn breakLoop(scan: *Scan, statement: *const Statement, _: usize) !void {
     try scan.optional(statement.break_loop.delay_slot);
 }
 
-fn whileLoop(scan: *Scan, statement: *const Statement, current: usize) !void {
-    try scan.condition(statement.while_loop.condition, current);
-    try scan.statements(statement.while_loop.statements);
-}
-
 /// The condition of a `do`/`while` loop has its own position after the body.
 fn doWhileLoop(scan: *Scan, statement: *const Statement, _: usize) !void {
     const loop = statement.do_while_loop;
     try scan.statements(loop.statements);
     scan.position += 1;
-    try scan.condition(loop.condition, scan.position);
+    if (loop.condition) |condition| try scan.condition(condition, scan.position);
     try scan.optional(loop.delay_slot);
 }
 
@@ -239,7 +233,7 @@ fn vectorMemory(scan: *Scan, item: ast.Builtin, current: usize) !void {
 
 pub fn isVectorLoad(operation: ast.VectorMemoryOperation) bool {
     return switch (operation) {
-        .load16, .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned, .load_quad_lane, .load_right, .load_transpose => true,
+        .load32, .load64, .load128, .load_packed_signed, .load_packed_unsigned, .load_quad_lane, .load_right, .load_transpose => true,
         else => false,
     };
 }

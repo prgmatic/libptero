@@ -1,6 +1,6 @@
 //! Optimization passes over the instruction IR, in order: relocation
-//! folding, dead-write removal, CP0 polling loops, list scheduling, and
-//! delay-slot filling. See `peephole.zig` and `schedule.zig`.
+//! folding, dead-write removal, CP0 polling loops, lane-op encodings, list
+//! scheduling, and delay-slot filling. See `peephole.zig` and `schedule.zig`.
 const std = @import("std");
 const ir_parse = @import("ir_parse.zig");
 const ir_print = @import("ir_print.zig");
@@ -8,12 +8,13 @@ const peephole = @import("peephole.zig");
 const schedule = @import("schedule.zig");
 const Emitter = @import("Emitter.zig");
 
-pub const pass_names = "relocation folding, dead writes, polling loops, list scheduling, delay slots";
+pub const pass_names = "relocation folding, dead writes, polling loops, lane encodings, list scheduling, delay slots";
 
 pub fn optimize(out: *Emitter) !void {
     peephole.foldSymbolOffsets(&out.items);
     peephole.removeDeadWrites(&out.items);
     try peephole.foldPollingLoops(&out.items);
+    peephole.chooseLaneEncodings(out.items.items);
     try schedule.scheduleItems(out.arena.child_allocator, &out.items);
     peephole.fillDelaySlots(&out.items);
 }

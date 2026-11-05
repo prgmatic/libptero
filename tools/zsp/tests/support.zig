@@ -30,6 +30,16 @@ pub fn expectParseError(source: []const u8, err: parser_mod.ErrorType, line: usi
     try testing.expectEqual(column, parser.diagnostic.?.column);
 }
 
+/// Rejects `source` with `err`. Parses into an arena, so a parser that
+/// stops partway through an expansion may leave allocations behind.
+pub fn expectRejectedWith(source: []const u8, err: parser_mod.ErrorType) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var parser = try parser_mod.Parser.init(arena.allocator(), source);
+    try testing.expectError(error.ParseError, parser.parse());
+    try testing.expectEqual(err, parser.diagnostic.?.err);
+}
+
 pub fn expectAsmError(source: []const u8, expected_err: anyerror) !void {
     var parser = try parser_mod.Parser.init(testing.allocator, source);
     const functions = try parser.parse();

@@ -13,6 +13,10 @@ test {
     _ = @import("tests/calls.zig");
     _ = @import("tests/parser.zig");
     _ = @import("tests/scalar.zig");
+    _ = @import("tests/expansion.zig");
+    _ = @import("tests/products.zig");
+    _ = @import("tests/pointers.zig");
+    _ = @import("tests/loops.zig");
     _ = @import("ir.zig");
     _ = @import("ir_print.zig");
     _ = @import("ir_parse.zig");

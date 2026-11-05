@@ -85,8 +85,8 @@ export fn _start() noreturn {
     reg($v19) unsigned_bytes: vec16 = loadVectorBytesUnsigned(input, 0);
     store(vec16, input, unsigned_bytes, 0x1c0);
     reg($v20) partial_words: vec16 = 0;
-    partial_words = loadVectorWords(input, 0);
-    partial_words = loadVectorWords(input, 8, 4);
+    partial_words[0..2] = load(vec16, input, 0);
+    partial_words[4..6] = load(vec16, input, 8);
     store(vec16, input, partial_words, 0x1d0);
 
     seed = 0x80402010;

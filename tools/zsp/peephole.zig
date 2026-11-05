@@ -27,6 +27,41 @@ fn isTransfer(inst: Inst) bool {
     return effects.of(inst).isTransfer();
 }
 
+// ------------------------------------------------------ lane-op encodings
+
+/// VMOV and the divide operations ignore bit 3 of their destination
+/// element, a field the RSP timing model reads as the `vs` register. Each
+/// unfrozen lane operation takes the spelling whose register the nearby
+/// instructions write least, so no false dependence slows the schedule.
+pub fn chooseLaneEncodings(items: []Item) void {
+    for (items, 0..) |*item, index| {
+        if (item.* != .instruction) continue;
+        const inst = &item.instruction;
+        if (inst.frozen or inst.op.info().format != .vector_lane) continue;
+        inst.dest_element = quieterElement(items, index, inst.dest_element);
+    }
+}
+
+/// Instructions on either side that the scheduler may place nearby.
+const lane_window = 8;
+
+fn quieterElement(items: []const Item, index: usize, element: u4) u4 {
+    const low = element & 7;
+    const high = low | 8;
+    return if (nearbyWrites(items, index, high) < nearbyWrites(items, index, low)) high else low;
+}
+
+fn nearbyWrites(items: []const Item, index: usize, register: u4) usize {
+    const first = index -| lane_window;
+    const end = @min(items.len, index + lane_window + 1);
+    var count: usize = 0;
+    for (items[first..end]) |item| {
+        if (item != .instruction) continue;
+        count += @intFromBool(effects.of(item.instruction).vector_writes & effects.vectorBit(@enumFromInt(register)) != 0);
+    }
+    return count;
+}
+
 // ------------------------------------------------------- relocation folding
 
 /// `addiu $at, $zero, %lo(L + k); lw $t0, n($at)` becomes
@@ -351,4 +386,19 @@ test "delay slots take the latest independent instruction" {
     try testing.expect(!independent(effects.of(.{ .op = .sw, .rt = .t0, .rs = .a0 }), effects.of(.{ .op = .lw, .rt = .t1, .rs = .a0 })));
     try testing.expect(!sameInst(.{ .op = .j, .symbol = "a" }, .{ .op = .j, .symbol = "b" }));
     try testing.expect(!sameInst(.{ .op = .j, .symbol = "a" }, .{ .op = .j }));
+}
+
+test "lane operations spell their destination to avoid nearby writes" {
+    var list = try listOf(testing.allocator, &.{
+        .{ .instruction = .{ .op = .vadd, .vd = .v01, .vs = .v02, .vt = .v03 } },
+        .{ .instruction = .{ .op = .vrcp, .vd = .v04, .dest_element = 1, .vt = .v05, .element = 8 } },
+        .{ .instruction = .{ .op = .vmov, .vd = .v06, .dest_element = 10, .vt = .v07, .element = 8 } },
+        .{ .label = "next" },
+        .{ .instruction = .{ .op = .vmov, .vd = .v06, .dest_element = 9, .vt = .v07, .element = 8, .frozen = true } },
+    });
+    defer list.deinit(testing.allocator);
+    chooseLaneEncodings(list.items);
+    try testing.expectEqual(@as(u4, 9), list.items[1].instruction.dest_element);
+    try testing.expectEqual(@as(u4, 2), list.items[2].instruction.dest_element);
+    try testing.expectEqual(@as(u4, 9), list.items[4].instruction.dest_element);
 }

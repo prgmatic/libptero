@@ -108,12 +108,12 @@ fn fetchCommandBufferWithPointer(
         command = load(u32, command);
     }
     return_address = return_address + command_address;
-    store(u32, stack_offset, return_address, pointer_stack);
+    store(u32, pointer_stack + stack_offset, return_address);
     tail jump(command);
 }
 
 @rspq.command(4) fn returnFromCall(command: dmem) noreturn {
-    reg($s0) rdram: u32 = load(u32, command, pointer_stack);
+    reg($s0) rdram: u32 = load(u32, pointer_stack + command);
     jump fetchCommandBufferWithPointer(rdram);
 }
 
@@ -141,7 +141,7 @@ fn fetchCommandBufferWithPointer(
     status: u32,
 ) noreturn {
     rsp.cp0.setSpStatus(status);
-    command = load(u32, command, pointer_stack);
+    command = load(u32, pointer_stack + command);
     tail call(command, save_slot);
 }
 
@@ -251,7 +251,7 @@ pub export fn commandLoop() noreturn {
     reg($v00) vector_zero: vec16 = undefined;
 switch_high_priority: block {
     dma_flags = rsp.cp0.spStatus();
-    command_header = load(u32, command_address, command_buffer);
+    command_header = load(u32, command_buffer + command_address);
     dma_size = status_high_priority_requested;
     dma_flags &= status_high_priority_mask;
     command_size = command_header >> 28;
@@ -262,14 +262,14 @@ switch_high_priority: block {
     command_index = command_header >> 23;
     command_index &= 0x01fe;
     execute_command: block {
-        command_descriptor = load(u16, command_index, internal_commands);
+        command_descriptor = load(u16, internal_commands + command_index);
         if(command_size == 0) {
             break execute_command;
         }
 
     resolve_overlay: do {
         dma_pitch = load(u16, 0, 0x202);
-        overlay_index = load(u8, command_size, overlay_idmap_address);
+        overlay_index = load(u8, overlay_idmap_address + command_size);
         dma_size = load(u16, 0, 0x200);
         shift_vector = loadVectorBytes(0);
         command_index = command_index - dma_size;
@@ -287,7 +287,7 @@ switch_high_priority: block {
             reg($at) assertion_code: u32 = 0xff010000;
         }
 
-        rdram = load(u32, overlay_index, overlay_data_rdram);
+        rdram = load(u32, overlay_data_rdram + overlay_index);
         dma_destination = 0x1f8;
         dma_pitch = 0x204;
         dma_size = rdram >> 20;
@@ -303,7 +303,7 @@ switch_high_priority: block {
         } while(rdram >= 0x80000000);
         argument_2 = status_enter_high_priority;
     } while(overlay_index != dma_pitch);
-        command_descriptor = load(u16, command_index, overlay_command_table);
+        command_descriptor = load(u16, overlay_command_table + command_index);
     }
 
     argument_1 = load(u32, command_address, 0xa4);

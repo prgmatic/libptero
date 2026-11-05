@@ -98,9 +98,9 @@ fn writeVectorStore(g: Gen, store: Store) !void {
     const access = try storedVector(store.value);
     const vector = try storedRegister(g, store, access);
     const base = try operands.valueAsDmemReg(g, store.address);
-    const partial = partialStoreOp(store, access) orelse return writeFullVectorStore(g, store, vector, base);
-    try expectPartialStore(store, access, partial);
-    try vectors.vectorMemory(g.out, partial, vector, access.lane orelse 0, base, store.offset);
+    const lane = access.lane orelse return writeFullVectorStore(g, store, vector, base);
+    if (store.data_type != .vec16) return error.PartialVectorMemoryRequiresVec16;
+    try vectors.vectorMemory(g.out, .ssv, vector, lane, base, store.offset);
 }
 
 fn storedRegister(g: Gen, store: Store, access: ast.VectorAccess) !ast.VectorRegister {
@@ -108,19 +108,6 @@ fn storedRegister(g: Gen, store: Store, access: ast.VectorAccess) !ast.VectorReg
     const value_type: DataType = if (access.view != null) .vec16 else value.data_type;
     if (value_type != store.data_type) return error.RegisterTypeMismatch;
     return analysis.vectorRegisterForView(value, access.view);
-}
-
-/// Partial stores need a `vec16`; only lane stores accept a view.
-fn expectPartialStore(store: Store, access: ast.VectorAccess, op: ir.Op) !void {
-    if (store.data_type != .vec16 or (op != .ssv and access.view != null)) return error.PartialVectorMemoryRequiresVec16;
-}
-
-/// Quarter (`slv`), half (`sdv`), and single-lane (`ssv`) stores.
-fn partialStoreOp(store: Store, access: ast.VectorAccess) ?ir.Op {
-    if (store.quarter_vector) return .slv;
-    if (store.half_vector) return .sdv;
-    if (access.lane != null) return .ssv;
-    return null;
 }
 
 fn writeFullVectorStore(g: Gen, store: Store, vector: ast.VectorRegister, base: Register) !void {

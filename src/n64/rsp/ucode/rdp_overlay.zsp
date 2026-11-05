@@ -115,13 +115,13 @@ bss {
     reg($a0) command: u32,
     reg($a1) address: u32,
 ) {
-    store(u32, command, address, address_table);
+    store(u32, address_table + command, address);
 }
 
 fn fixupAddress(reg($a1) address: u32) {
     reg table_offset: u32;
     table_offset = address >> 24;
-    reg base: u32 = load(u32, table_offset, address_table);
+    reg base: u32 = load(u32, address_table + table_offset);
     address += base;
 }
 
@@ -455,8 +455,8 @@ fn updateRenderMode() {
         reg combiner_low_mask: u32 = load(RdpModeState.combiner_low_mask, rdp_mode);
         comb_hi &= combiner_high_mask;
         comb_lo &= combiner_low_mask;
-        reg mipmap_high_bits: u32 = load(u32, mipmap_offset, combiner_mipmaps, -8);
-        reg mipmap_low_bits: u32 = load(u32, mipmap_offset, combiner_mipmaps, -4);
+        reg mipmap_high_bits: u32 = load(u32, combiner_mipmaps + mipmap_offset, -8);
+        reg mipmap_low_bits: u32 = load(u32, combiner_mipmaps + mipmap_offset, -4);
         comb_hi |= mipmap_high_bits;
         comb_lo |= mipmap_low_bits;
     } else {
@@ -483,7 +483,7 @@ fn updateRenderMode() {
     if(background_blend == 0) {
         if(aa_requested != 0) {
             background_blend = som_hi & 4;
-            background_blend = load(u32, background_blend, aa_blend_default);
+            background_blend = load(u32, aa_blend_default + background_blend);
             reg foreground_blend_mask: u32 = -16385;
             foreground_blend &= foreground_blend_mask;
         }
@@ -533,7 +533,7 @@ fn updateRenderMode() {
     reg background_blend_index: u32;
     background_blend_index = background_blending << 2;
     aa_table_index |= background_blend_index;
-    reg aa_mode_bits: u32 = load(u32, aa_table_index, aa_blend_table);
+    reg aa_mode_bits: u32 = load(u32, aa_blend_table + aa_table_index);
     reg aa_mode_mask: u32 = load(u32, aa_blend_mask);
     aa_mode_bits = (aa_mode_bits | merged_blend) & aa_mode_mask;
     exact {
@@ -777,9 +777,12 @@ fn triangleAsync(
     store(u16, output, vertex2, 2);
     store(u16, output, vertex3, 4);
 
-    reg all1: vec16 = loadVectorWords(vertex1, 0);
-    reg all2: vec16 = loadVectorWords(vertex2, 0);
-    reg all3: vec16 = loadVectorWords(vertex3, 0);
+    reg all1: vec16 = undefined;
+    reg all2: vec16 = undefined;
+    reg all3: vec16 = undefined;
+    all1[0..2] = load(vec16, vertex1, 0);
+    all2[0..2] = load(vec16, vertex2, 0);
+    all3[0..2] = load(vec16, vertex3, 0);
     reg clip1: dmem = load(u16, vertex1, 6);
     reg($v00) vector_zero: vec16 = undefined;
     reg($v30) shift_constants: vec16 = undefined;
@@ -870,27 +873,27 @@ fn triangleAsync(
         negative_my = vectorSubtractCarry(vector_zero, all_tmp2.yyyyyyyy);
         vertex3 = all3[3];
         fy.sfract = vectorShiftLeft8(y1, 14);
-        rsp.vector.store16(y2, 0, output, 4);
+        store(vec16, output, y2[0], 4);
         fy.sint = vectorShiftRightArithmetic(y1, 2);
         did_swap0 ^= cull_mode;
         normal.sfract = vmudh(all_tmp2, hml.yyyyyyyy);
-        rsp.vector.store16(y3, 0, output, 2);
+        store(vec16, output, y3[0], 2);
         normal.sfract = vmadh(hml, negative_my);
-        rsp.vector.store32(all_tmp2, 0, output, 8);
+        store(vec16, output, all_tmp2[0..2], 8);
         normal.sint = readVectorAccumulatorHigh();
-        rsp.vector.store32(all_tmp1, 0, output, 12);
+        store(vec16, output, all_tmp1[0..2], 12);
         normal.sfract = readVectorAccumulatorMiddle();
-        rsp.vector.load64(hml, 2, output, 8);
+        hml[2..6] = load(vec16, output, 8);
         fy.sfract = vectorSubtractCarry(vector_zero, fy.sfract);
         clip2 = output +% 0x20;
         fy.sint = vectorSubtract(fy.sint, fy.sint);
-        rsp.vector.load16(y3, 0, vertex1, 18);
+        y3[0] = load(vec16, vertex1, 18);
         slope.sint[7] = vectorReciprocalHigh(normal.sint[0]);
         did_swap1 = normal.sint[0];
         slope.sfract[7] = vectorReciprocalLow(normal.sfract[0]);
-        rsp.vector.load16(y3, 2, vertex2, 18);
+        y3[2] = load(vec16, vertex2, 18);
         slope.sint[7] = vectorReciprocalHigh(vector_zero[0]);
-        rsp.vector.load16(y3, 4, vertex3, 18);
+        y3[4] = load(vec16, vertex3, 18);
         slope.sfract[0] = vectorReciprocal(hml[1]);
         did_swap1 = did_swap1 < 0;
         slope.sint[0] = vectorReciprocalHigh(hml[1]);
@@ -909,11 +912,11 @@ fn triangleAsync(
 
     exact {
         slope.sint[2] = vectorReciprocalHigh(all_tmp2[1]);
-        rsp.vector.load16(y2, 0, vertex1, 16);
+        y2[0] = load(vec16, vertex1, 16);
         slope.sfract[4] = vectorReciprocal(all_tmp1[1]);
-        rsp.vector.load16(y2, 2, vertex2, 16);
+        y2[2] = load(vec16, vertex2, 16);
         slope.sint[4] = vectorReciprocalHigh(all_tmp1[1]);
-        rsp.vector.load16(y2, 4, vertex3, 16);
+        y2[4] = load(vec16, vertex3, 16);
         hml[7] = vectorMove(normal.sfract[0]);
         did_swap1 ^= 1;
         hml_upper[7] = vectorMove(normal.sint[0]);
@@ -927,11 +930,11 @@ fn triangleAsync(
         y2 = vectorCompareLessThan(y2, y2.zzzzzzzz);
         triangle_command |= did_swap1;
         y3 = vectorSelectByCompareCode(y3, y3.zzzzzzzz);
-        rsp.vector.load16(inverse_w.sfract, 6, vertex3, 22);
+        inverse_w.sfract[6] = load(vec16, vertex3, 22);
         all3 = vmudl(slope.sfract, hml.yywwYYWW);
-        rsp.vector.load16(inverse_w.sfract, 4, vertex1, 22);
+        inverse_w.sfract[4] = load(vec16, vertex1, 22);
         all3 = vmadm(slope.sint, hml.yywwYYWW);
-        rsp.vector.load16(inverse_w.sfract, 5, vertex2, 22);
+        inverse_w.sfract[5] = load(vec16, vertex2, 22);
         all3 = vmadn(slope.sfract, hml_upper);
         clip3 = triangle_command & 0x400;
         all_tmp1 = vmadh(slope.sint, hml_upper);
@@ -941,11 +944,11 @@ fn triangleAsync(
         all_tmp1 = vmadh(vector_one, negative_powers.WWWWWWWW);
         did_swap1 = hml[0];
         negative_my = vectorSubtractCarry(y3, y3.XXXXXXXX);
-        rsp.vector.load16(inverse_w.sint, 5, vertex2, 20);
+        inverse_w.sint[5] = load(vec16, vertex2, 20);
         y2 = vectorCompareLessThan(y2, y2.XXXXXXXX);
-        rsp.vector.load16(inverse_w.sint, 6, vertex3, 20);
+        inverse_w.sint[6] = load(vec16, vertex3, 20);
         y3 = vectorSelectByCompareCode(y3, y3.XXXXXXXX);
-        rsp.vector.load16(inverse_w.sint, 4, vertex1, 20);
+        inverse_w.sint[4] = load(vec16, vertex1, 20);
         negative_my = vmudl(all3, all1);
         clip3 +%= clip2;
         negative_my = vmadm(all_tmp1, all1);
@@ -961,9 +964,9 @@ fn triangleAsync(
     // Exact remainder of libdragon's hand-scheduled triangle fast path.
     exact {
         negative_my = vmudl(inverse_w.sfract, y3.xxxxxxxx);
-        rsp.vector.load32(all_tmp1, 4, vertex1, 12);
+        all_tmp1[4..6] = load(vec16, vertex1, 12);
         negative_my = vmadm(inverse_w.sint, y3.xxxxxxxx);
-        rsp.vector.load32(all3, 4, vertex2, 12);
+        all3[4..6] = load(vec16, vertex2, 12);
         inverse_w.sfract = vmadn(inverse_w.sfract, y2.xxxxxxxx);
         did_swap0 = -did_swap0;
         negative_my = vmudn(normal.sfract, hml);
@@ -975,15 +978,15 @@ fn triangleAsync(
         slope.sint = readVectorAccumulatorHigh();
         did_swap0 = 0xcf;
         inverse_w.sfract = vectorSubtractCarry(inverse_w.sfract, shift_constants.WWWWWWWW);
-        rsp.vector.load32(y1, 4, vertex3, 12);
+        y1[4..6] = load(vec16, vertex3, 12);
         y_tmp1 = vectorShiftRightLogical(y_tmp1, 7);
         rsp.vector.setCompareCode(did_swap0);
         y_tmp2 = vectorShiftRightLogical(y_tmp2, 7);
-        rsp.vector.load16(y_tmp1, 7, vertex1, 4);
+        y_tmp1[7] = load(vec16, vertex1, 4);
         attribute3 = vectorShiftRightLogical(attribute3, 7);
-        rsp.vector.load16(y_tmp2, 7, vertex2, 4);
+        y_tmp2[7] = load(vec16, vertex2, 4);
         inverse_w.sfract = vectorShiftRightLogical(inverse_w.sfract, 1);
-        rsp.vector.load16(attribute3, 7, vertex3, 4);
+        attribute3[7] = load(vec16, vertex3, 4);
         negative_my = vmudl(slope.sfract, fy.sfract.XXXXXXXX);
         command_bits +%= clip3;
         negative_my = vmadm(slope.sint, fy.sfract.XXXXXXXX);
@@ -991,13 +994,13 @@ fn triangleAsync(
         edges.sfract = vmadn(slope.sfract, fy.sint.XXXXXXXX);
         did_swap1 = rsp.cp0.dmaBusy();
         edges.sint = vmadh(slope.sint, fy.sint.XXXXXXXX);
-        rsp.vector.store64(inverse_w.sfract, 4, output, 16);
+        store(vec16, output, inverse_w.sfract[4..8], 16);
         all_tmp1 = vmulf(all_tmp1, inverse_w.sfract.xxxxXXXX);
-        rsp.vector.load16(y_tmp1, 6, output, 16);
+        y_tmp1[6] = load(vec16, output, 16);
         all3 = vmulf(all3, inverse_w.sfract.yyyyYYYY);
-        rsp.vector.load16(y_tmp2, 6, output, 18);
+        y_tmp2[6] = load(vec16, output, 18);
         y1 = vmulf(y1, inverse_w.sfract.zzzzZZZZ);
-        rsp.vector.load16(attribute3, 6, output, 20);
+        attribute3[6] = load(vec16, output, 20);
         x12.sint = vectorShiftRightArithmetic(x12.sfract, 2);
         if(did_swap1 != 0) slot {
             did_swap0 = load(u8, rdp_syncfull_ongoing);
@@ -1014,14 +1017,14 @@ fn triangleAsync(
         y_tmp1 = vectorSelectByCompareCode(y_tmp1, all_tmp1);
         clip1 +%= command_bits;
         y_tmp2 = vectorSelectByCompareCode(y_tmp2, all3);
-        rsp.vector.store16(slope.sint, 4, output, 12);
+        store(vec16, output, slope.sint[4], 12);
         attribute3 = vectorSelectByCompareCode(attribute3, y1);
         triangle_command = load(i32, rdp_current);
         edges.sfract = vectorAddCarry(edges.sfract, x12.sfract.xxxxxxxx);
-        rsp.vector.store16(x12.sint, 2, output, 8);
+        store(vec16, output, x12.sint[2], 8);
         edges.sint = vectorAdd(edges.sint, x12.sint.xxxxxxxx);
         if(did_swap0 == 0) slot {
-            rsp.vector.store16(slope.sfract, 4, output, 14);
+            store(vec16, output, slope.sfract[4], 14);
         } {
             rsp.cp0.setRdpCommandEnd(triangle_command);
         }
@@ -1029,25 +1032,25 @@ fn triangleAsync(
     exact {
         vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
         vector_one = vectorSubtract(y_tmp2, y_tmp1);
-        rsp.vector.store16(x12.sfract, 2, output, 10);
+        store(vec16, output, x12.sfract[2], 10);
         attribute_delta_high = vectorSubtract(attribute3, y_tmp1);
         clip1 = clip1 - output;
         normal.sfract = vmudn(normal.sfract, shift_constants.YYYYYYYY);
-        rsp.vector.store16(slope.sint, 2, output, 28);
+        store(vec16, output, slope.sint[2], 28);
         normal.sint = vmadh(normal.sint, shift_constants.YYYYYYYY);
-        rsp.vector.store16(slope.sfract, 2, output, 30);
+        store(vec16, output, slope.sfract[2], 30);
         all_tmp1 = vmudh(vector_one, hml.yyyyyyyy);
-        rsp.vector.store16(edges.sint, 2, output, 24);
+        store(vec16, output, edges.sint[2], 24);
         all_tmp1 = vmadh(attribute_delta_high, hml.wwwwwwww);
-        rsp.vector.store16(edges.sfract, 2, output, 26);
+        store(vec16, output, edges.sfract[2], 26);
         all_tmp1 = readVectorAccumulatorMiddle();
-        rsp.vector.store16(edges.sint, 0, output, 16);
+        store(vec16, output, edges.sint[0], 16);
         all3 = readVectorAccumulatorHigh();
-        rsp.vector.store16(edges.sfract, 0, output, 18);
+        store(vec16, output, edges.sfract[0], 18);
         y3 = vmudh(attribute_delta_high, hml.zzzzzzzz);
-        rsp.vector.store16(slope.sint, 0, output, 20);
+        store(vec16, output, slope.sint[0], 20);
         y3 = vmadh(vector_one, hml.xxxxxxxx);
-        rsp.vector.store16(slope.sfract, 0, output, 22);
+        store(vec16, output, slope.sfract[0], 22);
         y3 = readVectorAccumulatorMiddle();
         vertex2 = load(i32, rdp_sentinel);
         y2 = readVectorAccumulatorHigh();
@@ -1065,18 +1068,18 @@ fn triangleAsync(
         negative_my = vmadm(y2, normal.sfract.WWWWWWWW);
         did_swap0 = vertex2 < triangle_command;
         y3 = vmadn(y3, normal.sint.WWWWWWWW);
-        rsp.vector.store64(all_tmp1, 0, clip2, 24);
+        store(vec16, clip2, all_tmp1[0..4], 24);
         y2 = vmadh(y2, normal.sint.WWWWWWWW);
-        rsp.vector.store64(all_tmp1, 4, clip3, 24);
+        store(vec16, clip3, all_tmp1[4..8], 24);
         negative_my = vmadl(all_tmp1, slope.sfract.xxxxxxxx);
-        rsp.vector.store64(all3, 0, clip2, 8);
+        store(vec16, clip2, all3[0..4], 8);
         negative_my = vmadm(all3, slope.sfract.xxxxxxxx);
-        rsp.vector.store64(all3, 4, clip3, 8);
+        store(vec16, clip3, all3[4..8], 8);
         y1 = vmadn(all_tmp1, slope.sint.xxxxxxxx);
-        rsp.vector.store64(y3, 0, clip2, 56);
+        store(vec16, clip2, y3[0..4], 56);
         all_tmp2 = vmadh(all3, slope.sint.xxxxxxxx);
         if(did_swap0 != 0) slot {
-            rsp.vector.store64(y3, 4, clip3, 56);
+            store(vec16, clip3, y3[4..8], 56);
         } {
             vertex3 = return_address;
             triangle_command = load(i32, rdp_buffers, 4);
@@ -1101,31 +1104,31 @@ fn triangleAsync(
     }
     exact {
         negative_my = vmudh(y_tmp1, shift_constants.WWWWWWWW);
-        rsp.vector.store64(y2, 0, clip2, 40);
+        store(vec16, clip2, y2[0..4], 40);
         negative_my = vmadl(y1, fy.sfract.XXXXXXXX);
-        rsp.vector.store64(y2, 4, clip3, 40);
+        store(vec16, clip3, y2[4..8], 40);
         negative_my = vmadm(all_tmp2, fy.sfract.XXXXXXXX);
-        rsp.vector.store64(y1, 0, clip2, 48);
+        store(vec16, clip2, y1[0..4], 48);
         all2 = vmadn(y1, fy.sint.XXXXXXXX);
-        rsp.vector.store64(y1, 4, clip3, 48);
+        store(vec16, clip3, y1[4..8], 48);
         all1 = vmadh(all_tmp2, fy.sint.XXXXXXXX);
-        rsp.vector.store64(all_tmp2, 0, clip2, 32);
+        store(vec16, clip2, all_tmp2[0..4], 32);
         y3[6] = vectorMove(y2[7]);
-        rsp.vector.store64(all_tmp2, 4, clip3, 32);
+        store(vec16, clip3, all_tmp2[4..8], 32);
         y1[6] = vectorMove(all_tmp2[7]);
         store(u32, rdp_current, triangle_command);
         y_tmp2[1] = vectorMove(all2[7]);
-        rsp.vector.store64(all2, 0, clip2, 16);
+        store(vec16, clip2, all2[0..4], 16);
         y_tmp2[0] = vectorMove(all1[7]);
-        rsp.vector.store64(all2, 4, clip3, 16);
+        store(vec16, clip3, all2[4..8], 16);
         y_tmp2[3] = vectorMove(all_tmp1[7]);
-        rsp.vector.store64(all1, 0, clip2, 0);
+        store(vec16, clip2, all1[0..4], 0);
         y_tmp2[2] = vectorMove(all3[7]);
-        rsp.vector.store64(all1, 4, clip3, 0);
-        rsp.vector.store32(y1, 6, command_bits, 8);
-        rsp.vector.store32(y3, 6, command_bits, 12);
+        store(vec16, clip3, all1[4..8], 0);
+        store(vec16, command_bits, y1[6..8], 8);
+        store(vec16, command_bits, y3[6..8], 12);
         clip1 -%= 1;
-        rsp.vector.store64(y_tmp2, 0, command_bits, 0);
+        store(vec16, command_bits, y_tmp2[0..4], 0);
         return slot {
             rsp.cp0.startDmaWrite(clip1);
         }
@@ -1344,17 +1347,17 @@ fn autoTmemEnd() noreturn {
     reg($t1) _: u32,
     reg($t2) _: u32,
 ) {
-    store(u32, vertex_offset, xy, triangle_data0);
-    store(u32, vertex_offset, z, triangle_data0, 4);
-    store(u32, vertex_offset, rgba, triangle_data0, 8);
+    store(u32, triangle_data0 + vertex_offset, xy);
+    store(u32, triangle_data0 + vertex_offset, z, 4);
+    store(u32, triangle_data0 + vertex_offset, rgba, 8);
     reg st: u32 = 0xff;
-    store(u8, vertex_offset, st, triangle_data0, 7);
+    store(u8, triangle_data0 + vertex_offset, st, 7);
 
     reg($gp) command_end: dmem = undefined;
     st = load(u32, command_end, 0x94);
     reg w: u32 = load(u32, command_end, 0x98);
     reg inverse_w: u32 = load(u32, command_end, 0x9c);
-    store(u32, vertex_offset, st, triangle_data0, 12);
-    store(u32, vertex_offset, w, triangle_data0, 16);
-    store(u32, vertex_offset, inverse_w, triangle_data0, 20);
+    store(u32, triangle_data0 + vertex_offset, st, 12);
+    store(u32, triangle_data0 + vertex_offset, w, 16);
+    store(u32, triangle_data0 + vertex_offset, inverse_w, 20);
 }

@@ -174,12 +174,35 @@ pub fn parseWhileKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
     return parseWhile(self, null);
 }
 
-/// `while (condition) { ... }` after the keyword.
+/// `while (condition) { ... }` after the keyword, optionally with a
+/// continue expression: `while (condition) : (step) { ... }`. A loop with a
+/// condition is rotated into `if (condition) do { ... } while (condition)`
+/// so each iteration takes one branch; `while (true)` has no condition.
 fn parseWhile(self: *Parser, label: ?[]const u8) !ast.Statement {
     _ = try self.expect(.l_paren);
-    const condition = try self.parseCondition();
+    const condition: ?ast.Condition = if (try self.eatKeyword("true")) null else try self.parseCondition();
     _ = try self.expect(.r_paren);
-    return .{ .while_loop = .{ .label = label, .condition = condition, .statements = try parseBraced(self) } };
+    const step = try parseContinueExpression(self);
+    var body = try parseBraced(self);
+    if (step) |statements| body = try @import("parse_loops.zig").appendStep(self, label, body, statements);
+    const loop: ast.Statement = .{ .do_while_loop = .{ .label = label, .condition = condition, .statements = body, .delay_slot = null } };
+    const guard = condition orelse return loop;
+    const then_statements = try self.allocator.alloc(ast.Statement, 1);
+    then_statements[0] = loop;
+    return .{ .if_statement = .{ .condition = guard, .delay_slot = null, .then_statements = then_statements, .else_statements = null } };
+}
+
+/// `: (statement)`, ended by the parenthesis instead of a semicolon.
+fn parseContinueExpression(self: *Parser) !?[]ast.Statement {
+    if (!try self.eat(.colon)) return null;
+    _ = try self.expect(.l_paren);
+    const terminator = self.terminator;
+    self.terminator = .r_paren;
+    defer self.terminator = terminator;
+    var list: Parser.StatementList = .{};
+    defer list.locations.deinit(self.allocator);
+    try self.parseStatementInto(&list);
+    return try list.statements.toOwnedSlice(self.allocator);
 }
 
 /// `{ ... }`
@@ -206,10 +229,11 @@ pub fn parseBreakKeyword(self: *Parser, first: token.Token) anyerror!ast.Stateme
 
 /// `label:` alone, or naming the block or loop that follows.
 pub fn parseLabeledStatement(self: *Parser, first: token.Token) anyerror!ast.Statement {
-    if (try self.eatKeyword("block")) return parseLabeledBlock(self, first.text);
-    if (try self.eatKeyword("while")) return parseWhile(self, first.text);
-    if (try self.eatKeyword("do")) return self.parseDoWhileStatement(first.text);
-    return .{ .label = first.text };
+    const label = (try self.declaredName(first)).text;
+    if (try self.eatKeyword("block")) return parseLabeledBlock(self, label);
+    if (try self.eatKeyword("while")) return parseWhile(self, label);
+    if (try self.eatKeyword("do")) return self.parseDoWhileStatement(label);
+    return .{ .label = label };
 }
 
 /// `block { ... }`, optionally followed by `exit slot { ... }`.
@@ -291,16 +315,16 @@ pub fn parseStoreKeyword(self: *Parser, first: token.Token) anyerror!ast.Stateme
     _ = try self.expect(.comma);
     var operand = try @import("parse_memory.zig").Operand.parseBase(self, memory_type.offset, first);
     _ = try self.expect(.comma);
-    const value = try self.parseValueRef();
+    self.allow_lane_range = true;
+    const value = self.parseValueRef();
+    self.allow_lane_range = false;
     try operand.parseOffset(self);
     _ = try self.expect(.r_paren);
     _ = try self.expect(.semicolon);
     return .{ .store = .{
         .data_type = memory_type.data_type,
-        .half_vector = memory_type.half_vector,
-        .quarter_vector = memory_type.quarter_vector,
         .address = operand.address,
-        .value = value,
+        .value = try value,
         .offset = operand.offset,
         .label_offset = operand.label,
     } };
@@ -329,6 +353,8 @@ pub fn parseReservedKeyword(self: *Parser, _: token.Token) anyerror!ast.Statemen
 /// A statement starting with a name: an assignment to it, a call of it,
 /// or a call into the module it names.
 pub fn parseAssignmentOrCall(self: *Parser, first: token.Token) anyerror!ast.Statement {
+    const pointers = @import("parse_pointers.zig");
+    if (pointers.isDereference(self, first)) return pointers.parseStore(self, first);
     const destination = try parseDestination(self, first);
     if (try self.parseCompoundAssignOp()) |op| {
         return finishAssignment(self, destination, .{ .ident = first.text }, op, valueFromRef(try self.parseValueRef()));
@@ -341,14 +367,14 @@ pub fn parseAssignmentOrCall(self: *Parser, first: token.Token) anyerror!ast.Sta
     return parseCall(self, first.text, member.text);
 }
 
-const Destination = struct { name: []const u8, lane: ?u3 = null, view: ?ast.VectorView = null };
+const Destination = struct { name: []const u8, lane: ?u3 = null, lane_count: u4 = 1, view: ?ast.VectorView = null };
 
 /// A name, or a vector name with one lane or a typed view selected.
 fn parseDestination(self: *Parser, first: token.Token) !Destination {
     if (self.current.tag != .l_bracket and !self.isVectorDotSuffix()) return .{ .name = first.text };
     const access = try self.parseVectorAccess(first.text);
     if (access.lane == null and access.view == null) return self.fail(first, .unsupported_destination_swizzle);
-    return .{ .name = first.text, .lane = access.lane, .view = access.view };
+    return .{ .name = first.text, .lane = access.lane, .lane_count = access.lane_count, .view = access.view };
 }
 
 /// `= -x;`, `= ~x;`, `= expression;`, or `= a < b;`.
@@ -366,10 +392,11 @@ fn parseAssignedValue(self: *Parser, destination: Destination) !ast.Statement {
 }
 
 fn finishAssignment(self: *Parser, destination: Destination, lhs: ast.Value, op: ast.AssignOp, rhs: ?ast.Value) !ast.Statement {
-    _ = try self.expect(.semicolon);
+    _ = try self.expect(self.terminator);
     return .{ .assignment = .{
         .destination = destination.name,
         .destination_lane = destination.lane,
+        .destination_lane_count = destination.lane_count,
         .destination_view = destination.view,
         .lhs = lhs,
         .op = op,
@@ -388,7 +415,7 @@ pub fn parseDoWhileStatement(self: *Parser, label: ?[]const u8) !ast.Statement {
     const while_token = try self.expect(.ident);
     if (!std.mem.eql(u8, while_token.text, "while")) return self.fail(while_token, .unexpected_token);
     _ = try self.expect(.l_paren);
-    const condition = try self.parseCondition();
+    const condition: ?ast.Condition = if (try self.eatKeyword("true")) null else try self.parseCondition();
     _ = try self.expect(.r_paren);
     const delay_slot = try self.parseOptionalDelaySlot();
     return .{ .do_while_loop = .{
@@ -402,6 +429,6 @@ pub fn parseDoWhileStatement(self: *Parser, label: ?[]const u8) !ast.Statement {
 /// `slot { ... }` after a transfer, or the terminating `;`.
 pub fn parseOptionalDelaySlot(self: *Parser) !?[]ast.Statement {
     if (try self.eatKeyword("slot")) return try parseBraced(self);
-    _ = try self.expect(.semicolon);
+    _ = try self.expect(self.terminator);
     return null;
 }

@@ -230,7 +230,7 @@ pub const FunctionContext = struct {
 
     fn scalarCandidate(self: *const FunctionContext, name: []const u8, reg: Register) bool {
         if (self.functionForbids(reg) or self.lifetimes.registerForbidden(name, reg)) return false;
-        return !self.scalarLifetimeConflicts(name, reg);
+        return !self.scalarLifetimeConflicts(name, reg) and !self.lifetimes.pinnedOverlaps(name, .{ .scalar = reg });
     }
 
     pub fn allocExpressionRegister(self: *const FunctionContext) !Register {
@@ -318,7 +318,8 @@ pub const FunctionContext = struct {
     }
 
     fn vectorFree(self: *const FunctionContext, name: []const u8, reg: VReg) bool {
-        return !self.lifetimes.vectorRegisterForbidden(name, reg) and !self.vectorLifetimeConflicts(name, reg);
+        if (self.lifetimes.vectorRegisterForbidden(name, reg)) return false;
+        return !self.vectorLifetimeConflicts(name, reg) and !self.lifetimes.pinnedOverlaps(name, .{ .vector = reg });
     }
 
     pub fn isVectorRegisterInUse(self: *const FunctionContext, reg: VReg) bool {

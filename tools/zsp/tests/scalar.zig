@@ -289,9 +289,7 @@ test "compile-time enums and flags lower to qualified immediates" {
         \\
         \\test:
         \\  addiu $t0, $zero, 2
-        \\  addiu $t1, $zero, 1
-        \\  ori $t1, $t1, 8
-        \\  ori $t1, $t1, 16
+        \\  addiu $t1, $zero, 25
         \\  break
         \\
         \\
@@ -663,27 +661,6 @@ test "bitCast reinterprets scalar register values without conversion" {
         \\test:
         \\  or $a1, $s5, $zero
         \\  or $a0, $a1, $zero
-        \\  break
-        \\
-        \\
-    );
-}
-
-test "scalar materialization preserves unsigned and zero-register encodings" {
-    try expectAsm(
-        \\fn test() noreturn {
-        \\  reg($t0) size: u32 = scalar.unsigned(63);
-        \\  reg($t1) flags: u32 = scalar.zero();
-        \\  rsp.halt();
-        \\}
-    ,
-        \\.set noreorder
-        \\.set noat
-        \\.text
-        \\
-        \\test:
-        \\  ori $t0, $zero, 63
-        \\  or $t1, $zero, $zero
         \\  break
         \\
         \\

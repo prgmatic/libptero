@@ -9,6 +9,9 @@ pub const StatementLocation = struct {
 pub const Function = struct {
     source_path: []const u8 = "",
     source_locations: []const StatementLocation = &.{},
+    /// Names the parser generated for this function, such as unrolled
+    /// locals and register array elements.
+    generated_names: []const []const u8 = &.{},
     name: []const u8,
     source_name: []const u8,
     emit_label: bool = true,
@@ -75,22 +78,16 @@ pub const Value = union(enum) {
     scalar_comparison: ScalarComparison,
     signed_less_than: struct { lhs: ValueRef, rhs: ValueRef },
     number: i64,
-    scalar_materialize: struct {
-        value: i64,
-        encoding: enum { unsigned, zero },
-    },
     load: Load,
     scalar_expression: *ScalarExpression,
     bit_cast: ValueRef,
     function_address: FunctionRef,
     code_address: struct {
         label: []const u8,
-        unsigned: bool = false,
     },
     data_address: struct {
         label: []const u8,
         offset: i64 = 0,
-        unsigned: bool = false,
     },
 };
 
@@ -149,7 +146,6 @@ pub const VectorOperation = struct {
     op: VectorOp,
     lhs: VectorAccess,
     rhs: VectorAccess,
-    explicit_lane_encoding: bool = false,
 };
 
 pub const Load = struct {
@@ -159,7 +155,6 @@ pub const Load = struct {
     label_offset: ?[]const u8 = null,
     packed_u8: bool = false,
     packed_unsigned_u8: bool = false,
-    partial_u32_lane: ?u3 = null,
     unaligned: bool = false,
 };
 
@@ -181,6 +176,9 @@ pub const VectorAccess = struct {
     name: []const u8,
     element: u4 = 0,
     lane: ?u3 = null,
+    /// Lanes selected from `lane` by `v[first..end]`; the parser lowers
+    /// ranges of more than one lane into transfers.
+    lane_count: u4 = 1,
     view: ?VectorView = null,
 };
 
@@ -224,8 +222,6 @@ pub const VectorControlRegister = enum(u2) {
 };
 
 pub const VectorMemoryOperation = enum {
-    load16,
-    store16,
     load32,
     store32,
     load64,
@@ -436,6 +432,7 @@ pub const AssignOp = enum {
 pub const Assignment = struct {
     destination: []const u8,
     destination_lane: ?u3 = null,
+    destination_lane_count: u4 = 1,
     destination_view: ?VectorView = null,
     lhs: Value,
     op: AssignOp,
@@ -470,8 +467,6 @@ pub const Statement = union(enum) {
     assignment: Assignment,
     store: struct {
         data_type: DataType,
-        half_vector: bool = false,
-        quarter_vector: bool = false,
         address: ValueRef,
         value: ValueRef,
         offset: i64 = 0,
@@ -498,14 +493,12 @@ pub const Statement = union(enum) {
         typed: bool = false,
         delay_slot: ?[]Statement,
     },
-    while_loop: struct {
-        label: ?[]const u8 = null,
-        condition: Condition,
-        statements: []Statement,
-    },
+    /// `do { } while (condition);`, and every `while` loop, which the
+    /// parser rotates into `if (condition) do { } while (condition)`.
+    /// Without a condition the loop repeats until a transfer leaves it.
     do_while_loop: struct {
         label: ?[]const u8 = null,
-        condition: Condition,
+        condition: ?Condition,
         statements: []Statement,
         delay_slot: ?[]Statement,
     },
@@ -527,16 +520,25 @@ pub const Statement = union(enum) {
 };
 
 pub fn freeFunctions(allocator: std.mem.Allocator, functions: []const Function) void {
-    for (functions) |function| {
-        allocator.free(function.source_locations);
-        if (function.command_indices.len != 0) allocator.free(function.command_indices);
-        if (function.command_sizes.len != 0) allocator.free(function.command_sizes);
-        if (function.clobber_regs.len != 0) allocator.free(function.clobber_regs);
-        if (function.clobber_vector_regs.len != 0) allocator.free(function.clobber_vector_regs);
-        allocator.free(function.parameters);
-        freeStatements(allocator, function.statements);
-    }
+    for (functions) |function| freeFunction(allocator, function);
     allocator.free(functions);
+}
+
+fn freeFunction(allocator: std.mem.Allocator, function: Function) void {
+    allocator.free(function.source_locations);
+    for (function.generated_names) |name| allocator.free(name);
+    allocator.free(function.generated_names);
+    freeOptional(allocator, function.command_indices);
+    freeOptional(allocator, function.command_sizes);
+    freeOptional(allocator, function.clobber_regs);
+    freeOptional(allocator, function.clobber_vector_regs);
+    allocator.free(function.parameters);
+    freeStatements(allocator, function.statements);
+}
+
+/// Slices that default to a static empty one are only freed when filled.
+fn freeOptional(allocator: std.mem.Allocator, slice: anytype) void {
+    if (slice.len != 0) allocator.free(slice);
 }
 
 fn freeStatements(allocator: std.mem.Allocator, statements: []const Statement) void {

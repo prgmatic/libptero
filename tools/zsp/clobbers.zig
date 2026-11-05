@@ -386,7 +386,6 @@ const simulators = blk: {
     table.set(.var_decl, &simulateDeclaration);
     table.set(.assignment, &simulateAssignment);
     for ([_]Tag{ .goto, .conditional_goto, .conditional_direct_goto, .break_loop, .call }) |tag| table.set(tag, &simulateDelay);
-    table.set(.while_loop, &simulateWhile);
     table.set(.do_while_loop, &simulateDoWhile);
     table.set(.if_statement, &simulateIf);
     table.set(.labeled_block, &simulateBlock);
@@ -399,10 +398,6 @@ fn ignoreStatement(_: *Simulation, _: *const Statement) !void {}
 
 fn simulateDelay(simulation: *Simulation, statement: *const Statement) !void {
     try simulation.optional(ast_walk.delaySlot(statement));
-}
-
-fn simulateWhile(simulation: *Simulation, statement: *const Statement) !void {
-    try simulation.scoped(statement.while_loop.statements);
 }
 
 fn simulateDoWhile(simulation: *Simulation, statement: *const Statement) !void {

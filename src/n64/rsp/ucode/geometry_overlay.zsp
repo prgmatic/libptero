@@ -87,41 +87,41 @@ fn multiplyMatrices(
     reg($v29) accumulator_scratch: vec16 = undefined;
 
     exact {
-        rsp.vector.load64(l0i, 0, left, 0);
-        rsp.vector.load64(r01f, 0, right, 8);
-        rsp.vector.load64(l0f, 0, left, 8);
-        rsp.vector.load64(r01i, 0, right, 0);
-        rsp.vector.load64(l0f, 4, left, 8);
-        rsp.vector.load64(r01f, 4, right, 24);
-        rsp.vector.load64(l0i, 4, left, 0);
-        rsp.vector.load64(r01i, 4, right, 16);
-        rsp.vector.load64(l1i, 0, left, 16);
-        rsp.vector.load64(l2i, 0, left, 32);
+        l0i[0..4] = load(vec16, left, 0);
+        r01f[0..4] = load(vec16, right, 8);
+        l0f[0..4] = load(vec16, left, 8);
+        r01i[0..4] = load(vec16, right, 0);
+        l0f[4..8] = load(vec16, left, 8);
+        r01f[4..8] = load(vec16, right, 24);
+        l0i[4..8] = load(vec16, left, 0);
+        r01i[4..8] = load(vec16, right, 16);
+        l1i[0..4] = load(vec16, left, 16);
+        l2i[0..4] = load(vec16, left, 32);
         accumulator_scratch = vmudl(l0f, r01f.xxxxXXXX);
-        rsp.vector.load64(l1f, 0, left, 24);
-        rsp.vector.load64(l2f, 0, left, 40);
-        rsp.vector.load64(l2f, 4, left, 40);
-        rsp.vector.load64(l1f, 4, left, 24);
+        l1f[0..4] = load(vec16, left, 24);
+        l2f[0..4] = load(vec16, left, 40);
+        l2f[4..8] = load(vec16, left, 40);
+        l1f[4..8] = load(vec16, left, 24);
         accumulator_scratch = vmadm(l0i, r01f.xxxxXXXX);
-        rsp.vector.load64(l1i, 4, left, 16);
+        l1i[4..8] = load(vec16, left, 16);
         result_f = vmadn(l0f, r01i.xxxxXXXX);
-        rsp.vector.load64(l3i, 0, left, 48);
-        rsp.vector.load64(l3f, 0, left, 56);
+        l3i[0..4] = load(vec16, left, 48);
+        l3f[0..4] = load(vec16, left, 56);
         result_i = vmadh(l0i, r01i.xxxxXXXX);
         accumulator_scratch = vmadl(l1f, r01f.yyyyYYYY);
-        rsp.vector.load64(l2i, 4, left, 32);
+        l2i[4..8] = load(vec16, left, 32);
         accumulator_scratch = vmadm(l1i, r01f.yyyyYYYY);
-        rsp.vector.load64(r23i, 0, right, 32);
-        rsp.vector.load64(r23f, 0, right, 40);
+        r23i[0..4] = load(vec16, right, 32);
+        r23f[0..4] = load(vec16, right, 40);
         result_f = vmadn(l1f, r01i.yyyyYYYY);
         result_i = vmadh(l1i, r01i.yyyyYYYY);
-        rsp.vector.load64(l3f, 4, left, 56);
+        l3f[4..8] = load(vec16, left, 56);
         accumulator_scratch = vmadl(l2f, r01f.zzzzZZZZ);
-        rsp.vector.load64(r23f, 4, right, 56);
-        rsp.vector.load64(l3i, 4, left, 48);
+        r23f[4..8] = load(vec16, right, 56);
+        l3i[4..8] = load(vec16, left, 48);
         accumulator_scratch = vmadm(l2i, r01f.zzzzZZZZ);
         result_f = vmadn(l2f, r01i.zzzzZZZZ);
-        rsp.vector.load64(r23i, 4, right, 48);
+        r23i[4..8] = load(vec16, right, 48);
         result_i = vmadh(l2i, r01i.zzzzZZZZ);
         accumulator_scratch = vmadl(l3f, r01f.wwwwWWWW);
         accumulator_scratch = vmadm(l3i, r01f.wwwwWWWW);
@@ -134,12 +134,12 @@ fn multiplyMatrices(
         result_i = vmadh(l0i, r23i.xxxxXXXX);
         accumulator_scratch = vmadl(l1f, r23f.yyyyYYYY);
         accumulator_scratch = vmadm(l1i, r23f.yyyyYYYY);
-        rsp.vector.store64(r01i, 0, output, 0);
+        store(vec16, output, r01i[0..4], 0);
         result_f = vmadn(l1f, r23i.yyyyYYYY);
         result_i = vmadh(l1i, r23i.yyyyYYYY);
         accumulator_scratch = vmadl(l2f, r23f.zzzzZZZZ);
-        rsp.vector.store64(r01f, 4, output, 24);
-        rsp.vector.store64(r01i, 4, output, 16);
+        store(vec16, output, r01f[4..8], 24);
+        store(vec16, output, r01i[4..8], 16);
         accumulator_scratch = vmadm(l2i, r23f.zzzzZZZZ);
         result_f = vmadn(l2f, r23i.zzzzZZZZ);
         result_i = vmadh(l2i, r23i.zzzzZZZZ);
@@ -147,13 +147,13 @@ fn multiplyMatrices(
         accumulator_scratch = vmadm(l3i, r23f.wwwwWWWW);
         r23f = vmadn(l3f, r23i.wwwwWWWW);
         r23i = vmadh(l3i, r23i.wwwwWWWW);
-        rsp.vector.store64(r01f, 0, output, 8);
-        rsp.vector.store64(r23f, 0, output, 40);
-        rsp.vector.store64(r23i, 0, output, 32);
-        rsp.vector.store64(r23f, 4, output, 56);
+        store(vec16, output, r01f[0..4], 8);
+        store(vec16, output, r23f[0..4], 40);
+        store(vec16, output, r23i[0..4], 32);
+        store(vec16, output, r23f[4..8], 56);
     }
     return slot {
-        rsp.vector.store64(r23i, 4, output, 48);
+        store(vec16, output, r23i[4..8], 48);
     }
 }
 
@@ -172,8 +172,8 @@ fn normalizeMatrixVector(
     reg($v00) vector_zero: vec16 = undefined;
 
     exact {
-        rsp.vector.load64(value_f, 0, input, 8);
-        rsp.vector.load64(value_i, 0, input, 0);
+        value_f[0..4] = load(vec16, input, 8);
+        value_i[0..4] = load(vec16, input, 0);
         accumulator_scratch = vmudl(value_f, value_f.xyzwXYZW);
         accumulator_scratch = vmadm(value_i, value_f.xyzwXYZW);
         inverse_f = vmadn(value_f, value_i.xyzwXYZW);
@@ -195,7 +195,7 @@ fn normalizeMatrixVector(
         value_f = vmadn(value_f, inverse_i.wwwwWWWW);
         value_i = vmadh(value_i, inverse_i.wwwwWWWW);
         value_f = vectorAdd(value_f, value_f.xyzwXYZW);
-        rsp.vector.store64(value_f, 0, output, 0);
+        store(vec16, output, value_f[0..4], 0);
     }
     return slot {
         output +%= 8;
@@ -255,13 +255,13 @@ fn normalizeMatrixVector(
         export geometry_RDPQ_Triangle_Send_Async:
         all1[3] = vertex0;
         all2[3] = packed_vertices;
-        rsp.vector.load32(all1, 0, vertex0, 0);
-        rsp.vector.load32(all2, 0, packed_vertices, 0);
-        rsp.vector.load32(all3, 0, vertex2, 0);
+        all1[0..2] = load(vec16, vertex0, 0);
+        all2[0..2] = load(vec16, packed_vertices, 0);
+        all3[0..2] = load(vec16, vertex2, 0);
         clip1 = load(u16, vertex0, 6);
         negative_powers = vectorSubtractCarry(vector_zero, shift_constants);
         y1 = vector_zero | all1.y;
-        did_swap1 = scalar.unsigned(0xff);
+        did_swap1 = 0xff;
         y2 = vector_zero | all2.y;
         clip2 = load(u16, packed_vertices, 6);
         y3 = vector_zero | all3.y;
@@ -291,7 +291,7 @@ fn normalizeMatrixVector(
         y3 = vectorCompareGreaterOrEqual(y_tmp1, y_tmp2);
         output = buffer_offset +% clipping_buffer_temporary;
         all3 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
-        rsp.vector.store16(y1, 0, output, 6);
+        store(vec16, output, y1[0], 6);
         y2 = vectorCompareLessThan(y_tmp1, y_tmp2);
         did_swap2 = rsp.vector.getCompareCode();
         all2 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
@@ -311,27 +311,27 @@ fn normalizeMatrixVector(
         vector_temporary = vectorSubtractCarry(vector_zero, all_tmp2.yyyyyyyy);
         vertex2 = all3[3];
         fy_f = vectorShiftLeft8(y1, 14);
-        rsp.vector.store16(y2, 0, output, 4);
+        store(vec16, output, y2[0], 4);
         fy_i = vectorShiftRightArithmetic(y1, 2);
         buffer_offset ^= 176;
         normal_f = vmudh(all_tmp2, hml.yyyyyyyy);
-        rsp.vector.store16(y3, 0, output, 2);
+        store(vec16, output, y3[0], 2);
         normal_f = vmadh(hml, vector_temporary);
-        rsp.vector.store32(all_tmp2, 0, output, 8);
+        store(vec16, output, all_tmp2[0..2], 8);
         normal_i = readVectorAccumulatorHigh();
-        rsp.vector.store32(all_tmp1, 0, output, 12);
+        store(vec16, output, all_tmp1[0..2], 12);
         normal_f = readVectorAccumulatorMiddle();
-        rsp.vector.load64(hml, 2, output, 8);
+        hml[2..6] = load(vec16, output, 8);
         fy_f = vectorSubtractCarry(vector_zero, fy_f);
         clip2 = output +% 0x20;
         fy_i = vectorSubtract(fy_i, fy_i);
-        rsp.vector.load16(y3, 0, vertex0, 30);
+        y3[0] = load(vec16, vertex0, 30);
         slope_i[7] = vectorReciprocalHigh(normal_i[0]);
         did_swap0 = normal_i[0];
         slope_f[7] = vectorReciprocalLow(normal_f[0]);
-        rsp.vector.load16(y3, 2, packed_vertices, 30);
+        y3[2] = load(vec16, packed_vertices, 30);
         slope_i[7] = vectorReciprocalHigh(vector_zero[0]);
-        rsp.vector.load16(y3, 4, vertex2, 30);
+        y3[4] = load(vec16, vertex2, 30);
         slope_f[0] = vectorReciprocal(hml[1]);
         did_swap0 = did_swap0 < 0;
         slope_i[0] = vectorReciprocalHigh(hml[1]);
@@ -339,11 +339,11 @@ fn normalizeMatrixVector(
             slope_f[2] = vectorReciprocal(all_tmp2[1]);
         }
         slope_i[2] = vectorReciprocalHigh(all_tmp2[1]);
-        rsp.vector.load16(y2, 0, vertex0, 22);
+        y2[0] = load(vec16, vertex0, 22);
         slope_f[4] = vectorReciprocal(all_tmp1[1]);
-        rsp.vector.load16(y2, 2, packed_vertices, 22);
+        y2[2] = load(vec16, packed_vertices, 22);
         slope_i[4] = vectorReciprocalHigh(all_tmp1[1]);
-        rsp.vector.load16(y2, 4, vertex2, 22);
+        y2[4] = load(vec16, vertex2, 22);
         hml[7] = vectorMove(normal_f[0]);
         did_swap0 ^= 1;
         hml_upper[7] = vectorMove(normal_i[0]);
@@ -357,11 +357,11 @@ fn normalizeMatrixVector(
         y2 = vectorCompareLessThan(y2, y2.z);
         command |= did_swap0;
         y3 = vectorSelectByCompareCode(y3, y3.z);
-        rsp.vector.load16(inverse_w_f, 6, vertex2, 34);
+        inverse_w_f[6] = load(vec16, vertex2, 34);
         all3 = vmudl(slope_f, hml.yywwYYWW);
-        rsp.vector.load16(inverse_w_f, 4, vertex0, 34);
+        inverse_w_f[4] = load(vec16, vertex0, 34);
         all3 = vmadm(slope_i, hml.yywwYYWW);
-        rsp.vector.load16(inverse_w_f, 5, packed_vertices, 34);
+        inverse_w_f[5] = load(vec16, packed_vertices, 34);
         all3 = vmadn(slope_f, hml_upper);
         clip3 = command & 0x400;
         all_tmp1 = vmadh(slope_i, hml_upper);
@@ -371,11 +371,11 @@ fn normalizeMatrixVector(
         all_tmp1 = vmadh(vector_one, negative_powers.W);
         did_swap1 = hml[0];
         vector_temporary = vectorSubtractCarry(y3, y3.X);
-        rsp.vector.load16(inverse_w_i, 5, packed_vertices, 32);
+        inverse_w_i[5] = load(vec16, packed_vertices, 32);
         y2 = vectorCompareLessThan(y2, y2.X);
-        rsp.vector.load16(inverse_w_i, 6, vertex2, 32);
+        inverse_w_i[6] = load(vec16, vertex2, 32);
         y3 = vectorSelectByCompareCode(y3, y3.X);
-        rsp.vector.load16(inverse_w_i, 4, vertex0, 32);
+        inverse_w_i[4] = load(vec16, vertex0, 32);
         vector_temporary = vmudl(all3, all1);
         clip3 +%= clip2;
         vector_temporary = vmadm(all_tmp1, all1);
@@ -385,11 +385,11 @@ fn normalizeMatrixVector(
         normal_i = vmadh(all_tmp1, all2);
         store(i16, output, command);
         vector_temporary = vmudl(inverse_w_f, y3.x);
-        rsp.vector.load32(all_tmp1, 4, vertex0, 12);
+        all_tmp1[4..6] = load(vec16, vertex0, 12);
         vector_temporary = vmadm(inverse_w_i, y3.x);
-        rsp.vector.load32(all3, 4, packed_vertices, 12);
+        all3[4..6] = load(vec16, packed_vertices, 12);
         inverse_w_f = vmadn(inverse_w_f, y2.x);
-        rsp.vector.load32(y1, 4, vertex2, 12);
+        y1[4..6] = load(vec16, vertex2, 12);
         vector_temporary = vmudn(normal_f, hml);
         did_swap0 = -did_swap0;
         vector_temporary = vmadh(normal_i, hml);
@@ -401,13 +401,13 @@ fn normalizeMatrixVector(
         inverse_w_f = vectorSubtractCarry(inverse_w_f, shift_constants.W);
         did_swap0 = 0xcf;
         y_tmp1 = vectorShiftRightLogical(y_tmp1, 7);
-        rsp.vector.load16(y_tmp1, 7, vertex0, 4);
+        y_tmp1[7] = load(vec16, vertex0, 4);
         y_tmp2 = vectorShiftRightLogical(y_tmp2, 7);
         rsp.vector.setCompareCode(did_swap0);
         attribute3 = vectorShiftRightLogical(attribute3, 7);
-        rsp.vector.load16(y_tmp2, 7, packed_vertices, 4);
+        y_tmp2[7] = load(vec16, packed_vertices, 4);
         inverse_w_f = vectorShiftRightLogical(inverse_w_f, 1);
-        rsp.vector.load16(attribute3, 7, vertex2, 4);
+        attribute3[7] = load(vec16, vertex2, 4);
         vector_temporary = vmudl(slope_f, fy_f.X);
         command_bits >>>= 3;
         vector_temporary = vmadm(slope_i, fy_f.X);
@@ -415,13 +415,13 @@ fn normalizeMatrixVector(
         edges_f = vmadn(slope_f, fy_i.X);
         did_swap1 = rsp.cp0.dmaBusy();
         edges_i = vmadh(slope_i, fy_i.X);
-        rsp.vector.store64(inverse_w_f, 4, output, 16);
+        store(vec16, output, inverse_w_f[4..8], 16);
         all_tmp1 = vmulf(all_tmp1, inverse_w_f.xxxxXXXX);
-        rsp.vector.load16(y_tmp1, 6, output, 16);
+        y_tmp1[6] = load(vec16, output, 16);
         all3 = vmulf(all3, inverse_w_f.yyyyYYYY);
-        rsp.vector.load16(y_tmp2, 6, output, 18);
+        y_tmp2[6] = load(vec16, output, 18);
         y1 = vmulf(y1, inverse_w_f.zzzzZZZZ);
-        rsp.vector.load16(attribute3, 6, output, 20);
+        attribute3[6] = load(vec16, output, 20);
         x12_i = vectorShiftRightArithmetic(x12_f, 2);
         if(did_swap1 != 0) jump geometry_rdpq_triangle_dma_busy() slot {
             did_swap0 = load(u8, rdp_syncfull_ongoing);
@@ -433,40 +433,40 @@ fn normalizeMatrixVector(
         y_tmp1 = vectorSelectByCompareCode(y_tmp1, all_tmp1);
         command_bits +%= clip3;
         y_tmp2 = vectorSelectByCompareCode(y_tmp2, all3);
-        rsp.vector.store16(slope_i, 4, output, 12);
+        store(vec16, output, slope_i[4], 12);
         attribute3 = vectorSelectByCompareCode(attribute3, y1);
         // The fast path deliberately reuses the now-dead vertex0 argument
         // register for the resident RDP cursor.
         vertex0 = load(u32, rdp_current);
         edges_f = vectorAddCarry(edges_f, x12_f.x);
-        rsp.vector.store16(x12_i, 2, output, 8);
+        store(vec16, output, x12_i[2], 8);
         edges_i = vectorAdd(edges_i, x12_i.x);
         if(did_swap0 == 0) slot {
-            rsp.vector.store16(slope_f, 4, output, 14);
+            store(vec16, output, slope_f[4], 14);
         } {
             rsp.cp0.writeRegister(9, $a0);
         }
         vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
         vector_one = vectorSubtract(y_tmp2, y_tmp1);
-        rsp.vector.store16(x12_f, 2, output, 10);
+        store(vec16, output, x12_f[2], 10);
         attribute_delta_high = vectorSubtract(attribute3, y_tmp1);
         clip1 +%= command_bits;
         normal_f = vmudn(normal_f, shift_constants.Y);
-        rsp.vector.store16(slope_i, 2, output, 28);
+        store(vec16, output, slope_i[2], 28);
         normal_i = vmadh(normal_i, shift_constants.Y);
-        rsp.vector.store16(slope_f, 2, output, 30);
+        store(vec16, output, slope_f[2], 30);
         all_tmp1 = vmudh(vector_one, hml.y);
-        rsp.vector.store16(edges_i, 2, output, 24);
+        store(vec16, output, edges_i[2], 24);
         all_tmp1 = vmadh(attribute_delta_high, hml.w);
-        rsp.vector.store16(edges_f, 2, output, 26);
+        store(vec16, output, edges_f[2], 26);
         all_tmp1 = readVectorAccumulatorMiddle();
-        rsp.vector.store16(edges_i, 0, output, 16);
+        store(vec16, output, edges_i[0], 16);
         all3 = readVectorAccumulatorHigh();
-        rsp.vector.store16(edges_f, 0, output, 18);
+        store(vec16, output, edges_f[0], 18);
         y3 = vmudh(attribute_delta_high, hml.z);
-        rsp.vector.store16(slope_i, 0, output, 20);
+        store(vec16, output, slope_i[0], 20);
         y3 = vmadh(vector_one, hml.x);
-        rsp.vector.store16(slope_f, 0, output, 22);
+        store(vec16, output, slope_f[0], 22);
         y3 = readVectorAccumulatorMiddle();
         rsp.cp0.setDmaMemoryAddress(output);
         y2 = readVectorAccumulatorHigh();
@@ -484,46 +484,46 @@ fn normalizeMatrixVector(
         vector_temporary = vmadm(y2, normal_f.W);
         did_swap0 = signedLessThan(vertex2, vertex0);
         y3 = vmadn(y3, normal_i.W);
-        rsp.vector.store64(all_tmp1, 0, clip2, 24);
+        store(vec16, clip2, all_tmp1[0..4], 24);
         y2 = vmadh(y2, normal_i.W);
-        rsp.vector.store64(all_tmp1, 4, clip3, 24);
+        store(vec16, clip3, all_tmp1[4..8], 24);
         vector_temporary = vmadl(all_tmp1, slope_f.x);
-        rsp.vector.store64(all3, 0, clip2, 8);
+        store(vec16, clip2, all3[0..4], 8);
         vector_temporary = vmadm(all3, slope_f.x);
-        rsp.vector.store64(all3, 4, clip3, 8);
+        store(vec16, clip3, all3[4..8], 8);
         y1 = vmadn(all_tmp1, slope_i.x);
-        rsp.vector.store64(y3, 0, clip2, 56);
+        store(vec16, clip2, y3[0..4], 56);
         all_tmp2 = vmadh(all3, slope_i.x);
         if(did_swap0 != 0) jump geometry_rdpq_triangle_change_buffer() slot {
-            rsp.vector.store64(y3, 4, clip3, 56);
+            store(vec16, clip3, y3[4..8], 56);
         }
         export geometry_rdpq_triangle_change_buffer_done:
         vector_temporary = vmudh(y_tmp1, shift_constants.W);
-        rsp.vector.store64(y2, 0, clip2, 40);
+        store(vec16, clip2, y2[0..4], 40);
         vector_temporary = vmadl(y1, fy_f.X);
-        rsp.vector.store64(y2, 4, clip3, 40);
+        store(vec16, clip3, y2[4..8], 40);
         vector_temporary = vmadm(all_tmp2, fy_f.X);
-        rsp.vector.store64(y1, 0, clip2, 48);
+        store(vec16, clip2, y1[0..4], 48);
         all2 = vmadn(y1, fy_i.X);
-        rsp.vector.store64(y1, 4, clip3, 48);
+        store(vec16, clip3, y1[4..8], 48);
         all1 = vmadh(all_tmp2, fy_i.X);
-        rsp.vector.store64(all_tmp2, 0, clip2, 32);
+        store(vec16, clip2, all_tmp2[0..4], 32);
         y3[6] = vectorMove(y2[7]);
-        rsp.vector.store64(all_tmp2, 4, clip3, 32);
+        store(vec16, clip3, all_tmp2[4..8], 32);
         y1[6] = vectorMove(all_tmp2[7]);
         store(u32, rdp_current, vertex0);
         y_tmp2[1] = vectorMove(all2[7]);
-        rsp.vector.store64(all2, 0, clip2, 16);
+        store(vec16, clip2, all2[0..4], 16);
         y_tmp2[0] = vectorMove(all1[7]);
-        rsp.vector.store64(all2, 4, clip3, 16);
+        store(vec16, clip3, all2[4..8], 16);
         y_tmp2[3] = vectorMove(all_tmp1[7]);
-        rsp.vector.store64(all1, 0, clip2, 0);
+        store(vec16, clip2, all1[0..4], 0);
         y_tmp2[2] = vectorMove(all3[7]);
-        rsp.vector.store64(all1, 4, clip3, 0);
-        rsp.vector.store32(y1, 6, command_bits, 8);
-        rsp.vector.store32(y3, 6, command_bits, 12);
+        store(vec16, clip3, all1[4..8], 0);
+        store(vec16, command_bits, y1[6..8], 8);
+        store(vec16, command_bits, y3[6..8], 12);
         clip1 -%= 1;
-        rsp.vector.store64(y_tmp2, 0, command_bits, 0);
+        store(vec16, command_bits, y_tmp2[0..4], 0);
         return slot {
             rsp.cp0.startDmaWrite(clip1);
         }
@@ -580,7 +580,7 @@ export fn _start() noreturn {
         code_address = load(u32, clipping_code_address);
         code_size = load(u16, clipping_code_size);
         flags = 12;
-        return_address = code.addressOfUnsigned(_start);
+        return_address = code.addressOf(_start);
         store(u8, clipping_code_address, code_size);
     }
     jump dma.exec(code_size, pitch, code_address, target, flags) slot {
@@ -604,10 +604,10 @@ export fn _start() noreturn {
         input = input_output_addresses >> 16;
         segment = rdram_vertices >> 24;
         copy_size = buffer_size & 0xffff;
-        segment = load(u32, segment, segment_table);
+        segment = load(u32, segment_table + segment);
         input_end = input +% copy_size;
         copy_size -%= 1;
-        flags = scalar.zero();
+        flags = 0;
     }
     dma.exec(copy_size, pitch, source, input, flags) slot {
         source = rdram_vertices +% segment;
@@ -662,59 +662,59 @@ export fn _start() noreturn {
     reserved reg($k1) vertex_effect: u32 = undefined;
     reg($ra) return_address: u32 = undefined;
     exact {
-        segment = dmem.addressOfUnsigned(matrix_normal);
-        rsp.vector.load64(normal_row1, 0, segment, 8);
-        rsp.vector.load64(normal_row2, 0, segment, 16);
-        rsp.vector.load64(normal_row1, 4, segment, 8);
-        rsp.vector.load64(normal_row0, 0, segment, 0);
-        rsp.vector.load64(normal_row0, 4, segment, 0);
+        segment = dmem.addressOf(matrix_normal);
+        normal_row1[0..4] = load(vec16, segment, 8);
+        normal_row2[0..4] = load(vec16, segment, 16);
+        normal_row1[4..8] = load(vec16, segment, 8);
+        normal_row0[0..4] = load(vec16, segment, 0);
+        normal_row0[4..8] = load(vec16, segment, 0);
     }
     loadCurrentMVPMat(mvp_row0_i, mvp_row0_f, mvp_row1_i, mvp_row1_f, mvp_row2_i, mvp_row2_f, mvp_row3_i, mvp_row3_f) slot {
-        rsp.vector.load64(normal_row2, 4, segment, 16);
+        normal_row2[4..8] = load(vec16, segment, 16);
     }
     exact {
-        data_pointer = dmem.addressOfUnsigned(normal_mask_shift);
-        rsp.vector.load64(normal_shift, 0, data_pointer, 8);
-        rsp.vector.load64(normal_mask, 0, data_pointer, 0);
-        rsp.vector.load64(normal_mask, 4, data_pointer, 0);
-        rsp.vector.load64(normal_shift, 4, data_pointer, 8);
-        data_pointer = dmem.addressOfUnsigned(clipping_planes);
-        rsp.vector.load32(guard_band_scale, 0, data_pointer, 0);
-        data_pointer = dmem.addressOfUnsigned(screen_scale_offset);
-        rsp.vector.load64(screen_offset, 0, data_pointer, 8);
+        data_pointer = dmem.addressOf(normal_mask_shift);
+        normal_shift[0..4] = load(vec16, data_pointer, 8);
+        normal_mask[0..4] = load(vec16, data_pointer, 0);
+        normal_mask[4..8] = load(vec16, data_pointer, 0);
+        normal_shift[4..8] = load(vec16, data_pointer, 8);
+        data_pointer = dmem.addressOf(clipping_planes);
+        guard_band_scale[0..2] = load(vec16, data_pointer, 0);
+        data_pointer = dmem.addressOf(screen_scale_offset);
+        screen_offset[0..4] = load(vec16, data_pointer, 8);
         segment = input_output_addresses & 0xffff;
         output_b = segment -% triangle_size;
         light_end = load(u8, active_light_size);
-        rsp.vector.load64(screen_offset, 4, data_pointer, 8);
-        rsp.vector.load64(screen_size_i, 0, data_pointer, 0);
-        rsp.vector.load64(screen_size_i, 4, data_pointer, 0);
-        data_pointer = dmem.addressOfUnsigned(fog_scale_offset);
+        screen_offset[4..8] = load(vec16, data_pointer, 8);
+        screen_size_i[0..4] = load(vec16, data_pointer, 0);
+        screen_size_i[4..8] = load(vec16, data_pointer, 0);
+        data_pointer = dmem.addressOf(fog_scale_offset);
         guard_band_scale = vector_zero | guard_band_scale.y;
-        rsp.vector.load64(fog_scale, 0, data_pointer, 0);
+        fog_scale[0..4] = load(vec16, data_pointer, 0);
         screen_size_f = vmudl(vector_zero, shift_constants.WWWWWWWW);
         unlit = load(u8, triangle_command);
         source = load(u8, original_code_address);
         screen_size_i = vmadm(screen_size_i, shift_constants.WWWWWWWW);
-        data_pointer = dmem.addressOfUnsigned(normalize_w_scale);
+        data_pointer = dmem.addressOf(normalize_w_scale);
         screen_size_f = vmadn(vector_zero, vector_zero);
-        rsp.vector.load64(normalize_scale, 0, data_pointer, 0);
-        rsp.vector.load64(normalize_scale, 4, data_pointer, 0);
-        data_pointer = dmem.addressOfUnsigned(uv_generation_parameters);
-        rsp.vector.load64(uv_arguments, 4, data_pointer, 0);
+        normalize_scale[0..4] = load(vec16, data_pointer, 0);
+        normalize_scale[4..8] = load(vec16, data_pointer, 0);
+        data_pointer = dmem.addressOf(uv_generation_parameters);
+        uv_arguments[4..8] = load(vec16, data_pointer, 0);
         segment -%= 72;
         fog_scale[6] = vectorMove(fog_scale[2]);
-        data_pointer = dmem.addressOfUnsigned(screen_uvgen_scale);
+        data_pointer = dmem.addressOf(screen_uvgen_scale);
         fog_offset = load(u8, fog_store_offset);
         light_end +%= directional_light_color;
-        rsp.vector.load16(uv_arguments, 7, data_pointer, 0);
-        data_pointer = dmem.addressOfUnsigned(uv_generation_parameters);
-        rsp.vector.load32(uv_arguments, 0, data_pointer, 0);
+        uv_arguments[7] = load(vec16, data_pointer, 0);
+        data_pointer = dmem.addressOf(uv_generation_parameters);
+        uv_arguments[0..2] = load(vec16, data_pointer, 0);
     }
     dma.waitIdle() slot {
-        rsp.vector.load32(uv_arguments, 2, data_pointer, 0);
+        uv_arguments[2..4] = load(vec16, data_pointer, 0);
     }
     exact {
-        rsp.vector.load128(position, input, 0);
+        position[0..8] = load(vec16, input, 0);
         normal = normal_mask & position.wwwwWWWW;
         normal = vmudn(normal, normal_shift);
     }
@@ -723,7 +723,7 @@ export fn _start() noreturn {
         light_color = vector_zero | fog_scale.z;
         input_output_addresses = load(u8, input, 19);
         vector_temporary = vmulf(normal_row0, normal.xxxxXXXX);
-        light_pointer = dmem.addressOfUnsigned(directional_light_color);
+        light_pointer = dmem.addressOf(directional_light_color);
         vector_temporary = vmacf(normal_row1, normal.yyyyYYYY);
         is_point_light = load(u8, light_pointer, 15);
         normal = vmacf(normal_row2, normal.zzzzZZZZ);
@@ -736,7 +736,7 @@ export fn _start() noreturn {
         clip_position_i = vmadh(mvp_row1_i, position.yyyyYYYY);
         rsp.vector.loadPackedSigned(light_direction, light_pointer, 8);
         clip_position_f = vmadn(mvp_row2_f, position.zzzzZZZZ);
-        mv_matrix_loaded = scalar.zero();
+        mv_matrix_loaded = 0;
         segment +%= 72;
         clip_position_i = vmadh(mvp_row2_i, position.zzzzZZZZ);
         clip_position_f = vmadn(mvp_row3_f, vector_one.W);
@@ -750,7 +750,7 @@ export fn _start() noreturn {
         light_scale = vmulf(normal, light_direction);
         rsp.vector.loadPackedUnsigned(color, light_pointer, 0);
         if(is_point_light != 0) goto pointLight slot {
-            return_address = code.addressOfUnsigned(LABEL_T3DCmd_VertLoad_0005);
+            return_address = code.addressOf(LABEL_T3DCmd_VertLoad_0005);
         }
         export LABEL_T3DCmd_VertLoad_0005:
         light_pointer +%= 16;
@@ -765,7 +765,7 @@ export fn _start() noreturn {
     light_loop_end:
         light_direction = vmudm(guard_band_scale, clip_position_f.wwwwWWWW);
         rsp.vector.loadPackedUnsigned(color, input, 16);
-        return_address = code.addressOfUnsigned(LABEL_T3DCmd_VertLoad_0006);
+        return_address = code.addressOf(LABEL_T3DCmd_VertLoad_0006);
         light_scale = vmadh(guard_band_scale, clip_position_i.wwwwWWWW);
         light_direction = vmadn(vector_zero, vector_zero);
         if(mv_matrix_loaded != 0) goto loadCurrentMVPMat slot {
@@ -780,7 +780,7 @@ export fn _start() noreturn {
         fog_b = output_b +% fog_offset;
         export TAG_LightMul:
         color = vmulf(color, light_color);
-        rsp.vector.load128(position, input, 32);
+        position[0..8] = load(vec16, input, 32);
         clip_position_f = vmudl(clip_position_f, normalize_scale);
         clip_codes = rsp.vector.getCompareCode();
         clip_position_i = vmadm(clip_position_i, normalize_scale);
@@ -790,18 +790,18 @@ export fn _start() noreturn {
         clip_b = clip_codes >> 4;
         reject_a = reject_codes & 0x0707;
         color = vmudm(color, shift_constants.Z);
-        rsp.vector.store64(clip_position_i, 0, segment, 16);
+        store(vec16, segment, clip_position_i[0..4], 16);
         screen_size_i[3] = vectorReciprocalHigh(clip_position_i[3]);
-        rsp.vector.store64(clip_position_f, 0, segment, 24);
+        store(vec16, segment, clip_position_f[0..4], 24);
         screen_size_f[3] = vectorReciprocalLow(clip_position_f[3]);
-        rsp.vector.store64(clip_position_f, 4, output_b, 24);
+        store(vec16, output_b, clip_position_f[4..8], 24);
         screen_size_i[3] = vectorReciprocalHigh(clip_position_i[7]);
         is_point_light = clip_codes & 0x0307;
         screen_size_f[7] = vectorReciprocalLow(clip_position_f[7]);
         screen_size_i[7] = vectorReciprocalHigh(vector_zero[7]);
         flags = is_point_light >> 5;
         color = vmudh(color, uv_arguments.Z);
-        rsp.vector.store64(clip_position_i, 4, output_b, 16);
+        store(vec16, output_b, clip_position_i[4..8], 16);
         is_point_light |= flags;
         light_color = vectorAddCarry(clip_position_f, fog_scale.y);
         light_direction = vectorAdd(clip_position_i, fog_scale.x);
@@ -812,11 +812,11 @@ export fn _start() noreturn {
         is_point_light |= input_output_addresses;
         rsp.vector.storePackedUnsigned(color, 0, segment, 8);
         clip_position_f = vmadn(clip_position_f, screen_size_i.wwwwWWWW);
-        rsp.vector.store16(screen_size_f, 3, segment, 34);
+        store(vec16, segment, screen_size_f[3], 34);
         clip_position_i = vmadh(clip_position_i, screen_size_i.wwwwWWWW);
         light_direction = vmudh(light_direction, fog_scale.w);
-        rsp.vector.store16(screen_size_f, 7, output_b, 34);
-        rsp.vector.store16(screen_size_i, 3, segment, 32);
+        store(vec16, output_b, screen_size_f[7], 34);
+        store(vec16, segment, screen_size_i[3], 32);
         clip_b |= flags;
         vector_temporary = vmudl(clip_position_f, screen_size_f);
         flags = reject_a >> 5;
@@ -826,32 +826,32 @@ export fn _start() noreturn {
         clip_position_i = vmadh(clip_position_i, screen_size_i);
         clip_b |= input_output_addresses;
         vector_temporary = vectorSubtract(fog_scale, light_direction.zzzzZZZZ);
-        rsp.vector.store16(screen_size_i, 7, output_b, 32);
+        store(vec16, output_b, screen_size_i[7], 32);
         reject_a = reject_a ~| flags;
         flags = reject_b >> 5;
         clip_position_i = vmadh(screen_offset, vector_one.W);
-        rsp.vector.load64(light_color, 0, input, 24);
+        light_color[0..4] = load(vec16, input, 24);
         input +%= 32;
         reject_b = reject_b ~| flags;
         vector_temporary = vmudn(vector_temporary, vector_one.Z);
-        rsp.vector.store64(clip_position_i, 0, segment, 0);
+        store(vec16, segment, clip_position_i[0..4], 0);
         light_direction = vector_zero | normal;
         normal = normal_mask & position.wwwwWWWW;
-        rsp.vector.store64(clip_position_i, 4, output_b, 0);
+        store(vec16, output_b, clip_position_i[4..8], 0);
         store(u8, segment, is_point_light, 6);
         store(u8, segment, reject_a, 7);
         store(u8, output_b, clip_b, 6);
-        rsp.vector.store16(vector_temporary, 2, fog_a, 0);
+        store(vec16, fog_a, vector_temporary[2], 0);
         normal = vmudn(normal, normal_shift);
         store(u8, output_b, reject_b, 7);
         light_color = vectorAddCarry(light_color, uv_arguments);
         call(vertex_effect) slot {
-            rsp.vector.store16(vector_temporary, 6, fog_b, 0);
+            store(vec16, fog_b, vector_temporary[6], 0);
         }
         export VertexFX_None:
-        rsp.vector.store32(light_color, 0, segment, 12);
+        store(vec16, segment, light_color[0..2], 12);
         if(input != input_end) goto vertex_loop slot {
-            rsp.vector.store32(light_color, 2, output_b, 12);
+            store(vec16, output_b, light_color[2..4], 12);
         }
         jump queue.commandLoop() slot {
             export VertexFX_Spherical:
@@ -865,9 +865,9 @@ export fn _start() noreturn {
         color = vmulf(color, light_direction.zzzzZZZZ);
         color = vmulf(color, uv_arguments.x);
         light_color = vectorAddCarry(light_color, color);
-        rsp.vector.store32(light_color, 0, segment, 12);
+        store(vec16, segment, light_color[0..2], 12);
         if(input != input_end) goto vertex_loop slot {
-            rsp.vector.store32(light_color, 4, output_b, 12);
+            store(vec16, output_b, light_color[4..6], 12);
         }
         jump queue.commandLoop() slot {
             export VertexFX_CelShadeColor:
@@ -876,27 +876,27 @@ export fn _start() noreturn {
         color = vectorCompareGreaterOrEqual(color, color);
         light_color[0] = vectorMove(color[0]);
         light_color[2] = vectorMove(color[4]);
-        rsp.vector.store32(light_color, 2, output_b, 12);
+        store(vec16, output_b, light_color[2..4], 12);
         if(input != input_end) goto vertex_loop slot {
-            rsp.vector.store32(light_color, 0, segment, 12);
+            store(vec16, segment, light_color[0..2], 12);
         }
         jump queue.commandLoop() slot {
             export VertexFX_CelShadeAlpha:
             light_color[0] = vectorMove(color[3]);
         }
         light_color[2] = vectorMove(color[7]);
-        rsp.vector.store32(light_color, 2, output_b, 12);
+        store(vec16, output_b, light_color[2..4], 12);
         if(input != input_end) goto vertex_loop slot {
-            rsp.vector.store32(light_color, 0, segment, 12);
+            store(vec16, segment, light_color[0..2], 12);
         }
         jump queue.commandLoop() slot {
             export VertexFX_Outline:
             vector_temporary = vmulf(light_direction, uv_arguments);
         }
         clip_position_i = vmadh(clip_position_i, vector_one.W);
-        rsp.vector.store32(clip_position_i, 4, output_b, 0);
+        store(vec16, output_b, clip_position_i[4..6], 0);
         if(input != input_end) goto vertex_loop slot {
-            rsp.vector.store32(clip_position_i, 0, segment, 0);
+            store(vec16, segment, clip_position_i[0..2], 0);
         }
         jump queue.commandLoop();
     }
@@ -928,26 +928,26 @@ fn pointLight(
         if(mv_matrix_loaded != 0) goto point_position_ready slot {
             light_size = load(u16, light_pointer, 14);
         }
-        scratch = dmem.addressOfUnsigned(matrix_mv);
-        rsp.vector.load64(matrix_row_f, 0, scratch, 24);
-        rsp.vector.load64(matrix_row_f, 4, scratch, 24);
-        rsp.vector.load64(vertex_position_i, 0, scratch, 0);
-        rsp.vector.load64(vertex_position_f, 0, scratch, 8);
-        rsp.vector.load64(point_position_i, 0, scratch, 32);
-        rsp.vector.load64(point_position_f, 0, scratch, 40);
-        rsp.vector.load64(vertex_position_f, 4, scratch, 8);
-        rsp.vector.load64(vertex_position_i, 4, scratch, 0);
-        rsp.vector.load64(light_dot_i, 0, scratch, 48);
-        rsp.vector.load64(point_position_f, 4, scratch, 40);
-        rsp.vector.load64(matrix_row_i, 0, scratch, 16);
+        scratch = dmem.addressOf(matrix_mv);
+        matrix_row_f[0..4] = load(vec16, scratch, 24);
+        matrix_row_f[4..8] = load(vec16, scratch, 24);
+        vertex_position_i[0..4] = load(vec16, scratch, 0);
+        vertex_position_f[0..4] = load(vec16, scratch, 8);
+        point_position_i[0..4] = load(vec16, scratch, 32);
+        point_position_f[0..4] = load(vec16, scratch, 40);
+        vertex_position_f[4..8] = load(vec16, scratch, 8);
+        vertex_position_i[4..8] = load(vec16, scratch, 0);
+        light_dot_i[0..4] = load(vec16, scratch, 48);
+        point_position_f[4..8] = load(vec16, scratch, 40);
+        matrix_row_i[0..4] = load(vec16, scratch, 16);
         vertex_position_f = vmudn(vertex_position_f, position.xxxxXXXX);
-        rsp.vector.load64(matrix_row_i, 4, scratch, 16);
-        rsp.vector.load64(point_position_i, 4, scratch, 32);
-        rsp.vector.load64(light_dot_f, 0, scratch, 56);
+        matrix_row_i[4..8] = load(vec16, scratch, 16);
+        point_position_i[4..8] = load(vec16, scratch, 32);
+        light_dot_f[0..4] = load(vec16, scratch, 56);
         vertex_position_i = vmadh(vertex_position_i, position.xxxxXXXX);
-        rsp.vector.load64(light_dot_f, 4, scratch, 56);
+        light_dot_f[4..8] = load(vec16, scratch, 56);
         vertex_position_f = vmadn(matrix_row_f, position.yyyyYYYY);
-        rsp.vector.load64(light_dot_i, 4, scratch, 48);
+        light_dot_i[4..8] = load(vec16, scratch, 48);
         vertex_position_i = vmadh(matrix_row_i, position.yyyyYYYY);
         vertex_position_f = vmadn(point_position_f, position.zzzzZZZZ);
         vertex_position_i = vmadh(point_position_i, position.zzzzZZZZ);
@@ -958,8 +958,8 @@ fn pointLight(
         mv_matrix_loaded = 1;
         vertex_position_f = vmadn(vector_zero, vector_zero);
     point_position_ready:
-        rsp.vector.load64(point_position_i, 0, light_pointer, 8);
-        rsp.vector.load64(point_position_i, 4, light_pointer, 8);
+        point_position_i[0..4] = load(vec16, light_pointer, 8);
+        point_position_i[4..8] = load(vec16, light_pointer, 8);
         light_size &= 0x7fff;
         point_position_i = vmudm(point_position_i, shift_constants.Y);
         point_position_f = vmadn(vector_zero, vector_zero);
@@ -1027,25 +1027,25 @@ fn loadCurrentMVPMat(
 ) {
     reg($at) matrix: dmem = undefined;
     exact {
-        matrix = dmem.addressOfUnsigned(matrix_mvp);
-        rsp.vector.load64(row0_f, 4, matrix, 8);
-        rsp.vector.load64(row3_f, 4, matrix, 56);
-        rsp.vector.load64(row0_f, 0, matrix, 8);
-        rsp.vector.load64(row1_i, 4, matrix, 16);
-        rsp.vector.load64(row3_f, 0, matrix, 56);
-        rsp.vector.load64(row3_i, 0, matrix, 48);
-        rsp.vector.load64(row2_i, 0, matrix, 32);
-        rsp.vector.load64(row2_f, 4, matrix, 40);
-        rsp.vector.load64(row2_i, 4, matrix, 32);
-        rsp.vector.load64(row1_f, 4, matrix, 24);
-        rsp.vector.load64(row0_i, 0, matrix, 0);
-        rsp.vector.load64(row2_f, 0, matrix, 40);
-        rsp.vector.load64(row0_i, 4, matrix, 0);
-        rsp.vector.load64(row1_f, 0, matrix, 24);
-        rsp.vector.load64(row1_i, 0, matrix, 16);
+        matrix = dmem.addressOf(matrix_mvp);
+        row0_f[4..8] = load(vec16, matrix, 8);
+        row3_f[4..8] = load(vec16, matrix, 56);
+        row0_f[0..4] = load(vec16, matrix, 8);
+        row1_i[4..8] = load(vec16, matrix, 16);
+        row3_f[0..4] = load(vec16, matrix, 56);
+        row3_i[0..4] = load(vec16, matrix, 48);
+        row2_i[0..4] = load(vec16, matrix, 32);
+        row2_f[4..8] = load(vec16, matrix, 40);
+        row2_i[4..8] = load(vec16, matrix, 32);
+        row1_f[4..8] = load(vec16, matrix, 24);
+        row0_i[0..4] = load(vec16, matrix, 0);
+        row2_f[0..4] = load(vec16, matrix, 40);
+        row0_i[4..8] = load(vec16, matrix, 0);
+        row1_f[0..4] = load(vec16, matrix, 24);
+        row1_i[0..4] = load(vec16, matrix, 16);
     }
     return slot {
-        rsp.vector.load64(row3_i, 4, matrix, 48);
+        row3_i[4..8] = load(vec16, matrix, 48);
     }
 }
 
@@ -1119,11 +1119,11 @@ fn loadCurrentMVPMat(
     reg($s4) destination: dmem = undefined;
     exact {
         flags = 12;
-        size = scalar.unsigned(63);
+        size = 63;
         source = bitCast(rdram);
     }
     jump dma.exec(size, pitch, source, destination, flags) slot {
-        destination = dmem.addressOfUnsigned(matrix_projection);
+        destination = dmem.addressOf(matrix_projection);
     }
 }
 
@@ -1156,11 +1156,11 @@ fn loadCurrentMVPMat(
     }
     exact {
         segment_base = matrix_address >> 24;
-        segment_base = load(u32, segment_base, segment_table);
+        segment_base = load(u32, segment_table + segment_base);
         matrix_address +%= segment_base;
     }
     if(stack_control < 0) slot {
-        dma_destination = dmem.addressOfUnsigned(matrix_mv);
+        dma_destination = dmem.addressOf(matrix_mv);
     } {
         // Signed stack pointers and segmented addresses intentionally share
         // this register, so reinterpret the bits without emitting a move.
@@ -1168,44 +1168,44 @@ fn loadCurrentMVPMat(
     }
     exact {
         address_mask = 0xffffff;
-        dma_size = scalar.unsigned(63);
+        dma_size = 63;
         dma_flags = 12;
     }
     dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags) slot {
         rdram = matrix_address & address_mask;
     }
     if(multiply != 0) slot {
-        dma_pitch = dmem.addressOfUnsigned(matrix_normal);
+        dma_pitch = dmem.addressOf(matrix_normal);
     } {
         rdram = bitCast(stack_pointer) -% 64;
-        dma_size = scalar.unsigned(63);
+        dma_size = 63;
         dma_flags = 12;
-        dma_destination = dmem.addressOfUnsigned(clipping_buffer_result);
+        dma_destination = dmem.addressOf(clipping_buffer_result);
         dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
-        segment_base = dmem.addressOfUnsigned(clipping_buffer_result);
-        dma_destination = dmem.addressOfUnsigned(matrix_mv);
+        segment_base = dmem.addressOf(clipping_buffer_result);
+        dma_destination = dmem.addressOf(matrix_mv);
         multiplyMatrices(matrix_destination, segment_base, dma_destination) slot {
-            matrix_destination = dmem.addressOfUnsigned(matrix_mv);
+            matrix_destination = dmem.addressOf(matrix_mv);
         }
     }
     exact {
-        dma_size = scalar.unsigned(63);
+        dma_size = 63;
         dma_flags = -32756;
     }
     dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags) slot {
         rdram = bitCast(stack_pointer);
     }
     normalizeMatrixVector(dma_destination, dma_pitch) slot {
-        matrix_destination = dmem.addressOfUnsigned(matrix_mvp);
+        matrix_destination = dmem.addressOf(matrix_mvp);
     }
     normalizeMatrixVector(dma_destination, dma_pitch) slot {
-        segment_base = dmem.addressOfUnsigned(matrix_projection);
+        segment_base = dmem.addressOf(matrix_projection);
     }
     normalizeMatrixVector(dma_destination, dma_pitch);
     exact {
-        return_address = code.addressOfUnsigned(commandLoop);
+        return_address = code.addressOf(commandLoop);
         jump multiplyMatrices(matrix_destination, segment_base, dma_destination) slot {
-            dma_destination = dmem.addressOfUnsigned(matrix_mv);
+            dma_destination = dmem.addressOf(matrix_mv);
         }
     }
 }
@@ -1234,7 +1234,7 @@ fn triangleClip() noreturn {
             store(u16, 0x92, scratch);
         }
         jump _start() slot {
-            scratch = code.addressOfUnsigned(_start);
+            scratch = code.addressOf(_start);
         }
     }
 }
@@ -1283,11 +1283,11 @@ fn triangleClip() noreturn {
             dmem_pointer +%= 2;
         }
         jump geometry_RDPQ_Triangle_Send_Async() slot {
-            dma_busy = code.addressOfUnsigned(strip_next);
+            dma_busy = code.addressOf(strip_next);
         }
     strip_end:
         if(dmem_end >= 0) jump queue.commandLoop() slot {
-            dma_busy = code.addressOfUnsigned(commandLoop);
+            dma_busy = code.addressOf(commandLoop);
         }
     }
 }
@@ -1304,17 +1304,17 @@ fn syncTrianglesImpl() noreturn {
         export syncTriangles:
         clip_loaded = load(u8, clipping_code_address);
         if(clip_loaded == 0) jump geometry_RDPQ_Triangle_Send_End() slot {
-            target = code.addressOfUnsigned(_start);
+            target = code.addressOf(_start);
         }
         code_size = load(u16, clipping_code_size);
-        dma_flags = scalar.zero();
+        dma_flags = 0;
         code_address = load(u32, original_code_address);
         dma.exec(code_size, pitch, code_address, target, dma_flags) slot {
             code_size -%= 1;
         }
         store(u8, clipping_code_address, 0);
         jump geometry_RDPQ_Triangle_Send_End() slot {
-            return_address = code.addressOfUnsigned(commandLoop);
+            return_address = code.addressOf(commandLoop);
         }
     }
 }
@@ -1344,20 +1344,20 @@ fn drawTriangleSequenceImpl(
         }
         vertex2 = bitCast(base_vertex);
         end_index = base_vertex +% 36;
-        return_address = code.addressOfUnsigned(sequence_next);
+        return_address = code.addressOf(sequence_next);
         jump geometry_RDPQ_Triangle_Send_Async() slot {
             base_vertex +%= vertex_increment;
         }
     sequence_end:
         if(is_quad == 0) jump syncTriangles() slot {
-            return_address = code.addressOfUnsigned(commandLoop);
+            return_address = code.addressOf(commandLoop);
         }
         base_vertex = load(u16, command_end, 0x9a);
         face_culling_flag ^= 1;
         base_vertex_end +%= 36;
         base_vertex +%= 36;
         goto sequence_next slot {
-            is_quad = scalar.zero();
+            is_quad = 0;
         }
     }
 }
@@ -1373,7 +1373,7 @@ fn drawTriangleSequenceImpl(
     reg($s4) scratch: dmem = undefined;
     exact {
         rdram = bitCast(patch_address);
-        scratch = scalar.unsigned(0x80);
+        scratch = 0x80;
         store(u32, scratch, opcode_0);
         store(u32, scratch, opcode_1, 4);
     }

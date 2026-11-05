@@ -31,6 +31,25 @@ pub const Lifetime = struct {
     forbidden_vector: u32 = 0,
 };
 
+/// A register an automatic value may take, checked against pinned values.
+pub const Pinned = union(enum) {
+    scalar: Register,
+    vector: VReg,
+
+    fn heldBy(self: Pinned, lifetime: Lifetime) bool {
+        return switch (self) {
+            .scalar => |reg| lifetime.fixed_reg == reg,
+            .vector => |reg| holdsVector(lifetime, reg),
+        };
+    }
+};
+
+fn holdsVector(lifetime: Lifetime, reg: VReg) bool {
+    const fixed = lifetime.fixed_vector_reg orelse return false;
+    if (fixed == reg) return true;
+    return lifetime.data_type == .vec32 and @intFromEnum(fixed) < 31 and @intFromEnum(fixed) + 1 == @intFromEnum(reg);
+}
+
 pub const Label = struct { name: []const u8, position: usize, exported: bool = false };
 pub const Edge = struct { target: []const u8, position: usize };
 pub const Call = struct {
@@ -340,6 +359,24 @@ pub const Lifetimes = struct {
     pub fn vectorRegisterForbidden(self: *const Lifetimes, name: []const u8, reg: VReg) bool {
         const lifetime = self.findFirst(name) orelse return false;
         return lifetime.forbidden_vector & vectorRegisterBit(reg) != 0;
+    }
+
+    /// Whether a value pinned to `reg` is live at the same time as `name`,
+    /// including one declared later; automatic values must avoid it.
+    /// Without reuse, ranges are unknown and the in-scope checks decide.
+    pub fn pinnedOverlaps(self: *const Lifetimes, name: []const u8, reg: Pinned) bool {
+        if (!self.reuse) return false;
+        const own = self.findFirst(name) orelse return false;
+        for (self.lifetimes.items) |other| {
+            if (pinnedConflict(own, other, reg)) return true;
+        }
+        return false;
+    }
+
+    fn pinnedConflict(own: Lifetime, other: Lifetime, reg: Pinned) bool {
+        if (other.automatic or std.mem.eql(u8, other.name, own.name)) return false;
+        if (!reg.heldBy(other)) return false;
+        return own.first_live <= other.last_use and other.first_live <= own.last_use;
     }
 
     /// Whether a lifetime is live after `call` returns without the call

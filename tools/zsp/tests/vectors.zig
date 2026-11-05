@@ -118,8 +118,9 @@ test "triangle packed and partial vector loads emit exact RSP encodings" {
         \\  reg($t0) ptr: dmem = 8;
         \\  reg($v01) unsigned_bytes: vec16 = loadVectorBytesUnsigned(ptr, 8);
         \\  reg($v02) signed_bytes: vec16 = loadVectorBytes(ptr, 8);
-        \\  reg($v03) words: vec16 = loadVectorWords(ptr, 4);
-        \\  words = loadVectorWords(ptr, 8, 4);
+        \\  reg($v03) words: vec16 = undefined;
+        \\  words[0..2] = load(vec16, ptr, 4);
+        \\  words[4..6] = load(vec16, ptr, 8);
         \\  rsp.halt();
         \\}
     ,
@@ -144,14 +145,14 @@ test "explicit vector memory builtins emit each transfer width" {
         \\fn test() noreturn {
         \\  reg($t0) ptr: dmem = 8;
         \\  reg($v01) value: vec16 = undefined;
-        \\  rsp.vector.load16(value, 2, ptr, 4);
-        \\  rsp.vector.store16(value, 2, ptr, 4);
-        \\  rsp.vector.load32(value, 2, ptr, 4);
-        \\  rsp.vector.store32(value, 2, ptr, 4);
-        \\  rsp.vector.load64(value, 2, ptr, 8);
-        \\  rsp.vector.store64(value, 2, ptr, 8);
-        \\  rsp.vector.load128(value, ptr, 16);
-        \\  rsp.vector.store128(value, ptr, 16);
+        \\  value[2] = load(vec16, ptr, 4);
+        \\  store(vec16, ptr, value[2], 4);
+        \\  value[2..4] = load(vec16, ptr, 4);
+        \\  store(vec16, ptr, value[2..4], 4);
+        \\  value[2..6] = load(vec16, ptr, 8);
+        \\  store(vec16, ptr, value[2..6], 8);
+        \\  value[0..8] = load(vec16, ptr, 16);
+        \\  store(vec16, ptr, value[0..8], 16);
         \\  rsp.vector.loadPackedSigned(value, ptr, 8);
         \\  rsp.vector.loadPackedUnsigned(value, ptr, 8);
         \\  rsp.vector.storePackedSigned(value, 0, ptr, 8);
@@ -298,9 +299,9 @@ test "explicit accumulator and reciprocal names preserve RSP encodings" {
         \\test:
         \\  .word 0x4b00049d # vsar $v18, $v00, $v00
         \\  .word 0x4b2004dd # vsar $v19, $v00, $v00
-        \\  .word 0x4b127d32 # vrcph $v20[7], $v18[0]
-        \\  .word 0x4b137d71 # vrcpl $v21[7], $v19[0]
-        \\  .word 0x4b384570 # vrcp $v21[0], $v24[1]
+        \\  .word 0x4b123d32 # vrcph $v20[7], $v18[0]
+        \\  .word 0x4b133d71 # vrcpl $v21[7], $v19[0]
+        \\  .word 0x4b380570 # vrcp $v21[0], $v24[1]
         \\  break
         \\
         \\
@@ -332,7 +333,7 @@ test "vector lane moves and reciprocal operations emit exact RSP encodings" {
         \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
         \\  .word 0x4a04212c # vxor $v04, $v04, $v04
         \\  .word 0x4bc21873 # vmov $v01[3], $v02[6]
-        \\  .word 0x4b024073 # vmov $v01[0], $v02[0]
+        \\  .word 0x4b020073 # vmov $v01[0], $v02[0]
         \\  .word 0x4ba400f2 # vrcph $v03[0], $v04[5]
         \\  .word 0x4b8408f1 # vrcpl $v03[1], $v04[4]
         \\  .word 0x4b6410f0 # vrcp $v03[2], $v04[3]
@@ -618,9 +619,9 @@ test "reciprocal square root lane operations emit exact RSP encodings" {
         \\.text
         \\
         \\test:
-        \\  .word 0x4b015876 # vrsqh $v01[3], $v01[0]
-        \\  .word 0x4b0258b5 # vrsql $v02[3], $v02[0]
-        \\  .word 0x4b015874 # vrsq $v01[3], $v01[0]
+        \\  .word 0x4b011876 # vrsqh $v01[3], $v01[0]
+        \\  .word 0x4b0218b5 # vrsql $v02[3], $v02[0]
+        \\  .word 0x4b011874 # vrsq $v01[3], $v01[0]
         \\
         \\
     );
@@ -654,9 +655,9 @@ test "half-vector stores emit SDV with exact lane and offset fields" {
         \\fn test() noreturn {
         \\  reg($t4) ptr: dmem = undefined;
         \\  reg($v04) values: vec16 = undefined;
-        \\  store(vec64, ptr, values, 24);
-        \\  store(vec64, ptr, values[4], 56);
-        \\  store(vec32lane, ptr, values[6], 12);
+        \\  store(vec16, ptr, values[0..4], 24);
+        \\  store(vec16, ptr, values[4..8], 56);
+        \\  store(vec16, ptr, values[6..8], 12);
         \\}
     ,
         \\.set noreorder

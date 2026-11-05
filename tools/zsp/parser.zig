@@ -16,11 +16,71 @@ pub const Parser = struct {
     type_symbols: std.ArrayList(TypeSymbol) = .empty,
     compile_time_members: std.ArrayList(CompileTimeMember) = .empty,
     compile_time_types: std.ArrayList([]const u8) = .empty,
+    /// Names replaced while lexing: `inline for` captures become numbers
+    /// and names declared in an unrolled body get a per-iteration name.
+    substitutions: std.ArrayList(Substitution) = .empty,
+    /// Names the parser made up, owned by the function being parsed.
+    generated_names: std.ArrayList([]const u8) = .empty,
+    /// Unrolled iterations being parsed, innermost last.
+    iterations: std.ArrayList(usize) = .empty,
+    /// What ends an assignment: `;`, or `)` in a `while` continue expression.
+    terminator: token.Tag = .semicolon,
+    /// Set while parsing a store's value, where `v[first..end]` is allowed.
+    allow_lane_range: bool = false,
+    accumulator: @import("parse_products.zig").Chain = .{},
 
-    const TypeSymbol = struct {
+    pub const TypeSymbol = struct {
         name: []const u8,
         data_type: ast.DataType,
         function_type: ?ast.FunctionType = null,
+        /// Register arrays: `name[i]` lexes as the element's own name.
+        array_len: ?usize = null,
+        pointee: ?Pointee = null,
+    };
+
+    /// What a typed DMEM pointer addresses.
+    pub const Pointee = union(enum) {
+        scalar: ast.DataType,
+        packed_struct: []const u8,
+    };
+
+    /// Formats the indices of the enclosing unrolled iterations as `0.1`.
+    const IterationPath = struct {
+        indices: []const usize,
+
+        pub fn format(self: IterationPath, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            for (self.indices, 0..) |index, position| {
+                if (position != 0) try writer.writeByte('.');
+                try writer.print("{d}", .{index});
+            }
+        }
+    };
+
+    const Substitution = struct { name: []const u8, tag: token.Tag, text: []const u8 };
+
+    /// Statements parsed so far in one list, with their source locations.
+    pub const StatementList = struct {
+        statements: std.ArrayList(ast.Statement) = .empty,
+        locations: std.ArrayList(ast.SourceLocation) = .empty,
+
+        pub fn append(self: *StatementList, allocator: std.mem.Allocator, statement: ast.Statement, location: ast.SourceLocation) !void {
+            try self.statements.append(allocator, statement);
+            try self.locations.append(allocator, location);
+        }
+
+        pub fn insert(self: *StatementList, allocator: std.mem.Allocator, index: usize, statement: ast.Statement, location: ast.SourceLocation) !void {
+            try self.statements.insert(allocator, index, statement);
+            try self.locations.insert(allocator, index, location);
+        }
+
+        pub fn remove(self: *StatementList, index: usize) void {
+            _ = self.statements.orderedRemove(index);
+            _ = self.locations.orderedRemove(index);
+        }
+
+        pub fn len(self: *const StatementList) usize {
+            return self.statements.items.len;
+        }
     };
 
     pub const CompileTimeMember = struct {
@@ -37,7 +97,7 @@ pub const Parser = struct {
             .current = undefined,
             .diagnostic = null,
         };
-        parser.current = try parser.lexer.next();
+        try parser.advance();
         return parser;
     }
 
@@ -65,11 +125,16 @@ pub const Parser = struct {
         self.type_symbols.deinit(self.allocator);
         self.compile_time_members.deinit(self.allocator);
         self.compile_time_types.deinit(self.allocator);
+        self.substitutions.deinit(self.allocator);
+        for (self.generated_names.items) |name| self.allocator.free(name);
+        self.generated_names.deinit(self.allocator);
+        self.iterations.deinit(self.allocator);
     }
 
     pub fn appendFunction(self: *Parser, functions: *std.ArrayList(ast.Function), parsed: ast.Function) !void {
         var function = parsed;
         function.source_locations = try self.statement_locations.toOwnedSlice(self.allocator);
+        function.generated_names = try self.generated_names.toOwnedSlice(self.allocator);
         try functions.append(self.allocator, function);
     }
 
@@ -94,33 +159,42 @@ pub const Parser = struct {
     }
 
     pub fn parseTopLevelStatements(self: *Parser) anyerror![]ast.Statement {
-        var statements: std.ArrayList(ast.Statement) = .empty;
-        var locations: std.ArrayList(ast.SourceLocation) = .empty;
-        defer locations.deinit(self.allocator);
+        var list: StatementList = .{};
+        defer list.locations.deinit(self.allocator);
         while (self.current.tag != .eof and !self.isFunctionDeclarationStart() and
             !self.isCompileTimeTypeStart() and !self.isImportStart())
         {
-            try locations.append(self.allocator, .{ .line = self.current.line, .column = self.current.column });
-            try statements.append(self.allocator, try self.parseStatement());
+            try self.parseStatementInto(&list);
         }
-        return self.finishStatements(&statements, locations.items);
+        self.accumulator.closeList(&list);
+        return self.finishStatements(&list);
     }
 
     pub fn parseBlockStatements(self: *Parser) anyerror![]ast.Statement {
         const scope = self.type_symbols.items.len;
         defer self.type_symbols.shrinkRetainingCapacity(scope);
-        var statements: std.ArrayList(ast.Statement) = .empty;
-        var locations: std.ArrayList(ast.SourceLocation) = .empty;
-        defer locations.deinit(self.allocator);
-        while (!try self.eat(.r_brace)) {
-            try locations.append(self.allocator, .{ .line = self.current.line, .column = self.current.column });
-            try statements.append(self.allocator, try self.parseStatement());
-        }
-        return self.finishStatements(&statements, locations.items);
+        var list: StatementList = .{};
+        defer list.locations.deinit(self.allocator);
+        while (!try self.eat(.r_brace)) try self.parseStatementInto(&list);
+        self.accumulator.closeList(&list);
+        return self.finishStatements(&list);
     }
 
-    pub fn finishStatements(self: *Parser, statements: *std.ArrayList(ast.Statement), locations: []const ast.SourceLocation) ![]ast.Statement {
-        const result = try statements.toOwnedSlice(self.allocator);
+    /// Parses the statements up to the closing brace into `list`.
+    pub fn parseStatementsUntilBrace(self: *Parser, list: *StatementList) anyerror!void {
+        while (!try self.eat(.r_brace)) try self.parseStatementInto(list);
+    }
+
+    /// One source statement, which may expand to several AST statements.
+    pub fn parseStatementInto(self: *Parser, list: *StatementList) anyerror!void {
+        const location: ast.SourceLocation = .{ .line = self.current.line, .column = self.current.column };
+        if (try @import("parse_comptime.zig").parseExpandingStatement(self, list, location)) return;
+        try @import("parse_products.zig").appendStatement(self, list, try self.parseStatement(), location);
+    }
+
+    pub fn finishStatements(self: *Parser, list: *StatementList) ![]ast.Statement {
+        const locations = list.locations.items;
+        const result = try list.statements.toOwnedSlice(self.allocator);
         for (result, locations) |*statement, location| {
             try self.statement_locations.append(self.allocator, .{ .statement = statement, .location = location });
         }
@@ -230,7 +304,6 @@ pub const Parser = struct {
     pub const parseValue = @import("parse_values.zig").parseValue;
     pub const parseNamedValue = @import("parse_values.zig").parseNamedValue;
     pub const parseVectorOrReferenceValue = @import("parse_values.zig").parseVectorOrReferenceValue;
-    pub const parseScalarMaterialization = @import("parse_values.zig").parseScalarMaterialization;
     pub const parseHardwareRead = @import("parse_values.zig").parseHardwareRead;
     pub const parseDmemAddress = @import("parse_values.zig").parseDmemAddress;
     pub const parseCodeAddress = @import("parse_values.zig").parseCodeAddress;
@@ -258,8 +331,94 @@ pub const Parser = struct {
 
     pub fn eat(self: *Parser, tag: token.Tag) !bool {
         if (self.current.tag != tag) return false;
-        self.current = try self.lexer.next();
+        try self.advance();
         return true;
+    }
+
+    /// Moves to the next token, applying name substitutions and turning
+    /// `array[index]` into the element's name.
+    pub fn advance(self: *Parser) !void {
+        const tok = self.substituted(try self.lexer.next());
+        self.current = try self.arrayElement(tok);
+    }
+
+    fn substituted(self: *const Parser, tok: token.Token) token.Token {
+        if (tok.tag != .ident) return tok;
+        var index = self.substitutions.items.len;
+        while (index > 0) {
+            index -= 1;
+            const substitution = self.substitutions.items[index];
+            if (!std.mem.eql(u8, substitution.name, tok.text)) continue;
+            var replaced = tok;
+            replaced.tag = substitution.tag;
+            replaced.text = substitution.text;
+            return replaced;
+        }
+        return tok;
+    }
+
+    /// `name[index]` for a register array, with a literal or substituted index.
+    fn arrayElement(self: *Parser, tok: token.Token) !token.Token {
+        const len = self.arrayLength(tok) orelse return tok;
+        var lexer = self.lexer;
+        if ((try lexer.next()).tag != .l_bracket) return tok;
+        const index = try self.arrayIndex(&lexer, len);
+        self.lexer = lexer;
+        var element = tok;
+        element.text = try self.elementName(tok.text, index);
+        return element;
+    }
+
+    fn arrayLength(self: *const Parser, tok: token.Token) ?usize {
+        if (tok.tag != .ident) return null;
+        const symbol = self.lookupTypeSymbolInfo(tok.text) orelse return null;
+        return symbol.array_len;
+    }
+
+    /// `index]` after an array's `[`, checked against its length.
+    fn arrayIndex(self: *Parser, lexer: *lexer_mod.Lexer, len: usize) !usize {
+        const index_token = self.substituted(try lexer.next());
+        if (index_token.tag != .number) return self.fail(index_token, .expected_array_index);
+        if ((try lexer.next()).tag != .r_bracket) return self.fail(index_token, .expected_array_index);
+        const index = try self.parseNumberValue(index_token);
+        const valid = std.math.cast(usize, index) orelse return self.fail(index_token, .array_index_out_of_range);
+        return if (valid < len) valid else self.fail(index_token, .array_index_out_of_range);
+    }
+
+    /// The generated name of `array[index]`.
+    pub fn elementName(self: *Parser, array: []const u8, index: usize) ![]const u8 {
+        return self.generatedName("{s}[{d}]", .{ array, index });
+    }
+
+    /// A parser-made name, shared by every use of the same text.
+    pub fn generatedName(self: *Parser, comptime fmt: []const u8, args: anytype) ![]const u8 {
+        const name = try std.fmt.allocPrint(self.allocator, fmt, args);
+        for (self.generated_names.items) |existing| {
+            if (!std.mem.eql(u8, existing, name)) continue;
+            self.allocator.free(name);
+            return existing;
+        }
+        errdefer self.allocator.free(name);
+        try self.generated_names.append(self.allocator, name);
+        return name;
+    }
+
+    /// Replaces `name` while lexing until `restoreSubstitutions`.
+    pub fn substitute(self: *Parser, name: []const u8, tag: token.Tag, text: []const u8) !void {
+        try self.substitutions.append(self.allocator, .{ .name = name, .tag = tag, .text = text });
+    }
+
+    pub fn restoreSubstitutions(self: *Parser, len: usize) void {
+        self.substitutions.shrinkRetainingCapacity(len);
+    }
+
+    /// A name declared inside an unrolled body, made unique per iteration.
+    pub fn declaredName(self: *Parser, name: token.Token) !token.Token {
+        if (self.iterations.items.len == 0) return name;
+        var renamed = name;
+        renamed.text = try self.generatedName("{s}#{f}", .{ name.text, IterationPath{ .indices = self.iterations.items } });
+        try self.substitute(name.text, .ident, renamed.text);
+        return renamed;
     }
 
     /// Whether the current token is the identifier `word`.
@@ -278,7 +437,7 @@ pub const Parser = struct {
     pub fn peek(self: *const Parser, comptime count: usize) ?[count]token.Token {
         var lexer = self.lexer;
         var tokens: [count]token.Token = undefined;
-        for (&tokens) |*tok| tok.* = lexer.next() catch return null;
+        for (&tokens) |*tok| tok.* = self.substituted(lexer.next() catch return null);
         return tokens;
     }
 
@@ -293,7 +452,7 @@ pub const Parser = struct {
     pub fn expect(self: *Parser, tag: token.Tag) !token.Token {
         const tok = self.current;
         if (tok.tag != tag) return self.failExpected(tok, tag);
-        self.current = try self.lexer.next();
+        try self.advance();
         return tok;
     }
 
@@ -400,6 +559,18 @@ pub const ErrorType = enum {
     incorrect_array_initializer_count,
     unexpected_token,
     invalid_number,
+    invalid_constant_expression,
+    invalid_inline_range,
+    expected_array_index,
+    array_index_out_of_range,
+    invalid_lane_range,
+    invalid_lane_range_transfer,
+    invalid_vector_product,
+    accumulator_not_started,
+    accumulator_read_not_adjacent,
+    accumulator_read_requires_fraction,
+    expected_pointer_field,
+    pointer_type_mismatch,
 };
 
 pub const Diagnostic = struct {
@@ -449,6 +620,18 @@ const error_strings = std.EnumArray(ErrorType, []const u8).init(.{
     .incorrect_array_initializer_count = "array initializer must contain exactly the declared element count",
     .unexpected_token = "unexpected token",
     .invalid_number = "invalid number",
+    .invalid_constant_expression = "constant expression overflows or divides by zero",
+    .invalid_inline_range = "inline for needs a range first..end with first <= end and at most 256 iterations",
+    .expected_array_index = "register array index must be a compile-time integer",
+    .array_index_out_of_range = "register array index is out of range",
+    .invalid_lane_range = "a lane range must select 2, 4, or 8 lanes within the vector; 8 lanes start at lane 0",
+    .invalid_lane_range_transfer = "lane ranges are only allowed as a load destination or a stored value, and their type must match",
+    .invalid_vector_product = "unsupported vector product; multiply vec32 pairs, or vec16 operands viewed as .sint, .ufract, or .sfract",
+    .accumulator_not_started = "`acc +=` needs an `acc = a * b;` earlier in the same block",
+    .accumulator_read_not_adjacent = "`r = acc;` must directly follow the product it reads; use accumulator(.high/.middle/.low) for raw slices",
+    .accumulator_read_requires_fraction = "reading a vec32 needs a final product with a vec32 left operand, which leaves the fraction readable",
+    .expected_pointer_field = "expected a field of the pointed-to packed struct, or `.*`",
+    .pointer_type_mismatch = "pointer types differ",
 });
 
 pub fn errorString(code: ErrorType) []const u8 {
@@ -570,14 +753,6 @@ pub fn vectorControlRegisterForOperation(name: []const u8, comptime prefix: []co
 
 pub fn vectorMemoryOperationForBuiltin(name: []const u8) ?ast.VectorMemoryOperation {
     const names = .{
-        .{ "load16", ast.VectorMemoryOperation.load16 },
-        .{ "store16", ast.VectorMemoryOperation.store16 },
-        .{ "load32", ast.VectorMemoryOperation.load32 },
-        .{ "store32", ast.VectorMemoryOperation.store32 },
-        .{ "load64", ast.VectorMemoryOperation.load64 },
-        .{ "store64", ast.VectorMemoryOperation.store64 },
-        .{ "load128", ast.VectorMemoryOperation.load128 },
-        .{ "store128", ast.VectorMemoryOperation.store128 },
         .{ "loadQuad", ast.VectorMemoryOperation.load_quad_lane },
         .{ "loadRight", ast.VectorMemoryOperation.load_right },
         .{ "storeRight", ast.VectorMemoryOperation.store_right },
@@ -593,7 +768,7 @@ pub fn vectorMemoryOperationForBuiltin(name: []const u8) ?ast.VectorMemoryOperat
 
 pub fn vectorMemoryOperationHasLane(operation: ast.VectorMemoryOperation) bool {
     return switch (operation) {
-        .load16, .store16, .load32, .store32, .load64, .store64, .store_packed_signed, .store_packed_unsigned, .load_quad_lane, .load_transpose => true,
+        .load32, .store32, .load64, .store64, .store_packed_signed, .store_packed_unsigned, .load_quad_lane, .load_transpose => true,
         .load128, .store128, .load_packed_signed, .load_packed_unsigned, .load_right, .store_right => false,
     };
 }

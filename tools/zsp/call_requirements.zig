@@ -84,7 +84,6 @@ const handlers = blk: {
     table.set(.conditional_goto, &delayOnly);
     table.set(.conditional_direct_goto, &conditionalDirectGoto);
     table.set(.break_loop, &delayOnly);
-    table.set(.while_loop, &whileLoop);
     table.set(.do_while_loop, &doWhileLoop);
     table.set(.if_statement, &ifStatement);
     table.set(.labeled_block, &labeledBlock);
@@ -171,10 +170,6 @@ fn materialized(argument: ast.ValueRef) bool {
 fn trackedName(requirements: *const Requirements, argument: ast.ValueRef) ?[]const u8 {
     if (argument != .ident or !requirements.lifetimes.has(argument.ident)) return null;
     return argument.ident;
-}
-
-fn whileLoop(requirements: *Requirements, statement: *const Statement, _: usize) !void {
-    try requirements.statements(statement.while_loop.statements);
 }
 
 /// The loop condition has its own position after the body.

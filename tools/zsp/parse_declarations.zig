@@ -10,6 +10,7 @@ const Parser = parser_mod.Parser;
 const isVectorType = parser_mod.isVectorType;
 const parseRegister = parser_mod.parseRegister;
 const parseVectorRegister = parser_mod.parseVectorRegister;
+const pointers = @import("parse_pointers.zig");
 
 // ------------------------------------------------------------- functions
 
@@ -182,9 +183,10 @@ fn parseParameter(self: *Parser, first_unpinned: *?token.Token) !ast.Parameter {
     const name = try self.expect(.ident);
     if (register_token == null and first_unpinned.* == null) first_unpinned.* = name;
     _ = try self.expect(.colon);
-    const data_type = try self.parseDataType(try self.expect(.ident));
+    const declared = try parseValueType(self);
+    const data_type = declared.data_type.?;
     const binding = try optionalBinding(self, register_token, data_type);
-    try self.addTypeSymbol(name.text, data_type);
+    try self.type_symbols.append(self.allocator, .{ .name = name.text, .data_type = data_type, .pointee = declared.pointee });
     return .{ .name = name.text, .data_type = data_type, .reg = binding.reg, .vector_reg = binding.vector_reg };
 }
 
@@ -239,21 +241,35 @@ pub fn applyDefaultParameterRegisters(
 
 // ------------------------------------------------------ register variables
 
-const DeclaredType = struct { data_type: ?ast.DataType = null, function_type: ?ast.FunctionType = null };
-const ResolvedType = struct { data_type: ast.DataType, function_type: ?ast.FunctionType = null };
+const DeclaredType = struct {
+    data_type: ?ast.DataType = null,
+    function_type: ?ast.FunctionType = null,
+    pointee: ?Parser.Pointee = null,
+};
+const ResolvedType = struct {
+    data_type: ast.DataType,
+    function_type: ?ast.FunctionType = null,
+    pointee: ?Parser.Pointee = null,
+};
 const Initializer = struct { value: ?ast.Value = null, undefined: bool = false };
 
 /// `reg($t0) name: type = value;` after the `reg` keyword. The type may
 /// be omitted when the initializer determines it.
 pub fn parseRegDecl(self: *Parser) !ast.VarDecl {
     const register_token = try parseParenthesizedRegister(self);
-    const name = try self.expect(.ident);
+    const name = try self.declaredName(try self.expect(.ident));
     const declared: DeclaredType = if (try self.eat(.colon)) try parseDeclaredType(self) else .{};
     const initializer = try parseInitializer(self);
     _ = try self.expect(.semicolon);
     const resolved = try resolveType(self, name, declared, initializer.value);
+    try checkPointee(self, name, resolved.pointee, initializer.value);
     const binding = try optionalBinding(self, register_token, resolved.data_type);
-    try self.addTypeSymbolWithFunctionType(name.text, resolved.data_type, resolved.function_type);
+    try self.type_symbols.append(self.allocator, .{
+        .name = name.text,
+        .data_type = resolved.data_type,
+        .function_type = resolved.function_type,
+        .pointee = resolved.pointee,
+    });
     return .{
         .is_const = false,
         .allow_undefined_read = initializer.undefined,
@@ -273,8 +289,30 @@ fn parseParenthesizedRegister(self: *Parser) !?token.Token {
     return register_token;
 }
 
-/// A data type, or `fn(...)` for a function pointer held in a scalar.
+/// Initializing a typed pointer from another needs the same pointee.
+fn checkPointee(self: *Parser, name: token.Token, pointee: ?Parser.Pointee, value: ?ast.Value) !void {
+    const expected = pointee orelse return;
+    const actual = sourcePointee(self, value) orelse return;
+    if (!pointers.samePointee(expected, actual)) return self.fail(name, .pointer_type_mismatch);
+}
+
+/// The pointee of a typed pointer an initializer copies.
+fn sourcePointee(self: *const Parser, value: ?ast.Value) ?Parser.Pointee {
+    const initial = value orelse return null;
+    if (initial != .ident) return null;
+    const source = self.lookupTypeSymbolInfo(initial.ident) orelse return null;
+    return source.pointee;
+}
+
+/// A data type or `*T`.
+fn parseValueType(self: *Parser) !DeclaredType {
+    if (try self.eat(.star)) return .{ .data_type = .dmem, .pointee = try pointers.parsePointee(self) };
+    return .{ .data_type = try self.parseDataType(try self.expect(.ident)) };
+}
+
+/// A data type, `*T`, or `fn(...)` for a function pointer held in a scalar.
 fn parseDeclaredType(self: *Parser) !DeclaredType {
+    if (self.current.tag == .star) return parseValueType(self);
     const type_name = try self.expect(.ident);
     if (!std.mem.eql(u8, type_name.text, "fn")) return .{ .data_type = try self.parseDataType(type_name) };
     return .{ .data_type = .u32, .function_type = try parseFunctionType(self, type_name) };
@@ -307,14 +345,14 @@ fn parseFunctionTypeParameter(self: *Parser, type_name: token.Token, index: usiz
 /// `= value`, `= undefined`, or nothing.
 fn parseInitializer(self: *Parser) !Initializer {
     if (!try self.eat(.equal)) return .{};
-    if (!self.atKeyword("undefined")) return .{ .value = try self.parseValue() };
+    if (!self.atKeyword("undefined")) return .{ .value = try self.parseScalarExpression(0) };
     _ = try self.expect(.ident);
     return .{ .undefined = true };
 }
 
 /// The declared type, else one implied by the initializer.
 fn resolveType(self: *Parser, name: token.Token, declared: DeclaredType, value: ?ast.Value) !ResolvedType {
-    if (declared.data_type) |data_type| return .{ .data_type = data_type, .function_type = declared.function_type };
+    if (declared.data_type) |data_type| return .{ .data_type = data_type, .function_type = declared.function_type, .pointee = declared.pointee };
     const initial = value orelse return self.fail(name, .expected_data_type);
     if (initial == .ident) return copiedType(self, name, initial.ident);
     return .{ .data_type = inferredType(initial) orelse return self.fail(name, .expected_data_type) };
@@ -322,7 +360,7 @@ fn resolveType(self: *Parser, name: token.Token, declared: DeclaredType, value: 
 
 fn copiedType(self: *Parser, name: token.Token, source_name: []const u8) !ResolvedType {
     const source = self.lookupTypeSymbolInfo(source_name) orelse return self.fail(name, .expected_data_type);
-    return .{ .data_type = source.data_type, .function_type = source.function_type };
+    return .{ .data_type = source.data_type, .function_type = source.function_type, .pointee = source.pointee };
 }
 
 fn inferredType(value: ast.Value) ?ast.DataType {
@@ -519,22 +557,14 @@ fn parsePackedField(self: *Parser) !ast.PackedStructField {
 pub const MemoryType = struct {
     data_type: ast.DataType,
     offset: i64 = 0,
-    half_vector: bool = false,
-    quarter_vector: bool = false,
 };
 
-/// A load or store type: a data type, `vec64`, `vec32lane`, or a packed
-/// struct field written `Struct.field`.
+/// A load or store type: a data type, or a packed struct field written
+/// `Struct.field`.
 pub fn parseMemoryType(self: *Parser) !MemoryType {
     const type_name = try self.expect(.ident);
     if (try self.eat(.dot)) return parsePackedFieldType(self, type_name);
-    const half_vector = std.mem.eql(u8, type_name.text, "vec64");
-    const quarter_vector = std.mem.eql(u8, type_name.text, "vec32lane");
-    return .{
-        .data_type = if (half_vector or quarter_vector) .vec16 else try self.parseDataType(type_name),
-        .half_vector = half_vector,
-        .quarter_vector = quarter_vector,
-    };
+    return .{ .data_type = try self.parseDataType(type_name) };
 }
 
 fn parsePackedFieldType(self: *Parser, type_name: token.Token) !MemoryType {
@@ -602,6 +632,7 @@ fn parseStorageDeclaration(self: *Parser, allow_initialized: bool) !ast.DataDecl
     const values: []const i64 = if (initialized) try parseStorageInitializer(self, name, visibility, shape) else &.{};
     errdefer self.allocator.free(values);
     _ = try self.expect(.semicolon);
+    try self.type_symbols.append(self.allocator, .{ .name = name.text, .data_type = .dmem, .pointee = pointers.storagePointee(shape.storage_type) });
     return .{
         .name = name.text,
         .storage_type = shape.storage_type,

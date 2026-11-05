@@ -633,15 +633,17 @@ test "while loop emits labels branch and back edge" {
         \\.globl _start
         \\_start:
         \\  addiu $t0, $zero, 0
-        \\LABEL__start_while_0:
         \\  sltiu $at, $t0, 4
-        \\  beq $at, $zero, LABEL__start_whileend_0
+        \\  beq $at, $zero, LABEL__start_ifend_0
         \\  nop
+        \\LABEL__start_dowhile_1:
         \\  sh $t0, 0($t0)
         \\  addi $t0, $t0, 2
-        \\  j LABEL__start_while_0
+        \\  sltiu $at, $t0, 4
+        \\  bne $at, $zero, LABEL__start_dowhile_1
         \\  nop
-        \\LABEL__start_whileend_0:
+        \\LABEL__start_dowhileend_1:
+        \\LABEL__start_ifend_0:
         \\  break
         \\
         \\
@@ -669,20 +671,29 @@ test "labeled break and continue target the requested loop" {
         \\test:
         \\  addiu $t0, $zero, 0
         \\  addiu $t1, $zero, 0
-        \\LABEL_test_while_0:
         \\  sltiu $at, $t0, 2
-        \\  beq $at, $zero, LABEL_test_whileend_0
+        \\  beq $at, $zero, LABEL_test_ifend_0
         \\  nop
-        \\LABEL_test_while_1:
+        \\LABEL_test_dowhile_1:
         \\  sltiu $at, $t1, 2
-        \\  beq $at, $zero, LABEL_test_whileend_1
+        \\  beq $at, $zero, LABEL_test_ifend_2
         \\  nop
-        \\  j LABEL_test_whileend_0
+        \\LABEL_test_dowhile_3:
+        \\  j LABEL_test_dowhileend_1
         \\  nop
-        \\LABEL_test_whileend_1:
-        \\  j LABEL_test_while_0
+        \\  sltiu $at, $t1, 2
+        \\  bne $at, $zero, LABEL_test_dowhile_3
         \\  nop
-        \\LABEL_test_whileend_0:
+        \\LABEL_test_dowhileend_3:
+        \\LABEL_test_ifend_2:
+        \\  j LABEL_test_dowhilecond_1
+        \\  nop
+        \\LABEL_test_dowhilecond_1:
+        \\  sltiu $at, $t0, 2
+        \\  bne $at, $zero, LABEL_test_dowhile_1
+        \\  nop
+        \\LABEL_test_dowhileend_1:
+        \\LABEL_test_ifend_0:
         \\  break
         \\
         \\

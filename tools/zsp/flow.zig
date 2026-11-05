@@ -112,8 +112,10 @@ pub const Builder = struct {
     }
 };
 
+/// An unlabeled `break` or `continue` names the innermost loop; blocks
+/// need their label.
 fn loopMatches(loop: lifetimes_.FlowLoop, name: ?[]const u8) bool {
-    const requested = name orelse return true;
+    const requested = name orelse return loop.continue_position != 0;
     const actual = loop.name orelse return false;
     return std.mem.eql(u8, requested, actual);
 }
@@ -126,7 +128,6 @@ const builders = blk: {
     table.set(.goto, &goto);
     table.set(.conditional_goto, &conditionalGoto);
     table.set(.conditional_direct_goto, &conditionalDirectGoto);
-    table.set(.while_loop, &whileLoop);
     table.set(.do_while_loop, &doWhileLoop);
     table.set(.break_loop, &breakLoop);
     table.set(.continue_loop, &continueLoop);
@@ -167,15 +168,6 @@ fn conditionalDirectGoto(builder: *Builder, statement: *const Statement, step: S
     try builder.throughSlot(step, statement.conditional_direct_goto.delay_slot, step.next);
 }
 
-fn whileLoop(builder: *Builder, statement: *const Statement, step: Step) !void {
-    const loop = statement.while_loop;
-    if (step.nested != 0) try builder.add(step.current, step.current + 1);
-    try builder.add(step.current, step.next);
-    try builder.pushLoop(.{ .name = loop.label, .continue_position = step.current, .break_position = step.next });
-    defer builder.popLoop();
-    try builder.build(loop.statements, step.current);
-}
-
 fn doWhileLoop(builder: *Builder, statement: *const Statement, step: Step) !void {
     const loop = statement.do_while_loop;
     const body_start = step.current + 1;
@@ -185,18 +177,23 @@ fn doWhileLoop(builder: *Builder, statement: *const Statement, step: Step) !void
     try builder.build(loop.statements, condition);
     builder.popLoop();
     builder.position += 1;
-    try loopBack(builder, step, loop.delay_slot, condition, body_start);
+    const back: Back = .{ .condition = condition, .body_start = body_start, .exits = loop.condition != null };
+    try loopBack(builder, step, loop.delay_slot, back);
 }
 
-/// The condition repeats the body; a slot runs before either edge.
-fn loopBack(builder: *Builder, step: Step, slot: ?[]const Statement, condition: usize, body_start: usize) !void {
+/// The edges of a loop's condition position.
+const Back = struct { condition: usize, body_start: usize, exits: bool };
+
+/// The condition repeats the body; a slot runs before either edge. A
+/// loop without a condition never exits there.
+fn loopBack(builder: *Builder, step: Step, slot: ?[]const Statement, back: Back) !void {
     if (slot) |delay| {
-        try builder.add(condition, condition + 1);
-        try builder.build(delay, step.next);
-        return builder.add(step.current + step.nested, body_start);
+        try builder.add(back.condition, back.condition + 1);
+        try builder.build(delay, if (back.exits) step.next else back.body_start);
+        return builder.add(step.current + step.nested, back.body_start);
     }
-    try builder.add(condition, body_start);
-    try builder.add(condition, step.next);
+    try builder.add(back.condition, back.body_start);
+    if (back.exits) try builder.add(back.condition, step.next);
 }
 
 fn breakLoop(builder: *Builder, statement: *const Statement, step: Step) !void {

@@ -53,41 +53,41 @@ fn handMultiply(
     reg($v29) accumulator_scratch: vec16 = undefined;
 
     exact {
-        rsp.vector.load64(l0i, 0, left_matrix, 0);
-        rsp.vector.load64(r01f, 0, right_matrix, 8);
-        rsp.vector.load64(l0f, 0, left_matrix, 8);
-        rsp.vector.load64(r01i, 0, right_matrix, 0);
-        rsp.vector.load64(l0f, 4, left_matrix, 8);
-        rsp.vector.load64(r01f, 4, right_matrix, 24);
-        rsp.vector.load64(l0i, 4, left_matrix, 0);
-        rsp.vector.load64(r01i, 4, right_matrix, 16);
-        rsp.vector.load64(l1i, 0, left_matrix, 16);
-        rsp.vector.load64(l2i, 0, left_matrix, 32);
+        l0i[0..4] = load(vec16, left_matrix, 0);
+        r01f[0..4] = load(vec16, right_matrix, 8);
+        l0f[0..4] = load(vec16, left_matrix, 8);
+        r01i[0..4] = load(vec16, right_matrix, 0);
+        l0f[4..8] = load(vec16, left_matrix, 8);
+        r01f[4..8] = load(vec16, right_matrix, 24);
+        l0i[4..8] = load(vec16, left_matrix, 0);
+        r01i[4..8] = load(vec16, right_matrix, 16);
+        l1i[0..4] = load(vec16, left_matrix, 16);
+        l2i[0..4] = load(vec16, left_matrix, 32);
         accumulator_scratch = vmudl(l0f, r01f.xxxxXXXX);
-        rsp.vector.load64(l1f, 0, left_matrix, 24);
-        rsp.vector.load64(l2f, 0, left_matrix, 40);
-        rsp.vector.load64(l2f, 4, left_matrix, 40);
-        rsp.vector.load64(l1f, 4, left_matrix, 24);
+        l1f[0..4] = load(vec16, left_matrix, 24);
+        l2f[0..4] = load(vec16, left_matrix, 40);
+        l2f[4..8] = load(vec16, left_matrix, 40);
+        l1f[4..8] = load(vec16, left_matrix, 24);
         accumulator_scratch = vmadm(l0i, r01f.xxxxXXXX);
-        rsp.vector.load64(l1i, 4, left_matrix, 16);
+        l1i[4..8] = load(vec16, left_matrix, 16);
         result_f = vmadn(l0f, r01i.xxxxXXXX);
-        rsp.vector.load64(l3i, 0, left_matrix, 48);
-        rsp.vector.load64(l3f, 0, left_matrix, 56);
+        l3i[0..4] = load(vec16, left_matrix, 48);
+        l3f[0..4] = load(vec16, left_matrix, 56);
         result_i = vmadh(l0i, r01i.xxxxXXXX);
         accumulator_scratch = vmadl(l1f, r01f.yyyyYYYY);
-        rsp.vector.load64(l2i, 4, left_matrix, 32);
+        l2i[4..8] = load(vec16, left_matrix, 32);
         accumulator_scratch = vmadm(l1i, r01f.yyyyYYYY);
-        rsp.vector.load64(r23i, 0, right_matrix, 32);
-        rsp.vector.load64(r23f, 0, right_matrix, 40);
+        r23i[0..4] = load(vec16, right_matrix, 32);
+        r23f[0..4] = load(vec16, right_matrix, 40);
         result_f = vmadn(l1f, r01i.yyyyYYYY);
         result_i = vmadh(l1i, r01i.yyyyYYYY);
-        rsp.vector.load64(l3f, 4, left_matrix, 56);
+        l3f[4..8] = load(vec16, left_matrix, 56);
         accumulator_scratch = vmadl(l2f, r01f.zzzzZZZZ);
-        rsp.vector.load64(r23f, 4, right_matrix, 56);
-        rsp.vector.load64(l3i, 4, left_matrix, 48);
+        r23f[4..8] = load(vec16, right_matrix, 56);
+        l3i[4..8] = load(vec16, left_matrix, 48);
         accumulator_scratch = vmadm(l2i, r01f.zzzzZZZZ);
         result_f = vmadn(l2f, r01i.zzzzZZZZ);
-        rsp.vector.load64(r23i, 4, right_matrix, 48);
+        r23i[4..8] = load(vec16, right_matrix, 48);
         result_i = vmadh(l2i, r01i.zzzzZZZZ);
         accumulator_scratch = vmadl(l3f, r01f.wwwwWWWW);
         accumulator_scratch = vmadm(l3i, r01f.wwwwWWWW);
@@ -100,12 +100,12 @@ fn handMultiply(
         result_i = vmadh(l0i, r23i.xxxxXXXX);
         accumulator_scratch = vmadl(l1f, r23f.yyyyYYYY);
         accumulator_scratch = vmadm(l1i, r23f.yyyyYYYY);
-        rsp.vector.store64(r01i, 0, output, 0);
+        store(vec16, output, r01i[0..4], 0);
         result_f = vmadn(l1f, r23i.yyyyYYYY);
         result_i = vmadh(l1i, r23i.yyyyYYYY);
         accumulator_scratch = vmadl(l2f, r23f.zzzzZZZZ);
-        rsp.vector.store64(r01f, 4, output, 24);
-        rsp.vector.store64(r01i, 4, output, 16);
+        store(vec16, output, r01f[4..8], 24);
+        store(vec16, output, r01i[4..8], 16);
         accumulator_scratch = vmadm(l2i, r23f.zzzzZZZZ);
         result_f = vmadn(l2f, r23i.zzzzZZZZ);
         result_i = vmadh(l2i, r23i.zzzzZZZZ);
@@ -113,106 +113,44 @@ fn handMultiply(
         accumulator_scratch = vmadm(l3i, r23f.wwwwWWWW);
         r23f = vmadn(l3f, r23i.wwwwWWWW);
         r23i = vmadh(l3i, r23i.wwwwWWWW);
-        rsp.vector.store64(r01f, 0, output, 8);
-        rsp.vector.store64(r23f, 0, output, 40);
-        rsp.vector.store64(r23i, 0, output, 32);
-        rsp.vector.store64(r23f, 4, output, 56);
+        store(vec16, output, r01f[0..4], 8);
+        store(vec16, output, r23f[0..4], 40);
+        store(vec16, output, r23i[0..4], 32);
+        store(vec16, output, r23f[4..8], 56);
     }
     return slot {
-        rsp.vector.store64(r23i, 4, output, 48);
+        store(vec16, output, r23i[4..8], 48);
     }
 }
 
-// The same product written for readability: load each operand, run each
-// accumulator chain in order, then store the results.
+// The same product written for readability: rows are 16.16 `vec32` pairs,
+// and each pair of output rows is one accumulator chain.
 fn plainMultiply(
     reg($s2) output: dmem,
     reg($s3) left_matrix: dmem,
     reg($s4) right_matrix: dmem,
 ) {
-    reg l0i: vec16 = undefined;
-    reg l0f: vec16 = undefined;
-    reg l1i: vec16 = undefined;
-    reg l1f: vec16 = undefined;
-    reg l2i: vec16 = undefined;
-    reg l2f: vec16 = undefined;
-    reg l3i: vec16 = undefined;
-    reg l3f: vec16 = undefined;
-    reg r01i: vec16 = undefined;
-    reg r01f: vec16 = undefined;
-    reg r23i: vec16 = undefined;
-    reg r23f: vec16 = undefined;
-
-    // Each left row fills both halves of its registers.
-    rsp.vector.load64(l0i, 0, left_matrix, 0);
-    rsp.vector.load64(l0i, 4, left_matrix, 0);
-    rsp.vector.load64(l0f, 0, left_matrix, 8);
-    rsp.vector.load64(l0f, 4, left_matrix, 8);
-    rsp.vector.load64(l1i, 0, left_matrix, 16);
-    rsp.vector.load64(l1i, 4, left_matrix, 16);
-    rsp.vector.load64(l1f, 0, left_matrix, 24);
-    rsp.vector.load64(l1f, 4, left_matrix, 24);
-    rsp.vector.load64(l2i, 0, left_matrix, 32);
-    rsp.vector.load64(l2i, 4, left_matrix, 32);
-    rsp.vector.load64(l2f, 0, left_matrix, 40);
-    rsp.vector.load64(l2f, 4, left_matrix, 40);
-    rsp.vector.load64(l3i, 0, left_matrix, 48);
-    rsp.vector.load64(l3i, 4, left_matrix, 48);
-    rsp.vector.load64(l3f, 0, left_matrix, 56);
-    rsp.vector.load64(l3f, 4, left_matrix, 56);
-
-    // Right rows 0 and 1 share one register pair, rows 2 and 3 another.
-    rsp.vector.load64(r01i, 0, right_matrix, 0);
-    rsp.vector.load64(r01i, 4, right_matrix, 16);
-    rsp.vector.load64(r01f, 0, right_matrix, 8);
-    rsp.vector.load64(r01f, 4, right_matrix, 24);
-    rsp.vector.load64(r23i, 0, right_matrix, 32);
-    rsp.vector.load64(r23i, 4, right_matrix, 48);
-    rsp.vector.load64(r23f, 0, right_matrix, 40);
-    rsp.vector.load64(r23f, 4, right_matrix, 56);
-
-    reg partial: vec16 = vmudl(l0f, r01f.xxxxXXXX);
-    partial = vmadm(l0i, r01f.xxxxXXXX);
-    partial = vmadn(l0f, r01i.xxxxXXXX);
-    partial = vmadh(l0i, r01i.xxxxXXXX);
-    partial = vmadl(l1f, r01f.yyyyYYYY);
-    partial = vmadm(l1i, r01f.yyyyYYYY);
-    partial = vmadn(l1f, r01i.yyyyYYYY);
-    partial = vmadh(l1i, r01i.yyyyYYYY);
-    partial = vmadl(l2f, r01f.zzzzZZZZ);
-    partial = vmadm(l2i, r01f.zzzzZZZZ);
-    partial = vmadn(l2f, r01i.zzzzZZZZ);
-    partial = vmadh(l2i, r01i.zzzzZZZZ);
-    partial = vmadl(l3f, r01f.wwwwWWWW);
-    partial = vmadm(l3i, r01f.wwwwWWWW);
-    reg rows01f: vec16 = vmadn(l3f, r01i.wwwwWWWW);
-    reg rows01i: vec16 = vmadh(l3i, r01i.wwwwWWWW);
-
-    partial = vmudl(l0f, r23f.xxxxXXXX);
-    partial = vmadm(l0i, r23f.xxxxXXXX);
-    partial = vmadn(l0f, r23i.xxxxXXXX);
-    partial = vmadh(l0i, r23i.xxxxXXXX);
-    partial = vmadl(l1f, r23f.yyyyYYYY);
-    partial = vmadm(l1i, r23f.yyyyYYYY);
-    partial = vmadn(l1f, r23i.yyyyYYYY);
-    partial = vmadh(l1i, r23i.yyyyYYYY);
-    partial = vmadl(l2f, r23f.zzzzZZZZ);
-    partial = vmadm(l2i, r23f.zzzzZZZZ);
-    partial = vmadn(l2f, r23i.zzzzZZZZ);
-    partial = vmadh(l2i, r23i.zzzzZZZZ);
-    partial = vmadl(l3f, r23f.wwwwWWWW);
-    partial = vmadm(l3i, r23f.wwwwWWWW);
-    reg rows23f: vec16 = vmadn(l3f, r23i.wwwwWWWW);
-    reg rows23i: vec16 = vmadh(l3i, r23i.wwwwWWWW);
-
-    rsp.vector.store64(rows01i, 0, output, 0);
-    rsp.vector.store64(rows01f, 0, output, 8);
-    rsp.vector.store64(rows01i, 4, output, 16);
-    rsp.vector.store64(rows01f, 4, output, 24);
-    rsp.vector.store64(rows23i, 0, output, 32);
-    rsp.vector.store64(rows23f, 0, output, 40);
-    rsp.vector.store64(rows23i, 4, output, 48);
-    rsp.vector.store64(rows23f, 4, output, 56);
+    // Each left row fills both halves, so one chain yields two output rows.
+    reg left: [4]vec32 = undefined;
+    inline for (0..4) |row| {
+        left[row][0..4] = load(vec32, left_matrix, row * 16);
+        left[row][4..8] = load(vec32, left_matrix, row * 16);
+    }
+    // Right rows 0 and 1 share one pair, rows 2 and 3 the other.
+    reg right: [2]vec32 = undefined;
+    inline for (0..2) |pair| {
+        right[pair][0..4] = load(vec32, right_matrix, pair * 32);
+        right[pair][4..8] = load(vec32, right_matrix, pair * 32 + 16);
+    }
+    inline for (0..2) |pair| {
+        acc = left[0] * right[pair].halfLane(0);
+        inline for (1..4) |row| {
+            acc += left[row] * right[pair].halfLane(row);
+        }
+        reg rows: vec32 = acc;
+        store(vec32, output, rows[0..4], pair * 32);
+        store(vec32, output, rows[4..8], pair * 32 + 16);
+    }
 }
 
 // Tiny3D's hand-scheduled vector normalization.
@@ -231,8 +169,8 @@ fn handNormalize(
     reg($v00) vector_zero: vec16 = undefined;
 
     exact {
-        rsp.vector.load64(value_f, 0, input, 8);
-        rsp.vector.load64(value_i, 0, input, 0);
+        value_f[0..4] = load(vec16, input, 8);
+        value_i[0..4] = load(vec16, input, 0);
         accumulator_scratch = vmudl(value_f, value_f.xyzwXYZW);
         accumulator_scratch = vmadm(value_i, value_f.xyzwXYZW);
         inverse_f = vmadn(value_f, value_i.xyzwXYZW);
@@ -253,7 +191,7 @@ fn handNormalize(
         value_f = vmadn(value_f, inverse_i.wwwwWWWW);
         value_i = vmadh(value_i, inverse_i.wwwwWWWW);
         value_f = vectorAdd(value_f, value_f.xyzwXYZW);
-        rsp.vector.store64(value_f, 0, output, 0);
+        store(vec16, output, value_f[0..4], 0);
     }
     return slot {
         output +%= 8;
@@ -268,34 +206,26 @@ fn plainNormalize(
 ) {
     reg($v30) shift_constants: vec16 = undefined;
     reg($v00) vector_zero: vec16 = undefined;
-    reg value_i: vec16 = undefined;
-    reg value_f: vec16 = undefined;
-    rsp.vector.load64(value_i, 0, input, 0);
-    rsp.vector.load64(value_f, 0, input, 8);
+    reg value: vec32 = undefined;
+    value[0..4] = load(vec32, input, 0);
     input +%= 16;
 
-    reg partial: vec16 = vmudl(value_f, value_f.xyzwXYZW);
-    partial = vmadm(value_i, value_f.xyzwXYZW);
-    reg square_f: vec16 = vmadn(value_f, value_i.xyzwXYZW);
-    reg square_i: vec16 = vmadh(value_i, value_i.xyzwXYZW);
-    reg sum_f: vec16 = vectorAddCarry(square_f, square_f.yyyyYYYY);
-    reg sum_i: vec16 = vectorAdd(square_i, square_i.yyyyYYYY);
-    square_f = vectorAddCarry(square_f, sum_f.zzzzZZZZ);
-    square_i = vectorAdd(square_i, sum_i.zzzzZZZZ);
+    reg square: vec32 = value * value;
+    reg sum: vec32 = square + square.yyyyYYYY;
+    square += sum.zzzzZZZZ;
 
-    square_i[3] = vectorReciprocalSquareRootHigh(square_i[0]);
-    square_f[3] = vectorReciprocalSquareRootLow(square_f[0]);
-    square_i[3] = vectorReciprocalSquareRootHigh(vector_zero[0]);
-    square_f = vmudl(square_f, shift_constants.x);
-    square_i = vmadm(square_i, shift_constants.x);
-    square_f = vmadn(vector_zero, vector_zero);
+    // The inverse square root of the length squared, then scaled down.
+    reg inverse: vec32 = undefined;
+    inverse.sint[3] = vectorReciprocalSquareRootHigh(square.sint[0]);
+    inverse.ufract[3] = vectorReciprocalSquareRootLow(square.ufract[0]);
+    inverse.sint[3] = vectorReciprocalSquareRootHigh(vector_zero[0]);
+    inverse.ufract = vmudl(inverse.ufract, shift_constants.x);
+    inverse.sint = vmadm(inverse.sint, shift_constants.x);
+    inverse.ufract = vmadn(vector_zero, vector_zero);
 
-    partial = vmudl(value_f, square_f.wwwwWWWW);
-    partial = vmadm(value_i, square_f.wwwwWWWW);
-    value_f = vmadn(value_f, square_i.wwwwWWWW);
-    value_i = vmadh(value_i, square_i.wwwwWWWW);
-    value_f = vectorAdd(value_f, value_f.xyzwXYZW);
-    rsp.vector.store64(value_f, 0, output, 0);
+    value = value * inverse.wwwwWWWW;
+    value.ufract = vectorAdd(value.ufract, value.ufract);
+    store(vec16, output, value.ufract[0..4], 0);
     output +%= 8;
 }
 

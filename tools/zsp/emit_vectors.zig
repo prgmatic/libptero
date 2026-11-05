@@ -242,8 +242,7 @@ fn writeLaneOperation(g: Gen, destination: Symbol, assignment: ast.Assignment, o
     const destination_lane = assignment.destination_lane orelse return error.VectorLaneOperationRequiresLane;
     const result = try viewDestination(destination, assignment.destination_view, error.Vec32ViewRequired);
     const source = try laneSource(g, operation.lhs);
-    const encoded_lane = destination_lane + @as(u4, if (operation.explicit_lane_encoding) 8 else 0);
-    try g.out.vectorLane(irOp(operation.op), result, encoded_lane, source.reg, source.element);
+    try g.out.vectorLane(irOp(operation.op), result, destination_lane, source.reg, source.element);
 }
 
 fn writeVectorShiftAssignment(g: Gen, destination: Symbol, assignment: ast.Assignment) !void {
@@ -484,8 +483,6 @@ pub fn writeVectorMemoryOperation(g: Gen, operation: ast.VectorMemoryOperation, 
 const MemoryForm = struct { op: ir.Op, show_lane: bool = true };
 
 const memory_forms = std.EnumArray(ast.VectorMemoryOperation, MemoryForm).init(.{
-    .load16 = .{ .op = .lsv },
-    .store16 = .{ .op = .ssv },
     .load32 = .{ .op = .llv },
     .store32 = .{ .op = .slv },
     .load64 = .{ .op = .ldv },
@@ -502,12 +499,11 @@ const memory_forms = std.EnumArray(ast.VectorMemoryOperation, MemoryForm).init(.
     .store_packed_unsigned = .{ .op = .suv },
 });
 
-/// Expression-form vector loads: full, packed, one word lane, or unaligned.
+/// Expression-form vector loads: full, packed, or unaligned.
 pub fn writeVectorLoad(g: Gen, destination: VReg, load: ast.Load) !void {
     if (load.label_offset != null) return error.SymbolicOffsetRequiresScalarLoad;
     const base = try operands.valueAsDmemReg(g, load.address);
     if (packedLoadOp(load)) |op| return vectorTransfer(g.out, op, destination, 0, base, load.offset, false);
-    if (load.partial_u32_lane) |lane| return vectorMemory(g.out, .llv, destination, lane, base, load.offset);
     try writeQuadLoad(g.out, destination, base, load.offset, load.unaligned);
     if (load.data_type == .vec32) try writeQuadLoad(g.out, secondHalf(destination), base, load.offset + 16, load.unaligned);
 }

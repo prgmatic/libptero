@@ -22,7 +22,6 @@ pub fn parseValue(self: *Parser) anyerror!ast.Value {
 
 const ValueParser = *const fn (*Parser) anyerror!ast.Value;
 const namespace_value_parsers = std.StaticStringMap(ValueParser).initComptime(.{
-    .{ "scalar", parseScalarMaterialization },
     .{ "rsp", parseHardwareRead },
     .{ "dmem", parseDmemAddress },
     .{ "code", parseCodeAddress },
@@ -34,7 +33,6 @@ const builtin_value_parsers = std.StaticStringMap(ValueParser).initComptime(.{
     .{ "loadUnaligned", parseLoadValue },
     .{ "loadVectorBytes", parseLoadValue },
     .{ "loadVectorBytesUnsigned", parseLoadValue },
-    .{ "loadVectorWords", parseLoadValue },
     .{ "accumulator", parseAccumulatorValue },
     .{ "vectorShiftLeft8", parseVectorShiftValue },
     .{ "vectorShiftRightArithmetic", parseVectorShiftValue },
@@ -42,6 +40,8 @@ const builtin_value_parsers = std.StaticStringMap(ValueParser).initComptime(.{
 });
 
 pub fn parseNamedValue(self: *Parser) anyerror!ast.Value {
+    const pointers = @import("parse_pointers.zig");
+    if (pointers.isDereferenceAhead(self)) return pointers.parseLoad(self);
     var lookahead = self.lexer;
     if ((try lookahead.next()).tag == .dot) {
         if (namespace_value_parsers.get(self.current.text)) |parse_value| return parse_value(self);
@@ -54,23 +54,6 @@ pub fn parseVectorOrReferenceValue(self: *Parser) anyerror!ast.Value {
     if (explicitAccumulatorPart(self.current.text) != null) return self.parseAccumulatorValue();
     if (parseVectorOp(self.current.text) != null) return self.parseVectorOperationValue();
     return valueFromRef(try self.parseValueRef());
-}
-
-pub fn parseScalarMaterialization(self: *Parser) anyerror!ast.Value {
-    _ = try self.expect(.ident);
-    _ = try self.expect(.dot);
-    const operation = try self.expect(.ident);
-    _ = try self.expect(.l_paren);
-    if (std.mem.eql(u8, operation.text, "unsigned")) {
-        const value = try self.parseNumberValue(try self.expect(.number));
-        _ = try self.expect(.r_paren);
-        return .{ .scalar_materialize = .{ .value = value, .encoding = .unsigned } };
-    }
-    if (std.mem.eql(u8, operation.text, "zero")) {
-        _ = try self.expect(.r_paren);
-        return .{ .scalar_materialize = .{ .value = 0, .encoding = .zero } };
-    }
-    return self.fail(operation, .unsupported_builtin);
 }
 
 pub fn parseHardwareRead(self: *Parser) anyerror!ast.Value {
@@ -110,28 +93,24 @@ pub fn parseDmemAddress(self: *Parser) anyerror!ast.Value {
     _ = try self.expect(.ident);
     _ = try self.expect(.dot);
     const operation = try self.expect(.ident);
-    const unsigned = std.mem.eql(u8, operation.text, "addressOfUnsigned");
-    if (!unsigned and !std.mem.eql(u8, operation.text, "addressOf"))
-        return self.fail(operation, .unsupported_builtin);
+    if (!std.mem.eql(u8, operation.text, "addressOf")) return self.fail(operation, .unsupported_builtin);
     _ = try self.expect(.l_paren);
     const label = try self.expect(.ident);
     var offset: i64 = 0;
-    if (try self.eat(.comma)) offset = try self.parseNumberValue(try self.expect(.number));
+    if (try self.eat(.comma)) offset = try self.parseLiteralOffset();
     _ = try self.expect(.r_paren);
-    return .{ .data_address = .{ .label = label.text, .offset = offset, .unsigned = unsigned } };
+    return .{ .data_address = .{ .label = label.text, .offset = offset } };
 }
 
 pub fn parseCodeAddress(self: *Parser) anyerror!ast.Value {
     _ = try self.expect(.ident);
     _ = try self.expect(.dot);
     const operation = try self.expect(.ident);
-    const unsigned = std.mem.eql(u8, operation.text, "addressOfUnsigned");
-    if (!unsigned and !std.mem.eql(u8, operation.text, "addressOf"))
-        return self.fail(operation, .unsupported_builtin);
+    if (!std.mem.eql(u8, operation.text, "addressOf")) return self.fail(operation, .unsupported_builtin);
     _ = try self.expect(.l_paren);
     const label = try self.expect(.ident);
     _ = try self.expect(.r_paren);
-    return .{ .code_address = .{ .label = label.text, .unsigned = unsigned } };
+    return .{ .code_address = .{ .label = label.text } };
 }
 
 pub fn parseSignedComparison(self: *Parser) anyerror!ast.Value {
@@ -155,15 +134,13 @@ pub fn parseBitCast(self: *Parser) anyerror!ast.Value {
 pub fn parseLoadValue(self: *Parser) anyerror!ast.Value {
     const packed_u8 = std.mem.eql(u8, self.current.text, "loadVectorBytes");
     const packed_unsigned_u8 = std.mem.eql(u8, self.current.text, "loadVectorBytesUnsigned");
-    const partial_u32 = std.mem.eql(u8, self.current.text, "loadVectorWords");
     const unaligned = std.mem.eql(u8, self.current.text, "loadUnaligned");
     _ = try self.expect(.ident);
     _ = try self.expect(.l_paren);
     const memory = @import("parse_memory.zig");
-    const load_type = try memory.parseLoadType(self, packed_u8 or packed_unsigned_u8 or partial_u32);
+    const load_type = try memory.parseLoadType(self, packed_u8 or packed_unsigned_u8);
     var operand = try memory.Operand.parseBase(self, load_type.offset, null);
     try operand.parseOffset(self);
-    const partial_u32_lane = try memory.parseWordLane(self, partial_u32);
     _ = try self.expect(.r_paren);
     return .{ .load = .{
         .data_type = load_type.data_type,
@@ -172,7 +149,6 @@ pub fn parseLoadValue(self: *Parser) anyerror!ast.Value {
         .label_offset = operand.label,
         .packed_u8 = packed_u8,
         .packed_unsigned_u8 = packed_unsigned_u8,
-        .partial_u32_lane = partial_u32_lane,
         .unaligned = unaligned,
     } };
 }
@@ -233,8 +209,6 @@ pub fn parseVectorOperationValue(self: *Parser) anyerror!ast.Value {
         .op = op,
         .lhs = lhs,
         .rhs = rhs,
-        .explicit_lane_encoding = std.mem.startsWith(u8, op_token.text, "vectorReciprocal") or
-            std.mem.eql(u8, op_token.text, "vectorMove"),
     } };
 }
 
@@ -258,24 +232,39 @@ pub fn parseScalarExpression(self: *Parser, minimum_precedence: u4) !ast.Value {
 
     while (binaryPrecedence(self.current.tag)) |precedence| {
         if (precedence < minimum_precedence) break;
+        const operator = self.current;
         const op = (try self.parseBinaryAssignOp()).?;
-        const rhs = try self.parseScalarExpression(precedence + 1);
-        const expression = try self.allocator.create(ast.ScalarExpression);
-        expression.* = .{ .lhs = lhs, .op = op, .rhs = rhs };
-        lhs = .{ .scalar_expression = expression };
+        lhs = try combine(self, operator, lhs, op, try self.parseScalarExpression(precedence + 1));
     }
     return lhs;
+}
+
+/// `lhs op rhs`, folded when both sides are literals.
+fn combine(self: *Parser, operator: token.Token, lhs: ast.Value, op: ast.AssignOp, rhs: ast.Value) !ast.Value {
+    if (lhs == .number and rhs == .number) {
+        const folded = @import("parse_comptime.zig").fold(op, lhs.number, rhs.number);
+        return .{ .number = folded orelse return self.fail(operator, .invalid_constant_expression) };
+    }
+    const expression = try self.allocator.create(ast.ScalarExpression);
+    expression.* = .{ .lhs = lhs, .op = op, .rhs = rhs };
+    return .{ .scalar_expression = expression };
 }
 
 /// A literal, a name, `bitCast(name)`, a compile-time member such as
 /// `Mode.fast`, or a vector access.
 pub fn parseValueRef(self: *Parser) !ast.ValueRef {
     if (try self.eat(.minus)) return parseNegativeNumber(self);
+    if (isLayoutQuery(self)) return .{ .number = try @import("parse_comptime.zig").parseConstExpression(self) };
     return switch (self.current.tag) {
         .ident => parseNamedRef(self, try self.expect(.ident)),
         .number => .{ .number = try self.parseNumberValue(try self.expect(.number)) },
         else => self.fail(self.current, .expected_value),
     };
+}
+
+/// `sizeOf(T)` or `offsetOf(T, field)`.
+fn isLayoutQuery(self: *const Parser) bool {
+    return self.atKeyword("sizeOf") or self.atKeyword("offsetOf");
 }
 
 fn parseNegativeNumber(self: *Parser) !ast.ValueRef {
@@ -291,8 +280,15 @@ fn parseNamedRef(self: *Parser, tok: token.Token) !ast.ValueRef {
         _ = try self.expect(.ident);
         return .{ .number = member.value };
     }
-    if (self.current.tag == .l_bracket or self.isVectorDotSuffix()) return .{ .vector_access = try self.parseVectorAccess(tok.text) };
+    if (self.current.tag == .l_bracket or self.isVectorDotSuffix()) return parseVectorRef(self, tok);
     return .{ .ident = tok.text };
+}
+
+/// A vector access; lane ranges only where a caller lowers them.
+fn parseVectorRef(self: *Parser, tok: token.Token) !ast.ValueRef {
+    const access = try self.parseVectorAccess(tok.text);
+    if (access.lane_count > 1 and !self.allow_lane_range) return self.fail(tok, .invalid_lane_range_transfer);
+    return .{ .vector_access = access };
 }
 
 fn parseBitCastRef(self: *Parser) !ast.ValueRef {
@@ -315,8 +311,31 @@ pub fn isVectorDotSuffix(self: *const Parser) bool {
     if (self.current.tag != .dot) return false;
     var lexer = self.lexer;
     const suffix = lexer.next() catch return false;
-    return suffix.tag == .ident and
-        (parseVectorView(suffix.text) != null or parseSwizzle(suffix.text) != null);
+    return suffix.tag == .ident and (parseVectorView(suffix.text) != null or
+        parseSwizzle(suffix.text) != null or indexed_broadcasts.has(suffix.text));
+}
+
+/// Broadcasts selected by a compile-time index: `.lane(i)` repeats lane i
+/// everywhere, `.halfLane(i)` repeats lane i of each four-lane half, and
+/// `.quarterLane(i)` lane i of each pair. Values are the first element
+/// and the number of choices.
+const indexed_broadcasts = std.StaticStringMap([2]u4).initComptime(.{
+    .{ "lane", .{ 8, 8 } },
+    .{ "halfLane", .{ 4, 4 } },
+    .{ "quarterLane", .{ 2, 2 } },
+});
+
+fn applyIndexedBroadcast(self: *Parser, original: ast.VectorAccess, suffix: token.Token) !ast.VectorAccess {
+    const selector = indexed_broadcasts.get(suffix.text).?;
+    _ = try self.expect(.l_paren);
+    const index_token = self.current;
+    const index = try @import("parse_comptime.zig").parseConstExpression(self);
+    if (index < 0 or index >= selector[1]) return self.fail(index_token, .invalid_vector_lane);
+    _ = try self.expect(.r_paren);
+    var access = original;
+    access.element = selector[0] + @as(u4, @intCast(index));
+    access.lane = if (selector[0] == 8) @intCast(index) else null;
+    return access;
 }
 
 pub fn parseVectorAccess(self: *Parser, name: []const u8) !ast.VectorAccess {
@@ -331,18 +350,28 @@ pub fn parseVectorAccess(self: *Parser, name: []const u8) !ast.VectorAccess {
     return access;
 }
 
+/// `[lane]` or `[first..end]`.
 fn parseVectorLane(self: *Parser, original: ast.VectorAccess) !ast.VectorAccess {
-    const lane_token = try self.expect(.number);
-    const number = try self.parseNumberValue(lane_token);
-    const lane = std.math.cast(u3, number) orelse return self.fail(lane_token, .invalid_vector_lane);
-    _ = try self.expect(.r_bracket);
+    const lane_token = self.current;
+    const comptime_ = @import("parse_comptime.zig");
+    const lane = std.math.cast(u3, try comptime_.parseConstExpression(self)) orelse return self.fail(lane_token, .invalid_vector_lane);
     var access = original;
     access.element = @as(u4, lane) + 8;
     access.lane = lane;
+    if (try self.eat(.dot_dot)) access.lane_count = try parseLaneEnd(self, lane);
+    _ = try self.expect(.r_bracket);
     return access;
 }
 
+fn parseLaneEnd(self: *Parser, lane: u3) !u4 {
+    const end_token = self.current;
+    const end = try @import("parse_comptime.zig").parseConstExpression(self);
+    if (end <= lane or end > 8) return self.fail(end_token, .invalid_lane_range);
+    return @intCast(end - lane);
+}
+
 fn applySwizzle(self: *Parser, original: ast.VectorAccess, suffix: token.Token) !ast.VectorAccess {
+    if (indexed_broadcasts.has(suffix.text)) return applyIndexedBroadcast(self, original, suffix);
     const swizzle = parseSwizzle(suffix.text) orelse return self.fail(suffix, .invalid_vector_swizzle);
     var access = original;
     access.element = swizzle.element;
@@ -350,21 +379,9 @@ fn applySwizzle(self: *Parser, original: ast.VectorAccess, suffix: token.Token) 
     return access;
 }
 
+/// A memory offset: any compile-time integer expression.
 pub fn parseLiteralOffset(self: *Parser) !i64 {
-    if (self.current.tag == .ident and std.mem.eql(u8, self.current.text, "offsetOf")) {
-        _ = try self.expect(.ident);
-        _ = try self.expect(.l_paren);
-        const type_name = try self.expect(.ident);
-        _ = try self.expect(.comma);
-        const field_name = try self.expect(.ident);
-        _ = try self.expect(.r_paren);
-        return self.packedStructFieldOffset(type_name, field_name);
-    }
-    const tok = self.current;
-    return switch (try self.parseValueRef()) {
-        .number => |number| number,
-        .ident, .bit_cast, .vector_access => self.fail(tok, .expected_literal_offset),
-    };
+    return @import("parse_comptime.zig").parseConstExpression(self);
 }
 
 pub fn packedStructFieldOffset(self: *Parser, type_name: token.Token, field_name: token.Token) !i64 {
@@ -396,7 +413,7 @@ const comparison_operators = std.EnumArray(token.Tag, ?ast.CompareOp).initDefaul
 
 pub fn parseComparisonOperator(self: *Parser) !?ast.CompareOp {
     const op = comparison_operators.get(self.current.tag) orelse return null;
-    self.current = try self.lexer.next();
+    try self.advance();
     return op;
 }
 
@@ -418,7 +435,7 @@ const compound_operators = std.EnumArray(token.Tag, ?ast.AssignOp).initDefault(@
 
 pub fn parseCompoundAssignOp(self: *Parser) !?ast.AssignOp {
     const op = compound_operators.get(self.current.tag) orelse return null;
-    self.current = try self.lexer.next();
+    try self.advance();
     return op;
 }
 
@@ -440,6 +457,6 @@ const binary_operators = std.EnumArray(token.Tag, ?ast.AssignOp).initDefault(@as
 
 pub fn parseBinaryAssignOp(self: *Parser) !?ast.AssignOp {
     const op = binary_operators.get(self.current.tag) orelse return null;
-    self.current = try self.lexer.next();
+    try self.advance();
     return op;
 }

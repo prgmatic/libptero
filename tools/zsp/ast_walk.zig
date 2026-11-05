@@ -106,7 +106,6 @@ const Reader = *const fn (*const Statement, *Children) void;
 
 const child_readers = blk: {
     var table = std.EnumArray(Tag, Reader).initFill(&delayOnly);
-    table.set(.while_loop, &whileChildren);
     table.set(.do_while_loop, &doWhileChildren);
     table.set(.if_statement, &ifChildren);
     table.set(.labeled_block, &blockChildren);
@@ -116,10 +115,6 @@ const child_readers = blk: {
 
 fn delayOnly(statement: *const Statement, result: *Children) void {
     result.add(delaySlot(statement));
-}
-
-fn whileChildren(statement: *const Statement, result: *Children) void {
-    result.add(statement.while_loop.statements);
 }
 
 fn doWhileChildren(statement: *const Statement, result: *Children) void {
@@ -266,6 +261,6 @@ test "nested statements are visited through every list" {
     try testing.expectEqual(@as(usize, 1), children(&block).len);
     const ordered: Statement = .{ .ordered_block = &body };
     try testing.expectEqual(@as(usize, 1), children(&ordered).len);
-    const loop2: Statement = .{ .while_loop = .{ .condition = statements[0].if_statement.condition, .statements = &body } };
-    try testing.expectEqual(@as(usize, 1), children(&loop2).len);
+    const forever: Statement = .{ .do_while_loop = .{ .condition = null, .statements = &body, .delay_slot = null } };
+    try testing.expectEqual(@as(usize, 1), children(&forever).len);
 }

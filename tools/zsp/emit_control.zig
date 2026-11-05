@@ -266,8 +266,10 @@ fn findLoop(g: Gen, name: ?[]const u8) !EmissionLoop {
     return error.UnknownLoopLabel;
 }
 
+/// An unlabeled `break` or `continue` names the innermost loop; blocks
+/// need their label.
 fn loopMatches(loop: EmissionLoop, name: ?[]const u8) bool {
-    const requested = name orelse return true;
+    const requested = name orelse return loop.continue_suffix.len != 0;
     const actual = loop.name orelse return false;
     return std.mem.eql(u8, requested, actual);
 }
@@ -309,21 +311,6 @@ pub fn writeBreak(g: Gen, statement: *const Statement) !void {
     try statements_.writeConditionalDirectDelaySlot(g, transfer.delay_slot);
 }
 
-pub fn writeWhile(g: Gen, statement: *const Statement) !void {
-    const loop = statement.while_loop;
-    const label = g.context.allocLabel();
-    try pushLoop(g, .{ .name = loop.label, .label = label, .continue_suffix = "while", .break_suffix = "whileend" });
-    defer popLoop(g);
-    try g.out.label(try g.localLabel("while", label));
-    try writeConditionBranchFalse(g, loop.condition, "whileend", label, true);
-    try writeScoped(g, loop.statements);
-    if (!terminatesControlFlow(loop.statements)) {
-        try g.out.jump(.j, try g.localLabel("while", label));
-        try g.out.nop();
-    }
-    try g.out.label(try g.localLabel("whileend", label));
-}
-
 fn isContinue(_: void, statement: *const Statement) bool {
     return statement.* == .continue_loop;
 }
@@ -340,11 +327,20 @@ pub fn writeDoWhile(g: Gen, statement: *const Statement) !void {
     try writeStatements(g, loop.statements);
     if (ast_walk.any(loop.statements, {}, isContinue)) try g.out.label(try g.localLabel("dowhilecond", label));
     g.advance(1);
-    var inverse = loop.condition;
-    inverse.op = common.invertComparison(inverse.op);
-    try writeConditionBranchFalse(g, inverse, "dowhile", label, loop.delay_slot == null);
+    try writeLoopBack(g, loop.condition, label, loop.delay_slot == null);
     try statements_.writeStructuredDelaySlot(g, loop.delay_slot);
     try g.out.label(try g.localLabel("dowhileend", label));
+}
+
+/// Branches back to the loop top while `condition` holds, or always.
+fn writeLoopBack(g: Gen, condition: ?ast.Condition, label: usize, emit_nop: bool) !void {
+    var inverse = condition orelse {
+        try g.out.jump(.j, try g.localLabel("dowhile", label));
+        if (emit_nop) try g.out.nop();
+        return;
+    };
+    inverse.op = common.invertComparison(inverse.op);
+    try writeConditionBranchFalse(g, inverse, "dowhile", label, emit_nop);
 }
 
 const Block = @FieldType(Statement, "labeled_block");
@@ -400,28 +396,43 @@ const If = @FieldType(Statement, "if_statement");
 pub fn writeIf(g: Gen, statement: *const Statement) !void {
     const branch = statement.if_statement;
     const label = g.context.allocLabel();
-    if (labeledBreakTarget(branch)) |transfer| return writeConditionalBreak(g, branch, transfer);
+    if (try conditionalExit(g, branch)) |exit| return writeConditionalExit(g, branch, exit);
     const then_terminates = terminatesControlFlow(branch.then_statements);
     const else_terminates = if (branch.else_statements) |items| terminatesControlFlow(items) else false;
     if (branch.else_statements != null and else_terminates and !then_terminates) return writeReorderedIf(g, branch, label);
     return writeOrderedIf(g, branch, label, then_terminates);
 }
 
-/// `if (c) break name;` lowers to one branch to the named exit.
-fn labeledBreakTarget(branch: If) ?ast.BreakTransfer {
+/// Where `if (c) { break; }` or `if (c) { continue; }` goes, which
+/// lowers to one branch.
+const Exit = struct { suffix: []const u8, label: usize, delay_slot: ?[]const Statement };
+
+fn conditionalExit(g: Gen, branch: If) !?Exit {
     if (branch.else_statements != null or branch.then_statements.len != 1) return null;
-    const only = branch.then_statements[0];
-    if (only != .break_loop or only.break_loop.label == null) return null;
-    return only.break_loop;
+    return switch (branch.then_statements[0]) {
+        .break_loop => |transfer| try breakExit(g, transfer),
+        .continue_loop => |name| try continueExit(g, name),
+        else => null,
+    };
 }
 
-fn writeConditionalBreak(g: Gen, branch: If, transfer: ast.BreakTransfer) !void {
-    if (branch.delay_slot != null and transfer.delay_slot != null) return error.MultipleDelaySlots;
-    const delay_slot = branch.delay_slot orelse transfer.delay_slot;
-    const target = try findLoop(g, transfer.label.?);
+fn breakExit(g: Gen, transfer: ast.BreakTransfer) !Exit {
+    const loop = try findLoop(g, transfer.label);
+    return .{ .suffix = loop.break_suffix, .label = loop.label, .delay_slot = transfer.delay_slot };
+}
+
+fn continueExit(g: Gen, name: ?[]const u8) !Exit {
+    const loop = try findLoop(g, name);
+    if (loop.continue_suffix.len == 0) return error.CannotContinueBlock;
+    return .{ .suffix = loop.continue_suffix, .label = loop.label, .delay_slot = null };
+}
+
+fn writeConditionalExit(g: Gen, branch: If, exit: Exit) !void {
+    if (branch.delay_slot != null and exit.delay_slot != null) return error.MultipleDelaySlots;
+    const delay_slot = branch.delay_slot orelse exit.delay_slot;
     var inverse = branch.condition;
     inverse.op = common.invertComparison(inverse.op);
-    try writeConditionBranchFalse(g, inverse, target.break_suffix, target.label, delay_slot == null);
+    try writeConditionBranchFalse(g, inverse, exit.suffix, exit.label, delay_slot == null);
     try statements_.writeStructuredDelaySlot(g, delay_slot);
     g.advance(1);
 }

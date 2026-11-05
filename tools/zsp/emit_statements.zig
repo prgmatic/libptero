@@ -44,7 +44,6 @@ const handlers = std.EnumArray(Tag, Handler).init(.{
     .goto = &control.writeGoto,
     .conditional_goto = &control.writeConditionalGoto,
     .conditional_direct_goto = &control.writeConditionalDirectGoto,
-    .while_loop = &control.writeWhile,
     .do_while_loop = &control.writeDoWhile,
     .labeled_block = &control.writeLabeledBlock,
     .break_loop = &control.writeBreak,

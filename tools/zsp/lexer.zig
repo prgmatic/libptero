@@ -151,6 +151,7 @@ const punctuation_tokens = [_]struct { text: []const u8, tag: token.Tag }{
     .{ .text = "|=", .tag = .pipe_equal },
     .{ .text = "^=", .tag = .caret_equal },
     .{ .text = "@", .tag = .at },
+    .{ .text = "..", .tag = .dot_dot },
     .{ .text = ".", .tag = .dot },
     .{ .text = ":", .tag = .colon },
     .{ .text = ",", .tag = .comma },
@@ -175,8 +176,8 @@ const punctuation_tokens = [_]struct { text: []const u8, tag: token.Tag }{
 };
 
 test "lexer selects longest operators and tracks positions across comments" {
-    var lexer = Lexer{ .source = "// header\n/* block */ reg $t0 >>>= 2; +%= -% ~|= !=" };
-    const expected = [_]token.Tag{ .ident, .register, .logical_shift_right_equal, .number, .semicolon, .plus_percent_equal, .minus_percent, .nor_equal, .not_equal, .eof };
+    var lexer = Lexer{ .source = "// header\n/* block */ reg $t0 >>>= 2; +%= -% ~|= != 0..4" };
+    const expected = [_]token.Tag{ .ident, .register, .logical_shift_right_equal, .number, .semicolon, .plus_percent_equal, .minus_percent, .nor_equal, .not_equal, .number, .dot_dot, .number, .eof };
     for (expected, 0..) |tag, index| {
         const actual = try lexer.next();
         try std.testing.expectEqual(tag, actual.tag);
