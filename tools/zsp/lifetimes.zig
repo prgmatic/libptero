@@ -98,6 +98,8 @@ pub const Lifetimes = struct {
     successors: std.ArrayList([2]usize) = .empty,
     successor_counts: std.ArrayList(u2) = .empty,
     flow_loops: std.ArrayList(FlowLoop) = .empty,
+    /// Structured `do`/`while` loops as [first body position, condition].
+    loops: std.ArrayList([2]usize) = .empty,
     flow_statement_count: usize = 0,
     /// Lifetimes are only reused when every path is understood.
     reuse: bool = false,
@@ -107,7 +109,7 @@ pub const Lifetimes = struct {
     }
 
     pub fn deinit(self: *Lifetimes) void {
-        inline for (.{ "lifetimes", "labels", "edges", "calls", "events", "event_index", "sorted_events", "successors", "successor_counts", "flow_loops" }) |field| {
+        inline for (.{ "lifetimes", "labels", "edges", "calls", "events", "event_index", "sorted_events", "successors", "successor_counts", "flow_loops", "loops" }) |field| {
             @field(self, field).deinit(self.allocator);
         }
     }
@@ -228,6 +230,21 @@ pub const Lifetimes = struct {
         for (self.edges.items) |edge| {
             const target = (self.findLabel(edge.target) orelse continue).position;
             if (target < edge.position) self.extendLoop(target, edge.position);
+        }
+        for (self.loops.items) |loop| self.extendCarried(loop[0], loop[1]);
+    }
+
+    pub fn addLoop(self: *Lifetimes, first: usize, condition: usize) !void {
+        try self.loops.append(self.allocator, .{ first, condition });
+    }
+
+    /// Values from before a structured loop that it uses may be read again
+    /// by the next iteration, so they live until its back edge.
+    fn extendCarried(self: *Lifetimes, first: usize, back_edge: usize) void {
+        for (self.lifetimes.items) |*lifetime| {
+            if (lifetime.declaration < first and lifetime.last_use >= first) {
+                lifetime.last_use = @max(lifetime.last_use, back_edge);
+            }
         }
     }
 

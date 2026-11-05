@@ -114,9 +114,10 @@ fn parseVectorMemory(self: *Parser, operation: ast.VectorMemoryOperation) !Vecto
     return .{ .operation = operation, .vector = vector, .lane = lane, .address = address, .offset = offset };
 }
 
+/// A lane given as a constant expression, such as an `inline for` index.
 fn parseVectorLane(self: *Parser) !u3 {
-    const lane_token = try self.expect(.number);
-    const lane = try self.parseNumberValue(lane_token);
+    const lane_token = self.current;
+    const lane = try @import("parse_comptime.zig").parseConstExpression(self);
     if (lane < 0 or lane > 7) return self.fail(lane_token, .invalid_vector_lane);
     _ = try self.expect(.comma);
     return @intCast(lane);

@@ -248,6 +248,11 @@ fn writeArgument(g: Gen, argument: ast.ValueRef, parameter: ast.Parameter, allow
     };
 }
 
+/// A storage label passes its DMEM address.
+fn writeLabelArgument(g: Gen, parameter: ast.Parameter, label: []const u8) !void {
+    try operands.loadDataAddress(g.out, parameter.reg orelse return error.InvalidScalarRegister, label);
+}
+
 fn writeConstantArgument(g: Gen, parameter: ast.Parameter, value: i64) !void {
     if (analysis.isVectorType(parameter.data_type)) return error.VectorArgumentMustBeRegister;
     try operands.loadImmediateInto(g.out, parameter.reg orelse return error.InvalidScalarRegister, value);
@@ -259,6 +264,7 @@ fn writeSymbolArgument(g: Gen, symbol: analysis.Symbol, parameter: ast.Parameter
     if (!argumentTypeFits(symbol.data_type, parameter.data_type, allow_signedness_change)) return error.FunctionArgumentTypeMismatch;
     if (analysis.isVectorType(parameter.data_type)) return expectSameVector(symbol, parameter);
     if (symbol.reg != null) return;
+    if (symbol.data_label) |label| return writeLabelArgument(g, parameter, label);
     try writeConstantArgument(g, parameter, symbol.constant orelse return error.ExpectedConstant);
 }
 

@@ -367,6 +367,10 @@ halfwords followed by four fraction halfwords; select one half with a view
 (`pair.sfract[0..4]`) to transfer only that register. Eight lanes must start
 at lane 0, and the selection must stay inside the register.
 
+The lane argument of `rsp.vector.loadQuad`, `loadTranspose`, and the other
+lane-addressed vector memory builtins is a constant expression, so an
+`inline for` index can select it.
+
 `loadVectorBytes(address, offset)` loads eight packed bytes and expands
 them as signed packed values into a `vec16`; `loadVectorBytesUnsigned`
 performs the unsigned form.
@@ -474,7 +478,8 @@ address is taken. There the first four unpinned scalar parameters use `$a0`
 through `$a3`, and other parameters, including all vector ones, must specify
 a register.
 
-Calls remain stackless. Scalar input arguments are moved into the callee's
+Calls remain stackless. A storage label passed as an argument passes its
+DMEM address. Scalar input arguments are moved into the callee's
 registers when allocation cannot place them there directly; moves that form a
 cycle, such as swapped arguments, go through `$at` (or `$v1` when an argument
 is in `$at`). Constants and literals can be materialized in pinned scalar

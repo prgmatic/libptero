@@ -208,10 +208,13 @@ pub const FunctionContext = struct {
         return self.function_forbidden_scalar & registerBit(reg) != 0;
     }
 
-    /// A required register must be usable; otherwise the first free one.
+    /// The register a call wants the value in when it is usable for the
+    /// whole lifetime; otherwise the first free one, and the call moves it.
     pub fn allocRegister(self: *const FunctionContext, data_type: DataType, name: []const u8) !Register {
         if (isVectorType(data_type)) return error.ExpectedScalarType;
-        if (self.lifetimes.requiredRegister(name)) |reg| return self.checkRequiredRegister(name, reg);
+        if (self.lifetimes.requiredRegister(name)) |reg| {
+            if (self.checkRequiredRegister(name, reg)) |usable| return usable else |_| {}
+        }
         for (registers.alloc_scalar_registers) |reg| {
             if (self.scalarCandidate(name, reg)) return reg;
         }

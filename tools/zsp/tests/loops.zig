@@ -309,3 +309,38 @@ test "cold bodies stay inline inside loops" {
         \\
     );
 }
+
+test "values updated in a loop keep their register around the back edge" {
+    try expectAsm(
+        \\fn test(reg($a1) flags: u32) noreturn {
+        \\  reg output: dmem = 0x100;
+        \\  reg toggle: u32 = flags;
+        \\  do {
+        \\    store(u32, output, toggle, 4);
+        \\    output +%= 32;
+        \\    reg first_half: u32 = toggle;
+        \\    toggle = toggle ^ flags;
+        \\  } while (first_half >= 0x80000000);
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 256
+        \\  or $t1, $a1, $zero
+        \\LABEL_test_dowhile_0:
+        \\  sw $t1, 4($t0)
+        \\  addiu $t0, $t0, 32
+        \\  or $t2, $t1, $zero
+        \\  xor $t1, $t1, $a1
+        \\  bltz $t2, LABEL_test_dowhile_0
+        \\  nop
+        \\LABEL_test_dowhileend_0:
+        \\  break
+        \\
+        \\
+    );
+}

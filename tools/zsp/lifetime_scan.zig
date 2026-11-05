@@ -152,10 +152,12 @@ fn breakLoop(scan: *Scan, statement: *const Statement, _: usize) !void {
 /// The condition of a `do`/`while` loop has its own position after the body.
 fn doWhileLoop(scan: *Scan, statement: *const Statement, _: usize) !void {
     const loop = statement.do_while_loop;
+    const first = scan.position + 1;
     try scan.statements(loop.statements);
     scan.position += 1;
     if (loop.condition) |condition| try scan.condition(condition, scan.position);
     try scan.optional(loop.delay_slot);
+    try scan.lifetimes.addLoop(first, scan.position);
 }
 
 fn ifStatement(scan: *Scan, statement: *const Statement, current: usize) !void {
