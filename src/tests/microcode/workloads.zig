@@ -386,6 +386,34 @@ fn setup_second_buffer(h: *Harness) u24 {
     return @intCast(h.session.machine.readDmem(u32, dispatcher_symbols.rdp_buffers + 4));
 }
 
+test "triangles move to the other RDP buffer when the current one fills" {
+    var h: Harness = undefined;
+    try h.init(std.testing.allocator);
+    defer h.deinit();
+    const setup = try setUpRdp(&h, n64.rsp.Runtime.rdp_overlay_id);
+    var writer = try h.session.commands(512);
+    // Room for one shaded, textured, Z-buffered triangle (176 bytes).
+    try writer.internal(.write_word, dispatcher_symbols.rdp_sentinel, &.{setup.buffers[0] + 200});
+    for (0..3) |index| {
+        const offset: i16 = @intCast(index * 20);
+        const corners = [3][6]u32{
+            nativeVertex(10 + offset, 10, 0, 0, 0x0001_0000),
+            nativeVertex(60 + offset, 30, 16, 0, 0x0002_0000),
+            nativeVertex(20 + offset, 90, 0, 16, 0x0001_8000),
+        };
+        for (corners, 0..) |corner, vertex| try writer.overlayCommand(setup.overlay, 31, @intCast(vertex * 32), &corner);
+        try writer.overlayCommand(setup.overlay, 30, 0xca00, &.{});
+    }
+    _ = try h.measure(writer);
+    const counts = countOpcodes(h.rdp_bytes.written());
+    var triangles: u32 = 0;
+    for (counts[0x08..0x10]) |count| triangles += count;
+    try std.testing.expectEqual(@as(u32, 3), triangles);
+    try std.testing.expectEqual(setup.buffers[1], h.session.machine.dp.start);
+    const current = h.session.machine.readDmem(u32, dispatcher_symbols.rdp_current);
+    try std.testing.expect(current > setup.buffers[1] and current < setup.buffers[1] + 2 * 176);
+}
+
 test "rdp workload emits fills, shaded triangles, and a full sync" {
     var h: Harness = undefined;
     try h.init(std.testing.allocator);

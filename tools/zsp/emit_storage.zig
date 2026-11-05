@@ -104,6 +104,8 @@ fn writeSectionBlocks(storage: Storage, statements: []const ast.Statement, secti
 fn writeDeclaration(storage: Storage, declaration: ast.DataDecl) !void {
     const element_size = try elementSize(storage, declaration);
     if (!declaration.external) try writeDefinition(storage, declaration, element_size);
+    // Modules may each declare the same external storage they use.
+    if (declaration.external and isDataLabel(storage.context, declaration.name)) return;
     try storage.context.add(.{
         .name = declaration.name,
         .data_type = .dmem,
@@ -111,6 +113,11 @@ fn writeDeclaration(storage: Storage, declaration: ast.DataDecl) !void {
         .constant = null,
         .data_label = declaration.name,
     });
+}
+
+fn isDataLabel(context: *const FunctionContext, name: []const u8) bool {
+    const existing = context.lookup(name) catch return false;
+    return existing.data_label != null;
 }
 
 fn elementSize(storage: Storage, declaration: ast.DataDecl) !usize {

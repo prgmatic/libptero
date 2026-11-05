@@ -14,6 +14,8 @@ pub const Parser = struct {
     /// Names visible for type inference, innermost last; blocks restore
     /// the length on exit.
     type_symbols: std.ArrayList(TypeSymbol) = .empty,
+    /// Whether the block just parsed opened with `@branchHint(.cold)`.
+    last_block_cold: bool = false,
     compile_time_members: std.ArrayList(CompileTimeMember) = .empty,
     compile_time_types: std.ArrayList([]const u8) = .empty,
     /// Names replaced while lexing: `inline for` captures become numbers
@@ -177,9 +179,27 @@ pub const Parser = struct {
         defer self.type_symbols.shrinkRetainingCapacity(scope);
         var list: StatementList = .{};
         defer list.locations.deinit(self.allocator);
+        const cold = try self.eatColdHint();
         while (!try self.eat(.r_brace)) try self.parseStatementInto(&list);
         self.accumulator.closeList(&list);
+        self.last_block_cold = cold;
         return self.finishStatements(&list);
+    }
+
+    /// `@branchHint(.cold);` opening a block.
+    fn eatColdHint(self: *Parser) !bool {
+        if (self.current.tag != .at) return false;
+        const next = self.peek(1) orelse return false;
+        if (next[0].tag != .ident or !std.mem.eql(u8, next[0].text, "branchHint")) return false;
+        _ = try self.expect(.at);
+        _ = try self.expect(.ident);
+        _ = try self.expect(.l_paren);
+        _ = try self.expect(.dot);
+        const hint = try self.expect(.ident);
+        if (!std.mem.eql(u8, hint.text, "cold")) return self.fail(hint, .unsupported_builtin);
+        _ = try self.expect(.r_paren);
+        _ = try self.expect(.semicolon);
+        return true;
     }
 
     /// Parses the statements up to the closing brace into `list`.

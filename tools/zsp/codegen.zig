@@ -124,6 +124,7 @@ fn writeFunction(top: common.Gen, index: usize, fallthrough: ?usize) !void {
     const context = if (function.emit_label) &function_context else top.context;
     try writeBody(top, context, index, fallthrough);
     if (needsReturn(function)) try writeReturn(top.out, saves_return);
+    try @import("emit_control.zig").writeColdBlocks(top.with(context));
     try top.out.blank();
 }
 
@@ -135,6 +136,8 @@ fn writeBody(top: common.Gen, context: *FunctionContext, index: usize, fallthrou
     const function = top.functions[index];
     try prepareContext(top, context, function);
     if (fallthrough) |target| omitTail(context, function, top.functions[target]);
+    // Out-of-line bodies need a transfer before them, not a fall-through.
+    context.cold_blocks_allowed = fallthrough == null and (needsReturn(function) or endsWithTerminalTransfer(function.statements));
     try analysis.bindParameters(context, function.parameters);
     try statements_.writeStatements(top.with(context), function.statements);
 }

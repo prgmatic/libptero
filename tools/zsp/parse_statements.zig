@@ -185,13 +185,14 @@ fn parseWhile(self: *Parser, label: ?[]const u8) !ast.Statement {
     _ = try self.expect(.r_paren);
     const step = try parseContinueExpression(self);
     var body = try parseBraced(self);
+    const cold = self.last_block_cold;
     const loops = @import("parse_loops.zig");
     if (step) |statements| body = try loops.appendStep(self, label, body, statements);
     const guard = condition orelse return loops.exitAtEnd(self, label, body);
     const loop: ast.Statement = .{ .do_while_loop = .{ .label = label, .condition = condition, .statements = body, .delay_slot = null } };
     const then_statements = try self.allocator.alloc(ast.Statement, 1);
     then_statements[0] = loop;
-    return .{ .if_statement = .{ .condition = guard, .delay_slot = null, .then_statements = then_statements, .else_statements = null } };
+    return .{ .if_statement = .{ .condition = guard, .delay_slot = null, .then_statements = then_statements, .else_statements = null, .cold = cold } };
 }
 
 /// `: (statement)`, ended by the parenthesis instead of a semicolon.
@@ -283,12 +284,14 @@ fn parseConditionalGoto(self: *Parser, condition: ast.Condition) !ast.Statement 
 fn parseIfStatement(self: *Parser, condition: ast.Condition) !ast.Statement {
     const delay_slot = if (try self.eatKeyword("slot")) try parseBraced(self) else null;
     const then_statements = try parseBraced(self);
+    const cold = self.last_block_cold;
     const else_statements = if (try self.eatKeyword("else")) try parseBraced(self) else null;
     return .{ .if_statement = .{
         .condition = condition,
         .delay_slot = delay_slot,
         .then_statements = then_statements,
         .else_statements = else_statements,
+        .cold = cold,
     } };
 }
 

@@ -1,0 +1,437 @@
+// RDP triangle setup: turns three screen-space vertices into an RDP
+// triangle command with shade, texture, and Z coefficients, and starts its
+// DMA to the RDP buffer. Follows libdragon's RDPQ_Triangle_Send_Async
+// (include/rsp_rdpq_tri.inc); the scheduler interleaves the phases below.
+//
+// Vertex layout (bytes): X, Y (s13.2) at 0; Z at 4; clip flags at 6 and
+// trivial-reject flags at 7; RGBA at 8; S, T (s10.5) at 12; W (s15.16) at
+// 16; 1/W (s15.16) at 20.
+//
+// Output layout, relative to `output`: the command word at 0; edge
+// coefficients YL/YM/YH at 2-7 and XL, XH, XM with their slopes at 8-31;
+// shade, texture, and Z coefficients follow according to the command bits.
+const queue = import("resident_api.zsp");
+
+bss {
+    extern rdp_current: u32;
+    extern rdp_sentinel: u32;
+    extern rdp_buffers: [2]u32;
+    extern rdp_syncfull_ongoing: u8;
+    extern rdp_mode: [8]u32;
+}
+
+packed struct RdpBufferState {
+    current: u32;
+    previous: u32;
+}
+
+/// Builds the triangle `vertex1`-`vertex2`-`vertex3` at `output` and starts
+/// its DMA. `command` is the upper half of the command word; `cull_mode`
+/// is 0 to cull front faces, 1 for back faces, or 2 to keep both. Returns
+/// to the caller, or tails `cull` when the triangle is rejected, culled,
+/// or needs clipping.
+pub fn sendAsync(
+    // Where command handlers receive their first word.
+    reg($a0) command: i32,
+    vertex1: dmem,
+    vertex2: dmem,
+    vertex3: dmem,
+    output: dmem,
+    cull_mode: i32,
+) {
+    // Dispatcher constants: $v00 is zero and $v30 holds the shift powers;
+    // K1 is lane 7 and K4 is lane 5.
+    reg($v00) vector_zero: vec16 = undefined;
+    reg($v30) powers: vec16 = undefined;
+
+    // ---------------------------------------------------- load and sort
+    // Each vall row holds X Y, then Z and the vertex address in lane 3.
+    store(u16, output, vertex1);
+    store(u16, output, vertex2, 2);
+    store(u16, output, vertex3, 4);
+    reg vall1: vec16 = undefined;
+    reg vall2: vec16 = undefined;
+    reg vall3: vec16 = undefined;
+    vall1[0..2] = load(vec16, vertex1, 0);
+    vall2[0..2] = load(vec16, vertex2, 0);
+    vall3[0..2] = load(vec16, vertex3, 0);
+    reg negative_powers: vec16 = vector_zero - powers;
+    reg vy1: vec16 = vall1.yyyyyyyy;
+    reg vy2: vec16 = vall2.yyyyyyyy;
+    reg vy3: vec16 = vall3.yyyyyyyy;
+    vall1[3] = load(vec16, output, 0);
+    vall2[3] = load(vec16, output, 2);
+    vall3[3] = load(vec16, output, 4);
+    // A carrying add also clears VCO, so the first compare breaks Y ties
+    // the same way every time.
+    reg vk1: vec16 = vector_zero + powers.WWWWWWWW;
+
+    // Sort-of-three by Y: compare the keys, merge the rows, and remember
+    // each swap so the winding can be recovered.
+    reg vytmp1: vec16 = vectorCompareGreaterOrEqual(vy1, vy2);
+    reg valltmp1: vec16 = vectorSelectByCompareCode(vall1, vall2);
+    vy1 = vectorCompareLessThan(vy1, vy2);
+    reg swap1: i32 = rsp.vector.getCompareCode();
+    vall1 = vectorSelectByCompareCode(vall1, vall2);
+    reg vytmp2: vec16 = vectorCompareGreaterOrEqual(vy1, vy3);
+    reg valltmp2: vec16 = vectorSelectByCompareCode(vall1, vall3);
+    vy1 = vectorCompareLessThan(vy1, vy3);
+    reg swap2: i32 = rsp.vector.getCompareCode();
+    vall1 = vectorSelectByCompareCode(vall1, vall3);
+    vy3 = vectorCompareGreaterOrEqual(vytmp1, vytmp2);
+    vall3 = vectorSelectByCompareCode(valltmp1, valltmp2);
+    vy2 = vectorCompareLessThan(vytmp1, vytmp2);
+    reg swap3: i32 = rsp.vector.getCompareCode();
+    vall2 = vectorSelectByCompareCode(valltmp1, valltmp2);
+
+    // ------------------------------------------------- reject and clip
+    // The clip-flag halfword has clip flags in its high byte and inverted
+    // trivial-reject flags in its low byte.
+    reg flags: u32 = load(u16, vertex1, 6);
+    reg flags3: u32 = load(u16, vertex3, 6);
+    reg flags2: u32 = load(u16, vertex2, 6);
+    flags |= flags3;
+    flags |= flags2;
+    reg inside: u32 = flags & 0x3f;
+    reg vhml_upper: vec16 = 0;
+    if (inside != 0x3f) tail cull();
+    flags &= 0x3f00;
+    reg mipmap_bits: i32 = load(u8, rdp_mode, 24);
+    mipmap_bits &= 0x38;
+    store(vec16, output, vy1[0], 6);
+    // This overlay does not clip: such triangles are dropped.
+    if (flags != 0) tail cull();
+
+    // ------------------------------------------------ edges and normal
+    //   vhml = HX HY MX MY LX LY 0 NZf, with M and L in the temporaries.
+    reg vhml: vec16 = vectorSubtractCarry(vall3, vall1);
+    reg vm: vec16 = vectorSubtractCarry(vall2, vall1);
+    reg vl: vec16 = vectorSubtractCarry(vall3, vall2);
+    reg sorted1: dmem = undefined;
+    reg sorted2: dmem = undefined;
+    reg sorted3: dmem = undefined;
+    sorted1 = vall1[3];
+    sorted2 = vall2[3];
+    sorted3 = vall3[3];
+    reg vx12: vec32 = undefined;
+    vx12.sfract[0] = vectorMove(vall1[0]);
+    vx12.sfract[2] = vectorMove(vall2[0]);
+    command |= mipmap_bits;
+    // The face to cull: the parity of the sort's swaps, against `cull_mode`.
+    reg cull_face: i32 = swap1 ^ swap2;
+    cull_face ^= swap3;
+    cull_face &= 1;
+    cull_face ^= cull_mode;
+    reg negative_my: vec16 = vectorSubtractCarry(vector_zero, vm.yyyyyyyy);
+    // FY = floor(Y1) - Y1 as s15.16.
+    reg vfy: vec32 = undefined;
+    vfy.sfract = vectorShiftLeft8(vy1, 14);
+    store(vec16, output, vy2[0], 4);
+    vfy.sint = vectorShiftRightArithmetic(vy1, 2);
+    // NZ = MX * HY - HX * MY.
+    reg vnz: vec32 = undefined;
+    vnz.sfract = vmudh(vm, vhml.yyyyyyyy);
+    store(vec16, output, vy3[0], 2);
+    vnz.sfract = vmadh(vhml, negative_my);
+    store(vec16, output, vm[0..2], 8);
+    vnz.sint = readVectorAccumulatorHigh();
+    store(vec16, output, vl[0..2], 12);
+    vnz.sfract = readVectorAccumulatorMiddle();
+    vhml[2..6] = load(vec16, output, 8);
+    vfy.sfract = vectorSubtractCarry(vector_zero, vfy.sfract);
+    reg color_dmem: dmem = output +% 0x20;
+    vfy.sint = vectorSubtract(vfy.sint, vfy.sint);
+
+    // --------------------------------------------- slope reciprocals
+    //   slope = 1/HY -- 1/MY -- 1/LY -- -- 1/NZ
+    reg vw: vec32 = undefined;
+    reg vslope: vec32 = undefined;
+    vw.sfract[0] = load(vec16, sorted1, 18);
+    vslope.sint[7] = vectorReciprocalHigh(vnz.sint[0]);
+    reg back_facing: i32 = undefined;
+    back_facing = vnz.sint[0];
+    vslope.sfract[7] = vectorReciprocalLow(vnz.sfract[0]);
+    vw.sfract[2] = load(vec16, sorted2, 18);
+    vslope.sint[7] = vectorReciprocalHigh(vector_zero[0]);
+    vw.sfract[4] = load(vec16, sorted3, 18);
+    vslope.sfract[0] = vectorReciprocal(vhml[1]);
+    back_facing = back_facing < 0;
+    vslope.sint[0] = vectorReciprocalHigh(vhml[1]);
+    if (back_facing == cull_face) tail cull() slot {
+        vslope.sfract[2] = vectorReciprocal(vm[1]);
+    }
+    vslope.sint[2] = vectorReciprocalHigh(vm[1]);
+    vw.sint[0] = load(vec16, sorted1, 16);
+    vslope.sfract[4] = vectorReciprocal(vl[1]);
+    vw.sint[2] = load(vec16, sorted2, 16);
+    vslope.sint[4] = vectorReciprocalHigh(vl[1]);
+    vw.sint[4] = load(vec16, sorted3, 16);
+
+    // One Newton-Raphson pass over NZ (32-bit) and HY/MY/LY (16-bit):
+    //   vhml_upper = 0 0 0 0 0 0 0 NZi, so vhml/vhml_upper form 32-bit X.
+    vhml[7] = vectorMove(vnz.sfract[0]);
+    reg left_major: i32 = back_facing ^ 1;
+    vhml_upper[7] = vectorMove(vnz.sint[0]);
+    left_major <<= 7;
+    // slope_m2 = -2 * R
+    reg vslope_m2: vec32 = undefined;
+    vslope_m2.sfract = vmudn(vslope.sfract, negative_powers.YYYYYYYY);
+    reg vattr3: vec16 = undefined;
+    rsp.vector.loadPackedUnsigned(vattr3, sorted3, 8);
+    vslope_m2.sint = vmadh(vslope.sint, negative_powers.YYYYYYYY);
+    reg vattr1: vec16 = undefined;
+    rsp.vector.loadPackedUnsigned(vattr1, sorted1, 8);
+    // Minimum W between lanes 0 and 2.
+    reg discard: vec16 = vectorSubtractCarry(vw.sfract, vw.sfract.zzzzzzzz);
+    reg vattr2: vec16 = undefined;
+    rsp.vector.loadPackedUnsigned(vattr2, sorted2, 8);
+    vw.sint = vectorCompareLessThan(vw.sint, vw.sint.zzzzzzzz);
+    command |= left_major;
+    vw.sfract = vectorSelectByCompareCode(vw.sfract, vw.sfract.zzzzzzzz);
+    reg vinvw: vec32 = undefined;
+    vinvw.sfract[6] = load(vec16, sorted3, 22);
+    // R * X/2 - 1
+    reg vtmp: vec32 = undefined;
+    vtmp.sfract = vmudl(vslope.sfract, vhml.yywwYYWW);
+    vinvw.sfract[4] = load(vec16, sorted1, 22);
+    vtmp.sfract = vmadm(vslope.sint, vhml.yywwYYWW);
+    vinvw.sfract[5] = load(vec16, sorted2, 22);
+    vtmp.sfract = vmadn(vslope.sfract, vhml_upper);
+    reg tex_dmem: dmem = command & 0x400;
+    vtmp.sint = vmadh(vslope.sint, vhml_upper);
+    tex_dmem >>>= 4;
+    vtmp.sfract = vmadn(vk1, negative_powers.WWWWWWWW);
+    reg negated_my: i32 = undefined;
+    negated_my = vhml[3];
+    vtmp.sint = vmadh(vk1, negative_powers.WWWWWWWW);
+    reg negated_hx: i32 = undefined;
+    negated_hx = vhml[0];
+    // Minimum W between lanes 0 and 4.
+    discard = vectorSubtractCarry(vw.sfract, vw.sfract.XXXXXXXX);
+    vinvw.sint[5] = load(vec16, sorted2, 20);
+    vw.sint = vectorCompareLessThan(vw.sint, vw.sint.XXXXXXXX);
+    vinvw.sint[6] = load(vec16, sorted3, 20);
+    vw.sfract = vectorSelectByCompareCode(vw.sfract, vw.sfract.XXXXXXXX);
+    vinvw.sint[4] = load(vec16, sorted1, 20);
+    // X * (2 - R*X)
+    discard = vmudl(vtmp.sfract, vslope_m2.sfract);
+    tex_dmem +%= color_dmem;
+    discard = vmadm(vtmp.sint, vslope_m2.sfract);
+    reg z_dmem: dmem = command & 0x200;
+    vnz.sfract = vmadn(vtmp.sfract, vslope_m2.sint);
+    z_dmem >>>= 3;
+    vnz.sint = vmadh(vtmp.sint, vslope_m2.sint);
+    store(i16, output, command);
+
+    // ----------------------------------------- slopes and edge starts
+    reg($ra) return_address: i32 = undefined;
+    // Normalize 1/W by the minimum W into 0..1.
+    discard = vmudl(vinvw.sfract, vw.sfract.xxxxxxxx);
+    reg vtex1: vec16 = undefined;
+    vtex1[4..6] = load(vec16, sorted1, 12);
+    discard = vmadm(vinvw.sint, vw.sfract.xxxxxxxx);
+    reg vtex2: vec16 = undefined;
+    vtex2[4..6] = load(vec16, sorted2, 12);
+    vinvw.sfract = vmadn(vinvw.sfract, vw.sint.xxxxxxxx);
+    negated_my = -negated_my;
+    // slope = HX/HY -- MX/MY -- LX/LY
+    discard = vmudn(vnz.sfract, vhml);
+    negated_hx = -negated_hx;
+    discard = vmadh(vnz.sint, vhml);
+    vhml[3] = negated_my;
+    vslope.sfract = readVectorAccumulatorMiddle();
+    vhml[0] = negated_hx;
+    vslope.sint = readVectorAccumulatorHigh();
+    // Merge only S/T (lanes 4 and 5) into the attributes later.
+    reg st_lanes: i32 = 0xcf;
+    // An exact 1.0 would wrap to 0; one less is "almost 1".
+    vinvw.sfract = vectorSubtractCarry(vinvw.sfract, powers.WWWWWWWW);
+    reg vtex3: vec16 = undefined;
+    vtex3[4..6] = load(vec16, sorted3, 12);
+    // RGBA was loaded as 8.7; shift back to raw bytes, then add Z.
+    vattr1 = vectorShiftRightLogical(vattr1, 7);
+    rsp.vector.setCompareCode(st_lanes);
+    vattr2 = vectorShiftRightLogical(vattr2, 7);
+    vattr1[7] = load(vec16, sorted1, 4);
+    vattr3 = vectorShiftRightLogical(vattr3, 7);
+    vattr2[7] = load(vec16, sorted2, 4);
+    // VMULF takes 0.15 inputs.
+    vinvw.sfract = vectorShiftRightLogical(vinvw.sfract, 1);
+    vattr3[7] = load(vec16, sorted3, 4);
+    // XH and XM from Y1's fraction.
+    discard = vmudl(vslope.sfract, vfy.sfract.XXXXXXXX);
+    z_dmem +%= tex_dmem;
+    discard = vmadm(vslope.sint, vfy.sfract.XXXXXXXX);
+    reg prim_size: i32 = command & 0x100;
+    reg vedges: vec32 = undefined;
+    vedges.sfract = vmadn(vslope.sfract, vfy.sint.XXXXXXXX);
+    reg dma_busy: u32 = rsp.cp0.dmaBusy();
+    vedges.sint = vmadh(vslope.sint, vfy.sint.XXXXXXXX);
+    store(vec16, output, vinvw.sfract[4..8], 16);
+    // S/T * 1/W
+    vtex1 = vmulf(vtex1, vinvw.sfract.xxxxXXXX);
+    vattr1[6] = load(vec16, output, 16);
+    vtex2 = vmulf(vtex2, vinvw.sfract.yyyyYYYY);
+    vattr2[6] = load(vec16, output, 18);
+    vtex3 = vmulf(vtex3, vinvw.sfract.zzzzZZZZ);
+    vattr3[6] = load(vec16, output, 20);
+    // X1, X2 as s15.16.
+    vx12.sint = vectorShiftRightArithmetic(vx12.sfract, 2);
+    // Only one triangle's DMA is in flight at a time: wait out the last.
+    while (dma_busy != 0) {
+        @branchHint(.cold);
+        dma_busy = rsp.cp0.dmaBusy();
+    }
+    reg syncfull: u32 = load(u8, rdp_syncfull_ongoing);
+    vx12.sfract = vectorShiftLeft8(vx12.sfract, 14);
+    prim_size >>>= 4;
+    vattr1 = vectorSelectByCompareCode(vattr1, vtex1);
+    prim_size +%= z_dmem;
+    vattr2 = vectorSelectByCompareCode(vattr2, vtex2);
+    store(vec16, output, vslope.sint[4], 12);
+    vattr3 = vectorSelectByCompareCode(vattr3, vtex3);
+    reg rdram: i32 = load(i32, rdp_current);
+    vedges.sfract = vectorAddCarry(vedges.sfract, vx12.sfract.xxxxxxxx);
+    store(vec16, output, vx12.sint[2], 8);
+    vedges.sint = vectorAdd(vedges.sint, vx12.sint.xxxxxxxx);
+    store(vec16, output, vslope.sfract[4], 14);
+    // Everything up to `rdram` is in RDRAM by now: let the RDP start on
+    // it, unless a full sync holds DP_END.
+    if (syncfull == 0) {
+        rsp.cp0.setRdpCommandEnd(rdram);
+    }
+    // Clear VCO/VCC for the subtractions below.
+    vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
+
+    // ------------------------------------------------------ attributes
+    // MA = A2 - A1, HA = A3 - A1 (saturating; S/T are s10.5).
+    reg vma: vec16 = vectorSubtract(vattr2, vattr1);
+    store(vec16, output, vx12.sfract[2], 10);
+    reg vha: vec16 = vectorSubtract(vattr3, vattr1);
+    prim_size = prim_size - output;
+    // 1/NZ << 2 for the coefficient precision.
+    vnz.sfract = vmudn(vnz.sfract, powers.YYYYYYYY);
+    store(vec16, output, vslope.sint[2], 28);
+    vnz.sint = vmadh(vnz.sint, powers.YYYYYYYY);
+    store(vec16, output, vslope.sfract[2], 30);
+    // DX = MA * HY + HA * -MY
+    reg vdx: vec32 = undefined;
+    vdx.sfract = vmudh(vma, vhml.yyyyyyyy);
+    store(vec16, output, vedges.sint[2], 24);
+    vdx.sfract = vmadh(vha, vhml.wwwwwwww);
+    store(vec16, output, vedges.sfract[2], 26);
+    vdx.sfract = readVectorAccumulatorMiddle();
+    store(vec16, output, vedges.sint[0], 16);
+    vdx.sint = readVectorAccumulatorHigh();
+    store(vec16, output, vedges.sfract[0], 18);
+    // DY = HA * MX + MA * -HX
+    reg vdy: vec32 = undefined;
+    vdy.sfract = vmudh(vha, vhml.zzzzzzzz);
+    store(vec16, output, vslope.sint[0], 20);
+    vdy.sfract = vmadh(vma, vhml.xxxxxxxx);
+    store(vec16, output, vslope.sfract[0], 22);
+    vdy.sfract = readVectorAccumulatorMiddle();
+    reg sentinel: i32 = load(i32, rdp_sentinel);
+    vdy.sint = readVectorAccumulatorHigh();
+    // The top byte of the RDRAM pointer is not part of the address.
+    rdram <<= 8;
+    rdram >>>= 8;
+    // DX * 1/NZ
+    discard = vmudl(vdx.sfract, vnz.sfract.WWWWWWWW);
+    discard = vmadm(vdx.sint, vnz.sfract.WWWWWWWW);
+    rsp.cp0.setDmaMemoryAddress(output);
+    vdx.sfract = vmadn(vdx.sfract, vnz.sint.WWWWWWWW);
+    rsp.cp0.setDmaRdramAddress(rdram);
+    vdx.sint = vmadh(vdx.sint, vnz.sint.WWWWWWWW);
+    output +%= prim_size;
+    // DY * 1/NZ
+    discard = vmudl(vdy.sfract, vnz.sfract.WWWWWWWW);
+    rdram += prim_size;
+    discard = vmadm(vdy.sint, vnz.sfract.WWWWWWWW);
+    reg buffer_full: i32 = undefined;
+    buffer_full = sentinel < rdram;
+    vdy.sfract = vmadn(vdy.sfract, vnz.sint.WWWWWWWW);
+    store(vec16, color_dmem, vdx.sfract[0..4], 24);
+    vdy.sint = vmadh(vdy.sint, vnz.sint.WWWWWWWW);
+    store(vec16, tex_dmem, vdx.sfract[4..8], 24);
+    // DE = DX * 1/HY + DY, continuing the DY accumulation.
+    discard = vmadl(vdx.sfract, vslope.sfract.xxxxxxxx);
+    store(vec16, color_dmem, vdx.sint[0..4], 8);
+    discard = vmadm(vdx.sint, vslope.sfract.xxxxxxxx);
+    store(vec16, tex_dmem, vdx.sint[4..8], 8);
+    reg vde: vec32 = undefined;
+    vde.sfract = vmadn(vdx.sfract, vslope.sint.xxxxxxxx);
+    store(vec16, color_dmem, vdy.sfract[0..4], 56);
+    vde.sint = vmadh(vdx.sint, vslope.sint.xxxxxxxx);
+    store(vec16, tex_dmem, vdy.sfract[4..8], 56);
+    if (buffer_full != 0) {
+        @branchHint(.cold);
+        // Swap to the other dynamic buffer; the DMA already started below
+        // targets the new one. rdpSetBuffer returns through $ra.
+        reg caller: i32 = return_address;
+        rdram = load(i32, rdp_buffers, 4);
+        reg previous: i32 = load(i32, rdp_buffers);
+        store(RdpBufferState.current, rdp_buffers, rdram);
+        store(RdpBufferState.previous, rdp_buffers, previous);
+        reg new_sentinel: i32 = rdram + 0x10000;
+        reg start: i32 = rdram;
+        queue.rdpSetBuffer(rdram, start, new_sentinel);
+        rsp.cp0.setDmaRdramAddress(rdram);
+        rdram +%= prim_size;
+        return_address = caller;
+    }
+
+    // FINAL = A1 + DE * FY
+    discard = vmudh(vattr1, powers.WWWWWWWW);
+    store(vec16, color_dmem, vdy.sint[0..4], 40);
+    discard = vmadl(vde.sfract, vfy.sfract.XXXXXXXX);
+    store(vec16, tex_dmem, vdy.sint[4..8], 40);
+    discard = vmadm(vde.sint, vfy.sfract.XXXXXXXX);
+    store(vec16, color_dmem, vde.sfract[0..4], 48);
+    reg vfinal: vec32 = undefined;
+    vfinal.sfract = vmadn(vde.sfract, vfy.sint.XXXXXXXX);
+    store(vec16, tex_dmem, vde.sfract[4..8], 48);
+    vfinal.sint = vmadh(vde.sint, vfy.sint.XXXXXXXX);
+    store(vec16, color_dmem, vde.sint[0..4], 32);
+    // Pack the Z values so one store each writes them.
+    vdy.sfract[6] = vectorMove(vdy.sint[7]);
+    store(vec16, tex_dmem, vde.sint[4..8], 32);
+    vde.sfract[6] = vectorMove(vde.sint[7]);
+    store(u32, rdp_current, rdram);
+    reg vz: vec16 = undefined;
+    vz[1] = vectorMove(vfinal.sfract[7]);
+    store(vec16, color_dmem, vfinal.sfract[0..4], 16);
+    vz[0] = vectorMove(vfinal.sint[7]);
+    store(vec16, tex_dmem, vfinal.sfract[4..8], 16);
+    vz[3] = vectorMove(vdx.sfract[7]);
+    store(vec16, color_dmem, vfinal.sint[0..4], 0);
+    vz[2] = vectorMove(vdx.sint[7]);
+    store(vec16, tex_dmem, vfinal.sint[4..8], 0);
+    store(vec16, z_dmem, vde.sfract[6..8], 8);
+    store(vec16, z_dmem, vdy.sfract[6..8], 12);
+    prim_size -%= 1;
+    store(vec16, z_dmem, vz[0..4], 0);
+    return slot {
+        rsp.cp0.startDmaWrite(prim_size);
+    }
+}
+
+/// Waits for the last triangle's DMA, then hands everything up to
+/// `rdp_current` to the RDP.
+pub fn sendEnd() noreturn {
+    while (true) {
+        reg busy: u32 = rsp.cp0.dmaBusy();
+        if (busy == 0) {
+            break;
+        }
+    }
+    reg current: u32 = load(u32, rdp_current);
+    jump queue.rdpAppendBuffer(current);
+}
+
+/// Ends the batch for a rejected or culled triangle and returns to the
+/// queue.
+pub fn cull() noreturn {
+    sendEnd();
+    tail queue.commandLoop();
+}

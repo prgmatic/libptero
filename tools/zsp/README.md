@@ -167,7 +167,7 @@ Wherever a literal is expected (memory offsets, lane indices, array
 lengths, `inline for` bounds) a constant expression may be used instead. It
 combines literals, `const` names, `inline for` indices, enum and flags
 members, `sizeOf(T)`, and `offsetOf(Struct, field)` with the binary
-operators and parentheses. Scalar expressions whose operands are all
+operators, unary `-` and `~`, and parentheses. Scalar expressions whose operands are all
 constants fold to a single immediate, and a 32-bit constant whose upper half
 is the sign extension of its lower half loads with one `addiu`:
 
@@ -409,6 +409,8 @@ to an eight-byte boundary and is intended to survive replacement of an
 overlay. Storage labels are compile-time DMEM addresses. `pub` exports a
 storage label and `extern` references storage
 provided by another linked unit; external declarations have no initializer.
+Several modules of one program may each declare the same `extern`
+storage they use.
 
 ## Typed pointers
 
@@ -615,6 +617,21 @@ if (priority == requested) {
 dispatch();
 jump(handler);
 ```
+
+A block that opens with `@branchHint(.cold);` marks its `if` (or a
+`while`'s entry test) as rarely taken. When the `if` has no `else` and sits
+in the function's own statement list, outside loops and blocks, its body
+is placed after the function's return and jumps back, so the common path
+falls through without a taken branch:
+
+```zig
+while (dma_busy != 0) {
+    @branchHint(.cold);
+    dma_busy = rsp.cp0.dmaBusy();
+}
+```
+
+Bodies stay inline when the function falls through into the next one.
 
 `if (c) tail f(args);` puts a single argument-setup instruction in the
 branch's delay slot. Longer setup runs before the test and must not touch

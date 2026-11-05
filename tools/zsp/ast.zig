@@ -520,6 +520,9 @@ pub const Statement = union(enum) {
         delay_slot: ?[]Statement,
         then_statements: []Statement,
         else_statements: ?[]Statement,
+        /// `@branchHint(.cold)`: the body is rarely run and may be placed
+        /// out of line.
+        cold: bool = false,
     },
     ordered_block: []Statement,
     asm_line: []const u8,

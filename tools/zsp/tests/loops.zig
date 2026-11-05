@@ -223,3 +223,89 @@ test "while true keeps its jump when the break is mid-body or a continue tests n
         \\
     );
 }
+
+test "cold if bodies are placed after the function and jump back" {
+    try expectAsm(
+        \\fn test(reg($a0) count: u32, reg($a1) flag: u32) {
+        \\  count += 1;
+        \\  if (flag != 0) {
+        \\    @branchHint(.cold);
+        \\    count = 0;
+        \\  }
+        \\  while (count == 3) {
+        \\    @branchHint(.cold);
+        \\    count = rsp.cp0.spStatus();
+        \\  }
+        \\  rsp.cp0.setSpStatus(count);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addi $a0, $a0, 1
+        \\  bne $a1, $zero, LABEL_test_ifcold_0
+        \\  nop
+        \\LABEL_test_ifend_0:
+        \\  addiu $v1, $zero, 3
+        \\  beq $a0, $v1, LABEL_test_ifcold_1
+        \\  nop
+        \\LABEL_test_ifend_1:
+        \\  mtc0 $a0, $4
+        \\  jr $ra
+        \\  nop
+        \\LABEL_test_ifcold_0:
+        \\  addiu $a0, $zero, 0
+        \\  j LABEL_test_ifend_0
+        \\  nop
+        \\LABEL_test_ifcold_1:
+        \\LABEL_test_dowhile_2:
+        \\  mfc0 $a0, $4
+        \\  addiu $v1, $zero, 3
+        \\  beq $a0, $v1, LABEL_test_dowhile_2
+        \\  nop
+        \\LABEL_test_dowhileend_2:
+        \\  j LABEL_test_ifend_1
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "cold bodies stay inline inside loops" {
+    try expectAsm(
+        \\fn test(reg($a0) count: u32) {
+        \\  while (count != 0) {
+        \\    if (count == 2) {
+        \\      @branchHint(.cold);
+        \\      count = 9;
+        \\    }
+        \\    count -= 1;
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  beq $a0, $zero, LABEL_test_ifend_0
+        \\  nop
+        \\LABEL_test_dowhile_1:
+        \\  addiu $v1, $zero, 2
+        \\  bne $a0, $v1, LABEL_test_ifend_2
+        \\  nop
+        \\  addiu $a0, $zero, 9
+        \\LABEL_test_ifend_2:
+        \\  addi $a0, $a0, -1
+        \\  bne $a0, $zero, LABEL_test_dowhile_1
+        \\  nop
+        \\LABEL_test_dowhileend_1:
+        \\LABEL_test_ifend_0:
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}

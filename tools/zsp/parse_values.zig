@@ -254,12 +254,24 @@ fn combine(self: *Parser, operator: token.Token, lhs: ast.Value, op: ast.AssignO
 /// `Mode.fast`, or a vector access.
 pub fn parseValueRef(self: *Parser) !ast.ValueRef {
     if (try self.eat(.minus)) return parseNegativeNumber(self);
-    if (isLayoutQuery(self)) return .{ .number = try @import("parse_comptime.zig").parseConstExpression(self) };
+    if (startsConstant(self)) return .{ .number = try @import("parse_comptime.zig").parseConstExpression(self) };
     return switch (self.current.tag) {
         .ident => parseNamedRef(self, try self.expect(.ident)),
         .number => .{ .number = try self.parseNumberValue(try self.expect(.number)) },
         else => self.fail(self.current, .expected_value),
     };
+}
+
+/// A value that is a whole constant expression.
+fn startsConstant(self: *const Parser) bool {
+    return isLayoutQuery(self) or isNotOfConstant(self);
+}
+
+/// `~` applied to a literal or a `const` name.
+fn isNotOfConstant(self: *const Parser) bool {
+    if (self.current.tag != .tilde) return false;
+    const next = (self.peek(1) orelse return false)[0];
+    return next.tag == .number or (next.tag == .ident and self.lookupConstant(next.text) != null);
 }
 
 /// `sizeOf(T)` or `offsetOf(T, field)`.

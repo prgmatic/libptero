@@ -55,6 +55,7 @@ const named_primaries = std.StaticStringMap(PrimaryParser).initComptime(.{
 
 fn parseConstPrimary(self: *Parser) anyerror!i64 {
     if (try self.eat(.minus)) return negate(self, try parseConstPrimary(self));
+    if (try self.eat(.tilde)) return ~(try parseConstPrimary(self));
     if (try self.eat(.l_paren)) {
         const grouped = try parseConstExpression(self);
         _ = try self.expect(.r_paren);

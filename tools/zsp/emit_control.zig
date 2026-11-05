@@ -331,6 +331,8 @@ fn loopMatches(loop: EmissionLoop, name: ?[]const u8) bool {
 fn writeScoped(g: Gen, statements: []const Statement) !void {
     const scope = g.context.pushScope();
     defer g.context.popScope(scope);
+    g.context.block_depth += 1;
+    defer g.context.block_depth -= 1;
     try writeStatements(g, statements);
 }
 
@@ -450,9 +452,15 @@ pub fn writeIf(g: Gen, statement: *const Statement) !void {
     const branch = statement.if_statement;
     const label = g.context.allocLabel();
     if (try conditionalExit(g, branch)) |exit| return writeConditionalExit(g, branch, exit);
+    if (canDefer(g, branch)) return writeDeferredIf(g, branch, label);
+    return writeInlineIf(g, branch, label);
+}
+
+/// Only an `else` that ends in a transfer goes first.
+fn writeInlineIf(g: Gen, branch: If, label: usize) !void {
     const then_terminates = terminatesControlFlow(branch.then_statements);
     const else_terminates = if (branch.else_statements) |items| terminatesControlFlow(items) else false;
-    if (branch.else_statements != null and else_terminates and !then_terminates) return writeReorderedIf(g, branch, label);
+    if (else_terminates and !then_terminates) return writeReorderedIf(g, branch, label);
     return writeOrderedIf(g, branch, label, then_terminates);
 }
 
@@ -532,6 +540,39 @@ pub fn writeColdIf(g: Gen, statement: *const Statement, rest: []const Statement)
     g.context.statement_position = source_position;
     try writeScoped(g, branch.then_statements);
     g.context.statement_position = end_position;
+}
+
+/// A cold body moves out of line only from the function's own statement
+/// list, outside loops and blocks, so every name it uses is still in scope
+/// where it is written.
+fn canDefer(g: Gen, branch: If) bool {
+    if (!branch.cold or branch.else_statements != null) return false;
+    return g.context.cold_blocks_allowed and g.context.block_depth == 0 and g.context.emission_loops.items.len == 0;
+}
+
+/// Branches to the body when the condition holds; the body is written by
+/// `writeColdBlocks` and jumps back to the end label.
+fn writeDeferredIf(g: Gen, branch: If, label: usize) !void {
+    var inverse = branch.condition;
+    inverse.op = common.invertComparison(inverse.op);
+    try writeConditionBranchFalse(g, inverse, "ifcold", label, branch.delay_slot == null);
+    try statements_.writeStructuredDelaySlot(g, branch.delay_slot);
+    const position = g.context.statement_position;
+    try g.context.cold_blocks.append(g.context.allocator, .{ .statements = branch.then_statements, .position = position, .label = label });
+    g.context.statement_position = position + analysis.countFlowStatements(branch.then_statements);
+    try g.out.label(try g.localLabel("ifend", label));
+}
+
+/// The deferred cold bodies, after the function's last transfer.
+pub fn writeColdBlocks(g: Gen) !void {
+    for (g.context.cold_blocks.items) |block| {
+        try g.out.label(try g.localLabel("ifcold", block.label));
+        g.context.statement_position = block.position;
+        try writeScoped(g, block.statements);
+        if (terminatesControlFlow(block.statements)) continue;
+        try g.out.jump(.j, try g.localLabel("ifend", block.label));
+        try g.out.nop();
+    }
 }
 
 fn writeReorderedIf(g: Gen, branch: If, label: usize) !void {

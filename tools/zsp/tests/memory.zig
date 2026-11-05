@@ -1133,3 +1133,31 @@ test "bit-cast addresses use the source register directly" {
         \\}
     , error.AddressMustBeRegister);
 }
+
+test "modules may each declare the same external storage" {
+    try expectAsm(
+        \\bss {
+        \\  extern shared: u32;
+        \\  extern shared: u32;
+        \\}
+        \\fn test() {
+        \\  reg value: u32 = load(u32, shared);
+        \\  store(u32, shared, value, 4);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.bss
+        \\
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  lw $t0, %lo(shared)($zero)
+        \\  sw $t0, %lo(shared + 4)($zero)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}

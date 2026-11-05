@@ -31,6 +31,14 @@ pub const Symbol = struct {
     last_use: usize = std.math.maxInt(usize),
 };
 
+/// A rarely run `if` body written after the function: it starts at
+/// `label`'s cold label and jumps back to its end label.
+pub const ColdBlock = struct {
+    statements: []const ast.Statement,
+    position: usize,
+    label: usize,
+};
+
 /// A loop or labeled block that `break` and `continue` may target.
 pub const EmissionLoop = struct {
     name: ?[]const u8,
@@ -70,6 +78,11 @@ pub const FunctionContext = struct {
     shared_exit_delay: ?[]const ast.Statement = null,
     shared_exit_consumed: bool = false,
     expression_temporary_depth: usize = 0,
+    /// Whether rarely run `if` bodies may be placed after the function.
+    cold_blocks_allowed: bool = false,
+    /// Nested blocks being written; cold bodies move only from depth 0.
+    block_depth: usize = 0,
+    cold_blocks: std.ArrayList(ColdBlock) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, label_prefix: []const u8) FunctionContext {
         return .{ .allocator = allocator, .label_prefix = label_prefix, .lifetimes = .init(allocator) };
@@ -78,6 +91,7 @@ pub const FunctionContext = struct {
     pub fn deinit(self: *FunctionContext) void {
         self.symbols.deinit(self.allocator);
         self.emission_loops.deinit(self.allocator);
+        self.cold_blocks.deinit(self.allocator);
         self.lifetimes.deinit();
     }
 

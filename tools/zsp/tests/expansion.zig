@@ -211,3 +211,32 @@ test "parity spellings are no longer accepted" {
     try expectSyntaxRejected("fn test(reg($t0) p: dmem) { reg($v01) v: vec16 = loadVectorWords(p, 0); }");
     try expectSyntaxRejected("bss { t: u32; } fn test(reg($t0) i: u32) { reg a: u32 = load(u32, i, t); }");
 }
+
+test "not of a constant folds in values and constant expressions" {
+    try expectAsm(
+        \\const flag: u32 = 0x20000;
+        \\const mask: u32 = ~flag & 0xffff0000;
+        \\fn test(reg($a0) value: u32) {
+        \\  value &= ~flag;
+        \\  value |= mask;
+        \\  value = ~value;
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  lui $v1, 65533
+        \\  ori $v1, $v1, 65535
+        \\  and $a0, $a0, $v1
+        \\  lui $v1, 65533
+        \\  or $a0, $a0, $v1
+        \\  nor $a0, $a0, $zero
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
