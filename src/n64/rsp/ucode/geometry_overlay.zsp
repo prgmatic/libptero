@@ -202,7 +202,7 @@ fn normalizeMatrixVector(
     }
 }
 
-@rspq.command(0) fn drawTriangle(reg($a0) vertex0: dmem, reg($a1) packed_vertices: dmem) noreturn {
+@rspq.command(0) fn drawTriangle(vertex0: dmem, packed_vertices: dmem) noreturn {
     reg($a2) vertex2: dmem = undefined;
     reg($a3) command: i32 = undefined;
     reg($s3) output: dmem = undefined;
@@ -589,9 +589,9 @@ export fn _start() noreturn {
 }
 
 @rspq.command(4) fn loadVertices(
-    reg($a0) buffer_size: u32,
-    reg($a1) rdram_vertices: u32,
-    reg($a2) input_output_addresses: u32,
+    buffer_size: u32,
+    rdram_vertices: u32,
+    input_output_addresses: u32,
 ) noreturn {
     reg($s4) input: dmem;
     reg($s6) segment: dmem;
@@ -1050,10 +1050,10 @@ fn loadCurrentMVPMat(
 }
 
 @rspq.command(1) fn setScreenSize(
-    reg($a0) guard_band_factor: u32,
-    reg($a1) screen_offset_xy: u32,
-    reg($a2) screen_scale_xy: u32,
-    reg($a3) depth_and_w_scale: u32,
+    guard_band_factor: u32,
+    screen_offset_xy: u32,
+    screen_scale_xy: u32,
+    depth_and_w_scale: u32,
 ) noreturn {
     reg($s7) uvgen_scale: u32;
     reg($s6) negative_guard_band: u32;
@@ -1076,17 +1076,17 @@ fn loadCurrentMVPMat(
 }
 
 
-@rspq.command(9) fn setFogState(reg($a0) enabled: u8) noreturn {
+@rspq.command(9) fn setFogState(enabled: u8) noreturn {
     jump queue.commandLoop() slot {
         store(u8, fog_store_offset, enabled);
     }
 }
 
 @rspq.command(5) fn setLight(
-    reg($a0) address: dmem,
-    reg($a1) rgba: u32,
-    reg($a2) direction0: u32,
-    reg($a3) direction1: u32,
+    address: dmem,
+    rgba: u32,
+    direction0: u32,
+    direction1: u32,
 ) noreturn {
     store(u32, address, rgba);
     if(direction0 != 0) {
@@ -1099,8 +1099,8 @@ fn loadCurrentMVPMat(
 }
 
 @rspq.command(6) fn setRenderMode(
-    reg($a0) culling: u8,
-    reg($a1) command: u32,
+    culling: u8,
+    command: u32,
 ) noreturn {
     reg($s7) mipmap: u32 = load(u8, rdp_mode, 28);
     store(u8, face_culling, culling);
@@ -1111,7 +1111,7 @@ fn loadCurrentMVPMat(
     }
 }
 
-@rspq.command(7) fn setProjectionMatrix(reg($a0) rdram: u32) noreturn {
+@rspq.command(7) fn setProjectionMatrix(rdram: u32) noreturn {
     reg($t2) flags: u32;
     reg($t0) size: u32 = undefined;
     reg($t1) pitch: u32 = undefined;
@@ -1128,8 +1128,8 @@ fn loadCurrentMVPMat(
 }
 
 @rspq.command(2) fn updateMatrixStack(
-    reg($a0) stack_control: i32,
-    reg($a1) matrix_address: u32,
+    stack_control: i32,
+    matrix_address: u32,
 ) noreturn {
     reg($s7) multiply: i32;
     reg($s6) only_move: i32;
@@ -1211,8 +1211,8 @@ fn loadCurrentMVPMat(
 }
 
 @rspq.command(3) fn setWord(
-    reg($a0) address: dmem,
-    reg($a1) value: u32,
+    address: dmem,
+    value: u32,
 ) noreturn {
     reg($s7) is_halfword: u32;
     is_halfword = address & 0x8000;
@@ -1242,7 +1242,7 @@ fn triangleClip() noreturn {
 @rspq.command(10) extern fn syncTriangles() @rspq.commandSize(4) writes() noreturn;
 @rspq.command(12) extern fn drawTriangleSequence() @rspq.commandSize(8) writes() noreturn;
 
-@rspq.command(11) fn drawTriangleStrip(reg($a0) rdram: u32, reg($a1) count_and_dmem: i32) noreturn {
+@rspq.command(11) fn drawTriangleStrip(rdram: u32, count_and_dmem: i32) noreturn {
     reg($ra) dma_busy: u32;
     reg($t0) copy_size: i32;
     reg($s4) dmem_pointer: i32;
@@ -1363,9 +1363,9 @@ fn drawTriangleSequenceImpl(
 }
 
 @rspq.command(13) fn patchCode(
-    reg($a0) patch_address: u32,
-    reg($a1) opcode_0: u32,
-    reg($a2) opcode_1: u32,
+    patch_address: u32,
+    opcode_0: u32,
+    opcode_1: u32,
 ) noreturn {
     reg($t0) size: u32 = undefined;
     reg($t1) pitch: u32 = undefined;
