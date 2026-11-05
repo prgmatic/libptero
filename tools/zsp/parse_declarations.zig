@@ -87,6 +87,7 @@ const Modifiers = struct {
 };
 
 fn parseFunction(self: *Parser, prefixes: Prefixes, command_indices: []const u8) !ast.Function {
+    self.function_names.clearRetainingCapacity();
     const function_scope = self.type_symbols.items.len;
     defer self.type_symbols.shrinkRetainingCapacity(function_scope);
     const name = try self.expect(.ident);

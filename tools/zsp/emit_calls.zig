@@ -41,8 +41,10 @@ fn writeInlineCall(g: Gen, function: ast.Function, arguments: []const ast.ValueR
 fn reserveCallerSymbols(context: *analysis.FunctionContext, caller: *const analysis.FunctionContext) !void {
     for (caller.symbols.items) |symbol| {
         if (symbol.automatic and symbol.last_use < caller.statement_position) continue;
+        // Positions restart in the expansion: hold the register throughout.
         var reserved = symbol;
         reserved.automatic = false;
+        reserved.first_live = 0;
         reserved.last_use = std.math.maxInt(usize);
         try context.add(reserved);
     }
@@ -84,7 +86,9 @@ fn bindArgument(
     alias.automatic = false;
     alias.first_live = 0;
     alias.last_use = std.math.maxInt(usize);
-    try context.add(alias);
+    // The parameter shadows a caller name it shares; lookups find the
+    // newest symbol, while the caller's copy still reserves its register.
+    try context.symbols.append(context.allocator, alias);
 }
 
 /// The caller's symbol an argument names, or a constant for a literal.

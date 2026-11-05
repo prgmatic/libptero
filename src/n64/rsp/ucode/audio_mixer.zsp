@@ -1,16 +1,29 @@
-// PCM mixer port of libdragon src/audio/rsp_mixer.S, by Giovanni Bajo.
-// Libdragon is released into the public domain under the Unlicense.
-// Register placement and instruction order are part of the comparison contract.
+// PCM mixer, after libdragon's src/audio/rsp_mixer.S by Giovanni Bajo
+// (public domain, the Unlicense). Each batch resamples every active channel
+// into a 32-channel sample matrix, then mixes the matrix down to stereo with
+// per-channel volumes that ramp toward their targets.
 const dma = import("resident_api.zsp");
 const queue = import("resident_api.zsp");
 
+packed struct Channel {
+    // 20.12 position within the waveform, in bytes.
+    position: u32;
+    step: u32;
+    length: u32;
+    loop_length: u32;
+    sample_address: u32;
+    flags: u32;
+}
+
 data {
+    // Lane 1 and 2: the ramp's decay and approach factors.
     pub constants: [8]u16 = .{ 32767, 57462, 8074, 0, 0, 0, 0, 0 };
     banner0: [16]u8 = .{ 68, 114, 97, 103, 111, 110, 32, 82, 83, 80, 32, 65, 117, 100, 105, 111 };
     banner1: [16]u8 = .{ 32, 67, 111, 100, 101, 100, 32, 98, 121, 32, 82, 97, 115, 107, 121, 32 };
     identity: [8]u16 = .{ 2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048 };
 }
 state {
+    // The ramped volumes carried between commands.
     pub current_volume_left: [32]u16;
     pub current_volume_right: [32]u16;
 }
@@ -20,614 +33,403 @@ bss {
     samples_remaining: u16;
     configured_channels: u16;
     input_padding: [6]u8;
+    // Settings DMA'd from and back to the CPU: target volumes, then one
+    // `Channel` per slot.
     pub volume_left: [32]u16;
     volume_right: [32]u16;
-    pub channels: [192]u32;
+    pub channels: [32]Channel;
+    // Samples for the channel being resampled, addressed by position.
     pub sample_cache: [64]u8;
+    // One 64-byte row per output sample: a 16-bit value for each channel.
     pub channel_buffer: [1024]u16;
     pub output_buffer: [64]u16;
 }
 
-@rspq.command(0) fn _start() @rspq.commandSize(16) noreturn {
-    reg($at) comparison: u32 = undefined;
-    reg($a0) argument0: u32 = undefined;
-    reg($a1) argument1: u32 = undefined;
-    reg($a2) argument2: u32 = undefined;
-    reg($t0) scratch0: dmem = undefined;
-    reg($t1) scratch1: u32 = undefined;
-    reg($t2) scratch2: u32 = undefined;
-    reg($t4) position: u32 = undefined;
-    reg($s0) dma_rdram: dmem = undefined;
-    reg($s1) waveform: dmem = undefined;
-    reg($s4) dma_dmem: dmem = undefined;
-    reg($k0) channel_count: u32 = undefined;
-    reserved reg($k1) sample_count: u32 = undefined;
-    reg($gp) command_address: dmem = undefined;
-    reg($fp) output_start: dmem = undefined;
-    const zero: u32 = 0;
-    reg($v00) vector0: vec16 = undefined;
-    reg($v31) vector31: vec16 = undefined;
-    exact {
-        vector0 = vector0 ^ vector0;
-        scratch0 = dmem.addressOf(constants);
-        vector31 = load(vec16, scratch0, 0);
-        argument0 = argument0 & 65535;
-        store(u16, global_volume, argument0);
-        scratch1 = argument1 >>> 16;
-        store(u16, samples_remaining, scratch1);
-        argument1 = argument1 & 65535;
-        store(u16, configured_channels, argument1);
-        argument2 = load(u32, command_address, 152);
-        store(u32, output_rdram, argument2);
-        transferSettings() slot { scratch2 = 12; }
-        setupMixer(scratch0);
-    MainLoop:
-        position = load(i16, samples_remaining);
-        if (position == 0) goto End slot { scratch1 = load(u32, output_rdram); }
-        scratch1 = scratch1 & 7;
-        scratch1 = signedLessThan(zero, scratch1);
-        sample_count = 32;
-        sample_count = sample_count - scratch1;
-        comparison = signedLessThan(sample_count, position);
-        if (comparison != 0) goto CheckDMAAlignment;
-        sample_count = position;
-    CheckDMAAlignment:
-        if (scratch1 == 0) goto DoLoop slot { output_start = dmem.addressOf(output_buffer); }
-        dma_rdram = load(u32, output_rdram);
-        dma_dmem = dmem.addressOf(output_buffer);
-        dma.in(scratch0, scratch1, dma_rdram, dma_dmem) slot { scratch0 = 7; }
-        output_start = output_start + 4;
-    DoLoop:
-        position = position - sample_count;
-        store(u16, samples_remaining, position);
-        resampleChannels(scratch0, scratch1) slot { channel_count = load(u16, configured_channels); }
-        mixChannels(scratch0, scratch1) slot { dma_dmem = output_start; }
-        scratch0 = sample_count << 2;
-        dma_rdram = load(u32, output_rdram);
-        waveform = dma_rdram + scratch0;
-        store(u32, output_rdram, waveform);
-        scratch0 = scratch0 + -1;
-        dma.outAsync(scratch0, scratch1, dma_rdram, dma_dmem) slot { dma_dmem = dmem.addressOf(output_buffer); }
-        goto MainLoop;
-    End:
-        saveVolumes();
-        transferSettings() slot { scratch2 = -32768; }
-        dma.waitIdle();
-        tail queue.commandLoop();
+
+const flag_stereo: u32 = 8;
+const flag_pcm16: u32 = 4;
+const format_bits: u32 = flag_stereo | flag_pcm16;
+const max_batch: u32 = 32;
+const settings_size: u32 = 895;
+const settings_read: u32 = 12;
+const settings_write: u32 = 0xffff8000;
+const command_buffer: u32 = 0xa0;
+
+/// Mixes `counts >> 16` samples of `counts & 0xffff` channels at `volume`
+/// into `output`, using the settings at `settings`.
+@rspq.command(0) fn _start(
+    volume: u32,
+    counts: u32,
+    output: u32,
+    settings: u32,
+) @rspq.commandSize(16) noreturn {
+    reg($v00) vector_zero: vec16 = undefined;
+    vector_zero = vector_zero ^ vector_zero;
+    reg ramp: vec16 = load(vec16, constants, 0);
+    volume &= 0xffff;
+    reg remaining: u32 = counts >>> 16;
+    reg channel_count: u32 = counts & 0xffff;
+    reg pitch: u32 = undefined;
+    dma.exec(settings_size, pitch, settings, volume_left, settings_read);
+
+    // Volumes for groups of eight channels: targets scaled by the global
+    // volume, and the ramped ones from the last command.
+    reg target_left: [4]vec16 = undefined;
+    reg target_right: [4]vec16 = undefined;
+    reg left: [4]vec16 = undefined;
+    reg right: [4]vec16 = undefined;
+    reg global: vec16 = undefined;
+    global[0] = volume;
+    global = vector_zero | global.xxxxxxxx;
+    inline for (0..4) |group| {
+        target_left[group] = load(vec16, volume_left, group * 16);
+        target_right[group] = load(vec16, volume_left, 64 + group * 16);
+        target_left[group] = vmudl(target_left[group], global);
+        target_right[group] = vmudl(target_right[group], global);
+    }
+    inline for (0..4) |group| {
+        left[group] = load(vec16, current_volume_left, group * 16);
+        right[group] = load(vec16, current_volume_left, 64 + group * 16);
+    }
+
+    while (remaining != 0) {
+        // A misaligned output keeps the 4 bytes before it, so the batch
+        // shrinks by one sample.
+        reg misaligned: u32 = output & 7;
+        misaligned = signedLessThan(0, misaligned);
+        reg batch: u32 = max_batch - misaligned;
+        reg fits: u32 = signedLessThan(batch, remaining);
+        if (fits == 0) {
+            batch = remaining;
+        }
+        remaining = remaining - batch;
+
+        // ---- resample every active channel into the sample matrix
+        reg row: dmem = channel_buffer;
+        reg rows_left: u32 = 32;
+        do {
+            inline for (0..4) |quarter| {
+                store(vec16, row, vector_zero, quarter * 16);
+            }
+            row = row + 64;
+            rows_left += -1;
+        } while (rows_left != 0);
+
+        // Positions inside the cache are shifted so that `position >> 12` is
+        // the sample's DMEM address.
+        reg cache_limit: dmem = dmem.addressOf(sample_cache, 64);
+        reg cache_end: u32 = cache_limit;
+        cache_end <<= 12;
+        reg channel: *Channel = channels;
+        reg channel_index: u32 = 0;
+        do {
+            reg sample_address: u32 = channel.sample_address;
+            reg position: u32 = channel.position;
+            reg format: u32 = channel.flags;
+            format &= format_bits;
+            if (sample_address != 0) {
+                reg step: u32 = channel.step;
+                reg length: u32 = channel.length;
+                reg loop_length: u32 = channel.loop_length;
+                // Column `channel_index` of the sample matrix.
+                reg column: dmem = channel_index + channel_buffer;
+                column = column + channel_index;
+                reg ticks: i32 = undefined;
+                ticks = bitCast(batch);
+
+                refill: while (true) {
+                    // Wrap into the loop, or stop at the end of the waveform.
+                    while (position >= length) {
+                        if (loop_length == 0) {
+                            break refill;
+                        }
+                        position = position - loop_length;
+                    }
+                    // Fetch the next 64 bytes; the DMA leaves `cache` at the
+                    // first byte it asked for.
+                    reg sample_offset: u32 = position >>> 12;
+                    reg rdram: u32 = sample_offset + sample_address;
+                    reg cache: dmem = sample_cache;
+                    reg no_pitch: u32 = undefined;
+                    dma.in(63, no_pitch, rdram, cache);
+                    reg position_offset: u32 = sample_offset - cache;
+                    position_offset <<= 12;
+                    position = position - position_offset;
+                    if (format < flag_stereo) {
+                        if (format == 0) {
+                            resampleMono8(position, step, ticks, column, cache_end);
+                        } else {
+                            resampleMono16(position, step, ticks, column, cache_end);
+                        }
+                    } else {
+                        if (format == flag_stereo) {
+                            resampleStereo8(position, step, ticks, column, cache_end);
+                        } else {
+                            resampleStereo16(position, step, ticks, column, cache_end);
+                        }
+                    }
+                    position = position + position_offset;
+                    if (ticks <= 0) {
+                        break refill;
+                    }
+                }
+                channel.position = position;
+                // A stereo channel also fills the next column.
+                reg stereo_slot: u32 = format & flag_stereo;
+                if (stereo_slot != 0) {
+                    channel_index += 1;
+                    channel += sizeOf(Channel);
+                }
+            }
+            channel_index += 1;
+            channel += sizeOf(Channel);
+        } while (channel_index != channel_count);
+        reg output_start: dmem = output_buffer;
+        reg head: u32 = output & 7;
+        if (head != 0) {
+            reg no_pitch: u32 = undefined;
+            dma.in(7, no_pitch, output, output_buffer);
+            output_start += 4;
+        }
+
+        // ---- mix the matrix to stereo, ramping volumes every 8 samples;
+        // up to 8 channels use only the first group of each side
+        reg mix_row: dmem = channel_buffer;
+        reg matrix: [4]vec16 = undefined;
+        inline for (0..4) |quarter| {
+            matrix[quarter] = load(vec16, mix_row, quarter * 16);
+        }
+        // Each iteration stores the previous sample's sums, which hides the
+        // sums' latency. The first store rewrites the bytes before `output_start`.
+        reg left_sample: vec16 = undefined;
+        reg right_sample: vec16 = undefined;
+        left_sample[0] = load(vec16, output_start, -4);
+        right_sample[0] = load(vec16, output_start, -2);
+        reg mix_remaining: i32 = undefined;
+        mix_remaining = bitCast(batch);
+        if (channel_count > 8) {
+            do {
+                reg samples: i32 = 8;
+                if (mix_remaining < 8) {
+                    samples = mix_remaining;
+                }
+                do {
+                    reg left_sum: vec16 = vmulf(matrix[0], left[0]);
+                    inline for (1..4) |group| {
+                        left_sum = vmacf(matrix[group], left[group]);
+                    }
+                    store(vec16, output_start, left_sample[0], -4);
+                    store(vec16, output_start, right_sample[0], -2);
+                    reg right_sum: vec16 = vmulf(matrix[0], right[0]);
+                    inline for (1..4) |group| {
+                        right_sum = vmacf(matrix[group], right[group]);
+                    }
+                    mix_row = mix_row + 64;
+                    samples += -1;
+                    output_start = output_start + 4;
+                    sumLanes(left_sample, left_sum, right_sample, right_sum);
+                    inline for (0..4) |quarter| {
+                        matrix[quarter] = load(vec16, mix_row, quarter * 16);
+                    }
+                } while (samples != 0);
+                inline for (0..4) |group| {
+                    left[group] = vmudm(left[group], ramp.yyyyyyyy);
+                    left[group] = vmadm(target_left[group], ramp.zzzzzzzz);
+                    right[group] = vmudm(right[group], ramp.yyyyyyyy);
+                    right[group] = vmadm(target_right[group], ramp.zzzzzzzz);
+                }
+                mix_remaining += -8;
+            } while (mix_remaining > 0);
+        } else {
+            do {
+                reg samples: i32 = 8;
+                if (mix_remaining < 8) {
+                    samples = mix_remaining;
+                }
+                do {
+                    reg left_sum: vec16 = vmulf(matrix[0], left[0]);
+                    store(vec16, output_start, left_sample[0], -4);
+                    reg right_sum: vec16 = vmulf(matrix[0], right[0]);
+                    store(vec16, output_start, right_sample[0], -2);
+                    samples += -1;
+                    mix_row = mix_row + 64;
+                    output_start = output_start + 4;
+                    sumLanes(left_sample, left_sum, right_sample, right_sum);
+                    matrix[0] = load(vec16, mix_row, 0);
+                } while (samples != 0);
+                left[0] = vmudm(left[0], ramp.yyyyyyyy);
+                left[0] = vmadm(target_left[0], ramp.zzzzzzzz);
+                right[0] = vmudm(right[0], ramp.yyyyyyyy);
+                right[0] = vmadm(target_right[0], ramp.zzzzzzzz);
+                mix_remaining += -8;
+            } while (mix_remaining > 0);
+        }
+        store(vec16, output_start, left_sample[0], -4);
+        store(vec16, output_start, right_sample[0], -2);
+
+        reg size: u32 = batch << 2;
+        reg destination: u32 = output;
+        output = destination + size;
+        size += -1;
+        reg no_pitch: u32 = undefined;
+        dma.outAsync(size, no_pitch, destination, output_buffer);
+    }
+
+    inline for (0..4) |group| {
+        store(vec16, current_volume_left, left[group], group * 16);
+        store(vec16, current_volume_left, right[group], 64 + group * 16);
+    }
+    // The settings address is the command's last word, before `$gp`.
+    reg($gp) command_end: dmem = undefined;
+    reg settings_rdram: u32 = load(u32, command_buffer + command_end, -4);
+    reg final_pitch: u32 = undefined;
+    dma.exec(settings_size, final_pitch, settings_rdram, volume_left, settings_write);
+    dma.waitIdle();
+    tail queue.commandLoop();
+}
+
+
+
+// Each resampler copies samples into the column until `ticks` runs out or
+// the cache does: eight at a time while both last, then one at a time.
+// 8-bit samples go to the high byte of their 16-bit cell.
+
+inline fn resampleMono8(position: u32, step: u32, ticks: i32, column: dmem, cache_end: u32) {
+    reg batch_step: u32 = step << 3;
+    while (true) {
+        reg batch_end: u32 = position + batch_step;
+        reg overflows: u32 = signedLessThan(cache_end, batch_end);
+        if (overflows != 0) { break; }
+        reg short: u32 = signedLessThan(ticks, 8);
+        if (short != 0) { break; }
+        inline for (0..8) |sample| {
+            reg address: dmem = position >>> 12;
+            reg value: u32 = load(u8, address, 0);
+            position = position + step;
+            store(u8, column, value, sample * 64);
+        }
+        column = column + 512;
+        ticks += -8;
+    }
+    while (ticks > 0) {
+        reg inside: u32 = signedLessThan(position, cache_end);
+        if (inside == 0) { break; }
+        reg address: dmem = position >>> 12;
+        reg value: u32 = load(u8, address, 0);
+        position = position + step;
+        store(u8, column, value, 0);
+        column = column + 64;
+        ticks += -1;
     }
 }
 
-fn transferSettings() {
-    reg($t2) scratch2: u32 = undefined;
-    reg($t1) scratch1: u32 = undefined;
-    reg($at) comparison: u32 = undefined;
-    reg($t0) scratch0: dmem = undefined;
-    reg($s0) dma_rdram: dmem = undefined;
-    reg($s4) dma_dmem: dmem = undefined;
-    reg($gp) command_address: dmem = undefined;
-    exact {
-        dma_rdram = load(u32, command_address, 156);
-        dma_dmem = dmem.addressOf(volume_left);
-        jump dma.exec(scratch0, scratch1, dma_rdram, dma_dmem, scratch2) slot { scratch0 = 895; }
+inline fn resampleMono16(position: u32, step: u32, ticks: i32, column: dmem, cache_end: u32) {
+    reg batch_step: u32 = step << 3;
+    while (true) {
+        reg batch_end: u32 = position + batch_step;
+        reg overflows: u32 = signedLessThan(cache_end, batch_end);
+        if (overflows != 0) { break; }
+        reg short: u32 = signedLessThan(ticks, 8);
+        if (short != 0) { break; }
+        inline for (0..8) |sample| {
+            reg address: dmem = position >>> 13;
+            address = address << 1;
+            reg value: u32 = load(u16, address, 0);
+            position = position + step;
+            store(u16, column, value, sample * 64);
+        }
+        column = column + 512;
+        ticks += -8;
+    }
+    while (ticks > 0) {
+        reg inside: u32 = signedLessThan(position, cache_end);
+        if (inside == 0) { break; }
+        reg address: dmem = position >>> 13;
+        address = address << 1;
+        reg value: u32 = load(u16, address, 0);
+        position = position + step;
+        store(u16, column, value, 0);
+        column = column + 64;
+        ticks += -1;
     }
 }
 
-fn resampleChannels(reg($t0) scratch0: dmem, reg($t1) scratch1: u32) {
-    reg($at) comparison: u32 = undefined;
-    reserved reg($v1) channel_index: u32 = undefined;
-    reg($a0) argument0: u32 = undefined;
-    reg($a1) argument1: u32 = undefined;
-    reg($t2) scratch2: u32 = undefined;
-    reg($t3) ticks: i32 = undefined;
-    reg($t4) position: u32 = undefined;
-    reg($t5) step: u32 = undefined;
-    reg($t6) length: u32 = undefined;
-    reg($t7) loop_length: u32 = undefined;
-    reg($s0) dma_rdram: dmem = undefined;
-    reg($s1) waveform: dmem = undefined;
-    reg($s2) sample_offset: u32 = undefined;
-    reg($s4) dma_dmem: dmem = undefined;
-    reg($s5) output: dmem = undefined;
-    reg($s6) position_offset: u32 = undefined;
-    reg($s7) cache_end: dmem = undefined;
-    reg($t8) sample_address: u32 = undefined;
-    reg($k0) channel_count: u32 = undefined;
-    reserved reg($k1) sample_count: u32 = undefined;
-    reg($sp) saved_return: u32 = undefined;
-    reg($ra) return_address: u32 = undefined;
-    reg($v00) vector0: vec16 = undefined;
-    exact {
-        saved_return = return_address;
-        output = dmem.addressOf(channel_buffer);
-        scratch0 = 31;
-    ClearLoop:
-        store(vec16, output, vector0, 0);
-        store(vec16, output, vector0, 16);
-        store(vec16, output, vector0, 32);
-        store(vec16, output, vector0, 48);
-        output = output + 64;
-        if (scratch0 != 0) goto ClearLoop slot { scratch0 = scratch0 + -1; }
-        waveform = dmem.addressOf(channels);
-        channel_index = 0;
-        cache_end = dmem.addressOf(sample_cache, 64);
-        cache_end = cache_end << 12;
-    UpdateLoop:
-        sample_address = load(u32, waveform, 16);
-        if (sample_address == 0) goto WaveLoopEpilog2 slot { position = load(u32, waveform, 0); }
-        step = load(u32, waveform, 4);
-        length = load(u32, waveform, 8);
-        loop_length = load(u32, waveform, 12);
-        output = channel_index + channel_buffer;
-        output = output + channel_index;
-        ticks = bitCast(sample_count);
-        scratch0 = load(u32, waveform, 20);
-        argument0 = scratch0 & 8;
-        argument1 = scratch0 & 4;
-    WaveStart:
-        if (position < length) goto WaveDmaFetch;
-        if (loop_length == 0) goto WaveLoopEpilog;
-        goto WaveStart slot { position = position - loop_length; }
-    WaveDmaFetch:
-        sample_offset = position >>> 12;
-        dma_rdram = sample_offset + sample_address;
-        dma_dmem = dmem.addressOf(sample_cache);
-        dma.in(scratch0, scratch1, dma_rdram, dma_dmem) slot { scratch0 = 63; }
-        position_offset = sample_offset - dma_dmem;
-        position_offset = position_offset << 12;
-        scratch2 = step << 3;
-        if (argument0 != 0) goto WaveLoopStereo slot { position = position - position_offset; }
-        if (argument1 != 0) goto WaveLoop16_8x slot { WaveLoop8_8x: scratch0 = position + scratch2; }
-        comparison = signedLessThan(cache_end, scratch0);
-        if (comparison != 0) goto WaveLoop8Checks slot { scratch0 = 8; }
-        comparison = signedLessThan(ticks, scratch0);
-        if (comparison != 0) goto WaveLoop8Checks slot { scratch0 = position >>> 12; }
-        scratch0 = load(u8, scratch0, 0);
+inline fn resampleStereo8(position: u32, step: u32, ticks: i32, column: dmem, cache_end: u32) {
+    reg batch_step: u32 = step << 3;
+    while (true) {
+        reg batch_end: u32 = position + batch_step;
+        reg overflows: u32 = signedLessThan(cache_end, batch_end);
+        if (overflows != 0) { break; }
+        reg short: u32 = signedLessThan(ticks, 8);
+        if (short != 0) { break; }
+        inline for (0..8) |sample| {
+            reg address: dmem = position >>> 13;
+            address = address << 1;
+            reg left: u32 = load(u8, address, 0);
+            reg right: u32 = load(u8, address, 1);
+            position = position + step;
+            store(u8, column, left, sample * 64);
+            store(u8, column, right, sample * 64 + 2);
+        }
+        column = column + 512;
+        ticks += -8;
+    }
+    while (ticks > 0) {
+        reg inside: u32 = signedLessThan(position, cache_end);
+        if (inside == 0) { break; }
+        reg address: dmem = position >>> 13;
+        address = address << 1;
+        reg left: u32 = load(u8, address, 0);
+        reg right: u32 = load(u8, address, 1);
         position = position + step;
-        store(u8, output, scratch0, 0);
-        scratch0 = position >>> 12;
-        scratch0 = load(u8, scratch0, 0);
-        position = position + step;
-        store(u8, output, scratch0, 64);
-        scratch0 = position >>> 12;
-        scratch0 = load(u8, scratch0, 0);
-        position = position + step;
-        store(u8, output, scratch0, 128);
-        scratch0 = position >>> 12;
-        scratch0 = load(u8, scratch0, 0);
-        position = position + step;
-        store(u8, output, scratch0, 192);
-        scratch0 = position >>> 12;
-        scratch0 = load(u8, scratch0, 0);
-        position = position + step;
-        store(u8, output, scratch0, 256);
-        scratch0 = position >>> 12;
-        scratch0 = load(u8, scratch0, 0);
-        position = position + step;
-        store(u8, output, scratch0, 320);
-        scratch0 = position >>> 12;
-        scratch0 = load(u8, scratch0, 0);
-        position = position + step;
-        store(u8, output, scratch0, 384);
-        scratch0 = position >>> 12;
-        scratch0 = load(u8, scratch0, 0);
-        position = position + step;
-        store(u8, output, scratch0, 448);
-        output = output + 512;
-        goto WaveLoop8_8x slot { ticks = ticks + -8; }
-    WaveLoop8:
-        scratch0 = position >>> 12;
-        scratch0 = load(u8, scratch0, 0);
-        position = position + step;
-        store(u8, output, scratch0, 0);
-        output = output + 64;
-        ticks = ticks + -1;
-    WaveLoop8Checks:
-        if (ticks <= 0) goto WaveBeforeEpilog slot { scratch0 = signedLessThan(position, cache_end); }
-        if (scratch0 != 0) goto WaveLoop8;
-        goto WaveStart slot { position = position + position_offset; }
-    WaveLoop16_8x:
-        scratch0 = position + scratch2;
-        comparison = signedLessThan(cache_end, scratch0);
-        if (comparison != 0) goto WaveLoop16Checks slot { scratch0 = 8; }
-        comparison = signedLessThan(ticks, scratch0);
-        if (comparison != 0) goto WaveLoop16Checks slot { scratch0 = position >>> 13; }
-        scratch0 = scratch0 << 1;
-        scratch0 = load(u16, scratch0, 0);
-        position = position + step;
-        store(u16, output, scratch0, 0);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch0 = load(u16, scratch0, 0);
-        position = position + step;
-        store(u16, output, scratch0, 64);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch0 = load(u16, scratch0, 0);
-        position = position + step;
-        store(u16, output, scratch0, 128);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch0 = load(u16, scratch0, 0);
-        position = position + step;
-        store(u16, output, scratch0, 192);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch0 = load(u16, scratch0, 0);
-        position = position + step;
-        store(u16, output, scratch0, 256);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch0 = load(u16, scratch0, 0);
-        position = position + step;
-        store(u16, output, scratch0, 320);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch0 = load(u16, scratch0, 0);
-        position = position + step;
-        store(u16, output, scratch0, 384);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch0 = load(u16, scratch0, 0);
-        position = position + step;
-        store(u16, output, scratch0, 448);
-        output = output + 512;
-        goto WaveLoop16_8x slot { ticks = ticks + -8; }
-    WaveLoop16:
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch0 = load(u16, scratch0, 0);
-        position = position + step;
-        store(u16, output, scratch0, 0);
-        output = output + 64;
-        ticks = ticks + -1;
-    WaveLoop16Checks:
-        if (ticks <= 0) goto WaveBeforeEpilog slot { scratch0 = signedLessThan(position, cache_end); }
-        if (scratch0 != 0) goto WaveLoop16;
-        goto WaveStart slot { position = position + position_offset; }
-    WaveLoopStereo:
-        if (argument1 != 0) goto WaveLoop16_Stereo_8x slot { WaveLoop8_Stereo_8x: scratch0 = position + scratch2; }
-        comparison = signedLessThan(cache_end, scratch0);
-        if (comparison != 0) goto WaveLoop8StereoChecks slot { scratch0 = 8; }
-        comparison = signedLessThan(ticks, scratch0);
-        if (comparison != 0) goto WaveLoop8StereoChecks slot { scratch0 = position >>> 13; }
-        scratch0 = scratch0 << 1;
-        scratch1 = load(u8, scratch0, 0);
-        scratch0 = load(u8, scratch0, 1);
-        position = position + step;
-        store(u8, output, scratch1, 0);
-        store(u8, output, scratch0, 2);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch1 = load(u8, scratch0, 0);
-        scratch0 = load(u8, scratch0, 1);
-        position = position + step;
-        store(u8, output, scratch1, 64);
-        store(u8, output, scratch0, 66);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch1 = load(u8, scratch0, 0);
-        scratch0 = load(u8, scratch0, 1);
-        position = position + step;
-        store(u8, output, scratch1, 128);
-        store(u8, output, scratch0, 130);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch1 = load(u8, scratch0, 0);
-        scratch0 = load(u8, scratch0, 1);
-        position = position + step;
-        store(u8, output, scratch1, 192);
-        store(u8, output, scratch0, 194);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch1 = load(u8, scratch0, 0);
-        scratch0 = load(u8, scratch0, 1);
-        position = position + step;
-        store(u8, output, scratch1, 256);
-        store(u8, output, scratch0, 258);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch1 = load(u8, scratch0, 0);
-        scratch0 = load(u8, scratch0, 1);
-        position = position + step;
-        store(u8, output, scratch1, 320);
-        store(u8, output, scratch0, 322);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch1 = load(u8, scratch0, 0);
-        scratch0 = load(u8, scratch0, 1);
-        position = position + step;
-        store(u8, output, scratch1, 384);
-        store(u8, output, scratch0, 386);
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch1 = load(u8, scratch0, 0);
-        scratch0 = load(u8, scratch0, 1);
-        position = position + step;
-        store(u8, output, scratch1, 448);
-        store(u8, output, scratch0, 450);
-        output = output + 512;
-        goto WaveLoop8_Stereo_8x slot { ticks = ticks + -8; }
-    WaveLoop8Stereo:
-        scratch0 = position >>> 13;
-        scratch0 = scratch0 << 1;
-        scratch1 = load(u8, scratch0, 0);
-        scratch0 = load(u8, scratch0, 1);
-        position = position + step;
-        store(u8, output, scratch1, 0);
-        store(u8, output, scratch0, 2);
-        output = output + 64;
-        ticks = ticks + -1;
-    WaveLoop8StereoChecks:
-        if (ticks <= 0) goto WaveBeforeEpilog slot { scratch0 = signedLessThan(position, cache_end); }
-        if (scratch0 != 0) goto WaveLoop8Stereo;
-        goto WaveStart slot { position = position + position_offset; }
-    WaveLoop16_Stereo_8x:
-        scratch0 = position + scratch2;
-        comparison = signedLessThan(cache_end, scratch0);
-        if (comparison != 0) goto WaveLoop16StereoChecks slot { scratch0 = 8; }
-        comparison = signedLessThan(ticks, scratch0);
-        if (comparison != 0) goto WaveLoop16StereoChecks slot { scratch0 = position >>> 14; }
-        scratch0 = scratch0 << 2;
-        scratch0 = load(u32, scratch0, 0);
-        position = position + step;
-        store(u32, output, scratch0, 0);
-        scratch0 = position >>> 14;
-        scratch0 = scratch0 << 2;
-        scratch0 = load(u32, scratch0, 0);
-        position = position + step;
-        store(u32, output, scratch0, 64);
-        scratch0 = position >>> 14;
-        scratch0 = scratch0 << 2;
-        scratch0 = load(u32, scratch0, 0);
-        position = position + step;
-        store(u32, output, scratch0, 128);
-        scratch0 = position >>> 14;
-        scratch0 = scratch0 << 2;
-        scratch0 = load(u32, scratch0, 0);
-        position = position + step;
-        store(u32, output, scratch0, 192);
-        scratch0 = position >>> 14;
-        scratch0 = scratch0 << 2;
-        scratch0 = load(u32, scratch0, 0);
-        position = position + step;
-        store(u32, output, scratch0, 256);
-        scratch0 = position >>> 14;
-        scratch0 = scratch0 << 2;
-        scratch0 = load(u32, scratch0, 0);
-        position = position + step;
-        store(u32, output, scratch0, 320);
-        scratch0 = position >>> 14;
-        scratch0 = scratch0 << 2;
-        scratch0 = load(u32, scratch0, 0);
-        position = position + step;
-        store(u32, output, scratch0, 384);
-        scratch0 = position >>> 14;
-        scratch0 = scratch0 << 2;
-        scratch0 = load(u32, scratch0, 0);
-        position = position + step;
-        store(u32, output, scratch0, 448);
-        output = output + 512;
-        goto WaveLoop16_Stereo_8x slot { ticks = ticks + -8; }
-    WaveLoop16Stereo:
-        scratch0 = position >>> 14;
-        scratch0 = scratch0 << 2;
-        scratch0 = load(u32, scratch0, 0);
-        position = position + step;
-        store(u32, output, scratch0, 0);
-        output = output + 64;
-        ticks = ticks + -1;
-    WaveLoop16StereoChecks:
-        if (ticks <= 0) goto WaveBeforeEpilog slot { scratch0 = signedLessThan(position, cache_end); }
-        if (scratch0 != 0) goto WaveLoop16Stereo;
-        goto WaveStart slot { position = position + position_offset; }
-    WaveBeforeEpilog:
-        position = position + position_offset;
-    WaveLoopEpilog:
-        if (argument0 == 0) goto WaveLoopEpilog2 slot { store(u32, waveform, position, 0); }
-        channel_index = channel_index + 1;
-        waveform = waveform + 24;
-    WaveLoopEpilog2:
-        channel_index = channel_index + 1;
-        if (channel_index != channel_count) goto UpdateLoop slot { waveform = waveform + 24; }
-        jump(saved_return);
+        store(u8, column, left, 0);
+        store(u8, column, right, 2);
+        column = column + 64;
+        ticks += -1;
     }
 }
 
-fn setupMixer(reg($t0) scratch0: dmem) {
-    reg($at) comparison: u32 = undefined;
-    reg($s0) dma_rdram: dmem = undefined;
-    reg($s1) waveform: dmem = undefined;
-    reg($ra) return_address: u32 = undefined;
-    reg($v00) vector0: vec16 = undefined;
-    reg($v01) vector1: vec16 = undefined;
-    reg($v13) vector13: vec16 = undefined;
-    reg($v14) vector14: vec16 = undefined;
-    reg($v15) vector15: vec16 = undefined;
-    reg($v16) vector16: vec16 = undefined;
-    reg($v17) vector17: vec16 = undefined;
-    reg($v18) vector18: vec16 = undefined;
-    reg($v19) vector19: vec16 = undefined;
-    reg($v20) vector20: vec16 = undefined;
-    reg($v21) vector21: vec16 = undefined;
-    reg($v22) vector22: vec16 = undefined;
-    reg($v23) vector23: vec16 = undefined;
-    reg($v24) vector24: vec16 = undefined;
-    reg($v25) vector25: vec16 = undefined;
-    reg($v26) vector26: vec16 = undefined;
-    reg($v27) vector27: vec16 = undefined;
-    reg($v28) vector28: vec16 = undefined;
-    exact {
-        scratch0 = load(i16, global_volume);
-        vector1[0] = scratch0;
-        vector1 = vector0 | vector1.xxxxxxxx;
-        dma_rdram = dmem.addressOf(volume_left);
-        waveform = dmem.addressOf(current_volume_left);
-        vector21 = load(vec16, dma_rdram, 0);
-        vector23 = load(vec16, dma_rdram, 16);
-        vector25 = load(vec16, dma_rdram, 32);
-        vector27 = load(vec16, dma_rdram, 48);
-        vector22 = load(vec16, dma_rdram, 64);
-        vector24 = load(vec16, dma_rdram, 80);
-        vector26 = load(vec16, dma_rdram, 96);
-        vector28 = load(vec16, dma_rdram, 112);
-        vector21 = vmudl(vector21, vector1);
-        vector22 = vmudl(vector22, vector1);
-        vector23 = vmudl(vector23, vector1);
-        vector24 = vmudl(vector24, vector1);
-        vector25 = vmudl(vector25, vector1);
-        vector26 = vmudl(vector26, vector1);
-        vector27 = vmudl(vector27, vector1);
-        vector28 = vmudl(vector28, vector1);
-        vector13 = load(vec16, waveform, 0);
-        vector15 = load(vec16, waveform, 16);
-        vector17 = load(vec16, waveform, 32);
-        vector19 = load(vec16, waveform, 48);
-        vector14 = load(vec16, waveform, 64);
-        vector16 = load(vec16, waveform, 80);
-        vector18 = load(vec16, waveform, 96);
-        vector20 = load(vec16, waveform, 112);
-        return;
+inline fn resampleStereo16(position: u32, step: u32, ticks: i32, column: dmem, cache_end: u32) {
+    reg batch_step: u32 = step << 3;
+    while (true) {
+        reg batch_end: u32 = position + batch_step;
+        reg overflows: u32 = signedLessThan(cache_end, batch_end);
+        if (overflows != 0) { break; }
+        reg short: u32 = signedLessThan(ticks, 8);
+        if (short != 0) { break; }
+        inline for (0..8) |sample| {
+            reg address: dmem = position >>> 14;
+            address = address << 2;
+            reg pair: u32 = load(u32, address, 0);
+            position = position + step;
+            store(u32, column, pair, sample * 64);
+        }
+        column = column + 512;
+        ticks += -8;
+    }
+    while (ticks > 0) {
+        reg inside: u32 = signedLessThan(position, cache_end);
+        if (inside == 0) { break; }
+        reg address: dmem = position >>> 14;
+        address = address << 2;
+        reg pair: u32 = load(u32, address, 0);
+        position = position + step;
+        store(u32, column, pair, 0);
+        column = column + 64;
+        ticks += -1;
     }
 }
 
-fn saveVolumes() {
-    reg($at) comparison: u32 = undefined;
-    reg($s1) waveform: dmem = undefined;
-    reg($ra) return_address: u32 = undefined;
-    reg($v13) vector13: vec16 = undefined;
-    reg($v14) vector14: vec16 = undefined;
-    reg($v15) vector15: vec16 = undefined;
-    reg($v16) vector16: vec16 = undefined;
-    reg($v17) vector17: vec16 = undefined;
-    reg($v18) vector18: vec16 = undefined;
-    reg($v19) vector19: vec16 = undefined;
-    reg($v20) vector20: vec16 = undefined;
-    exact {
-        waveform = dmem.addressOf(current_volume_left);
-        store(vec16, waveform, vector13, 0);
-        store(vec16, waveform, vector15, 16);
-        store(vec16, waveform, vector17, 32);
-        store(vec16, waveform, vector19, 48);
-        store(vec16, waveform, vector14, 64);
-        store(vec16, waveform, vector16, 80);
-        store(vec16, waveform, vector18, 96);
-        store(vec16, waveform, vector20, 112);
-        return;
-    }
-}
 
-fn mixChannels(reg($t0) scratch0: i32, reg($t1) scratch1: i32) {
-    reg($at) comparison: u32 = undefined;
-    reg($s0) dma_rdram: dmem = undefined;
-    reg($s4) dma_dmem: dmem = undefined;
-    reg($k0) channel_count: i32 = undefined;
-    reserved reg($k1) sample_count: u32 = undefined;
-    reg($ra) return_address: u32 = undefined;
-    reg($v01) vector1: vec16 = undefined;
-    reg($v02) vector2: vec16 = undefined;
-    reg($v03) vector3: vec16 = undefined;
-    reg($v04) vector4: vec16 = undefined;
-    reg($v05) vector5: vec16 = undefined;
-    reg($v06) vector6: vec16 = undefined;
-    reg($v07) vector7: vec16 = undefined;
-    reg($v08) vector8: vec16 = undefined;
-    reg($v13) vector13: vec16 = undefined;
-    reg($v14) vector14: vec16 = undefined;
-    reg($v15) vector15: vec16 = undefined;
-    reg($v16) vector16: vec16 = undefined;
-    reg($v17) vector17: vec16 = undefined;
-    reg($v18) vector18: vec16 = undefined;
-    reg($v19) vector19: vec16 = undefined;
-    reg($v20) vector20: vec16 = undefined;
-    reg($v21) vector21: vec16 = undefined;
-    reg($v22) vector22: vec16 = undefined;
-    reg($v23) vector23: vec16 = undefined;
-    reg($v24) vector24: vec16 = undefined;
-    reg($v25) vector25: vec16 = undefined;
-    reg($v26) vector26: vec16 = undefined;
-    reg($v27) vector27: vec16 = undefined;
-    reg($v28) vector28: vec16 = undefined;
-    reg($v31) vector31: vec16 = undefined;
-    exact {
-        dma_rdram = dmem.addressOf(channel_buffer);
-        scratch1 = bitCast(sample_count);
-        vector3 = load(vec16, dma_rdram, 0);
-        vector4 = load(vec16, dma_rdram, 16);
-        vector5 = load(vec16, dma_rdram, 32);
-        vector6 = load(vec16, dma_rdram, 48);
-        vector1[0] = load(vec16, dma_dmem, -4);
-        if (channel_count <= 8) goto Mix8Start slot { vector2[0] = load(vec16, dma_dmem, -2); }
-    Mix32Start:
-        if (scratch1 < 8) goto Mix32Loop slot { scratch0 = scratch1; }
-        scratch0 = 8;
-    Mix32Loop:
-        vector7 = vmulf(vector3, vector13);
-        vector7 = vmacf(vector4, vector15);
-        vector7 = vmacf(vector5, vector17);
-        store(vec16, dma_dmem, vector1[0], -4);
-        vector7 = vmacf(vector6, vector19);
-        store(vec16, dma_dmem, vector2[0], -2);
-        vector8 = vmulf(vector3, vector14);
-        dma_rdram = dma_rdram + 64;
-        vector8 = vmacf(vector4, vector16);
-        scratch0 = scratch0 + -1;
-        vector8 = vmacf(vector5, vector18);
-        dma_dmem = dma_dmem + 4;
-        vector8 = vmacf(vector6, vector20);
-        vector1 = vectorAdd(vector7, vector7.yywwYYWW);
-        vector3 = load(vec16, dma_rdram, 0);
-        vector2 = vectorAdd(vector8, vector8.yywwYYWW);
-        vector4 = load(vec16, dma_rdram, 16);
-        vector1 = vectorAdd(vector1, vector1.zzzzZZZZ);
-        vector5 = load(vec16, dma_rdram, 32);
-        vector2 = vectorAdd(vector2, vector2.zzzzZZZZ);
-        vector6 = load(vec16, dma_rdram, 48);
-        vector1 = vectorAdd(vector1, vector1.XXXXXXXX);
-        if (scratch0 != 0) goto Mix32Loop slot { vector2 = vectorAdd(vector2, vector2.XXXXXXXX); }
-        vector13 = vmudm(vector13, vector31.yyyyyyyy);
-        vector13 = vmadm(vector21, vector31.zzzzzzzz);
-        vector15 = vmudm(vector15, vector31.yyyyyyyy);
-        vector15 = vmadm(vector23, vector31.zzzzzzzz);
-        vector17 = vmudm(vector17, vector31.yyyyyyyy);
-        vector17 = vmadm(vector25, vector31.zzzzzzzz);
-        vector19 = vmudm(vector19, vector31.yyyyyyyy);
-        vector19 = vmadm(vector27, vector31.zzzzzzzz);
-        vector14 = vmudm(vector14, vector31.yyyyyyyy);
-        vector14 = vmadm(vector22, vector31.zzzzzzzz);
-        vector16 = vmudm(vector16, vector31.yyyyyyyy);
-        vector16 = vmadm(vector24, vector31.zzzzzzzz);
-        vector18 = vmudm(vector18, vector31.yyyyyyyy);
-        vector18 = vmadm(vector26, vector31.zzzzzzzz);
-        scratch1 = scratch1 + -8;
-        vector20 = vmudm(vector20, vector31.yyyyyyyy);
-        if (scratch1 > 0) goto Mix32Start slot { vector20 = vmadm(vector28, vector31.zzzzzzzz); }
-        store(vec16, dma_dmem, vector1[0], -4);
-        return slot { store(vec16, dma_dmem, vector2[0], -2); }
-    Mix8Start:
-        if (scratch1 < 8) goto Mix8Loop slot { scratch0 = scratch1; }
-        scratch0 = 8;
-        rsp.nop();
-    Mix8Loop:
-        vector7 = vmulf(vector3, vector13);
-        store(vec16, dma_dmem, vector1[0], -4);
-        vector8 = vmulf(vector3, vector14);
-        store(vec16, dma_dmem, vector2[0], -2);
-        vector1 = vectorAdd(vector7, vector7.yywwYYWW);
-        scratch0 = scratch0 + -1;
-        vector2 = vectorAdd(vector8, vector8.yywwYYWW);
-        dma_rdram = dma_rdram + 64;
-        vector1 = vectorAdd(vector1, vector1.zzzzZZZZ);
-        dma_dmem = dma_dmem + 4;
-        vector2 = vectorAdd(vector2, vector2.zzzzZZZZ);
-        vector3 = load(vec16, dma_rdram, 0);
-        vector1 = vectorAdd(vector1, vector1.XXXXXXXX);
-        if (scratch0 != 0) goto Mix8Loop slot { vector2 = vectorAdd(vector2, vector2.XXXXXXXX); }
-        vector13 = vmudm(vector13, vector31.yyyyyyyy);
-        vector13 = vmadm(vector21, vector31.zzzzzzzz);
-        scratch1 = scratch1 + -8;
-        vector14 = vmudm(vector14, vector31.yyyyyyyy);
-        if (scratch1 > 0) goto Mix8Start slot { vector14 = vmadm(vector22, vector31.zzzzzzzz); }
-        store(vec16, dma_dmem, vector1[0], -4);
-        return slot { store(vec16, dma_dmem, vector2[0], -2); }
-    }
+
+/// Lane 0 of each sum becomes the sum of all eight lanes. `vadd` carries
+/// through VCO, so the adds keep their order: alternating the two sides
+/// gives each add time for the previous one's result.
+inline fn sumLanes(left_sum: vec16, left_lanes: vec16, right_sum: vec16, right_lanes: vec16) {
+    left_sum = vectorAdd(left_lanes, left_lanes.yywwYYWW);
+    right_sum = vectorAdd(right_lanes, right_lanes.yywwYYWW);
+    left_sum = vectorAdd(left_sum, left_sum.zzzzZZZZ);
+    right_sum = vectorAdd(right_sum, right_sum.zzzzZZZZ);
+    left_sum = vectorAdd(left_sum, left_sum.XXXXXXXX);
+    right_sum = vectorAdd(right_sum, right_sum.XXXXXXXX);
 }

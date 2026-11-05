@@ -735,3 +735,37 @@ test "bit-cast arguments move into the parameter register" {
         \\}
     , error.FunctionArgumentTypeMismatch);
 }
+
+test "inline expansions keep caller values and may reuse caller names" {
+    try expectAsm(
+        \\inline fn twice(sum: u32, value: u32) {
+        \\  reg doubled: u32 = value << 1;
+        \\  sum = doubled + value;
+        \\}
+        \\fn test(reg($a0) count: u32) noreturn {
+        \\  reg sum: u32 = 0;
+        \\  reg value: u32 = count;
+        \\  reg keep: u32 = count + 7;
+        \\  twice(value, sum);
+        \\  rsp.cp0.setSpStatus(keep);
+        \\  rsp.cp0.setSpStatus(value);
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addiu $t0, $zero, 0
+        \\  or $t1, $a0, $zero
+        \\  addi $t2, $a0, 7
+        \\  sll $t3, $t0, 1
+        \\  add $t1, $t3, $t0
+        \\  mtc0 $t2, $4
+        \\  mtc0 $t1, $4
+        \\  break
+        \\
+        \\
+    );
+}

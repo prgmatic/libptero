@@ -125,9 +125,16 @@ const Analysis = struct {
         try self.direct.appendSlice(self.allocator, self.result.entries.items);
     }
 
+    /// A called function whose writes constrain the caller's pins; an
+    /// inline expansion allocates around the caller's live registers.
+    fn constrainedTarget(functions: []const ast.Function, name: []const u8) ?ast.Function {
+        const function = call_requirements.findFunction(functions, name) orelse return null;
+        return if (function.inline_call) null else function;
+    }
+
     fn forbidAcrossCall(self: *Analysis, function_context: *const FunctionContext, function: ast.Function, call: lifetimes_.Call) !void {
         const target = self.result.findPtr(call.target) orelse return;
-        const target_function = call_requirements.findFunction(self.functions, call.target) orelse return;
+        const target_function = constrainedTarget(self.functions, call.target) orelse return;
         const pins: Pins = .{ .target = target, .target_function = target_function, .call = call, .diagnostic = self.diagnostic, .caller = function };
         for (function_context.lifetimes.lifetimes.items) |lifetime| {
             if (lifetime.automatic or !function_context.lifetimes.livesAcrossCall(lifetime, call)) continue;

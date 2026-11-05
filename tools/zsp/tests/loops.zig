@@ -344,3 +344,43 @@ test "values updated in a loop keep their register around the back edge" {
         \\
     );
 }
+
+test "sibling blocks may declare the same name with separate lifetimes" {
+    try expectAsm(
+        \\fn test(reg($a0) count: u32, reg($a1) flag: u32) noreturn {
+        \\  reg keep: u32 = count + 1;
+        \\  if (flag != 0) {
+        \\    reg temp: u32 = count << 2;
+        \\    rsp.cp0.setSpStatus(temp);
+        \\  } else {
+        \\    reg temp: u32 = count << 3;
+        \\    rsp.cp0.setSpStatus(keep);
+        \\    rsp.cp0.setSpStatus(temp);
+        \\  }
+        \\  rsp.cp0.setSpStatus(keep);
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  addi $t0, $a0, 1
+        \\  beq $a1, $zero, LABEL_test_ifelse_0
+        \\  nop
+        \\  sll $t1, $a0, 2
+        \\  mtc0 $t1, $4
+        \\  j LABEL_test_ifend_0
+        \\  nop
+        \\LABEL_test_ifelse_0:
+        \\  sll $t1, $a0, 3
+        \\  mtc0 $t0, $4
+        \\  mtc0 $t1, $4
+        \\LABEL_test_ifend_0:
+        \\  mtc0 $t0, $4
+        \\  break
+        \\
+        \\
+    );
+}

@@ -258,7 +258,8 @@ immediates where possible and do not consume registers:
 const dmem_end: dmem = 0x1000;
 ```
 
-Names may not be duplicated in a visible global or function scope. The old
+Names may not be duplicated in a visible global or function scope; blocks
+that are not nested in each other may each declare the same name. The old
 `var` spelling is not supported.
 
 ## Scalar expressions
@@ -492,7 +493,8 @@ never returns, such as `_start`, can make nested calls without saving it.
 `inline` functions are expanded at the call site. An unpinned inline
 parameter names its argument directly, wherever the caller keeps it: reads
 and writes of the parameter are reads and writes of the argument, and a
-constant argument stays a constant. A pinned inline parameter receives its
+constant argument stays a constant. Parameter names shadow caller names,
+and the expansion's temporaries avoid every caller register still in use. A pinned inline parameter receives its
 argument in that register. Other functions use the repository's stackless
 fixed-register calling convention. `export` emits a
 global assembly symbol, while `pub` permits access from another ZSP module.

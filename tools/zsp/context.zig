@@ -141,12 +141,20 @@ pub const FunctionContext = struct {
     }
 
     /// Automatic values live across a call avoid every register it writes.
+    /// Inline calls are left out: an expansion allocates its temporaries
+    /// around the caller's live registers.
     fn applyCallClobbers(self: *FunctionContext) void {
         const registry = self.clobbers orelse return;
         for (self.lifetimes.calls.items) |call| {
+            if (isInlineTarget(self.functions, call.target)) continue;
             const clobber = registry.find(call.target) orelse continue;
             self.forbidAcrossCall(call, clobber);
         }
+    }
+
+    fn isInlineTarget(functions: []const ast.Function, name: []const u8) bool {
+        const function = @import("call_requirements.zig").findFunction(functions, name) orelse return false;
+        return function.inline_call;
     }
 
     fn forbidAcrossCall(self: *FunctionContext, call: lifetimes_.Call, clobber: @import("clobbers.zig").FunctionClobber) void {

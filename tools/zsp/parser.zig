@@ -16,6 +16,8 @@ pub const Parser = struct {
     type_symbols: std.ArrayList(TypeSymbol) = .empty,
     /// Whether the block just parsed opened with `@branchHint(.cold)`.
     last_block_cold: bool = false,
+    /// Every name declared in the current function.
+    function_names: std.StringHashMapUnmanaged(void) = .empty,
     compile_time_members: std.ArrayList(CompileTimeMember) = .empty,
     compile_time_types: std.ArrayList([]const u8) = .empty,
     /// Names replaced while lexing: `inline for` captures become numbers
@@ -133,6 +135,7 @@ pub const Parser = struct {
         for (self.generated_names.items) |name| self.allocator.free(name);
         self.generated_names.deinit(self.allocator);
         self.iterations.deinit(self.allocator);
+        self.function_names.deinit(self.allocator);
     }
 
     pub fn appendFunction(self: *Parser, functions: *std.ArrayList(ast.Function), parsed: ast.Function) !void {
@@ -180,6 +183,9 @@ pub const Parser = struct {
         var list: StatementList = .{};
         defer list.locations.deinit(self.allocator);
         const cold = try self.eatColdHint();
+        // Renames made for this block's declarations end with it.
+        const renames = self.substitutions.items.len;
+        defer self.restoreSubstitutions(renames);
         while (!try self.eat(.r_brace)) try self.parseStatementInto(&list);
         self.accumulator.closeList(&list);
         self.last_block_cold = cold;
@@ -440,12 +446,20 @@ pub const Parser = struct {
         self.substitutions.shrinkRetainingCapacity(len);
     }
 
-    /// A name declared inside an unrolled body, made unique per iteration.
+    /// A declared name, unique within the function: renamed per iteration
+    /// inside an unrolled body, and per scope when a sibling block already
+    /// declared it, since lifetimes are tracked by name.
     pub fn declaredName(self: *Parser, name: token.Token) !token.Token {
-        if (self.iterations.items.len == 0) return name;
         var renamed = name;
-        renamed.text = try self.generatedName("{s}#{f}", .{ name.text, IterationPath{ .indices = self.iterations.items } });
-        try self.substitute(name.text, .ident, renamed.text);
+        if (self.iterations.items.len != 0) {
+            renamed.text = try self.generatedName("{s}#{f}", .{ name.text, IterationPath{ .indices = self.iterations.items } });
+        }
+        // A visible duplicate is left alone so it is still reported.
+        if (self.function_names.contains(renamed.text) and self.lookupTypeSymbolInfo(name.text) == null) {
+            renamed.text = try self.generatedName("{s}#s{d}", .{ renamed.text, self.function_names.count() });
+        }
+        try self.function_names.put(self.allocator, renamed.text, {});
+        if (renamed.text.ptr != name.text.ptr) try self.substitute(name.text, .ident, renamed.text);
         return renamed;
     }
 
