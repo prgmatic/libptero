@@ -177,16 +177,18 @@ pub fn parseWhileKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
 /// `while (condition) { ... }` after the keyword, optionally with a
 /// continue expression: `while (condition) : (step) { ... }`. A loop with a
 /// condition is rotated into `if (condition) do { ... } while (condition)`
-/// so each iteration takes one branch; `while (true)` has no condition.
+/// so each iteration takes one branch; `while (true)` has no condition
+/// unless its body ends in `if (c) { break; }`.
 fn parseWhile(self: *Parser, label: ?[]const u8) !ast.Statement {
     _ = try self.expect(.l_paren);
     const condition: ?ast.Condition = if (try self.eatKeyword("true")) null else try self.parseCondition();
     _ = try self.expect(.r_paren);
     const step = try parseContinueExpression(self);
     var body = try parseBraced(self);
-    if (step) |statements| body = try @import("parse_loops.zig").appendStep(self, label, body, statements);
+    const loops = @import("parse_loops.zig");
+    if (step) |statements| body = try loops.appendStep(self, label, body, statements);
+    const guard = condition orelse return loops.exitAtEnd(self, label, body);
     const loop: ast.Statement = .{ .do_while_loop = .{ .label = label, .condition = condition, .statements = body, .delay_slot = null } };
-    const guard = condition orelse return loop;
     const then_statements = try self.allocator.alloc(ast.Statement, 1);
     then_statements[0] = loop;
     return .{ .if_statement = .{ .condition = guard, .delay_slot = null, .then_statements = then_statements, .else_statements = null } };

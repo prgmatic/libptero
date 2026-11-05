@@ -10,16 +10,23 @@ pub const Operand = struct {
     label: ?[]const u8 = null,
     offset: i64,
 
+    /// `address` or `label + index`, where `label` is a data label or a
+    /// `const` and `index` is any scalar register.
     pub fn parseBase(parser: *Parser, offset: i64, diagnostic_token: ?token.Token) !Operand {
-        var operand = Operand{ .address = try parser.parseValueRef(), .offset = offset };
-        if (try parser.eat(.plus)) {
-            operand.label = switch (operand.address) {
-                .ident => |name| name,
-                else => return parser.fail(diagnostic_token orelse parser.current, .unexpected_token),
-            };
-            operand.address = try parser.parseValueRef();
+        if (isLabelPlusIndex(parser)) {
+            const label = try parser.expect(.ident);
+            _ = try parser.expect(.plus);
+            return .{ .address = try parser.parseValueRef(), .label = label.text, .offset = offset };
         }
+        const operand = Operand{ .address = try parser.parseValueRef(), .offset = offset };
+        if (parser.current.tag == .plus) return parser.fail(diagnostic_token orelse parser.current, .unexpected_token);
         return operand;
+    }
+
+    fn isLabelPlusIndex(parser: *const Parser) bool {
+        if (parser.current.tag != .ident) return false;
+        const next = parser.peek(1) orelse return false;
+        return next[0].tag == .plus;
     }
 
     pub fn parseOffset(self: *Operand, parser: *Parser) !void {

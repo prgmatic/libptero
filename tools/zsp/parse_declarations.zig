@@ -393,10 +393,10 @@ pub fn parseConstStatement(self: *Parser) !ast.Statement {
     _ = try self.expect(.colon);
     const data_type = try self.parseDataType(try self.expect(.ident));
     _ = try self.expect(.equal);
-    const value = parser_mod.valueFromRef(try self.parseValueRef());
+    const value = try @import("parse_comptime.zig").parseConstExpression(self);
     _ = try self.expect(.semicolon);
-    try self.addTypeSymbol(name.text, data_type);
-    return .{ .var_decl = .{ .is_const = true, .data_type = data_type, .reg = null, .name = name.text, .value = value } };
+    try self.type_symbols.append(self.allocator, .{ .name = name.text, .data_type = data_type, .constant = value });
+    return .{ .var_decl = .{ .is_const = true, .data_type = data_type, .reg = null, .name = name.text, .value = .{ .number = value } } };
 }
 
 fn parseCommandTable(self: *Parser, name: token.Token) !ast.Statement {

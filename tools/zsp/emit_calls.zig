@@ -16,13 +16,13 @@ pub fn writeCall(g: Gen, call: ast.Call) anyerror!void {
     try common.expectLocal(call.module);
     const function = try common.findFunction(g, call.name);
     try writeFunctionArguments(g, function, call.arguments, true);
-    if (function.inline_call) return writeInlineCall(g, function);
+    if (function.inline_call) return writeInlineCall(g, function, call.arguments);
     try g.out.jump(.jal, call.name);
     try statements_.writeDelaySlot(g, call.delay_slot);
 }
 
 /// Expands an inline body with the caller's live registers reserved.
-fn writeInlineCall(g: Gen, function: ast.Function) !void {
+fn writeInlineCall(g: Gen, function: ast.Function, arguments: []const ast.ValueRef) !void {
     const caller = g.context;
     var context = analysis.FunctionContext.init(caller.allocator, caller.label_prefix);
     defer context.deinit();
@@ -33,7 +33,7 @@ fn writeInlineCall(g: Gen, function: ast.Function) !void {
     context.function_forbidden_vector = caller.function_forbidden_vector;
     try reserveCallerSymbols(&context, caller);
     try context.prepareLifetimes(g.functions, function.parameters, function.statements);
-    for (function.parameters) |parameter| try bindInlineParameter(&context, parameter);
+    for (function.parameters, arguments) |parameter, argument| try bindInlineParameter(&context, caller, parameter, argument);
     try statements_.writeStatements(g.with(&context), function.statements);
     caller.next_label = context.next_label;
 }
@@ -48,8 +48,15 @@ fn reserveCallerSymbols(context: *analysis.FunctionContext, caller: *const analy
     }
 }
 
-/// Parameters are already bound when a caller symbol has the same name.
-fn bindInlineParameter(context: *analysis.FunctionContext, parameter: ast.Parameter) !void {
+/// A pinned parameter is the register its argument was moved into. An
+/// unpinned one names the argument itself: its register, or its constant.
+fn bindInlineParameter(
+    context: *analysis.FunctionContext,
+    caller: *const analysis.FunctionContext,
+    parameter: ast.Parameter,
+    argument: ast.ValueRef,
+) !void {
+    if (parameter.automatic) return bindArgument(context, caller, parameter, argument);
     const existing = context.lookup(parameter.name) catch return context.add(.{
         .name = parameter.name,
         .data_type = parameter.data_type,
@@ -59,6 +66,34 @@ fn bindInlineParameter(context: *analysis.FunctionContext, parameter: ast.Parame
     });
     if (existing.data_type != parameter.data_type) return error.FunctionArgumentTypeMismatch;
     if (existing.reg != parameter.reg or existing.vector_reg != parameter.vector_reg) return error.FunctionArgumentRegisterMismatch;
+}
+
+fn bindArgument(
+    context: *analysis.FunctionContext,
+    caller: *const analysis.FunctionContext,
+    parameter: ast.Parameter,
+    argument: ast.ValueRef,
+) !void {
+    const source = try argumentSymbol(caller, parameter, argument);
+    if (!argumentTypeFits(source.data_type, parameter.data_type, true)) return error.FunctionArgumentTypeMismatch;
+    // An argument with the parameter's own name is already reserved.
+    if (std.mem.eql(u8, source.name, parameter.name) and argument == .ident) return;
+    var alias = source;
+    alias.name = parameter.name;
+    alias.data_type = parameter.data_type;
+    alias.automatic = false;
+    alias.first_live = 0;
+    alias.last_use = std.math.maxInt(usize);
+    try context.add(alias);
+}
+
+/// The caller's symbol an argument names, or a constant for a literal.
+fn argumentSymbol(caller: *const analysis.FunctionContext, parameter: ast.Parameter, argument: ast.ValueRef) !analysis.Symbol {
+    return switch (argument) {
+        .number => |value| .{ .name = parameter.name, .data_type = parameter.data_type, .reg = null, .constant = value },
+        .ident => |name| caller.lookup(name),
+        else => error.FunctionArgumentTypeMismatch,
+    };
 }
 
 /// `call(); tail next();` where `next` takes no arguments.
@@ -106,6 +141,7 @@ pub fn writeFunctionArguments(g: Gen, function: ast.Function, arguments: []const
     var moves = try collectMoves(g, function, arguments);
     try emitParallelMoves(g, &moves);
     for (arguments, function.parameters) |argument, parameter| {
+        if (function.bindsArgument(parameter)) continue;
         try writeArgument(g, argument, parameter, allow_signedness_change);
     }
 }
@@ -142,6 +178,7 @@ const Moves = struct {
 fn collectMoves(g: Gen, function: ast.Function, arguments: []const ast.ValueRef) !Moves {
     var moves: Moves = .{};
     for (arguments, function.parameters, 0..) |argument, parameter, index| {
+        if (function.bindsArgument(parameter)) continue;
         const source = try movedSource(g, argument, parameter) orelse continue;
         if (parameterIsWritten(g, function, index)) return error.FunctionArgumentRegisterMismatch;
         moves.add(.{ .destination = parameter.reg.?, .source = source });

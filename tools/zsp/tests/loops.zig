@@ -95,7 +95,7 @@ test "continue expressions run before labeled and unlabeled continues" {
     );
 }
 
-test "while true repeats until a break and conditional exits branch once" {
+test "while true ending in a break tests its exit on the back edge" {
     try expectAsm(
         \\fn test(reg($a0) count: u32) {
         \\  while (true) {
@@ -124,22 +124,20 @@ test "while true repeats until a break and conditional exits branch once" {
         \\test:
         \\LABEL_test_dowhile_0:
         \\  addi $a0, $a0, -1
-        \\  beq $a0, $zero, LABEL_test_dowhileend_0
-        \\  nop
-        \\  j LABEL_test_dowhile_0
+        \\  bne $a0, $zero, LABEL_test_dowhile_0
         \\  nop
         \\LABEL_test_dowhileend_0:
-        \\LABEL_test_dowhile_2:
+        \\LABEL_test_dowhile_1:
         \\  addiu $v1, $zero, 4
-        \\  beq $a0, $v1, LABEL_test_dowhileend_2
+        \\  beq $a0, $v1, LABEL_test_dowhileend_1
         \\  nop
-        \\  j LABEL_test_blockend_3
+        \\  j LABEL_test_blockend_2
         \\  nop
-        \\LABEL_test_blockend_3:
+        \\LABEL_test_blockend_2:
         \\  addi $a0, $a0, 1
-        \\  j LABEL_test_dowhile_2
+        \\  j LABEL_test_dowhile_1
         \\  addi $a0, $a0, 2
-        \\LABEL_test_dowhileend_2:
+        \\LABEL_test_dowhileend_1:
         \\  jr $ra
         \\  nop
         \\
@@ -166,6 +164,59 @@ test "expression initializers declare then assign" {
         \\  mtc0 $t0, $4
         \\  .word 0x4aa21114 # vaddc $v04, $v02, $v02
         \\  .word 0x4aa108d0 # vadd $v03, $v01, $v01
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "while true keeps its jump when the break is mid-body or a continue tests nothing" {
+    try expectAsm(
+        \\fn test(reg($a0) count: u32) {
+        \\  while (true) {
+        \\    count -= 1;
+        \\    if (count == 0) {
+        \\      break;
+        \\    }
+        \\    count -= 2;
+        \\  }
+        \\  while (true) {
+        \\    count += 1;
+        \\    if (count == 4) {
+        \\      continue;
+        \\    }
+        \\    if (count == 9) {
+        \\      break;
+        \\    }
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\LABEL_test_dowhile_0:
+        \\  addi $a0, $a0, -1
+        \\  beq $a0, $zero, LABEL_test_dowhileend_0
+        \\  nop
+        \\  addi $a0, $a0, -2
+        \\  j LABEL_test_dowhile_0
+        \\  nop
+        \\LABEL_test_dowhileend_0:
+        \\LABEL_test_dowhile_2:
+        \\  addi $a0, $a0, 1
+        \\  addiu $v1, $zero, 4
+        \\  beq $a0, $v1, LABEL_test_dowhilecond_2
+        \\  nop
+        \\  addiu $v1, $zero, 9
+        \\  beq $a0, $v1, LABEL_test_dowhileend_2
+        \\  nop
+        \\LABEL_test_dowhilecond_2:
+        \\  j LABEL_test_dowhile_2
+        \\  nop
+        \\LABEL_test_dowhileend_2:
         \\  jr $ra
         \\  nop
         \\

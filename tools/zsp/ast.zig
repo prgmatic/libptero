@@ -32,6 +32,12 @@ pub const Function = struct {
     pub fn emitsBody(self: Function) bool {
         return !self.external and !self.inline_call;
     }
+
+    /// An unpinned inline parameter names its argument at each expansion
+    /// rather than receiving it in a register.
+    pub fn bindsArgument(self: Function, parameter: Parameter) bool {
+        return self.inline_call and parameter.automatic;
+    }
 };
 
 pub const Import = struct {

@@ -106,11 +106,13 @@ pub fn backendScratch2(context: *const analysis.FunctionContext) !Register {
 }
 
 /// The shortest `addiu`, `ori`, or `lui`/`ori` sequence for a 32-bit value.
+/// Unsigned and signed spellings of the same register bits are equivalent.
 pub fn loadImmediateInto(out: *Emitter, reg: Register, value: i64) !void {
-    if (common.fitsSigned16(value)) return out.immediate(.addiu, reg, .zero, value);
-    if (common.fitsUnsigned16(value)) return out.immediate(.ori, reg, .zero, value);
     if (value < std.math.minInt(i32) or value > std.math.maxInt(u32)) return error.ImmediateOutOfRange;
     const bits: u32 = @truncate(@as(u64, @bitCast(value)));
+    const signed: i32 = @bitCast(bits);
+    if (common.fitsSigned16(signed)) return out.immediate(.addiu, reg, .zero, signed);
+    if (common.fitsUnsigned16(value)) return out.immediate(.ori, reg, .zero, value);
     try out.upper(reg, @truncate(bits >> 16));
     const lower: u16 = @truncate(bits);
     if (lower != 0) try out.immediate(.ori, reg, reg, lower);
@@ -132,6 +134,7 @@ test "immediates use the shortest materialization" {
     try loadImmediateInto(&out, .t0, 0xffff);
     try loadImmediateInto(&out, .t0, 0x12340000);
     try loadImmediateInto(&out, .t0, -0x12345678);
+    try loadImmediateInto(&out, .t0, 0xffff800c);
     try testing.expectError(error.ImmediateOutOfRange, loadImmediateInto(&out, .t0, 1 << 33));
     const text = try printed(&out);
     defer testing.allocator.free(text);
@@ -141,6 +144,7 @@ test "immediates use the shortest materialization" {
         \\  lui $t0, 4660
         \\  lui $t0, 60875
         \\  ori $t0, $t0, 43400
+        \\  addiu $t0, $zero, -32756
         \\
     , text);
 }

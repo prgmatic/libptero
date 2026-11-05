@@ -281,7 +281,13 @@ fn parseNamedRef(self: *Parser, tok: token.Token) !ast.ValueRef {
         return .{ .number = member.value };
     }
     if (self.current.tag == .l_bracket or self.isVectorDotSuffix()) return parseVectorRef(self, tok);
-    return .{ .ident = tok.text };
+    return namedOrConstant(self, tok.text);
+}
+
+/// A `const` name folds to its value; anything else stays a name.
+fn namedOrConstant(self: *const Parser, name: []const u8) ast.ValueRef {
+    if (self.lookupConstant(name)) |value| return .{ .number = value };
+    return .{ .ident = name };
 }
 
 /// A vector access; lane ranges only where a caller lowers them.

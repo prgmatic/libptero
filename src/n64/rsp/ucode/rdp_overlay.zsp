@@ -325,11 +325,12 @@ fn sendOtherModes(
     reg($a0) word0: u32,
     reg($a1) word1: u32,
 ) {
-    reg opcode: u32 = undefined;
-    opcode = 0xef;
+    // The staged command takes the SET_OTHER_MODES opcode in place of the
+    // overlay's flag byte at the top of `word0`.
     rdp.write8(word0, word1);
-    reg($s0) staging: dmem = undefined;
-    store(u8, staging, opcode, -8);
+    reg staged_end: dmem = load(u32, command_staging_ptr);
+    reg opcode: u32 = 0xef;
+    store(u8, staged_end, opcode, -8);
     tail finalizeOtherModes(word0, word1);
 }
 

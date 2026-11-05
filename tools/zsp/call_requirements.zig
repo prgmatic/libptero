@@ -109,6 +109,7 @@ fn call(requirements: *Requirements, statement: *const Statement, current: usize
 }
 
 fn callArgument(requirements: *Requirements, current: usize, function: ast.Function, index: usize, argument: ast.ValueRef, parameter: ast.Parameter) !void {
+    if (function.bindsArgument(parameter)) return boundArgument(requirements, current, function, index, argument);
     switch (argument) {
         .ident => |name| try namedCallArgument(requirements, current, function, index, name, parameter),
         .number => requirements.setupClobber(current, parameter),
@@ -116,11 +117,22 @@ fn callArgument(requirements: *Requirements, current: usize, function: ast.Funct
     }
 }
 
-/// A parameter the callee writes redefines the caller's value; an in/out
-/// parameter also reads it first.
+/// An argument an inline parameter names is used in place: no register is
+/// required, but the expansion's writes still redefine it.
+fn boundArgument(requirements: *Requirements, current: usize, function: ast.Function, index: usize, argument: ast.ValueRef) !void {
+    if (argument != .ident or !requirements.lifetimes.has(argument.ident)) return;
+    try trackParameterWrites(requirements, current, function, index, argument.ident);
+}
+
 fn namedCallArgument(requirements: *Requirements, current: usize, function: ast.Function, index: usize, name: []const u8, parameter: ast.Parameter) !void {
     if (!requirements.lifetimes.has(name)) return requirements.setupClobber(current, parameter);
     requirements.require(current, name, parameter);
+    try trackParameterWrites(requirements, current, function, index, name);
+}
+
+/// A parameter the callee writes redefines the caller's value; an in/out
+/// parameter also reads it first.
+fn trackParameterWrites(requirements: *Requirements, current: usize, function: ast.Function, index: usize, name: []const u8) !void {
     if (!parameterIsWrittenByCall(requirements.functions, function, index)) return;
     if (parameterIsLiveIn(requirements.lifetimes.allocator, function, index)) return requirements.lifetimes.write(name, current);
     try requirements.lifetimes.writeOutput(name, current);

@@ -29,7 +29,8 @@ pub fn parseExpandingStatement(self: *Parser, list: *StatementList, location: as
 // ------------------------------------------------------ constant expressions
 
 /// An integer known while parsing: literals, `offsetOf`, `sizeOf`,
-/// enum and flags members, `inline for` captures, and operators on them.
+/// enum and flags members, `const` names, `inline for` captures, and
+/// operators on them.
 pub fn parseConstExpression(self: *Parser) anyerror!i64 {
     return parseConstBinary(self, 0);
 }
@@ -61,7 +62,16 @@ fn parseConstPrimary(self: *Parser) anyerror!i64 {
     }
     if (self.current.tag == .number) return self.parseNumberValue(try self.expect(.number));
     if (self.current.tag != .ident) return self.fail(self.current, .expected_literal_offset);
+    return parseNamedPrimary(self);
+}
+
+/// `sizeOf`/`offsetOf`, a `const` name, or an enum or flags member.
+fn parseNamedPrimary(self: *Parser) anyerror!i64 {
     if (named_primaries.get(self.current.text)) |parse_primary| return parse_primary(self);
+    if (self.lookupConstant(self.current.text)) |value| {
+        _ = try self.expect(.ident);
+        return value;
+    }
     return parseMember(self);
 }
 

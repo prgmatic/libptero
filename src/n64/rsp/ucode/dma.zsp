@@ -1,19 +1,27 @@
-// Stackless DMA ABI, matching libdragon's rsp_dma.inc:
-//   $t0: DMA size descriptor
+// Stackless DMA ABI used by the resident queue and every overlay:
+//   $t0: DMA size descriptor (length - 1, optionally with a row count)
 //   $t1: RDRAM pitch
 //   $s0: RDRAM address
 //   $s4: DMEM address
 //   $t2: operation flags
 //
-// Returns through $ra. Clobbers $at and $t2. For DMA reads, $s4 is adjusted
-// by the low three bits of the RDRAM address.
+// Returns through $ra and writes only $at, $t2, and $s4, so callers keep
+// everything else live across a transfer; $at is the only scratch register.
+// For DMA reads, $s4 is advanced by the low three bits of the RDRAM address
+// so it points at the requested byte.
+
+// Bit 31 selects an RDRAM write; the low bits are SP status bits to wait on.
+const write_to_rdram: u32 = 0xffff8000;
+const wait_busy_and_full: u32 = 0x0c;
+const wait_busy: u32 = 0x08;
+
 pub export fn out(
     reg($t0) size: u32,
     reg($t1) pitch: u32,
     reg($s0) rdram: u32,
     reg($s4) dmem: dmem,
 ) noreturn {
-    reg($t2) flags: u32 = -32756;
+    reg($t2) flags: u32 = write_to_rdram | wait_busy_and_full;
     jump exec(size, pitch, rdram, dmem, flags);
 }
 
@@ -23,7 +31,7 @@ pub export fn outAsync(
     reg($s0) rdram: u32,
     reg($s4) dmem: dmem,
 ) noreturn {
-    reg($t2) flags: u32 = -32768;
+    reg($t2) flags: u32 = write_to_rdram;
     jump exec(size, pitch, rdram, dmem, flags);
 }
 
@@ -43,7 +51,7 @@ pub export fn in(
     reg($s0) rdram: u32,
     reg($s4) dmem: dmem,
 ) noreturn {
-    reg($t2) flags: u32 = 0x0c;
+    reg($t2) flags: u32 = wait_busy_and_full;
     tail exec(size, pitch, rdram, dmem, flags);
 }
 
@@ -54,38 +62,41 @@ pub export fn exec(
     reg($s4) dmem: dmem,
     reg($t2) flags: u32,
 ) noreturn {
-    reg($at) dma_full: u32;
-    reg($at) transfer_descriptor: u32;
-    do {
-        dma_full = rsp.cp0.dmaFull();
-    } while(dma_full != 0) slot {
-        transfer_descriptor = size & 0x0fff;
+    while (true) {
+        reg($at) full: u32 = rsp.cp0.dmaFull();
+        if (full == 0) {
+            break;
+        }
     }
-    transfer_descriptor = pitch - transfer_descriptor;
-    transfer_descriptor -= 1;
-    transfer_descriptor <<= 20;
-    transfer_descriptor |= size;
+
+    // The hardware descriptor packs the row skip (pitch minus row length)
+    // above the length and row count already held in `size`.
+    reg($at) descriptor: u32 = size & 0x0fff;
+    descriptor = pitch - descriptor;
+    descriptor -= 1;
+    descriptor <<= 20;
+    descriptor |= size;
     rsp.cp0.setDmaRdramAddress(rdram);
     rsp.cp0.setDmaMemoryAddress(dmem);
-    if(flags < 0x80000000) {
-        rsp.cp0.startDmaRead(transfer_descriptor);
+    if (flags < 0x80000000) {
+        rsp.cp0.startDmaRead(descriptor);
     } else {
-        rsp.cp0.startDmaWrite(transfer_descriptor);
+        rsp.cp0.startDmaWrite(descriptor);
     }
-    reg($at) rdram_alignment: u32;
-    rdram_alignment = rdram & 7;
-    dmem = dmem + rdram_alignment;
+
+    reg($at) alignment: u32 = rdram & 7;
+    dmem = dmem + alignment;
     flags &= 0x0f;
     jump waitStatus(flags);
 }
 
 pub export fn waitStatus(reg($t2) flags: u32) noreturn {
-    reg($at) status: u32;
-    status = rsp.cp0.spStatus();
-    do {
+    while (true) {
+        reg($at) status: u32 = rsp.cp0.spStatus();
         status &= flags;
-    } while(status != 0) slot {
-        status = rsp.cp0.spStatus();
+        if (status == 0) {
+            break;
+        }
     }
     tail returnToCaller();
 }
@@ -96,11 +107,11 @@ pub export fn returnToCaller() noreturn {
 }
 
 pub export fn waitIdle() noreturn {
-    reg($t2) flags: u32 = 0x0c;
+    reg($t2) flags: u32 = wait_busy_and_full;
     jump waitStatus(flags);
 }
 
 pub export fn waitOut() noreturn {
-    reg($t2) flags: u32 = 0x08;
+    reg($t2) flags: u32 = wait_busy;
     tail waitStatus(flags);
 }

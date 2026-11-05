@@ -33,8 +33,7 @@ pub fn assign(allocator: std.mem.Allocator, functions: []const ast.Function) ![]
     var registry = FunctionClobberRegistry.init(allocator, result, null) catch return result;
     defer registry.deinit();
     for (result) |*function| {
-        if (!isInternal(result, function.*)) continue;
-        try chooseParameters(allocator, result, function, &registry);
+        if (choosesParameters(result, function.*)) try chooseParameters(allocator, result, function, &registry);
     }
     return result;
 }
@@ -44,6 +43,12 @@ fn hasAutomaticParameters(functions: []const ast.Function) bool {
         for (function.parameters) |parameter| if (parameter.automatic) return true;
     }
     return false;
+}
+
+/// Internal functions get chosen registers; an inline expansion binds each
+/// parameter to its argument instead.
+fn choosesParameters(functions: []const ast.Function, function: ast.Function) bool {
+    return !function.inline_call and isInternal(functions, function);
 }
 
 fn isInternal(functions: []const ast.Function, function: ast.Function) bool {

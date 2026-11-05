@@ -165,10 +165,11 @@ reg signed_value: i32 = -32;
 
 Wherever a literal is expected (memory offsets, lane indices, array
 lengths, `inline for` bounds) a constant expression may be used instead. It
-combines literals, `inline for` indices, enum and flags members,
-`sizeOf(T)`, and `offsetOf(Struct, field)` with the binary operators and
-parentheses. Scalar expressions whose operands are all literals fold to a
-single immediate:
+combines literals, `const` names, `inline for` indices, enum and flags
+members, `sizeOf(T)`, and `offsetOf(Struct, field)` with the binary
+operators and parentheses. Scalar expressions whose operands are all
+constants fold to a single immediate, and a 32-bit constant whose upper half
+is the sign extension of its lower half loads with one `addiu`:
 
 ```zig
 reg header_end: u32 = load(u32, base, sizeOf(Header) * 2 + offsetOf(Header, address));
@@ -229,10 +230,10 @@ reserving the caller's live registers.
 
 ZSP does not insert spills or save/restore instructions. Vector arguments and
 parameters written by the callee must already use the target parameter's
-register. Scalar argument moves are emitted as a parallel assignment, but a
-cyclic register permutation currently fails instead of using a temporary
-register. If no safe assignment exists under those restrictions, compilation
-fails.
+register; the allocator places such an argument there when it can. Scalar
+argument moves are emitted as a parallel assignment (see
+[Functions, calls, and modules](#functions-calls-and-modules)). If no safe
+assignment exists under those restrictions, compilation fails.
 
 External functions can declare their complete register-write contract after
 their parameter list:
@@ -479,8 +480,12 @@ are representation-compatible.
 
 A function that calls another overwrites its own `$ra`, so only code that
 never returns, such as `_start`, can make nested calls without saving it.
-`inline` functions are expanded at the call site; other functions use the
-repository's stackless fixed-register calling convention. `export` emits a
+`inline` functions are expanded at the call site. An unpinned inline
+parameter names its argument directly, wherever the caller keeps it: reads
+and writes of the parameter are reads and writes of the argument, and a
+constant argument stays a constant. A pinned inline parameter receives its
+argument in that register. Other functions use the repository's stackless
+fixed-register calling convention. `export` emits a
 global assembly symbol, while `pub` permits access from another ZSP module.
 
 Function pointers use structural lowered signatures. Unpinned types use the
@@ -592,7 +597,9 @@ condition guards entry and is tested again after the body, as in
 `if (c) do { ... } while (c)`. A continue expression after `:` runs at the
 end of every iteration, including one reached by `continue`.
 `if (c) { break; }` and `if (c) { continue; }` lower to a single branch to
-the loop's exit or condition.
+the loop's exit or condition. A `while (true)` body that ends in
+`if (c) { break; }` and has no `continue` becomes `do { ... } while (!c)`,
+so the exit test is the back edge.
 
 `inline for (first..end) |index| { ... }` repeats its body once per index,
 with `index` a constant expression inside it. Registers and labels declared
@@ -1095,13 +1102,18 @@ than assembly text. Its passes run in order:
 2. Dead-write removal drops register writes that are overwritten before any
    read.
 3. Polling-loop folding tightens common CP0 busy-wait loops.
-4. List scheduling reorders each straight-line block together with the branch
+4. Lane-encoding selection spells each VMOV/VRCP/VRSQ destination element
+   (bit 3 is ignored by hardware) to avoid false dependences.
+5. List scheduling reorders each straight-line block together with the branch
    that ends it and that branch's delay slot. A beam search (16 candidates,
    windows of up to 64 instructions) scores orders with the RSP interpreter's
    calibrated timing model (`tools/rsp_interp/timing.zig`), so it accounts for
    load latency, vector result latency, and dual issue.
-5. Delay-slot filling moves an independent instruction into each remaining
+6. Delay-slot filling moves an independent instruction into each remaining
    branch slot.
+7. Loop-exit slots: a backward branch whose slot is still empty takes the
+   first instruction after the loop when repeating it each iteration is
+   harmless, such as `dma.exec`'s descriptor setup after its DMA-full poll.
 
 Dependences come from per-instruction effects: registers, the vector
 accumulator, VCO/VCC/VCE, the divide unit, memory, and IO. Partial vector

@@ -36,6 +36,8 @@ pub const Parser = struct {
         /// Register arrays: `name[i]` lexes as the element's own name.
         array_len: ?usize = null,
         pointee: ?Pointee = null,
+        /// `const` declarations: the value they fold to.
+        constant: ?i64 = null,
     };
 
     /// What a typed DMEM pointer addresses.
@@ -263,6 +265,12 @@ pub const Parser = struct {
             if (std.mem.eql(u8, symbol.name, name)) return symbol;
         }
         return null;
+    }
+
+    /// The value of a visible `const` named `name`.
+    pub fn lookupConstant(self: *const Parser, name: []const u8) ?i64 {
+        const symbol = self.lookupTypeSymbolInfo(name) orelse return null;
+        return symbol.constant;
     }
 
     pub fn lookupCompileTimeMember(self: *const Parser, type_name: []const u8, member_name: []const u8) ?CompileTimeMember {

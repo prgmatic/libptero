@@ -267,12 +267,17 @@ fn scanDirectFunctionClobbers(functions: []const ast.Function, function: ast.Fun
 
 fn addWrittenParameters(functions: []const ast.Function, function: ast.Function, result: *FunctionClobber) void {
     for (function.parameters, 0..) |parameter, index| {
-        var visited: [1024]call_requirements.ParameterWriteVisit = undefined;
-        var visited_count: usize = 0;
-        if (!call_requirements.functionParameterIsWritten(functions, function, index, &visited, &visited_count)) continue;
+        // An inline expansion writes the caller's own argument register.
+        if (function.bindsArgument(parameter) or !parameterIsWritten(functions, function, index)) continue;
         if (parameter.reg) |reg| result.scalar |= registerBit(reg);
         if (parameter.vector_reg) |reg| result.vector |= vectorBits(parameter.data_type, reg);
     }
+}
+
+fn parameterIsWritten(functions: []const ast.Function, function: ast.Function, index: usize) bool {
+    var visited: [1024]call_requirements.ParameterWriteVisit = undefined;
+    var visited_count: usize = 0;
+    return call_requirements.functionParameterIsWritten(functions, function, index, &visited, &visited_count);
 }
 
 fn vectorBits(data_type: ast.DataType, reg: ast.VectorRegister) u32 {

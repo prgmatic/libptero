@@ -161,6 +161,57 @@ test "inline calls bind parameters and expand inside caller scope" {
     );
 }
 
+test "unpinned inline parameters name their arguments in place" {
+    try expectAsm(
+        \\bss { stage: [4]u32; end: u32; }
+        \\fn send(reg($s4) first: dmem, reg($s3) last: dmem) {
+        \\  last &= 0x0fff;
+        \\  store(u32, first, last);
+        \\}
+        \\inline fn take(begin: dmem, finish: dmem, step: u32) {
+        \\  begin = stage;
+        \\  finish = load(u32, end);
+        \\  finish += step;
+        \\}
+        \\fn test() {
+        \\  reg low: dmem;
+        \\  reg high: dmem;
+        \\  take(low, high, 8);
+        \\  send(low, high);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.bss
+        \\.balign 4
+        \\stage:
+        \\  .space 16
+        \\.balign 4
+        \\end:
+        \\  .space 4
+        \\
+        \\.text
+        \\
+        \\
+        \\send:
+        \\  andi $s3, $s3, 4095
+        \\  sw $s3, 0($s4)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\test:
+        \\  addiu $s4, $zero, %lo(stage)
+        \\  lw $s3, %lo(end)($zero)
+        \\  addi $s3, $s3, 8
+        \\  jal send
+        \\  nop
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
 test "default function parameters use argument registers" {
     try expectAsm(
         \\fn add(first: u32, second: u32) noreturn {
