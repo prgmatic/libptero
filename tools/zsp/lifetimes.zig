@@ -42,6 +42,14 @@ pub const Pinned = union(enum) {
             .vector => |reg| holdsVector(lifetime, reg),
         };
     }
+
+    /// An automatic value that must arrive in this register for a call.
+    fn requiredBy(self: Pinned, lifetime: Lifetime) bool {
+        return switch (self) {
+            .scalar => |reg| lifetime.required_reg == reg,
+            .vector => |reg| lifetime.required_vector_reg == reg,
+        };
+    }
 };
 
 fn holdsVector(lifetime: Lifetime, reg: VReg) bool {
@@ -373,10 +381,16 @@ pub const Lifetimes = struct {
         return false;
     }
 
+    /// `other` holds `reg` while `own` is live: pinned there, or an
+    /// automatic value required there that `own` does not also want.
     fn pinnedConflict(own: Lifetime, other: Lifetime, reg: Pinned) bool {
-        if (other.automatic or std.mem.eql(u8, other.name, own.name)) return false;
-        if (!reg.heldBy(other)) return false;
+        if (std.mem.eql(u8, other.name, own.name) or !claims(own, other, reg)) return false;
         return own.first_live <= other.last_use and other.first_live <= own.last_use;
+    }
+
+    fn claims(own: Lifetime, other: Lifetime, reg: Pinned) bool {
+        if (!other.automatic) return reg.heldBy(other);
+        return reg.requiredBy(other) and !reg.requiredBy(own);
     }
 
     /// Whether a lifetime is live after `call` returns without the call

@@ -136,20 +136,36 @@ test "update mode rewrites the baseline file" {
 const interp = @import("rsp_interp");
 const hottest_functions = 6;
 
-pub const Options = struct { path: []const u8, update: bool };
+pub const Options = struct {
+    path: []const u8,
+    update: bool = false,
+    /// Workload whose per-instruction costs are printed.
+    profile: ?[]const u8 = null,
+};
 
+/// `<baseline.zon> [--update] [--profile <workload>]`
 pub fn parseOptions(args: []const []const u8) !Options {
     if (args.len < 2) return error.MissingBaselinePath;
-    return .{ .path = args[1], .update = args.len > 2 and std.mem.eql(u8, args[2], "--update") };
+    var options: Options = .{ .path = args[1] };
+    var index: usize = 2;
+    while (index < args.len) : (index += 1) {
+        if (std.mem.eql(u8, args[index], "--update")) options.update = true;
+        if (std.mem.eql(u8, args[index], "--profile") and index + 1 < args.len) {
+            index += 1;
+            options.profile = args[index];
+        }
+    }
+    return options;
 }
 
-/// `rsp-baseline <baseline.zon> [--update]`: prints every workload against
-/// the recorded baseline with its hottest functions. Returns true when the
-/// gate fails; with `--update`, rewrites the baseline instead.
+/// `rsp-baseline <baseline.zon> [--update] [--profile <workload>]`: prints
+/// every workload against the recorded baseline with its hottest functions,
+/// and each executed instruction's cost for the profiled workload. Returns
+/// true when the gate fails; with `--update`, rewrites the baseline instead.
 pub fn runCommand(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, args: []const []const u8, out: *std.Io.Writer) !bool {
     const options = try parseOptions(args);
     var results: [workloads.all.len]Named = undefined;
-    const failed = try report(allocator, out, &results);
+    const failed = try report(allocator, out, &results, options.profile);
     if (!options.update) return failed;
     var text: std.Io.Writer.Allocating = .init(allocator);
     defer text.deinit();
@@ -179,7 +195,7 @@ fn printSizes(out: *std.Io.Writer) !void {
     try out.writeAll("\n");
 }
 
-fn report(allocator: std.mem.Allocator, out: *std.Io.Writer, results: []Named) !bool {
+fn report(allocator: std.mem.Allocator, out: *std.Io.Writer, results: []Named, profiled: ?[]const u8) !bool {
     var failed = false;
     try printSizes(out);
     try out.print("{s:<22} {s:>12} {s:>12} {s:>12} {s:>8}  verdict\n", .{ "workload", "instructions", "cycles", "recorded", "delta" });
@@ -195,8 +211,32 @@ fn report(allocator: std.mem.Allocator, out: *std.Io.Writer, results: []Named) !
         failed = failed or verdict.fails();
         try printRow(out, result.*, entry, verdict);
         try printHottest(allocator, out, &profile, workload.symbols);
+        if (profiled) |name| if (std.mem.eql(u8, name, workload.name)) try printWords(allocator, out, &profile, workload.symbols);
     }
     return failed;
+}
+
+/// Every executed IMEM word as `symbol+offset`, run count, and cycles.
+fn printWords(allocator: std.mem.Allocator, out: *std.Io.Writer, profile: *const interp.Profile, source: workloads.SymbolSource) !void {
+    const symbols = try source(allocator);
+    defer allocator.free(symbols);
+    const sorted = try interp.Profile.sortedSymbols(allocator, symbols);
+    defer allocator.free(sorted);
+    for (profile.instructions, profile.cycles, 0..) |count, cycles, index| {
+        if (count == 0) continue;
+        const offset: u16 = @intCast(index * 4);
+        const owner = symbolAt(sorted, offset);
+        try out.print("      {s}+0x{x:0>3} {d:>8} runs {d:>8} cycles\n", .{ owner.name, offset - owner.offset, count, cycles });
+    }
+}
+
+fn symbolAt(sorted: []const interp.Profile.Symbol, offset: u16) interp.Profile.Symbol {
+    var owner: interp.Profile.Symbol = .{ .name = "(unnamed)", .offset = 0 };
+    for (sorted) |symbol| {
+        if (symbol.offset > offset) break;
+        owner = symbol;
+    }
+    return owner;
 }
 
 fn printRow(out: *std.Io.Writer, result: Named, entry: ?Entry, verdict: Verdict) !void {
@@ -232,4 +272,9 @@ test "percent change handles a missing baseline" {
     try testing.expectEqual(@as(f64, 0), percentChange(10, 0));
     try testing.expectApproxEqAbs(@as(f64, 10), percentChange(110, 100), 0.0001);
     try testing.expectEqual(Options{ .path = "b", .update = false }, try parseOptions(&.{ "x", "b", "--other" }));
+    const profiled = try parseOptions(&.{ "x", "b", "--profile", "rdp", "--update" });
+    try testing.expectEqualStrings("rdp", profiled.profile.?);
+    try testing.expect(profiled.update);
+    const symbols = [_]interp.Profile.Symbol{ .{ .name = "a", .offset = 0 }, .{ .name = "b", .offset = 8 } };
+    try testing.expectEqualStrings("b", symbolAt(&symbols, 12).name);
 }

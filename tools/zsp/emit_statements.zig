@@ -22,6 +22,7 @@ pub fn writeStatements(g: Gen, statements: []const Statement) anyerror!void {
             continue;
         }
         g.advance(1);
+        if (control.isColdIf(g, statements, index)) return control.writeColdIf(g, &statements[index], statements[index + 1 ..]);
         try handlers.get(std.meta.activeTag(statements[index]))(g, &statements[index]);
     }
 }

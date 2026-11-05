@@ -182,17 +182,70 @@ fn directEqualityRhs(g: Gen, lhs: Symbol, rhs: ast.Value) !Register {
 const DirectGoto = @FieldType(Statement, "conditional_direct_goto");
 
 /// `if (condition) jump target(...)`: a branch straight to a function.
+/// `if (c) tail f(args)`. The argument setup must not disturb the test, so
+/// a single setup instruction goes in the branch's delay slot when the
+/// source gives none; longer setup runs first and must not conflict.
 pub fn writeConditionalDirectGoto(g: Gen, statement: *const Statement) !void {
     const branch = statement.conditional_direct_goto;
     try common.expectLocal(branch.target.module);
-    if (branch.typed) try calls.writeFunctionArguments(g, try common.findFunction(g, branch.target.name), branch.arguments, true);
+    var setup: Setup = .{};
+    if (branch.typed) {
+        const start = g.out.items.items.len;
+        try calls.writeFunctionArguments(g, try common.findFunction(g, branch.target.name), branch.arguments, true);
+        try setup.take(&g.out.items, start);
+    }
+    const condition_start = g.out.items.items.len;
+    try writeDirectTest(g, branch);
+    if (setup.len == 1 and branch.delay_slot == null and g.context.shared_exit_label == null) {
+        return g.out.item(setup.items[0]);
+    }
+    try setup.placeBefore(g.out, condition_start);
+    try statements_.writeConditionalDirectDelaySlot(g, branch.delay_slot);
+}
+
+fn writeDirectTest(g: Gen, branch: DirectGoto) !void {
     const lhs = try conditionLhs(g, branch.condition);
     const target = branch.target.name;
     switch (branch.condition.op) {
         .eq, .ne => try writeDirectEqualityJump(g, lhs, branch.condition, target),
         else => try writeDirectOrderedJump(g, lhs, branch.condition, target),
     }
-    try statements_.writeConditionalDirectDelaySlot(g, branch.delay_slot);
+}
+
+/// Argument setup held aside while the condition is emitted.
+const Setup = struct {
+    items: [16]ir.Item = undefined,
+    len: usize = 0,
+
+    fn take(self: *Setup, list: *std.ArrayList(ir.Item), start: usize) !void {
+        const taken = list.items[start..];
+        if (taken.len > self.items.len) return error.TooManyFunctionArguments;
+        @memcpy(self.items[0..taken.len], taken);
+        self.len = taken.len;
+        list.shrinkRetainingCapacity(start);
+    }
+
+    /// Reinserts the setup ahead of the test, which must neither read a
+    /// register the setup writes nor overwrite one it sets.
+    fn placeBefore(self: *const Setup, out: *@import("Emitter.zig"), condition_start: usize) !void {
+        const setup = self.items[0..self.len];
+        const condition = out.items.items[condition_start..];
+        if (scalarMask(setup, .writes) & (scalarMask(condition, .reads) | scalarMask(condition, .writes)) != 0) {
+            return error.ConditionalTailArgumentConflict;
+        }
+        try out.items.insertSlice(out.arena.allocator(), condition_start, setup);
+    }
+};
+
+fn scalarMask(items: []const ir.Item, comptime kind: enum { reads, writes }) u32 {
+    const effects = @import("ir_effects.zig");
+    var mask: u32 = 0;
+    for (items) |entry| {
+        if (entry != .instruction) continue;
+        const effect = effects.of(entry.instruction);
+        mask |= if (kind == .reads) effect.scalar_reads else effect.scalar_writes;
+    }
+    return mask;
 }
 
 fn writeDirectOrderedJump(g: Gen, lhs: Symbol, condition: ast.Condition, target: []const u8) !void {
@@ -439,6 +492,48 @@ fn writeConditionalExit(g: Gen, branch: If, exit: Exit) !void {
 
 /// When only the else arm terminates, it is placed first so the then arm
 /// falls through to the end without a jump.
+/// `if (c) { ...; tail f(); } rest` where `rest` also ends in a transfer:
+/// the common path falls through into `rest` and the body is placed after
+/// it, so it costs no taken branch. Not used when `rest` must fall through
+/// into the next function.
+pub fn isColdIf(g: Gen, statements: []const Statement, index: usize) bool {
+    if (statements[index] != .if_statement) return false;
+    const branch = statements[index].if_statement;
+    if (branch.else_statements != null or !terminatesControlFlow(branch.then_statements)) return false;
+    const rest = statements[index + 1 ..];
+    if (!terminatesControlFlow(rest) or isSingleExit(branch)) return false;
+    return !reachesOmittedTail(g, branch, rest);
+}
+
+fn isSingleExit(branch: If) bool {
+    if (branch.then_statements.len != 1) return false;
+    const only = branch.then_statements[0];
+    return only == .break_loop or only == .continue_loop;
+}
+
+fn reachesOmittedTail(g: Gen, branch: If, rest: []const Statement) bool {
+    if (g.context.omitted_tail_target == null) return false;
+    const end = g.context.statement_position + analysis.countFlowStatements(branch.then_statements) + analysis.countFlowStatements(rest);
+    return end >= g.context.omitted_tail_position;
+}
+
+pub fn writeColdIf(g: Gen, statement: *const Statement, rest: []const Statement) !void {
+    const branch = statement.if_statement;
+    const label = g.context.allocLabel();
+    var inverse = branch.condition;
+    inverse.op = common.invertComparison(inverse.op);
+    try writeConditionBranchFalse(g, inverse, "ifthen", label, branch.delay_slot == null);
+    try statements_.writeStructuredDelaySlot(g, branch.delay_slot);
+    const source_position = g.context.statement_position;
+    g.context.statement_position = source_position + analysis.countFlowStatements(branch.then_statements);
+    try writeStatements(g, rest);
+    const end_position = g.context.statement_position;
+    try g.out.label(try g.localLabel("ifthen", label));
+    g.context.statement_position = source_position;
+    try writeScoped(g, branch.then_statements);
+    g.context.statement_position = end_position;
+}
+
 fn writeReorderedIf(g: Gen, branch: If, label: usize) !void {
     var inverse = branch.condition;
     inverse.op = common.invertComparison(inverse.op);

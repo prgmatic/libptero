@@ -278,16 +278,36 @@ fn isPureScalar(candidate: effects.Effects) bool {
 
 // -------------------------------------------------------------- delay slots
 
-/// Moves an earlier independent instruction into each `nop` delay slot.
+/// Moves an earlier independent instruction into each `nop` delay slot,
+/// unless the timing model says the move makes the code around it slower.
 pub fn fillDelaySlots(items: *Items) void {
     var transfer: usize = 0;
     while (transfer + 1 < items.items.len) : (transfer += 1) {
         if (!schedule.hasDelaySlot(items.items[transfer]) or !isNopAt(items.items, transfer + 1)) continue;
         const candidate = slotCandidate(items.items, transfer) orelse continue;
+        if (!slotMoveHelps(items.items, candidate, transfer)) continue;
         const moved = items.orderedRemove(candidate);
         transfer -= 1;
         items.items[transfer + 1] = moved;
     }
+}
+
+/// Instructions after the slot whose stalls the move can change.
+const slot_lookahead = 3;
+const max_window = 32;
+
+/// Compares the estimated cycles from `candidate` through a few
+/// instructions past the slot, before and after moving it into the slot.
+fn slotMoveHelps(items: []const Item, candidate: usize, transfer: usize) bool {
+    const end = @min(items.len, transfer + 2 + slot_lookahead);
+    if (end - candidate > max_window) return true;
+    var moved: [max_window]Item = undefined;
+    const window = items[candidate..end];
+    const slot = transfer + 1 - candidate;
+    @memcpy(moved[0 .. slot - 1], window[1..slot]);
+    moved[slot - 1] = window[0];
+    @memcpy(moved[slot .. window.len - 1], window[slot + 1 ..]);
+    return schedule.estimateCycles(moved[0 .. window.len - 1]) <= schedule.estimateCycles(window);
 }
 
 /// The latest instruction before `transfer` that can move after it.

@@ -75,9 +75,7 @@ pub fn sendStaged(
     staging_end &= 0x0fff;
     dmem &= 0x0fff;
     reg($at) reversed: u32 = signedLessThan(staging_end, dmem);
-    if (reversed != 0) tail queue.invalidCommand() slot {
-        reg($at) assertion_code: u32 = 0xc0060000;
-    }
+    if (reversed != 0) tail queue.invalidCommand(0xc0060000);
 
     reg($t7) size: u32 = staging_end - dmem;
     reg($sp) saved_return: u32 = undefined;

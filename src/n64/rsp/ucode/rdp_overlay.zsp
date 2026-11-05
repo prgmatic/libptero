@@ -404,9 +404,7 @@ fn updateRenderMode() {
         }
         reg($t2) invalid_cycle_flags: u32 = undefined;
         invalid_cycle_flags = som_hi & 1;
-        if(invalid_cycle_flags != 0) tail queue.invalidCommand() slot {
-            reg($at) assertion_code: u32 = 0xc0040000;
-        }
+        if(invalid_cycle_flags != 0) tail queue.invalidCommand(0xc0040000);
         break store_combiner_2cycle;
     } exit slot {
         cycle_combiner_mask = 0x04000000;
@@ -1193,9 +1191,7 @@ fn triangleSendEnd() noreturn {
     reg overlay_data_end: dmem = dmem.addressOf(triangle_padding2, 4);
     // Libdragon compares its zero-based data end against 0x500. Libptero's
     // corresponding overlay DMEM coordinate is shifted by 0x800.
-    if(overlay_data_end > 0x0d00) tail queue.invalidCommand() slot {
-        reg($at) assertion_code: u32 = 0xc0090000;
-    }
+    if(overlay_data_end > 0x0d00) tail queue.invalidCommand(0xc0090000);
     reg flags: i32 = undefined;
     flags = -32756;
     clearZBackup(overlay_data_end, flags, temporary);
@@ -1260,9 +1256,7 @@ fn clearZBackup(
     store(u16, autotmem_previous_address, address);
     address += command;
     invalid = signedLessThan(limit, address);
-    if(invalid != 0) tail queue.invalidCommand() slot {
-        invalid = 0xc0070000;
-    }
+    if(invalid != 0) tail queue.invalidCommand(0xc0070000);
     store(u16, autotmem_address, address);
     jump(return_address);
 }
@@ -1289,9 +1283,7 @@ fn autoTmemEnd() noreturn {
     reg($ra) return_address: u32 = undefined;
     address = load(u8, autotmem_enabled);
     address -%= 1;
-    if(address < 0) tail queue.invalidCommand() slot {
-        invalid = 0xc0080000;
-    }
+    if(address < 0) tail queue.invalidCommand(0xc0080000);
     store(u8, autotmem_enabled, address);
     jump(return_address);
 }

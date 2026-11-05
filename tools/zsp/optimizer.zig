@@ -1,7 +1,8 @@
 //! Optimization passes over the instruction IR, in order: relocation
 //! folding, dead-write removal, CP0 polling loops, lane-op encodings, list
-//! scheduling, delay-slot filling, and loop-exit delay slots. See
-//! `peephole.zig`, `schedule.zig`, and `loop_slots.zig`.
+//! scheduling, delay-slot filling, loop-exit and fall-through delay slots.
+//! See `peephole.zig`, `schedule.zig`, `loop_slots.zig`, and
+//! `branch_slots.zig`.
 const std = @import("std");
 const ir_parse = @import("ir_parse.zig");
 const ir_print = @import("ir_print.zig");
@@ -9,7 +10,7 @@ const peephole = @import("peephole.zig");
 const schedule = @import("schedule.zig");
 const Emitter = @import("Emitter.zig");
 
-pub const pass_names = "relocation folding, dead writes, polling loops, lane encodings, list scheduling, delay slots, loop exits";
+pub const pass_names = "relocation folding, dead writes, polling loops, lane encodings, list scheduling, delay slots, loop exits, fall-through slots";
 
 pub fn optimize(out: *Emitter) !void {
     peephole.foldSymbolOffsets(&out.items);
@@ -19,6 +20,7 @@ pub fn optimize(out: *Emitter) !void {
     try schedule.scheduleItems(out.arena.child_allocator, &out.items);
     peephole.fillDelaySlots(&out.items);
     @import("loop_slots.zig").fillLoopExitSlots(&out.items);
+    @import("branch_slots.zig").fillFromFallthrough(&out.items);
 }
 
 /// Parses assembly text, optimizes it, and prints the result. Used by tests.

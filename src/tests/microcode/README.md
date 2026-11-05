@@ -40,7 +40,13 @@ the runtime's own encoders and layouts where they are pure:
 (cd core && zig build test)            # behavior, digests, cycles, coverage
 (cd core && zig build rsp-baseline)    # table: sizes, cycles vs baseline, hottest functions
 (cd core && zig build rsp-baseline -- --update)   # record a new baseline
+(cd core && zig build rsp-baseline -- --profile rdp)   # per-instruction costs of one workload
 ```
+
+`--profile <workload>` lists every executed IMEM word as `symbol+offset`
+with its run count and estimated cycles; an instruction whose cycles exceed
+its runs stalled or followed a taken branch. Match offsets against the
+program's `zsp` assembly.
 
 Update the baseline only when the change is intended:
 

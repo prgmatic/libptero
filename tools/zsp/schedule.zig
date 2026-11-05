@@ -98,7 +98,7 @@ fn scheduleWindow(allocator: std.mem.Allocator, items: *Items, start: usize, end
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const body = try arena.allocator().dupe(Item, items.items[start..end]);
-    const order = try listSchedule(arena.allocator(), body, tail);
+    const order = try listSchedule(arena.allocator(), body, tail, entryPipeline(items.items, start));
     return applyOrder(items, start, body, order, tail);
 }
 
@@ -121,9 +121,37 @@ const Node = struct {
     preds: usize = 0,
 };
 
+/// Instructions before a window whose results it may still wait on.
+const entry_history = 6;
+
+/// The pipeline as the window is entered by falling through: the latest
+/// instructions before it, so results still in flight delay their readers.
+fn entryPipeline(items: []const Item, start: usize) timing.Pipeline {
+    const first = historyStart(items, start);
+    var pipeline: timing.Pipeline = .{};
+    for (items[first..start]) |item| {
+        if (item == .instruction) pipeline.issue(item.instruction.encode(), false);
+    }
+    return pipeline;
+}
+
+/// The earliest of the last `entry_history` instructions before `start`,
+/// looking back across labels but not other items.
+fn historyStart(items: []const Item, start: usize) usize {
+    var first = start;
+    var count: usize = 0;
+    while (first > 0 and count < entry_history) : (first -= 1) {
+        const item = items[first - 1];
+        if (item != .instruction and item != .label) break;
+        count += @intFromBool(item == .instruction);
+    }
+    return first;
+}
+
 /// Returns body indices in issue order; index `body.len` is the tail's
 /// transfer, followed by at most one instruction that fills its slot.
-pub fn listSchedule(arena: std.mem.Allocator, body: []const Item, tail: Tail) ![]usize {
+/// `entry` is the pipeline state the window starts from.
+pub fn listSchedule(arena: std.mem.Allocator, body: []const Item, tail: Tail, entry: timing.Pipeline) ![]usize {
     const count = body.len + @intFromBool(tail.transfer != null);
     const all = try arena.alloc(effects.Effects, count);
     const nodes = try arena.alloc(Node, count);
@@ -135,7 +163,7 @@ pub fn listSchedule(arena: std.mem.Allocator, body: []const Item, tail: Tail) ![
     const graph = try ir_deps.Graph.init(arena, all);
     computeHeights(graph, nodes);
     for (nodes, 0..) |*node, index| node.preds = graph.preds[index].count();
-    var search: Search = .{ .arena = arena, .graph = graph, .nodes = nodes, .body_len = body.len, .tail = tail };
+    var search: Search = .{ .arena = arena, .graph = graph, .nodes = nodes, .body_len = body.len, .tail = tail, .entry = entry };
     return search.run();
 }
 
@@ -176,6 +204,7 @@ const Search = struct {
     nodes: []const Node,
     body_len: usize,
     tail: Tail,
+    entry: timing.Pipeline = .{},
 
     fn run(self: *Search) ![]usize {
         var beam: std.ArrayList(State) = .empty;
@@ -190,7 +219,7 @@ const Search = struct {
         for (self.nodes, waiting) |node, *count| count.* = node.preds;
         const issued = try self.arena.alloc(bool, self.nodes.len);
         @memset(issued, false);
-        return .{ .order = try self.arena.alloc(usize, self.nodes.len), .issued = issued, .waiting = waiting };
+        return .{ .pipeline = self.entry, .order = try self.arena.alloc(usize, self.nodes.len), .issued = issued, .waiting = waiting };
     }
 
     /// Extends every state by each ready node and keeps the best few.

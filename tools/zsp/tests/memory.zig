@@ -961,6 +961,29 @@ test "scalar loads support symbolic offsets from an index register" {
     );
 }
 
+test "constant bases with an index register keep the offset" {
+    try expectAsm(
+        \\const buffer: u32 = 0xa0;
+        \\fn test(reg($t0) index: u32) {
+        \\  reg($t1) value: u32 = load(u32, buffer + index, 4);
+        \\  store(u32, buffer + index, value, 8);
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\
+        \\test:
+        \\  lw $t1, 164($t0)
+        \\  sw $t1, 168($t0)
+        \\  jr $ra
+        \\  nop
+        \\
+        \\
+    );
+}
+
 test "scalar stores support symbolic offsets from an index register" {
     try expectAsm(
         \\bss {

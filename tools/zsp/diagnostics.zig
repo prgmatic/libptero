@@ -47,6 +47,7 @@ const error_hints = std.StaticStringMap([]const u8).initComptime(.{
     .{ "AutomaticRegisterClobberedByCall", "a value live across this call uses a written register; declare an accurate writes() contract or shorten the live range" },
     .{ "FunctionArgumentCountMismatch", "transfer argument count does not match the target function signature" },
     .{ "FunctionArgumentTypeMismatch", "transfer argument type does not match the target function signature" },
+    .{ "ConditionalTailArgumentConflict", "a conditional tail call's argument setup conflicts with its condition; compute the condition into another register or pass fewer arguments" },
     .{ "FunctionArgumentRegisterMismatch", "a vector or callee-written argument is not in the register required by the target function signature" },
     .{ "FunctionArgumentMoveCycle", "scalar argument moves form a register cycle and no backend scratch register is free to break it; reorder the values or pass one in a different register" },
     .{ "UnknownFunction", "transfer target could not be resolved; check its import alias, visibility, and spelling" },

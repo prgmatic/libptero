@@ -55,8 +55,9 @@ fn labeledAddress(g: Gen, address: ast.ValueRef, offset: i64, label: analysis.Sy
     const base = try operands.valueAsAddressReg(g, address);
     if (label.data_label) |symbol| return .{ .base = base, .symbol = symbol, .offset = offset };
     const constant = label.constant orelse return error.ExpectedConstant;
-    try common.validateMemoryOffset(constant);
-    return .{ .base = base, .offset = constant };
+    const total = try std.math.add(i64, constant, offset);
+    try common.validateMemoryOffset(total);
+    return .{ .base = base, .offset = total };
 }
 
 fn absoluteAddress(address: i64, offset: i64) !Address {

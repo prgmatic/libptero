@@ -6,6 +6,17 @@ packed struct OverlaySection {
     dmem_address: u16;
 }
 
+// The loaded overlay's header at DMEM 0x1f8: where its persistent state
+// lives, the first command index it handles, and its overlay id. Its
+// section list follows at 0x204; the last section has bit 31 clear.
+packed struct OverlayHeader {
+    state_dmem: u16;
+    state_size: u16;
+    state_rdram: u32;
+    command_base: u16;
+    overlay_index: u16;
+}
+
 data {
     shift_constants: [8]u8 = .{ 0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01 };
     overlay_data_rdram: [16]u32;
@@ -29,25 +40,25 @@ data {
 const internal_commands = @rspq.commandTable();
 
 
+/// Refills the command buffer from the queue position of `$gp`.
 fn fetchCommandBuffer() noreturn {
-    reg($s0) rdram: u32 = load(u32, queue_rdram_address);
     reg($gp) command_address: dmem = undefined;
+    reg rdram: u32 = load(u32, queue_rdram_address);
     rdram = rdram + command_address;
     tail fetchCommandBufferWithPointer(rdram);
 }
 
-fn fetchCommandBufferWithPointer(
-    reg($s0) rdram: u32,
-) noreturn {
-    const command_buffer: u32 = 0xa0;
-    reg($s4) dma_destination: dmem = command_buffer;
+/// Loads the 256-byte command window starting at the 8-byte-aligned RDRAM
+/// address below `rdram`; `$gp` keeps the misalignment. `rdram` arrives in
+/// the DMA's address register.
+fn fetchCommandBufferWithPointer(reg($s0) rdram: u32) noreturn {
+    const command_buffer: dmem = 0xa0;
     reg($gp) command_address: dmem = undefined;
     command_address = rdram & 7;
     rdram = rdram - command_address;
     store(u32, queue_rdram_address, rdram);
-    reg($t0) dma_size: u32 = 255;
-    reg($t1) dma_pitch: u32 = undefined;
-    dma.in(dma_size, dma_pitch, rdram, dma_destination);
+    reg pitch: u32 = undefined;
+    dma.in(255, pitch, rdram, command_buffer);
     tail commandLoop();
 }
 
@@ -62,24 +73,20 @@ fn fetchCommandBufferWithPointer(
     const status_signal_more: u32 = 0x00004000;
     const status_clear_signal_more: u32 = 0x00800000;
 
-    reg status_value: u32;
-    reg idle_clock: u32;
     // Publish the RDP clock (DPC_CLOCK) at which the queue went idle; the
     // CPU pairs it with its wake time to measure RSP busy time. Overlay id 0
     // never maps to an overlay, so its table entry is free. Read the clock
     // before SP_STATUS: the CPU's double wake write only covers a short
     // window between the signal check and the break.
-    idle_clock = rsp.cp0.read(12);
-    status_value = rsp.cp0.spStatus();
-    status_value &= status_signal_more;
-    if(status_value == 0) slot {
-        store(u32, overlay_data_rdram, idle_clock);
-    } {
+    reg idle_clock: u32 = rsp.cp0.read(12);
+    reg more: u32 = rsp.cp0.spStatus();
+    more &= status_signal_more;
+    store(u32, overlay_data_rdram, idle_clock);
+    // With no more work, halt; the CPU restarts the RSP here.
+    if (more == 0) {
         rsp.halt();
     }
-    status_value = status_clear_signal_more;
-    rsp.cp0.setSpStatus(status_value);
-
+    rsp.cp0.setSpStatus(status_clear_signal_more);
     tail fetchCommandBuffer();
 }
 
@@ -92,8 +99,8 @@ fn fetchCommandBufferWithPointer(
 }
 
 @rspq.command(2) fn jump(command: dmem) noreturn {
-    reg($s0) rdram: u32 = undefined;
-    rdram = command << 8;
+    // The low 24 bits are the RDRAM address; the top byte is the opcode.
+    reg rdram: u32 = command << 8;
     rdram >>>= 8;
     jump fetchCommandBufferWithPointer(rdram);
 }
@@ -102,18 +109,20 @@ fn fetchCommandBufferWithPointer(
     command: dmem,
     stack_offset: u32,
 ) noreturn {
-    reg($s0) return_address: u32 = load(u32, queue_rdram_address);
+    // Save where the queue resumes, then jump. A negative slot means the
+    // command word names a DMEM pointer to the jump target.
     reg($gp) command_address: dmem = undefined;
-    if(stack_offset >= 0x80000000) {
+    reg resume_rdram: u32 = load(u32, queue_rdram_address);
+    if (stack_offset >= 0x80000000) {
         command = load(u32, command);
     }
-    return_address = return_address + command_address;
-    store(u32, pointer_stack + stack_offset, return_address);
+    resume_rdram = resume_rdram + command_address;
+    store(u32, pointer_stack + stack_offset, resume_rdram);
     tail jump(command);
 }
 
 @rspq.command(4) fn returnFromCall(command: dmem) noreturn {
-    reg($s0) rdram: u32 = load(u32, pointer_stack + command);
+    reg rdram: u32 = load(u32, pointer_stack + command);
     jump fetchCommandBufferWithPointer(rdram);
 }
 
@@ -123,16 +132,13 @@ fn fetchCommandBufferWithPointer(
     size: u32,
     flags: u32,
 ) noreturn {
-    reg rdram: u32 = undefined;
-    reg dma_size: u32 = undefined;
-    reg($t1) dma_pitch: u32 = undefined;
-    reg($s4) dma_destination: dmem = undefined;
-    reg($t2) dma_flags: u32 = undefined;
-    rdram = rdram_address;
-    dma_destination = dmem_address;
-    dma_size = size;
-    dma_flags = flags;
-    jump dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
+    // `size` already carries any row count and the pitch is unused. The
+    // transfer advances its DMEM address and consumes its flags, so both
+    // are passed as copies.
+    reg pitch: u32 = undefined;
+    reg destination: dmem = dmem_address;
+    reg wait_flags: u32 = flags;
+    jump dma.exec(size, pitch, rdram_address, destination, wait_flags);
 }
 
 @rspq.command(7) fn swapBuffers(
@@ -151,6 +157,7 @@ fn fetchCommandBufferWithPointer(
 ) noreturn {
     reg wait_mask: u32 = mask;
     dma.waitStatus(wait_mask);
+    tail writeStatus(status);
 }
 
 @rspq.command(6) fn writeStatus(status: u32) noreturn {
@@ -158,49 +165,58 @@ fn fetchCommandBufferWithPointer(
     jump commandLoop();
 }
 
+// Switches the RDP to the buffer at `start`, then appends up to `current`.
+// A zero `sentinel` only records it. The triangle overlay relies on this
+// command preserving $t4-$t6; $sp is the resident secondary return-address
+// register, since the waits below call through $ra.
 @rspq.command(9) pub export fn rdpSetBuffer(
     current: u32,
     start: u32,
     sentinel: u32,
 ) noreturn {
+    const dp_status_dma_busy: u32 = 0x00000100;
+    const dp_status_end_valid: u32 = 0x00000200;
+    const sp_status_sig0: u32 = 0x80;
+    const sp_set_sig0_and_interrupt: u32 = 0x410;
+
+    // The top byte of `current` carries flags.
     current <<= 8;
     current >>>= 8;
-    reg dp_value: u32;
-    reg masked_status: u32;
-    reg dp_status: u32;
-    reg wait_mask: u32;
-    // The triangle overlay relies on this command preserving $t4-$t6. The
-    // resident ABI uses $sp as its secondary return-address register.
-    reg($sp) saved_return: u32;
+    reg($sp) saved_return: u32 = undefined;
     reg($ra) return_address: u32 = undefined;
     store(u32, rdp_sentinel, sentinel);
-    if(sentinel == 0) tail dma.returnToCaller() slot {
-        dp_value = rsp.cp0.rdpCommandStart();
-    }
+    reg dp_start: u32 = rsp.cp0.rdpCommandStart();
+    if (sentinel == 0) tail dma.returnToCaller();
     saved_return = return_address;
-    const dp_status_end_valid: u32 = 0x00000200;
-    const dp_status_dma_busy: u32 = 0x00000100;
 
-    wait_mask = load(u8, rdp_syncfull_ongoing);
-    if(dp_value == start) {
+    // Wait until no buffer is pending. During a full sync, also wait for
+    // the RDP to go idle; when reusing the current buffer, also wait for its
+    // DMA to finish, since new commands will overwrite what it reads.
+    reg wait_mask: u32 = load(u8, rdp_syncfull_ongoing);
+    if (dp_start == start) {
         wait_mask |= dp_status_dma_busy;
     }
     wait_mask |= dp_status_end_valid;
+    // The full sync is over once this wait ends; the flag is cleared while
+    // waiting, in the loop's otherwise empty delay slot.
+    reg dp_status: u32 = undefined;
     do {
         dp_status = rsp.cp0.rdpStatus();
-        masked_status = dp_status & wait_mask;
+        dp_status &= wait_mask;
+    } while (dp_status != 0) slot {
         store(u8, rdp_syncfull_ongoing, 0);
-    } while(masked_status != 0);
-    dp_value = load(u32, rdp_current);
-    dp_status = load(i8, rdp_target_bitdepth);
-    rsp.cp0.setRdpCommandEnd(dp_value);
-    if(dp_status >= 0x80000000) {
-        dp_status = 0x80;
-        dma.waitStatus(dp_status);
-        dp_value = 0x410;
-        rsp.cp0.setSpStatus(dp_value);
-        dp_status = 0x80;
-        dma.waitStatus(dp_status);
+    }
+
+    // Submit what a pending full sync held back.
+    reg bitdepth: i32 = load(i8, rdp_target_bitdepth);
+    reg rdp_end: u32 = load(u32, rdp_current);
+    rsp.cp0.setRdpCommandEnd(rdp_end);
+    if (bitdepth < 0) {
+        // The RDP validator is active: interrupt the CPU so it records the
+        // new buffer, and wait until it acknowledges through SIG0.
+        dma.waitStatus(sp_status_sig0);
+        rsp.cp0.setSpStatus(sp_set_sig0_and_interrupt);
+        dma.waitStatus(sp_status_sig0);
     }
     return_address = saved_return;
     rsp.cp0.setRdpCommandStart(start);
@@ -228,115 +244,103 @@ pub export fn commandLoop() noreturn {
     const command_buffer_size: u32 = 256;
     const overlay_idmap_address: u32 = 0x48;
     const overlay_command_table: u32 = 0x214;
+    const overlay_header: dmem = 0x1f8;
     const status_high_priority_requested: u32 = 0x00000800;
     const status_high_priority_mask: u32 = 0x00000c00;
     const status_enter_high_priority: u32 = 0x00030000;
 
+    // Handler ABI: the command words, its size, the next command, the
+    // return address, and the vector constants every handler may use.
     reg($gp) command_address: dmem = undefined;
     reg($a0) command_header: u32 = undefined;
     reg($a1) argument_1: u32 = undefined;
     reg($a2) argument_2: u32 = undefined;
     reg($a3) argument_3: u32 = undefined;
-    reg($t0) dma_size: u32 = undefined;
-    reg($t1) dma_pitch: dmem = undefined;
-    reg($t2) dma_flags: u32 = undefined;
-    reg($t4) overlay_index: dmem = undefined;
-    reg($t5) command_index: u32 = undefined;
-    reg($t6) command_descriptor: u32 = undefined;
     reg($t7) command_size: u32 = undefined;
-    reg($s0) rdram: u32 = undefined;
-    reg($s4) dma_destination: dmem = undefined;
     reg($v31) shift_vector: vec16 = undefined;
     reg($v30) shifted_vector: vec16 = undefined;
     reg($v00) vector_zero: vec16 = undefined;
-switch_high_priority: block {
-    dma_flags = rsp.cp0.spStatus();
+
+    reg priority: u32 = rsp.cp0.spStatus();
     command_header = load(u32, command_buffer + command_address);
-    dma_size = status_high_priority_requested;
-    dma_flags &= status_high_priority_mask;
-    command_size = command_header >> 28;
-    if(dma_flags == dma_size) {
-        break switch_high_priority;
+    priority &= status_high_priority_mask;
+    if (priority == status_high_priority_requested) {
+        tail swapBuffers(36, 32, status_enter_high_priority);
     }
 
-    command_index = command_header >> 23;
-    command_index &= 0x01fe;
-    execute_command: block {
-        command_descriptor = load(u16, internal_commands + command_index);
-        if(command_size == 0) {
-            break execute_command;
-        }
-
-    resolve_overlay: do {
-        dma_pitch = load(u16, 0, 0x202);
-        overlay_index = load(u8, overlay_idmap_address + command_size);
-        dma_size = load(u16, 0, 0x200);
+    // The top four bits select an overlay; 0 is the resident table.
+    reg overlay_id: u32 = command_header >> 28;
+    reg command_offset: u32 = command_header >> 23;
+    command_offset &= 0x01fe;
+    reg descriptor: u32 = load(u16, internal_commands + command_offset);
+    if (overlay_id != 0) {
+        // Look the command up as if its overlay were loaded; if it is not,
+        // load it and dispatch the command again. Overlay handlers may rely
+        // on the shift constants and a zero vector.
         shift_vector = loadVectorBytes(0);
-        command_index = command_index - dma_size;
-        if(overlay_index == dma_pitch) {
-            break resolve_overlay;
-        }
-
-        command_index +%= dma_size;
-
-        dma_size = load(u16, 0, 0x1fa);
-        rdram = load(u32, 0, 0x1fc);
-        dma_destination = load(u16, 0, 0x1f8);
-        dma.outAsync(dma_size, dma_pitch, rdram, dma_destination);
-        if(overlay_index == 0) tail invalidCommand() slot {
-            reg($at) assertion_code: u32 = 0xff010000;
-        }
-
-        rdram = load(u32, overlay_data_rdram + overlay_index);
-        dma_destination = 0x1f8;
-        dma_pitch = 0x204;
-        dma_size = rdram >> 20;
-        dma_size |= 0x0f;
-        dma.in(dma_size, dma_pitch, rdram, dma_destination);
-
-        do {
-            rdram = load(OverlaySection.rdram_address, dma_pitch);
-            dma_size = load(OverlaySection.byte_count, dma_pitch);
-            dma_destination = load(OverlaySection.dmem_address, dma_pitch);
-            dma.in(dma_size, dma_pitch, rdram, dma_destination);
-            dma_pitch +%= 8;
-        } while(rdram >= 0x80000000);
-        argument_2 = status_enter_high_priority;
-    } while(overlay_index != dma_pitch);
-        command_descriptor = load(u16, overlay_command_table + command_index);
+        reg overlay_index: u32 = load(u8, overlay_idmap_address + overlay_id);
+        reg loaded_index: u32 = load(OverlayHeader.overlay_index, overlay_header);
+        reg command_base: u32 = load(OverlayHeader.command_base, overlay_header);
+        command_offset -= command_base;
+        descriptor = load(u16, overlay_command_table + command_offset);
+        shifted_vector = shift_vector >>> 8;
+        vector_zero = 0;
+        if (overlay_index != loaded_index) tail loadOverlay(overlay_index);
     }
 
-    argument_1 = load(u32, command_address, 0xa4);
-    shifted_vector = shift_vector >>> 8;
-    dma_pitch = command_buffer_size;
-    if(command_descriptor == 0) tail invalidCommand() slot {
-        reg($at) assertion_code: u32 = 0xff020000;
-    }
-    command_size = command_descriptor >> 8;
-    vector_zero = 0;
+    argument_1 = load(u32, command_buffer + command_address, 4);
+    argument_2 = load(u32, command_buffer + command_address, 8);
+    argument_3 = load(u32, command_buffer + command_address, 12);
+    if (descriptor == 0) tail invalidCommand(0xff020000);
+
+    // Bits 8-15 of the descriptor hold the command size in bytes.
+    command_size = descriptor >> 8;
     command_size &= 0xfc;
-    dma_size = command_address +% command_size;
-    reg($at) command_fits_buffer: u32 = undefined;
-    command_fits_buffer = signedLessThan(dma_size, dma_pitch);
-    if(command_fits_buffer == 0) tail fetchCommandBuffer() slot {
-        argument_2 = load(u32, command_address, 0xa8);
-    }
-    argument_3 = load(u32, command_address, 0xac);
+    reg command_end: u32 = command_address +% command_size;
+    reg fits: u32 = signedLessThan(command_end, command_buffer_size);
+    if (fits == 0) tail fetchCommandBuffer();
     command_address = command_address + command_size;
-    command_descriptor <<= 2;
+    descriptor <<= 2;
     reg($ra) return_address: fn() = &commandLoop;
-    jump(command_descriptor);
-
-} exit slot {
-        argument_2 = status_enter_high_priority;
-}
-    command_header = 36;
-    argument_1 = 32;
-    tail swapBuffers(command_header, argument_1, argument_2);
+    jump(descriptor);
 }
 
-pub export fn invalidCommand() noreturn {
-    reg($at) assertion_code: u32 = undefined;
+/// Saves the loaded overlay's state, loads overlay `overlay_index` (its
+/// header first, then each section it lists), and dispatches the pending
+/// command again.
+fn loadOverlay(overlay_index: u32) noreturn {
+    const overlay_header: dmem = 0x1f8;
+    const overlay_sections: dmem = 0x204;
+    // Single-row transfers ignore the pitch.
+    reg pitch: u32 = undefined;
+
+    reg state_size: u32 = load(OverlayHeader.state_size, overlay_header);
+    reg state_rdram: u32 = load(OverlayHeader.state_rdram, overlay_header);
+    reg state_dmem: dmem = load(OverlayHeader.state_dmem, overlay_header);
+    dma.outAsync(state_size, pitch, state_rdram, state_dmem);
+    if (overlay_index == 0) tail invalidCommand(0xff010000);
+
+    // The overlay's RDRAM word holds the header length in its top bits.
+    reg header_rdram: u32 = load(u32, overlay_data_rdram + overlay_index);
+    reg header_size: u32 = header_rdram >> 20;
+    header_size |= 0x0f;
+    reg header_dmem: dmem = overlay_header;
+    dma.in(header_size, pitch, header_rdram, header_dmem);
+
+    reg section: *OverlaySection = overlay_sections;
+    reg section_rdram: u32 = undefined;
+    do {
+        section_rdram = section.rdram_address;
+        reg section_size: u32 = section.byte_count;
+        reg section_dmem: dmem = section.dmem_address;
+        dma.in(section_size, pitch, section_rdram, section_dmem);
+        section += sizeOf(OverlaySection);
+    } while (section_rdram >= 0x80000000);
+    tail commandLoop();
+}
+
+// Records `assertion_code` for the CPU's crash report and halts.
+pub export fn invalidCommand(reg($at) assertion_code: u32) noreturn {
     store(u32, resident_scratch, assertion_code);
     rsp.halt(0xba);
 }

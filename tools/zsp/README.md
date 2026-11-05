@@ -218,7 +218,9 @@ Automatic allocation is definition- and control-flow-aware: scalar and vector
 registers are reused after their values die along every reachable path. The
 analysis follows branches, loops, labels, gotos, nested blocks, and branch delay
 slots. A value produced in a call's delay slot is live across the callee, while
-a value defined by the callee is not treated as a live input.
+a value defined by the callee is not treated as a live input. An automatic
+value avoids registers that a later value with an overlapping lifetime is
+pinned to or must arrive in for a call.
 
 Calls prefer to allocate scalar arguments directly in their fixed
 calling-convention registers. When a scalar input is already in a different
@@ -600,6 +602,23 @@ end of every iteration, including one reached by `continue`.
 the loop's exit or condition. A `while (true)` body that ends in
 `if (c) { break; }` and has no `continue` becomes `do { ... } while (!c)`,
 so the exit test is the back edge.
+
+An `if` without `else` whose body ends in a transfer (`tail`, `jump`,
+`break`, `goto`), followed by statements that also end in one, is laid out
+with the body after them: the common path falls through and the body costs
+no taken branch.
+
+```zig
+if (priority == requested) {
+    tail swapBuffers(36, 32, enter_high_priority);   // placed out of line
+}
+dispatch();
+jump(handler);
+```
+
+`if (c) tail f(args);` puts a single argument-setup instruction in the
+branch's delay slot. Longer setup runs before the test and must not touch
+the registers the test reads or uses.
 
 `inline for (first..end) |index| { ... }` repeats its body once per index,
 with `index` a constant expression inside it. Registers and labels declared
@@ -1108,12 +1127,20 @@ than assembly text. Its passes run in order:
    that ends it and that branch's delay slot. A beam search (16 candidates,
    windows of up to 64 instructions) scores orders with the RSP interpreter's
    calibrated timing model (`tools/rsp_interp/timing.zig`), so it accounts for
-   load latency, vector result latency, and dual issue.
+   load latency, vector result latency, and dual issue. Each window starts
+   from the pipeline state left by the instructions that fall through into
+   it, so results still in flight from the previous block count.
 6. Delay-slot filling moves an independent instruction into each remaining
-   branch slot.
+   branch slot when the timing model says the code around it does not get
+   slower.
 7. Loop-exit slots: a backward branch whose slot is still empty takes the
    first instruction after the loop when repeating it each iteration is
    harmless, such as `dma.exec`'s descriptor setup after its DMA-full poll.
+8. Fall-through slots: a conditional branch whose slot is still empty takes
+   one of the next few instructions when it has no side effects and what it
+   writes is dead where the branch goes. Liveness comes from a bounded walk
+   over the program, through jumps and into one level of calls; returns,
+   indirect jumps, and unknown targets count as reads.
 
 Dependences come from per-instruction effects: registers, the vector
 accumulator, VCO/VCC/VCE, the divide unit, memory, and IO. Partial vector

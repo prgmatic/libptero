@@ -36,6 +36,7 @@ test {
     _ = @import("optimizer.zig");
     _ = @import("peephole.zig");
     _ = @import("loop_slots.zig");
+    _ = @import("branch_slots.zig");
     _ = @import("schedule.zig");
     _ = @import("ir_deps.zig");
     _ = @import("interface.zig");
