@@ -70,10 +70,11 @@ fn isIdent(tok: token.Token, text: []const u8) bool {
     return tok.tag == .ident and std.mem.eql(u8, tok.text, text);
 }
 
-/// Suffixes after the parameter list: `noreturn`, `writes(...)`, and
-/// `@rspq.commandSize(...)`.
+/// Suffixes after the parameter list: `noreturn`, `writes(...)`,
+/// `align(n)`, and `@rspq.commandSize(...)`.
 const Modifiers = struct {
     no_return: bool = false,
+    alignment: u16 = 4,
     has_clobber_contract: bool = false,
     command_sizes: std.ArrayList(u8) = .empty,
     clobber_regs: std.ArrayList(ast.Register) = .empty,
@@ -108,6 +109,7 @@ fn parseFunction(self: *Parser, prefixes: Prefixes, command_indices: []const u8)
         .inline_call = prefixes.@"inline",
         .external = prefixes.@"extern",
         .no_return = modifiers.no_return,
+        .alignment = modifiers.alignment,
         .command_indices = command_indices,
         .command_sizes = try modifiers.command_sizes.toOwnedSlice(self.allocator),
         .has_clobber_contract = modifiers.has_clobber_contract,
@@ -136,10 +138,22 @@ fn parseModifier(self: *Parser, modifiers: *Modifiers) !void {
         modifiers.no_return = true;
         return;
     }
+    if (std.mem.eql(u8, modifier.text, "align")) return parseAlignment(self, modifiers);
     if (!std.mem.eql(u8, modifier.text, "writes")) return self.fail(modifier, .unsupported_function_modifier);
     if (modifiers.has_clobber_contract) return self.fail(modifier, .duplicate_clobber_contract);
     modifiers.has_clobber_contract = true;
     try parseClobberContract(self, modifiers);
+}
+
+/// `align(n)`: the function starts at a multiple of `n` bytes, a power of
+/// two from 4 (every instruction's alignment) to 4096.
+fn parseAlignment(self: *Parser, modifiers: *Modifiers) !void {
+    _ = try self.expect(.l_paren);
+    const value_token = try self.expect(.number);
+    const value = try self.parseNumberValue(value_token);
+    if (value < 4 or value > 4096 or !std.math.isPowerOfTwo(value)) return self.fail(value_token, .invalid_function_alignment);
+    modifiers.alignment = @intCast(value);
+    _ = try self.expect(.r_paren);
 }
 
 /// `writes($t0, $v01, ...)`: every register the function may change.

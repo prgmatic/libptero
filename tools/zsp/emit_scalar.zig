@@ -53,10 +53,20 @@ fn declareVector(g: Gen, decl: ast.VarDecl) !void {
 }
 
 /// `$v1` and `$k1` are backend registers that only `reserved` may claim.
+/// `reserved` may also hold any other register but `$zero` and the
+/// backend's `$at` for a whole function, such as one its callers keep.
 fn validateReservation(decl: ast.VarDecl, reg: Register) !void {
-    const backend = reg == registers.compiler_scratch_2 or reg == registers.command_return;
-    if (decl.is_reserved and !backend) return error.InvalidReservedRegister;
-    if (!decl.is_reserved and backend) return error.RegisterReservedForBackend;
+    if (decl.is_reserved) {
+        if (!reservable(reg)) return error.InvalidReservedRegister;
+    } else if (backendOnly(reg)) return error.RegisterReservedForBackend;
+}
+
+fn reservable(reg: Register) bool {
+    return reg != .zero and reg != registers.compiler_scratch;
+}
+
+fn backendOnly(reg: Register) bool {
+    return reg == registers.compiler_scratch_2 or reg == registers.command_return;
 }
 
 fn declareScalar(g: Gen, decl: ast.VarDecl) !void {

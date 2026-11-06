@@ -29,6 +29,9 @@ pub const Lifetime = struct {
     /// Registers written by calls the value is live across.
     forbidden_scalar: u32 = 0,
     forbidden_vector: u32 = 0,
+    /// `reserved`: the register is the value's for the whole function and
+    /// across every call it makes.
+    reserved: bool = false,
 };
 
 /// A register an automatic value may take, checked against pinned values.
@@ -83,6 +86,7 @@ pub const Declaration = struct {
     data_type: ast.DataType,
     fixed_reg: ?Register = null,
     fixed_vector_reg: ?VReg = null,
+    reserved: bool = false,
 };
 
 pub const Lifetimes = struct {
@@ -121,16 +125,18 @@ pub const Lifetimes = struct {
     }
 
     pub fn declare(self: *Lifetimes, declaration: Declaration) !void {
+        const whole = declaration.reserved;
         try self.lifetimes.append(self.allocator, .{
             .name = declaration.name,
             .declaration = declaration.position,
-            .last_use = declaration.position,
+            .last_use = if (whole) std.math.maxInt(usize) else declaration.position,
             .automatic = declaration.automatic,
             .initially_defined = declaration.initially_defined,
-            .first_live = if (declaration.initially_defined) declaration.position else std.math.maxInt(usize),
+            .first_live = if (whole) 0 else if (declaration.initially_defined) declaration.position else std.math.maxInt(usize),
             .data_type = declaration.data_type,
             .fixed_reg = declaration.fixed_reg,
             .fixed_vector_reg = declaration.fixed_vector_reg,
+            .reserved = whole,
         });
     }
 
@@ -413,6 +419,7 @@ pub const Lifetimes = struct {
     /// Whether a lifetime is live after `call` returns without the call
     /// itself defining it.
     pub fn livesAcrossCall(self: *const Lifetimes, lifetime: Lifetime, call: Call) bool {
+        if (lifetime.reserved) return true;
         if (lifetime.declaration >= call.resume_position) return false;
         if (!self.valueLivesAcross(lifetime.name, call.resume_position)) return false;
         return !self.valueDefinedAt(lifetime.name, call.position);

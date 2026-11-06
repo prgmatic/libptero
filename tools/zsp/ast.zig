@@ -20,6 +20,8 @@ pub const Function = struct {
     inline_call: bool,
     external: bool = false,
     no_return: bool,
+    /// The byte alignment of the function's first instruction.
+    alignment: u16 = 4,
     command_indices: []const u8 = &.{},
     command_sizes: []const u8 = &.{},
     has_clobber_contract: bool = false,

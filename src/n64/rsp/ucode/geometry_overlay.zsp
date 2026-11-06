@@ -1,29 +1,78 @@
-// Geometry's primary RSP overlay, ported from rsp_geometry.rspl.  Keep storage
-// declarations in generated-assembly order: the final verification compares
-// section bytes while allowing symbol addresses to differ.
+// Geometry: Tiny3D's vertex pipeline and triangle setup (rsp_tiny3d.rspl).
 //
-// Shared interior entry points, resident queue ABI registers, and fixed IMEM
-// clipping branches are expressed directly in ZSP. Geometry and RDP work
-// belongs in typed ZSP below; the generated section remains byte-for-byte
-// comparable with Tiny3D's shipped overlay.
+// loadVertices transforms, lights, and projects vertices into the vertex
+// buffer; the triangle commands then hand three buffered vertices at a time
+// to the triangle sender, which builds the RDP command. Triangles that
+// cross the guard band are clipped by the clipping patch
+// (geometry_clipping.zsp), which is loaded over this overlay's text at
+// `_start` when first needed and restored by syncTriangles.
 const dma = import("resident_api.zsp");
 const queue = import("resident_api.zsp");
 
-const triangle_size: u32 = 36;
+// A buffered vertex, ready for the triangle sender (36 bytes):
+//   0  screen X, Y (s13.2) and depth
+//   6  clip codes: the X/Y/Z codes in the low five bits, the tile index
+//      in the top three
+//   7  trivial-reject codes, inverted: ORing three vertices' codes leaves a
+//      zero for a plane all three are outside
+//   8  RGBA
+//  12  S, T
+//  16  clip-space X Y Z W as 16.16: four integer halves, then four
+//      fractions
+//  32  1/W as 16.16
+const vertex_size: u32 = 36;
+const vertex_pair_size: u32 = 2 * vertex_size;
+const vertex_clip_flags: u32 = 6;
+const vertex_reject_flags: u32 = 7;
+const vertex_color: u32 = 8;
+const vertex_texture: u32 = 12;
+const vertex_clip_position: u32 = 16;
+const vertex_inverse_w: u32 = 32;
+
+// Input vertices arrive in pairs (32 bytes): positions with a packed
+// 5.6.5 normal in W, RGBA, then S T. The first vertex's alpha byte may
+// carry the base tile.
+const input_pair_size: u32 = 32;
+const input_color: u32 = 16;
+const input_base_tile: u32 = 19;
+const input_texture: u32 = 24;
+
+// A light (16 bytes): RGBA twice, then a direction as signed bytes twice
+// for a directional light, or a position (s16 X Y Z) and a size for a
+// point light. The size's top bit ignores the vertex normal.
+const light_size: u32 = 16;
+const light_point_position: u32 = 8;
+const light_direction: u32 = 8;
+const light_point_size: u32 = 14;
+const light_is_point: u32 = 15;
+
+// The resident command buffer; $gp is the offset of the next command.
+const command_buffer: u32 = 0xa0;
 
 state {
     matrix_projection: [64]u8;
     matrix_mvp: [64]u8;
     matrix_mv: [64]u8;
+    // The normal matrix: three rows of fractions.
     matrix_normal: [24]u8;
+    // The fog offset as s16.16 in X and Y, the clamp limit in Z, and the
+    // scale in W.
     fog_scale_offset: [4]i16 = .{ 0, 0, 32767, 0 };
+    // The screen scale (8.8) in lanes 0-3 and offset in lanes 4-7.
     pub screen_scale_offset: [8]i16 = .{ 0, 0, 0, 0, 0, 0, 16383, 255 };
+    // Masks that split a packed 5.6.5 normal, then the multipliers that
+    // turn each field into a fraction.
     normal_mask_shift: [8]u16 = .{ 63488, 2016, 31, 0, 1, 32, 2048, 0 };
+    // Plane normals (X Y Z) and their W, which is the guard band.
     pub clipping_planes: [20]i8 = .{ 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, -1, 0, 1, 0, -1 };
     triangle_buffer_offset: u16 = 0;
     screen_uvgen_scale: u16 = 0;
+    // Scales clip-space positions so W is 1 midway between the planes;
+    // lane 3 is set by setScreenSize.
     pub normalize_w_scale: [4]i16 = .{ -1, -1, -1, 0 };
     pub clipping_return_address: u16 = 0;
+    // The UV generation parameters and the color exposure are loaded
+    // with the segment table's first entry, which is always zero.
     uv_generation_parameters: [2]u16 = .{ 0, 0 };
     color_exposure: u16 = 128;
     segment_table: [8]u32 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
@@ -31,13 +80,20 @@ state {
     directional_light_color: [112]u8;
     triangle_command: u32 = 0;
     matrix_stack_pointer: i32 = 0;
+    // 0 culls front faces, 1 back faces, 2 neither.
     face_culling: u8 = 0;
+    // Where fog lands in each vertex: 11 is the alpha byte; 12 is S,
+    // which the texture coordinates overwrite.
     fog_store_offset: u8 = 12;
     active_light_size: u8 = 0;
     unused_state_byte: u8 = 0;
-    vertex_effect_function: u16 = 0;
+    // Nonzero generates spherical texture coordinates.
+    vertex_effect: u16 = 0;
     clipping_code_size: u16 = 0;
+    // The clipping patch in RDRAM; its top byte is nonzero while loaded.
     clipping_code_address: u32 = 0;
+    // This overlay's code under the patch; its top byte masks the base
+    // tile from the input alpha.
     original_code_address: u32 = 0;
     vertex_buffer: [2520]u8;
 }
@@ -45,6 +101,7 @@ state {
 bss {
     pub clipping_buffer_temporary: [256]u8;
     pub clipping_buffer_result: [288]u8;
+    extern resident_scratch: [32]u8;
     extern rdp_current: u32;
     extern rdp_sentinel: u32;
     extern rdp_buffers: [2]u32;
@@ -52,1036 +109,162 @@ bss {
     extern rdp_mode: [8]u32;
 }
 
-// Shared entry points inside the triangle pipeline. They are declared as code
-// symbols so callers can use normal ZSP control transfers; their definitions
-// remain at the exact interior instruction required by the overlay ABI.
-extern fn geometry_RDPQ_Triangle_Send_Async() writes() noreturn;
-extern fn geometry_RDPQ_Triangle_Send_End() writes();
-extern fn geometryTriangleClip() writes() noreturn;
-extern fn geometry_rdpq_triangle_change_buffer_done() writes() noreturn;
-extern fn geometry_rdpq_triangle_dma_busy() writes() noreturn;
-extern fn geometry_rdpq_triangle_change_buffer() writes() noreturn;
+packed struct RdpBufferState {
+    current: u32;
+    previous: u32;
+}
 
-// Fixed-register matrix kernel.  The register assignment and instruction
-// order mirror Geometry's generated rsp_geometry.S so this routine can be compared
-// instruction-for-instruction independently of its linked address.
-fn multiplyMatrices(
-    reg($s2) output: dmem,
-    reg($s3) left: dmem,
-    reg($s4) right: dmem,
-) {
-    reg($v01) l0i: vec16 = undefined;
-    reg($v02) l0f: vec16 = undefined;
-    reg($v03) l1i: vec16 = undefined;
-    reg($v04) l1f: vec16 = undefined;
-    reg($v05) l2i: vec16 = undefined;
-    reg($v06) l2f: vec16 = undefined;
-    reg($v07) l3i: vec16 = undefined;
-    reg($v08) l3f: vec16 = undefined;
-    reg($v09) r01i: vec16 = undefined;
-    reg($v10) r01f: vec16 = undefined;
-    reg($v11) r23i: vec16 = undefined;
-    reg($v12) r23f: vec16 = undefined;
-    reg($v13) result_i: vec16 = undefined;
-    reg($v14) result_f: vec16 = undefined;
-    reg($v29) accumulator_scratch: vec16 = undefined;
+// ---------------------------------------------------------------- matrices
 
-    exact {
-        l0i[0..4] = load(vec16, left, 0);
-        r01f[0..4] = load(vec16, right, 8);
-        l0f[0..4] = load(vec16, left, 8);
-        r01i[0..4] = load(vec16, right, 0);
-        l0f[4..8] = load(vec16, left, 8);
-        r01f[4..8] = load(vec16, right, 24);
-        l0i[4..8] = load(vec16, left, 0);
-        r01i[4..8] = load(vec16, right, 16);
-        l1i[0..4] = load(vec16, left, 16);
-        l2i[0..4] = load(vec16, left, 32);
-        accumulator_scratch = vmudl(l0f, r01f.xxxxXXXX);
-        l1f[0..4] = load(vec16, left, 24);
-        l2f[0..4] = load(vec16, left, 40);
-        l2f[4..8] = load(vec16, left, 40);
-        l1f[4..8] = load(vec16, left, 24);
-        accumulator_scratch = vmadm(l0i, r01f.xxxxXXXX);
-        l1i[4..8] = load(vec16, left, 16);
-        result_f = vmadn(l0f, r01i.xxxxXXXX);
-        l3i[0..4] = load(vec16, left, 48);
-        l3f[0..4] = load(vec16, left, 56);
-        result_i = vmadh(l0i, r01i.xxxxXXXX);
-        accumulator_scratch = vmadl(l1f, r01f.yyyyYYYY);
-        l2i[4..8] = load(vec16, left, 32);
-        accumulator_scratch = vmadm(l1i, r01f.yyyyYYYY);
-        r23i[0..4] = load(vec16, right, 32);
-        r23f[0..4] = load(vec16, right, 40);
-        result_f = vmadn(l1f, r01i.yyyyYYYY);
-        result_i = vmadh(l1i, r01i.yyyyYYYY);
-        l3f[4..8] = load(vec16, left, 56);
-        accumulator_scratch = vmadl(l2f, r01f.zzzzZZZZ);
-        r23f[4..8] = load(vec16, right, 56);
-        l3i[4..8] = load(vec16, left, 48);
-        accumulator_scratch = vmadm(l2i, r01f.zzzzZZZZ);
-        result_f = vmadn(l2f, r01i.zzzzZZZZ);
-        r23i[4..8] = load(vec16, right, 48);
-        result_i = vmadh(l2i, r01i.zzzzZZZZ);
-        accumulator_scratch = vmadl(l3f, r01f.wwwwWWWW);
-        accumulator_scratch = vmadm(l3i, r01f.wwwwWWWW);
-        r01f = vmadn(l3f, r01i.wwwwWWWW);
-        r01i = vmadh(l3i, r01i.wwwwWWWW);
-
-        accumulator_scratch = vmudl(l0f, r23f.xxxxXXXX);
-        accumulator_scratch = vmadm(l0i, r23f.xxxxXXXX);
-        result_f = vmadn(l0f, r23i.xxxxXXXX);
-        result_i = vmadh(l0i, r23i.xxxxXXXX);
-        accumulator_scratch = vmadl(l1f, r23f.yyyyYYYY);
-        accumulator_scratch = vmadm(l1i, r23f.yyyyYYYY);
-        store(vec16, output, r01i[0..4], 0);
-        result_f = vmadn(l1f, r23i.yyyyYYYY);
-        result_i = vmadh(l1i, r23i.yyyyYYYY);
-        accumulator_scratch = vmadl(l2f, r23f.zzzzZZZZ);
-        store(vec16, output, r01f[4..8], 24);
-        store(vec16, output, r01i[4..8], 16);
-        accumulator_scratch = vmadm(l2i, r23f.zzzzZZZZ);
-        result_f = vmadn(l2f, r23i.zzzzZZZZ);
-        result_i = vmadh(l2i, r23i.zzzzZZZZ);
-        accumulator_scratch = vmadl(l3f, r23f.wwwwWWWW);
-        accumulator_scratch = vmadm(l3i, r23f.wwwwWWWW);
-        r23f = vmadn(l3f, r23i.wwwwWWWW);
-        r23i = vmadh(l3i, r23i.wwwwWWWW);
-        store(vec16, output, r01f[0..4], 8);
-        store(vec16, output, r23f[0..4], 40);
-        store(vec16, output, r23i[0..4], 32);
-        store(vec16, output, r23f[4..8], 56);
+/// output = left * right, for 4x4 16.16 matrices stored row by row as four
+/// integer halves followed by four fractions.
+fn multiplyMatrices(output: dmem, left_matrix: dmem, right_matrix: dmem) {
+    // Each left row fills both halves, so one chain yields two output rows.
+    reg left: [4]vec32 = undefined;
+    inline for (0..4) |row| {
+        left[row][0..4] = load(vec32, left_matrix, row * 16);
+        left[row][4..8] = load(vec32, left_matrix, row * 16);
     }
-    return slot {
-        store(vec16, output, r23i[4..8], 48);
+    // Right rows 0 and 1 share one pair, rows 2 and 3 the other.
+    reg right: [2]vec32 = undefined;
+    inline for (0..2) |pair| {
+        right[pair][0..4] = load(vec32, right_matrix, pair * 32);
+        right[pair][4..8] = load(vec32, right_matrix, pair * 32 + 16);
+    }
+    inline for (0..2) |pair| {
+        acc = left[0] * right[pair].halfLane(0);
+        inline for (1..4) |row| {
+            acc += left[row] * right[pair].halfLane(row);
+        }
+        reg rows: vec32 = acc;
+        store(vec32, output, rows[0..4], pair * 32);
+        store(vec32, output, rows[4..8], pair * 32 + 16);
     }
 }
 
-fn normalizeMatrixVector(
-    reg($s4) input: dmem,
-    reg($t1) output: dmem,
-) {
-    reg($v01) value_i: vec16 = undefined;
-    reg($v02) value_f: vec16 = undefined;
-    reg($v03) inverse_i: vec16 = undefined;
-    reg($v04) inverse_f: vec16 = undefined;
-    reg($v05) sum_i: vec16 = undefined;
-    reg($v06) sum_f: vec16 = undefined;
-    reg($v29) accumulator_scratch: vec16 = undefined;
-    reg($v30) shift_constants: vec16 = undefined;
+/// Normalizes the X Y Z of the 16.16 row at `input` into fractions at
+/// `output`, then advances both to the next row.
+fn normalizeRow(input: dmem, output: dmem) {
     reg($v00) vector_zero: vec16 = undefined;
+    reg($v30) powers: vec16 = undefined;
+    reg value: vec32 = undefined;
+    value[0..4] = load(vec32, input, 0);
+    input +%= 16;
 
-    exact {
-        value_f[0..4] = load(vec16, input, 8);
-        value_i[0..4] = load(vec16, input, 0);
-        accumulator_scratch = vmudl(value_f, value_f.xyzwXYZW);
-        accumulator_scratch = vmadm(value_i, value_f.xyzwXYZW);
-        inverse_f = vmadn(value_f, value_i.xyzwXYZW);
-        input +%= 16;
-        inverse_i = vmadh(value_i, value_i.xyzwXYZW);
-        sum_f = vectorAddCarry(inverse_f, inverse_f.yyyyYYYY);
-        sum_i = vectorAdd(inverse_i, inverse_i.yyyyYYYY);
-        inverse_f = vectorAddCarry(inverse_f, sum_f.zzzzZZZZ);
-        inverse_i = vectorAdd(inverse_i, sum_i.zzzzZZZZ);
-        inverse_i[3] = vectorReciprocalSquareRootHigh(inverse_i[0]);
-        inverse_f[3] = vectorReciprocalSquareRootLow(inverse_f[0]);
-        inverse_i[3] = vectorReciprocalSquareRootHigh(vector_zero[0]);
-        inverse_f = vmudl(inverse_f, shift_constants.x);
-        inverse_i = vmadm(inverse_i, shift_constants.x);
-        inverse_f = vmadn(vector_zero, vector_zero);
-        export geometryTriangleClipNormalize:
-        accumulator_scratch = vmudl(value_f, inverse_f.wwwwWWWW);
-        accumulator_scratch = vmadm(value_i, inverse_f.wwwwWWWW);
-        value_f = vmadn(value_f, inverse_i.wwwwWWWW);
-        value_i = vmadh(value_i, inverse_i.wwwwWWWW);
-        value_f = vectorAdd(value_f, value_f.xyzwXYZW);
-        store(vec16, output, value_f[0..4], 0);
-    }
-    return slot {
-        output +%= 8;
-    }
+    reg square: vec32 = value * value;
+    reg sum: vec32 = square + square.yyyyYYYY;
+    square += sum.zzzzZZZZ;
+
+    // 1/sqrt(length squared), shifted down by 9 so the doubled fraction
+    // below cannot overflow.
+    reg inverse: vec32 = undefined;
+    inverse.sint[3] = vectorReciprocalSquareRootHigh(square.sint[0]);
+    inverse.ufract[3] = vectorReciprocalSquareRootLow(square.ufract[0]);
+    inverse.sint[3] = vectorReciprocalSquareRootHigh(vector_zero[0]);
+    inverse.ufract = vmudl(inverse.ufract, powers.x);
+    inverse.sint = vmadm(inverse.sint, powers.x);
+    inverse.ufract = vmadn(vector_zero, vector_zero);
+
+    value = value * inverse.wwwwWWWW;
+    value.ufract = vectorAdd(value.ufract, value.ufract);
+    store(vec16, output, value.ufract[0..4], 0);
+    output +%= 8;
 }
 
-@rspq.command(0) fn drawTriangle(vertex0: dmem, packed_vertices: dmem) noreturn {
-    reg($a2) vertex2: dmem = undefined;
-    reg($a3) command: i32 = undefined;
-    reg($s3) output: dmem = undefined;
-    reg($s7) buffer_offset: dmem;
-    reg($t0) did_swap0: i32 = undefined;
-    reg($t1) did_swap1: i32 = undefined;
-    reg($t2) did_swap2: i32 = undefined;
-    reg($t3) clip1: dmem;
-    reg($t4) clip2: dmem;
-    reg($t5) clip3: dmem;
-    reg($t6) command_bits: dmem;
-    reg($at) scratch: dmem;
-    reg($v0) cull_mode: i32;
-    reg($v00) vector_zero: vec16 = undefined;
-    reg($v01) all1: vec16 = undefined;
-    reg($v02) all2: vec16 = undefined;
-    reg($v03) all3: vec16 = undefined;
-    reg($v04) all_tmp1: vec16 = undefined;
-    reg($v05) all_tmp2: vec16 = undefined;
-    reg($v06) y1: vec16 = undefined;
-    reg($v07) y2: vec16 = undefined;
-    reg($v08) y3: vec16 = undefined;
-    reg($v09) y_tmp1: vec16 = undefined;
-    reg($v10) y_tmp2: vec16 = undefined;
-    reg($v11) attribute3: vec16 = undefined;
-    reg($v12) vector_one: vec16 = undefined;
-    reg($v13) attribute_delta_high: vec16 = undefined;
-    reg($v14) inverse_w_i: vec16 = undefined;
-    reg($v15) inverse_w_f: vec16 = undefined;
-    reg($v16) edges_i: vec16 = undefined;
-    reg($v17) edges_f: vec16 = undefined;
-    reg($v18) normal_i: vec16 = undefined;
-    reg($v19) normal_f: vec16 = undefined;
-    reg($v20) slope_i: vec16 = undefined;
-    reg($v21) slope_f: vec16 = undefined;
-    reg($v22) x12_i: vec16 = undefined;
-    reg($v23) x12_f: vec16 = undefined;
-    reg($v24) hml: vec16 = undefined;
-    reg($v25) fy_i: vec16 = undefined;
-    reg($v26) fy_f: vec16 = undefined;
-    reg($v27) negative_powers: vec16 = undefined;
-    reg($v28) hml_upper: vec16 = undefined;
-    reg($v29) vector_temporary: vec16 = undefined;
-    reg($v30) shift_constants: vec16 = undefined;
-    reg($ra) return_address: i32 = undefined;
-    exact {
-        export geometry__ovl_text_start:
-        vertex2 = packed_vertices >> 16;
-        cull_mode = load(u8, face_culling);
-        export geometry_RDPQ_Triangle_Send_Async:
-        all1[3] = vertex0;
-        all2[3] = packed_vertices;
-        all1[0..2] = load(vec16, vertex0, 0);
-        all2[0..2] = load(vec16, packed_vertices, 0);
-        all3[0..2] = load(vec16, vertex2, 0);
-        clip1 = load(u16, vertex0, 6);
-        negative_powers = vectorSubtractCarry(vector_zero, shift_constants);
-        y1 = vector_zero | all1.y;
-        did_swap1 = 0xff;
-        y2 = vector_zero | all2.y;
-        clip2 = load(u16, packed_vertices, 6);
-        y3 = vector_zero | all3.y;
-        all3[3] = vertex2;
-        vector_one = vectorAddCarry(vector_zero, shift_constants.W);
-        clip3 = load(u16, vertex2, 6);
-        buffer_offset = load(u16, triangle_buffer_offset);
-        y_tmp1 = vectorCompareGreaterOrEqual(y1, y2);
-        clip1 |= clip2;
-        all_tmp1 = vectorSelectByCompareCode(all1, all2);
-        clip1 |= clip3;
-        y1 = vectorCompareLessThan(y1, y2);
-        did_swap0 = rsp.vector.getCompareCode();
-        all1 = vectorSelectByCompareCode(all1, all2);
-        scratch = clip1 & 0xff;
-        hml_upper = hml_upper ^ hml_upper;
-        if(scratch != did_swap1) tail dma.returnToCaller() slot {
-            y_tmp2 = vectorCompareGreaterOrEqual(y1, y3);
-        }
-        scratch = clip1 >> 13;
-        all_tmp2 = vectorSelectByCompareCode(all1, all3);
-        command = load(i32, triangle_command);
-        y1 = vectorCompareLessThan(y1, y3);
-        did_swap1 = rsp.vector.getCompareCode();
-        all1 = vectorSelectByCompareCode(all1, all3);
-        clip2 = clip1 & 0x1f00;
-        y3 = vectorCompareGreaterOrEqual(y_tmp1, y_tmp2);
-        output = buffer_offset +% clipping_buffer_temporary;
-        all3 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
-        store(vec16, output, y1[0], 6);
-        y2 = vectorCompareLessThan(y_tmp1, y_tmp2);
-        did_swap2 = rsp.vector.getCompareCode();
-        all2 = vectorSelectByCompareCode(all_tmp1, all_tmp2);
-        if(clip2 != 0) jump geometryTriangleClip() slot {
-            did_swap0 ^= did_swap1;
-        }
-        hml = vectorSubtractCarry(all3, all1);
-        did_swap0 ^= did_swap2;
-        all_tmp2 = vectorSubtractCarry(all2, all1);
-        vertex0 = all1[3];
-        all_tmp1 = vectorSubtractCarry(all3, all2);
-        packed_vertices = all2[3];
-        x12_f[0] = vectorMove(all1[0]);
-        did_swap0 &= 1;
-        x12_f[2] = vectorMove(all2[0]);
-        did_swap1 = cull_mode ^ did_swap0;
-        vector_temporary = vectorSubtractCarry(vector_zero, all_tmp2.yyyyyyyy);
-        vertex2 = all3[3];
-        fy_f = vectorShiftLeft8(y1, 14);
-        store(vec16, output, y2[0], 4);
-        fy_i = vectorShiftRightArithmetic(y1, 2);
-        buffer_offset ^= 176;
-        normal_f = vmudh(all_tmp2, hml.yyyyyyyy);
-        store(vec16, output, y3[0], 2);
-        normal_f = vmadh(hml, vector_temporary);
-        store(vec16, output, all_tmp2[0..2], 8);
-        normal_i = readVectorAccumulatorHigh();
-        store(vec16, output, all_tmp1[0..2], 12);
-        normal_f = readVectorAccumulatorMiddle();
-        hml[2..6] = load(vec16, output, 8);
-        fy_f = vectorSubtractCarry(vector_zero, fy_f);
-        clip2 = output +% 0x20;
-        fy_i = vectorSubtract(fy_i, fy_i);
-        y3[0] = load(vec16, vertex0, 30);
-        slope_i[7] = vectorReciprocalHigh(normal_i[0]);
-        did_swap0 = normal_i[0];
-        slope_f[7] = vectorReciprocalLow(normal_f[0]);
-        y3[2] = load(vec16, packed_vertices, 30);
-        slope_i[7] = vectorReciprocalHigh(vector_zero[0]);
-        y3[4] = load(vec16, vertex2, 30);
-        slope_f[0] = vectorReciprocal(hml[1]);
-        did_swap0 = did_swap0 < 0;
-        slope_i[0] = vectorReciprocalHigh(hml[1]);
-        if(did_swap0 == did_swap1) tail dma.returnToCaller() slot {
-            slope_f[2] = vectorReciprocal(all_tmp2[1]);
-        }
-        slope_i[2] = vectorReciprocalHigh(all_tmp2[1]);
-        y2[0] = load(vec16, vertex0, 22);
-        slope_f[4] = vectorReciprocal(all_tmp1[1]);
-        y2[2] = load(vec16, packed_vertices, 22);
-        slope_i[4] = vectorReciprocalHigh(all_tmp1[1]);
-        y2[4] = load(vec16, vertex2, 22);
-        hml[7] = vectorMove(normal_f[0]);
-        did_swap0 ^= 1;
-        hml_upper[7] = vectorMove(normal_i[0]);
-        did_swap0 <<= 7;
-        all1 = vmudn(slope_f, negative_powers.Y);
-        rsp.vector.loadPackedUnsigned(attribute3, vertex2, 8);
-        all2 = vmadh(slope_i, negative_powers.Y);
-        rsp.vector.loadPackedUnsigned(y_tmp1, vertex0, 8);
-        vector_temporary = vectorSubtractCarry(y3, y3.z);
-        rsp.vector.loadPackedUnsigned(y_tmp2, packed_vertices, 8);
-        y2 = vectorCompareLessThan(y2, y2.z);
-        command |= did_swap0;
-        y3 = vectorSelectByCompareCode(y3, y3.z);
-        inverse_w_f[6] = load(vec16, vertex2, 34);
-        all3 = vmudl(slope_f, hml.yywwYYWW);
-        inverse_w_f[4] = load(vec16, vertex0, 34);
-        all3 = vmadm(slope_i, hml.yywwYYWW);
-        inverse_w_f[5] = load(vec16, packed_vertices, 34);
-        all3 = vmadn(slope_f, hml_upper);
-        clip3 = command & 0x400;
-        all_tmp1 = vmadh(slope_i, hml_upper);
-        clip3 >>>= 4;
-        all3 = vmadn(vector_one, negative_powers.W);
-        did_swap0 = hml[3];
-        all_tmp1 = vmadh(vector_one, negative_powers.W);
-        did_swap1 = hml[0];
-        vector_temporary = vectorSubtractCarry(y3, y3.X);
-        inverse_w_i[5] = load(vec16, packed_vertices, 32);
-        y2 = vectorCompareLessThan(y2, y2.X);
-        inverse_w_i[6] = load(vec16, vertex2, 32);
-        y3 = vectorSelectByCompareCode(y3, y3.X);
-        inverse_w_i[4] = load(vec16, vertex0, 32);
-        vector_temporary = vmudl(all3, all1);
-        clip3 +%= clip2;
-        vector_temporary = vmadm(all_tmp1, all1);
-        command_bits = command & 0x200;
-        normal_f = vmadn(all3, all2);
-        command |= scratch;
-        normal_i = vmadh(all_tmp1, all2);
-        store(i16, output, command);
-        vector_temporary = vmudl(inverse_w_f, y3.x);
-        all_tmp1[4..6] = load(vec16, vertex0, 12);
-        vector_temporary = vmadm(inverse_w_i, y3.x);
-        all3[4..6] = load(vec16, packed_vertices, 12);
-        inverse_w_f = vmadn(inverse_w_f, y2.x);
-        y1[4..6] = load(vec16, vertex2, 12);
-        vector_temporary = vmudn(normal_f, hml);
-        did_swap0 = -did_swap0;
-        vector_temporary = vmadh(normal_i, hml);
-        did_swap1 = -did_swap1;
-        slope_f = readVectorAccumulatorMiddle();
-        hml[3] = did_swap0;
-        slope_i = readVectorAccumulatorHigh();
-        hml[0] = did_swap1;
-        inverse_w_f = vectorSubtractCarry(inverse_w_f, shift_constants.W);
-        did_swap0 = 0xcf;
-        y_tmp1 = vectorShiftRightLogical(y_tmp1, 7);
-        y_tmp1[7] = load(vec16, vertex0, 4);
-        y_tmp2 = vectorShiftRightLogical(y_tmp2, 7);
-        rsp.vector.setCompareCode(did_swap0);
-        attribute3 = vectorShiftRightLogical(attribute3, 7);
-        y_tmp2[7] = load(vec16, packed_vertices, 4);
-        inverse_w_f = vectorShiftRightLogical(inverse_w_f, 1);
-        attribute3[7] = load(vec16, vertex2, 4);
-        vector_temporary = vmudl(slope_f, fy_f.X);
-        command_bits >>>= 3;
-        vector_temporary = vmadm(slope_i, fy_f.X);
-        clip1 = command & 0x100;
-        edges_f = vmadn(slope_f, fy_i.X);
-        did_swap1 = rsp.cp0.dmaBusy();
-        edges_i = vmadh(slope_i, fy_i.X);
-        store(vec16, output, inverse_w_f[4..8], 16);
-        all_tmp1 = vmulf(all_tmp1, inverse_w_f.xxxxXXXX);
-        y_tmp1[6] = load(vec16, output, 16);
-        all3 = vmulf(all3, inverse_w_f.yyyyYYYY);
-        y_tmp2[6] = load(vec16, output, 18);
-        y1 = vmulf(y1, inverse_w_f.zzzzZZZZ);
-        attribute3[6] = load(vec16, output, 20);
-        x12_i = vectorShiftRightArithmetic(x12_f, 2);
-        if(did_swap1 != 0) jump geometry_rdpq_triangle_dma_busy() slot {
-            did_swap0 = load(u8, rdp_syncfull_ongoing);
-        }
-    dma_idle:
-        export geometry_rdpq_triangle_dma_idle:
-        x12_f = vectorShiftLeft8(x12_f, 14);
-        clip1 >>>= 4;
-        y_tmp1 = vectorSelectByCompareCode(y_tmp1, all_tmp1);
-        command_bits +%= clip3;
-        y_tmp2 = vectorSelectByCompareCode(y_tmp2, all3);
-        store(vec16, output, slope_i[4], 12);
-        attribute3 = vectorSelectByCompareCode(attribute3, y1);
-        // The fast path deliberately reuses the now-dead vertex0 argument
-        // register for the resident RDP cursor.
-        vertex0 = load(u32, rdp_current);
-        edges_f = vectorAddCarry(edges_f, x12_f.x);
-        store(vec16, output, x12_i[2], 8);
-        edges_i = vectorAdd(edges_i, x12_i.x);
-        if(did_swap0 == 0) slot {
-            store(vec16, output, slope_f[4], 14);
-        } {
-            rsp.cp0.writeRegister(9, $a0);
-        }
-        vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
-        vector_one = vectorSubtract(y_tmp2, y_tmp1);
-        store(vec16, output, x12_f[2], 10);
-        attribute_delta_high = vectorSubtract(attribute3, y_tmp1);
-        clip1 +%= command_bits;
-        normal_f = vmudn(normal_f, shift_constants.Y);
-        store(vec16, output, slope_i[2], 28);
-        normal_i = vmadh(normal_i, shift_constants.Y);
-        store(vec16, output, slope_f[2], 30);
-        all_tmp1 = vmudh(vector_one, hml.y);
-        store(vec16, output, edges_i[2], 24);
-        all_tmp1 = vmadh(attribute_delta_high, hml.w);
-        store(vec16, output, edges_f[2], 26);
-        all_tmp1 = readVectorAccumulatorMiddle();
-        store(vec16, output, edges_i[0], 16);
-        all3 = readVectorAccumulatorHigh();
-        store(vec16, output, edges_f[0], 18);
-        y3 = vmudh(attribute_delta_high, hml.z);
-        store(vec16, output, slope_i[0], 20);
-        y3 = vmadh(vector_one, hml.x);
-        store(vec16, output, slope_f[0], 22);
-        y3 = readVectorAccumulatorMiddle();
-        rsp.cp0.setDmaMemoryAddress(output);
-        y2 = readVectorAccumulatorHigh();
-        vertex2 = load(i32, rdp_sentinel);
-        vector_temporary = vmudl(all_tmp1, normal_f.W);
-        clip1 = clip1 - output;
-        vector_temporary = vmadm(all3, normal_f.W);
-        output +%= clip1;
-        all_tmp1 = vmadn(all_tmp1, normal_i.W);
-        rsp.cp0.writeRegister(1, $a0);
-        all3 = vmadh(all3, normal_i.W);
-        store(u16, triangle_buffer_offset, buffer_offset);
-        vector_temporary = vmudl(y3, normal_f.W);
-        vertex0 += clip1;
-        vector_temporary = vmadm(y2, normal_f.W);
-        did_swap0 = signedLessThan(vertex2, vertex0);
-        y3 = vmadn(y3, normal_i.W);
-        store(vec16, clip2, all_tmp1[0..4], 24);
-        y2 = vmadh(y2, normal_i.W);
-        store(vec16, clip3, all_tmp1[4..8], 24);
-        vector_temporary = vmadl(all_tmp1, slope_f.x);
-        store(vec16, clip2, all3[0..4], 8);
-        vector_temporary = vmadm(all3, slope_f.x);
-        store(vec16, clip3, all3[4..8], 8);
-        y1 = vmadn(all_tmp1, slope_i.x);
-        store(vec16, clip2, y3[0..4], 56);
-        all_tmp2 = vmadh(all3, slope_i.x);
-        if(did_swap0 != 0) jump geometry_rdpq_triangle_change_buffer() slot {
-            store(vec16, clip3, y3[4..8], 56);
-        }
-        export geometry_rdpq_triangle_change_buffer_done:
-        vector_temporary = vmudh(y_tmp1, shift_constants.W);
-        store(vec16, clip2, y2[0..4], 40);
-        vector_temporary = vmadl(y1, fy_f.X);
-        store(vec16, clip3, y2[4..8], 40);
-        vector_temporary = vmadm(all_tmp2, fy_f.X);
-        store(vec16, clip2, y1[0..4], 48);
-        all2 = vmadn(y1, fy_i.X);
-        store(vec16, clip3, y1[4..8], 48);
-        all1 = vmadh(all_tmp2, fy_i.X);
-        store(vec16, clip2, all_tmp2[0..4], 32);
-        y3[6] = vectorMove(y2[7]);
-        store(vec16, clip3, all_tmp2[4..8], 32);
-        y1[6] = vectorMove(all_tmp2[7]);
-        store(u32, rdp_current, vertex0);
-        y_tmp2[1] = vectorMove(all2[7]);
-        store(vec16, clip2, all2[0..4], 16);
-        y_tmp2[0] = vectorMove(all1[7]);
-        store(vec16, clip3, all2[4..8], 16);
-        y_tmp2[3] = vectorMove(all_tmp1[7]);
-        store(vec16, clip2, all1[0..4], 0);
-        y_tmp2[2] = vectorMove(all3[7]);
-        store(vec16, clip3, all1[4..8], 0);
-        store(vec16, command_bits, y1[6..8], 8);
-        store(vec16, command_bits, y3[6..8], 12);
-        clip1 -%= 1;
-        store(vec16, command_bits, y_tmp2[0..4], 0);
-        return slot {
-            rsp.cp0.startDmaWrite(clip1);
-        }
-        export geometry_rdpq_triangle_change_buffer:
-        command = return_address;
-        vertex0 = load(u32, rdp_buffers, 4);
-        did_swap1 = load(i32, rdp_buffers);
-        store(u32, rdp_buffers, vertex0);
-        store(u32, rdp_buffers, did_swap1, 4);
-        store(u8, clip2, clip1);
-        scratch = 0x10000;
-        vertex2 = vertex0 + scratch;
-        queue.rdpSetBuffer(vertex0, packed_vertices, vertex2) slot {
-            packed_vertices = vertex0;
-        }
-        rsp.cp0.writeRegister(1, $a0);
-        clip1 = load(u8, clip2);
-        vertex0 +%= clip1;
-        jump geometry_rdpq_triangle_change_buffer_done() slot {
-            return_address = command;
-        }
-    dma_busy:
-        export geometry_rdpq_triangle_dma_busy:
-        if(did_swap1 != 0) goto dma_busy slot {
-            did_swap1 = rsp.cp0.dmaBusy();
-        }
-        goto dma_idle slot {
-        send_end:
-            export geometry_RDPQ_Triangle_Send_End:
-            rsp.cp0.readRegister(6, $at);
-        }
-        store(u16, triangle_buffer_offset, 0);
-        did_swap0 = load(u8, rdp_syncfull_ongoing);
-        if(scratch != 0) goto geometry_RDPQ_Triangle_Send_End slot {
-            did_swap1 = load(i32, rdp_current);
-        }
-        if(did_swap0 != 0) tail dma.returnToCaller() slot {
-            store(i32, rdp_current, did_swap1);
-        }
-        return slot {
-            rsp.cp0.setRdpCommandEnd(did_swap1);
-        }
-    }
+/// Resolves a segmented RDRAM address: the top byte selects a segment
+/// table entry to add.
+inline fn resolveSegment(address: u32) {
+    reg segment: u32 = address >> 24;
+    segment = load(u32, segment_table + segment);
+    address +%= segment;
 }
 
-export fn _start() noreturn {
-    reg($s0) code_address: u32;
-    reg($t0) code_size: u32;
-    reg($t1) pitch: u32 = undefined;
-    reg($t2) flags: u32;
-    reg($s4) target: dmem = undefined;
-    reg($ra) return_address: fn() = undefined;
-    exact {
-        code_address = load(u32, clipping_code_address);
-        code_size = load(u16, clipping_code_size);
-        flags = 12;
-        return_address = code.addressOf(_start);
-        store(u8, clipping_code_address, code_size);
+/// Pushes, pops, or replaces the model-view matrix, then rebuilds the
+/// normal and MVP matrices. The low byte of `stack_control` holds flags
+/// (1 multiplies by the matrix below on the stack, 2 only moves the stack
+/// pointer); bytes 1-2 are the signed stack-pointer step. A negative step
+/// pops the matrix from the stack instead of loading `matrix_address`.
+@rspq.command(2) fn updateMatrixStack(stack_control: i32, matrix_address: u32) noreturn {
+    const matrix_bytes: u32 = 64;
+    const matrix_dma_size: u32 = matrix_bytes - 1;
+    reg($gp) next_command: dmem = undefined;
+    reg multiply: i32 = stack_control & 1;
+    reg only_move: i32 = stack_control & 2;
+    reg step: i32 = load(i16, next_command, command_buffer - 8 + 1);
+    reg stack_pointer: i32 = load(i32, matrix_stack_pointer);
+    stack_pointer +%= step;
+    store(i32, matrix_stack_pointer, stack_pointer);
+    if (only_move != 0) tail queue.commandLoop();
+
+    resolveSegment(matrix_address);
+    if (step < 0) {
+        matrix_address = bitCast(stack_pointer);
     }
-    jump dma.exec(code_size, pitch, code_address, target, flags) slot {
-        code_size -%= 1;
+    reg pitch: u32 = undefined;
+    reg($s0) rdram: u32 = matrix_address & 0xffffff;
+    dma.in(matrix_dma_size, pitch, rdram, matrix_mv);
+    if (multiply != 0) {
+        rdram = bitCast(stack_pointer);
+        rdram -%= matrix_bytes;
+        dma.in(matrix_dma_size, pitch, rdram, clipping_buffer_result);
+        multiplyMatrices(matrix_mv, clipping_buffer_result, matrix_mv);
     }
+    // Keep the result on the stack. The write must finish here: an
+    // asynchronous one broke posed models on hardware.
+    rdram = bitCast(stack_pointer);
+    dma.out(matrix_dma_size, pitch, rdram, matrix_mv);
+
+    reg row: dmem = matrix_mv;
+    reg normal_row: dmem = matrix_normal;
+    normalizeRow(row, normal_row);
+    normalizeRow(row, normal_row);
+    normalizeRow(row, normal_row);
+    multiplyMatrices(matrix_mvp, matrix_projection, matrix_mv);
+    tail queue.commandLoop();
 }
 
-@rspq.command(4) fn loadVertices(
-    buffer_size: u32,
-    rdram_vertices: u32,
-    input_output_addresses: u32,
-) noreturn {
-    reg($s4) input: dmem;
-    reg($s6) segment: dmem;
-    reg($t0) copy_size: u32;
-    reg($t1) pitch: u32 = undefined;
-    reg($s7) input_end: dmem;
-    reg($t2) flags: u32 = undefined;
-    reg($s0) source: u32 = undefined;
-    exact {
-        input = input_output_addresses >> 16;
-        segment = rdram_vertices >> 24;
-        copy_size = buffer_size & 0xffff;
-        segment = load(u32, segment_table + segment);
-        input_end = input +% copy_size;
-        copy_size -%= 1;
-        flags = 0;
-    }
-    dma.exec(copy_size, pitch, source, input, flags) slot {
-        source = rdram_vertices +% segment;
-    }
-    reg($v18) normal_row2: vec16 = undefined;
-    reg($v19) normal_row1: vec16 = undefined;
-    reg($v20) normal_row0: vec16 = undefined;
-    reg($v21) mvp_row3_i: vec16 = undefined;
-    reg($v22) mvp_row3_f: vec16 = undefined;
-    reg($v23) mvp_row2_i: vec16 = undefined;
-    reg($v24) mvp_row2_f: vec16 = undefined;
-    reg($v25) mvp_row1_i: vec16 = undefined;
-    reg($v26) mvp_row1_f: vec16 = undefined;
-    reg($v27) mvp_row0_i: vec16 = undefined;
-    reg($v28) mvp_row0_f: vec16 = undefined;
-    reg($at) data_pointer: dmem = undefined;
-    reg($v16) normal_shift: vec16 = undefined;
-    reg($v17) normal_mask: vec16 = undefined;
-    reg($v15) guard_band_scale: vec16 = undefined;
-    reg($v12) screen_offset: vec16 = undefined;
-    reg($v13) screen_size_i: vec16 = undefined;
-    reg($s5) output_b: dmem;
-    reg($s2) light_end: dmem;
-    reg($v00) vector_zero: vec16 = undefined;
-    reg($v31) shift_constants: vec16 = undefined;
-    reg($v14) screen_size_f: vec16 = undefined;
-    reg($v11) fog_scale: vec16 = undefined;
-    reg($v10) normalize_scale: vec16 = undefined;
-    reg($v09) uv_arguments: vec16 = undefined;
-    reg($v08) position: vec16 = undefined;
-    reg($v07) normal: vec16 = undefined;
-    reg($v06) clip_position_f: vec16 = undefined;
-    reg($v05) clip_position_i: vec16 = undefined;
-    reg($v03) light_color: vec16 = undefined;
-    reg($v02) light_direction: vec16 = undefined;
-    reg($v01) light_scale: vec16 = undefined;
-    reg($v04) color: vec16 = undefined;
-    reg($v29) vector_temporary: vec16 = undefined;
-    reg($v30) vector_one: vec16 = undefined;
-    reg($k0) unlit: u32;
-    reg($s1) fog_offset: u32;
-    reg($s3) light_pointer: dmem = undefined;
-    reg($t8) is_point_light: u32;
-    reg($t9) mv_matrix_loaded: u32 = undefined;
-    reg($fp) fog_a: dmem;
-    reg($sp) fog_b: dmem;
-    reg($t3) clip_codes: u32 = undefined;
-    reg($t4) reject_codes: u32 = undefined;
-    reg($t5) reject_b: u32;
-    reg($t6) reject_a: u32;
-    reg($t7) clip_b: u32;
-    reserved reg($k1) vertex_effect: u32 = undefined;
-    reg($ra) return_address: u32 = undefined;
-    exact {
-        segment = dmem.addressOf(matrix_normal);
-        normal_row1[0..4] = load(vec16, segment, 8);
-        normal_row2[0..4] = load(vec16, segment, 16);
-        normal_row1[4..8] = load(vec16, segment, 8);
-        normal_row0[0..4] = load(vec16, segment, 0);
-        normal_row0[4..8] = load(vec16, segment, 0);
-    }
-    loadCurrentMVPMat(mvp_row0_i, mvp_row0_f, mvp_row1_i, mvp_row1_f, mvp_row2_i, mvp_row2_f, mvp_row3_i, mvp_row3_f) slot {
-        normal_row2[4..8] = load(vec16, segment, 16);
-    }
-    exact {
-        data_pointer = dmem.addressOf(normal_mask_shift);
-        normal_shift[0..4] = load(vec16, data_pointer, 8);
-        normal_mask[0..4] = load(vec16, data_pointer, 0);
-        normal_mask[4..8] = load(vec16, data_pointer, 0);
-        normal_shift[4..8] = load(vec16, data_pointer, 8);
-        data_pointer = dmem.addressOf(clipping_planes);
-        guard_band_scale[0..2] = load(vec16, data_pointer, 0);
-        data_pointer = dmem.addressOf(screen_scale_offset);
-        screen_offset[0..4] = load(vec16, data_pointer, 8);
-        segment = input_output_addresses & 0xffff;
-        output_b = segment -% triangle_size;
-        light_end = load(u8, active_light_size);
-        screen_offset[4..8] = load(vec16, data_pointer, 8);
-        screen_size_i[0..4] = load(vec16, data_pointer, 0);
-        screen_size_i[4..8] = load(vec16, data_pointer, 0);
-        data_pointer = dmem.addressOf(fog_scale_offset);
-        guard_band_scale = vector_zero | guard_band_scale.y;
-        fog_scale[0..4] = load(vec16, data_pointer, 0);
-        screen_size_f = vmudl(vector_zero, shift_constants.WWWWWWWW);
-        unlit = load(u8, triangle_command);
-        source = load(u8, original_code_address);
-        screen_size_i = vmadm(screen_size_i, shift_constants.WWWWWWWW);
-        data_pointer = dmem.addressOf(normalize_w_scale);
-        screen_size_f = vmadn(vector_zero, vector_zero);
-        normalize_scale[0..4] = load(vec16, data_pointer, 0);
-        normalize_scale[4..8] = load(vec16, data_pointer, 0);
-        data_pointer = dmem.addressOf(uv_generation_parameters);
-        uv_arguments[4..8] = load(vec16, data_pointer, 0);
-        segment -%= 72;
-        fog_scale[6] = vectorMove(fog_scale[2]);
-        data_pointer = dmem.addressOf(screen_uvgen_scale);
-        fog_offset = load(u8, fog_store_offset);
-        light_end +%= directional_light_color;
-        uv_arguments[7] = load(vec16, data_pointer, 0);
-        data_pointer = dmem.addressOf(uv_generation_parameters);
-        uv_arguments[0..2] = load(vec16, data_pointer, 0);
-    }
-    dma.waitIdle() slot {
-        uv_arguments[2..4] = load(vec16, data_pointer, 0);
-    }
-    exact {
-        position[0..8] = load(vec16, input, 0);
-        normal = normal_mask & position.wwwwWWWW;
-        normal = vmudn(normal, normal_shift);
-    }
-    vertex_loop:
-    exact {
-        light_color = vector_zero | fog_scale.z;
-        input_output_addresses = load(u8, input, 19);
-        vector_temporary = vmulf(normal_row0, normal.xxxxXXXX);
-        light_pointer = dmem.addressOf(directional_light_color);
-        vector_temporary = vmacf(normal_row1, normal.yyyyYYYY);
-        is_point_light = load(u8, light_pointer, 15);
-        normal = vmacf(normal_row2, normal.zzzzZZZZ);
-        clip_position_f = vmudn(mvp_row0_f, position.xxxxXXXX);
-        output_b +%= 72;
-        clip_position_i = vmadh(mvp_row0_i, position.xxxxXXXX);
-        input_output_addresses &= source;
-        clip_position_f = vmadn(mvp_row1_f, position.yyyyYYYY);
-        vertex_effect = load(u16, vertex_effect_function);
-        clip_position_i = vmadh(mvp_row1_i, position.yyyyYYYY);
-        rsp.vector.loadPackedSigned(light_direction, light_pointer, 8);
-        clip_position_f = vmadn(mvp_row2_f, position.zzzzZZZZ);
-        mv_matrix_loaded = 0;
-        segment +%= 72;
-        clip_position_i = vmadh(mvp_row2_i, position.zzzzZZZZ);
-        clip_position_f = vmadn(mvp_row3_f, vector_one.W);
-        if(unlit != 0) goto light_loop_end slot {
-            clip_position_i = vmadh(mvp_row3_i, vector_one.W);
-        }
-        if(light_pointer == light_end) goto light_loop_end slot {
-            rsp.vector.loadPackedUnsigned(light_color, light_pointer, -8);
-        }
-    light_loop:
-        light_scale = vmulf(normal, light_direction);
-        rsp.vector.loadPackedUnsigned(color, light_pointer, 0);
-        if(is_point_light != 0) goto pointLight slot {
-            return_address = code.addressOf(LABEL_T3DCmd_VertLoad_0005);
-        }
-        export LABEL_T3DCmd_VertLoad_0005:
-        light_pointer +%= 16;
-        vector_temporary = vmulu(color, light_scale.xxxxXXXX);
-        vector_temporary = vmacu(color, light_scale.yyyyYYYY);
-        is_point_light = load(u8, light_pointer, 15);
-        vector_temporary = vmacu(color, light_scale.zzzzZZZZ);
-        rsp.vector.loadPackedSigned(light_direction, light_pointer, 8);
-        if(light_pointer != light_end) goto light_loop slot {
-            light_color = vectorAdd(light_color, vector_temporary);
-        }
-    light_loop_end:
-        light_direction = vmudm(guard_band_scale, clip_position_f.wwwwWWWW);
-        rsp.vector.loadPackedUnsigned(color, input, 16);
-        return_address = code.addressOf(LABEL_T3DCmd_VertLoad_0006);
-        light_scale = vmadh(guard_band_scale, clip_position_i.wwwwWWWW);
-        light_direction = vmadn(vector_zero, vector_zero);
-        if(mv_matrix_loaded != 0) goto loadCurrentMVPMat slot {
-            fog_a = segment +% fog_offset;
-        }
-        export LABEL_T3DCmd_VertLoad_0006:
-        vector_temporary = vectorClipHigh(clip_position_i, clip_position_i.wwwwWWWW);
-        vector_temporary = vectorClipLow(clip_position_f, clip_position_f.wwwwWWWW);
-        reject_codes = rsp.vector.getCompareCode();
-        vector_temporary = vectorClipHigh(clip_position_i, light_scale);
-        vector_temporary = vectorClipLow(clip_position_f, light_direction);
-        fog_b = output_b +% fog_offset;
-        export TAG_LightMul:
-        color = vmulf(color, light_color);
-        position[0..8] = load(vec16, input, 32);
-        clip_position_f = vmudl(clip_position_f, normalize_scale);
-        clip_codes = rsp.vector.getCompareCode();
-        clip_position_i = vmadm(clip_position_i, normalize_scale);
-        reject_b = reject_codes >> 4;
-        reject_b &= 0x0707;
-        clip_position_f = vmadn(vector_zero, vector_zero);
-        clip_b = clip_codes >> 4;
-        reject_a = reject_codes & 0x0707;
-        color = vmudm(color, shift_constants.Z);
-        store(vec16, segment, clip_position_i[0..4], 16);
-        screen_size_i[3] = vectorReciprocalHigh(clip_position_i[3]);
-        store(vec16, segment, clip_position_f[0..4], 24);
-        screen_size_f[3] = vectorReciprocalLow(clip_position_f[3]);
-        store(vec16, output_b, clip_position_f[4..8], 24);
-        screen_size_i[3] = vectorReciprocalHigh(clip_position_i[7]);
-        is_point_light = clip_codes & 0x0307;
-        screen_size_f[7] = vectorReciprocalLow(clip_position_f[7]);
-        screen_size_i[7] = vectorReciprocalHigh(vector_zero[7]);
-        flags = is_point_light >> 5;
-        color = vmudh(color, uv_arguments.Z);
-        store(vec16, output_b, clip_position_i[4..8], 16);
-        is_point_light |= flags;
-        light_color = vectorAddCarry(clip_position_f, fog_scale.y);
-        light_direction = vectorAdd(clip_position_i, fog_scale.x);
-        clip_b &= 0x0307;
-        flags = clip_b >> 5;
-        vector_temporary = vmudl(clip_position_f, screen_size_f.wwwwWWWW);
-        vector_temporary = vmadm(clip_position_i, screen_size_f.wwwwWWWW);
-        is_point_light |= input_output_addresses;
-        rsp.vector.storePackedUnsigned(color, 0, segment, 8);
-        clip_position_f = vmadn(clip_position_f, screen_size_i.wwwwWWWW);
-        store(vec16, segment, screen_size_f[3], 34);
-        clip_position_i = vmadh(clip_position_i, screen_size_i.wwwwWWWW);
-        light_direction = vmudh(light_direction, fog_scale.w);
-        store(vec16, output_b, screen_size_f[7], 34);
-        store(vec16, segment, screen_size_i[3], 32);
-        clip_b |= flags;
-        vector_temporary = vmudl(clip_position_f, screen_size_f);
-        flags = reject_a >> 5;
-        vector_temporary = vmadm(clip_position_i, screen_size_f);
-        rsp.vector.storePackedUnsigned(color, 4, output_b, 8);
-        clip_position_f = vmadn(clip_position_f, screen_size_i);
-        clip_position_i = vmadh(clip_position_i, screen_size_i);
-        clip_b |= input_output_addresses;
-        vector_temporary = vectorSubtract(fog_scale, light_direction.zzzzZZZZ);
-        store(vec16, output_b, screen_size_i[7], 32);
-        reject_a = reject_a ~| flags;
-        flags = reject_b >> 5;
-        clip_position_i = vmadh(screen_offset, vector_one.W);
-        light_color[0..4] = load(vec16, input, 24);
-        input +%= 32;
-        reject_b = reject_b ~| flags;
-        vector_temporary = vmudn(vector_temporary, vector_one.Z);
-        store(vec16, segment, clip_position_i[0..4], 0);
-        light_direction = vector_zero | normal;
-        normal = normal_mask & position.wwwwWWWW;
-        store(vec16, output_b, clip_position_i[4..8], 0);
-        store(u8, segment, is_point_light, 6);
-        store(u8, segment, reject_a, 7);
-        store(u8, output_b, clip_b, 6);
-        store(vec16, fog_a, vector_temporary[2], 0);
-        normal = vmudn(normal, normal_shift);
-        store(u8, output_b, reject_b, 7);
-        light_color = vectorAddCarry(light_color, uv_arguments);
-        call(vertex_effect) slot {
-            store(vec16, fog_b, vector_temporary[6], 0);
-        }
-        export VertexFX_None:
-        store(vec16, segment, light_color[0..2], 12);
-        if(input != input_end) goto vertex_loop slot {
-            store(vec16, output_b, light_color[2..4], 12);
-        }
-        jump queue.commandLoop() slot {
-            export VertexFX_Spherical:
-            clip_position_i = vectorCompareGreaterOrEqual(clip_position_i, vector_zero.x);
-        }
-        color = vectorSubtractCarry(clip_position_i, screen_offset);
-        color = vectorCompareLessThan(color, screen_offset);
-        light_color = vmulf(light_direction, uv_arguments);
-        color = vmudn(color, uv_arguments.W);
-        light_color = vectorAddCarry(light_color, uv_arguments.x);
-        color = vmulf(color, light_direction.zzzzZZZZ);
-        color = vmulf(color, uv_arguments.x);
-        light_color = vectorAddCarry(light_color, color);
-        store(vec16, segment, light_color[0..2], 12);
-        if(input != input_end) goto vertex_loop slot {
-            store(vec16, output_b, light_color[4..6], 12);
-        }
-        jump queue.commandLoop() slot {
-            export VertexFX_CelShadeColor:
-            color = vectorCompareGreaterOrEqual(color, color);
-        }
-        color = vectorCompareGreaterOrEqual(color, color);
-        light_color[0] = vectorMove(color[0]);
-        light_color[2] = vectorMove(color[4]);
-        store(vec16, output_b, light_color[2..4], 12);
-        if(input != input_end) goto vertex_loop slot {
-            store(vec16, segment, light_color[0..2], 12);
-        }
-        jump queue.commandLoop() slot {
-            export VertexFX_CelShadeAlpha:
-            light_color[0] = vectorMove(color[3]);
-        }
-        light_color[2] = vectorMove(color[7]);
-        store(vec16, output_b, light_color[2..4], 12);
-        if(input != input_end) goto vertex_loop slot {
-            store(vec16, segment, light_color[0..2], 12);
-        }
-        jump queue.commandLoop() slot {
-            export VertexFX_Outline:
-            vector_temporary = vmulf(light_direction, uv_arguments);
-        }
-        clip_position_i = vmadh(clip_position_i, vector_one.W);
-        store(vec16, output_b, clip_position_i[4..6], 0);
-        if(input != input_end) goto vertex_loop slot {
-            store(vec16, segment, clip_position_i[0..2], 0);
-        }
-        jump queue.commandLoop();
-    }
+@rspq.command(7) fn setProjectionMatrix(rdram: u32) noreturn {
+    reg pitch: u32 = undefined;
+    reg($s0) source: u32 = bitCast(rdram);
+    tail dma.in(63, pitch, source, matrix_projection);
 }
 
-fn pointLight(
-    reg($s3) light_pointer: dmem,
-    reg($v27) vertex_position_i: vec16,
-    reg($v28) vertex_position_f: vec16,
-    reg($v25) matrix_row_i: vec16,
-    reg($v26) matrix_row_f: vec16,
-    reg($v23) point_position_i: vec16,
-    reg($v24) point_position_f: vec16,
-    reg($v21) light_dot_i: vec16,
-    reg($v22) light_dot_f: vec16,
-    reg($v08) position: vec16,
-    reg($v07) normal: vec16,
-    reg($v01) light_result: vec16,
-    reg($t9) mv_matrix_loaded: u32,
-) {
-    reg($t7) light_size: i32;
-    reg($at) scratch: dmem = undefined;
-    reg($v29) vector_temporary: vec16 = undefined;
-    reg($v31) shift_constants: vec16 = undefined;
-    reg($v30) vector_one: vec16 = undefined;
-    reg($v00) vector_zero: vec16 = undefined;
+// ----------------------------------------------------------- render state
 
-    exact {
-        if(mv_matrix_loaded != 0) goto point_position_ready slot {
-            light_size = load(u16, light_pointer, 14);
-        }
-        scratch = dmem.addressOf(matrix_mv);
-        matrix_row_f[0..4] = load(vec16, scratch, 24);
-        matrix_row_f[4..8] = load(vec16, scratch, 24);
-        vertex_position_i[0..4] = load(vec16, scratch, 0);
-        vertex_position_f[0..4] = load(vec16, scratch, 8);
-        point_position_i[0..4] = load(vec16, scratch, 32);
-        point_position_f[0..4] = load(vec16, scratch, 40);
-        vertex_position_f[4..8] = load(vec16, scratch, 8);
-        vertex_position_i[4..8] = load(vec16, scratch, 0);
-        light_dot_i[0..4] = load(vec16, scratch, 48);
-        point_position_f[4..8] = load(vec16, scratch, 40);
-        matrix_row_i[0..4] = load(vec16, scratch, 16);
-        vertex_position_f = vmudn(vertex_position_f, position.xxxxXXXX);
-        matrix_row_i[4..8] = load(vec16, scratch, 16);
-        point_position_i[4..8] = load(vec16, scratch, 32);
-        light_dot_f[0..4] = load(vec16, scratch, 56);
-        vertex_position_i = vmadh(vertex_position_i, position.xxxxXXXX);
-        light_dot_f[4..8] = load(vec16, scratch, 56);
-        vertex_position_f = vmadn(matrix_row_f, position.yyyyYYYY);
-        light_dot_i[4..8] = load(vec16, scratch, 48);
-        vertex_position_i = vmadh(matrix_row_i, position.yyyyYYYY);
-        vertex_position_f = vmadn(point_position_f, position.zzzzZZZZ);
-        vertex_position_i = vmadh(point_position_i, position.zzzzZZZZ);
-        vertex_position_f = vmadn(light_dot_f, vector_one.W);
-        vertex_position_i = vmadh(light_dot_i, vector_one.W);
-        vertex_position_f = vmudl(vertex_position_f, shift_constants.w);
-        vertex_position_i = vmadm(vertex_position_i, shift_constants.w);
-        mv_matrix_loaded = 1;
-        vertex_position_f = vmadn(vector_zero, vector_zero);
-    point_position_ready:
-        point_position_i[0..4] = load(vec16, light_pointer, 8);
-        point_position_i[4..8] = load(vec16, light_pointer, 8);
-        light_size &= 0x7fff;
-        point_position_i = vmudm(point_position_i, shift_constants.Y);
-        point_position_f = vmadn(vector_zero, vector_zero);
-        light_size <<= 16;
-        point_position_f = vectorSubtractCarry(point_position_f, vertex_position_f);
-        point_position_i = vectorSubtract(point_position_i, vertex_position_i);
-        vector_temporary = vmudl(point_position_f, point_position_f);
-        vector_temporary = vmadm(point_position_i, point_position_f);
-        light_dot_f = vmadn(point_position_f, point_position_i);
-        light_dot_i = vmadh(point_position_i, point_position_i);
-        matrix_row_f = vectorAddCarry(light_dot_f, light_dot_f.yyyyYYYY);
-        matrix_row_i = vectorAdd(light_dot_i, light_dot_i.yyyyYYYY);
-        light_dot_f = vectorAddCarry(light_dot_f, matrix_row_f.zzzzZZZZ);
-        matrix_row_f[3] = light_size;
-        light_dot_i = vectorAdd(light_dot_i, matrix_row_i.zzzzZZZZ);
-        scratch = light_size >> 16;
-        light_dot_i[0] = vectorReciprocalSquareRootHigh(light_dot_i[0]);
-        light_size = load(u8, light_pointer, 14);
-        light_dot_f[0] = vectorReciprocalSquareRootLow(light_dot_f[0]);
-        matrix_row_i[3] = scratch;
-        light_size >>= 7;
-        light_dot_i[0] = vectorReciprocalSquareRootHigh(light_dot_i[4]);
-        light_dot_f[4] = vectorReciprocalSquareRootLow(light_dot_f[4]);
-        light_dot_i[4] = vectorReciprocalSquareRootHigh(vector_zero[0]);
-        vector_temporary = vmudl(light_dot_f, matrix_row_f.w);
-        vector_temporary = vmadm(light_dot_i, matrix_row_f.w);
-        vector_temporary = vmadn(light_dot_f, matrix_row_i.w);
-        if(light_size != 0) goto radius_only slot {
-            light_result = vmadh(light_dot_i, matrix_row_i.w);
-        }
-        light_dot_f = vmudn(light_dot_f, shift_constants.W);
-        light_dot_i = vmadh(light_dot_i, shift_constants.W);
-        light_result = vmulf(light_result, light_result);
-        vector_temporary = vmudl(point_position_f, light_dot_f.xxxxXXXX);
-        vector_temporary = vmadm(point_position_i, light_dot_f.xxxxXXXX);
-        vector_temporary = vmadn(point_position_f, light_dot_i.xxxxXXXX);
-        position = vmadh(point_position_i, light_dot_i.xxxxXXXX);
-        position = vmulf(position, light_result.xxxxXXXX);
-        return slot {
-            light_result = vmulf(position, normal);
-        }
-    radius_only:
-        light_result = vmulf(light_result, light_result);
-        light_result[5] = vectorMove(vector_zero[0]);
-        light_result[6] = vectorMove(vector_zero[0]);
-        light_result[2] = vectorMove(vector_zero[0]);
-    }
-    return slot {
-        light_result[1] = vectorMove(vector_zero[0]);
-    }
-}
-
-// Load the current MVP matrix duplicated across both vector halves. Keeping
-// the fixed vector assignment makes this usable by the hand-scheduled vertex
-// loop without hiding the operation behind raw opcodes.
-fn loadCurrentMVPMat(
-    reg($v27) row0_i: vec16,
-    reg($v28) row0_f: vec16,
-    reg($v25) row1_i: vec16,
-    reg($v26) row1_f: vec16,
-    reg($v23) row2_i: vec16,
-    reg($v24) row2_f: vec16,
-    reg($v21) row3_i: vec16,
-    reg($v22) row3_f: vec16,
-) {
-    reg($at) matrix: dmem = undefined;
-    exact {
-        matrix = dmem.addressOf(matrix_mvp);
-        row0_f[4..8] = load(vec16, matrix, 8);
-        row3_f[4..8] = load(vec16, matrix, 56);
-        row0_f[0..4] = load(vec16, matrix, 8);
-        row1_i[4..8] = load(vec16, matrix, 16);
-        row3_f[0..4] = load(vec16, matrix, 56);
-        row3_i[0..4] = load(vec16, matrix, 48);
-        row2_i[0..4] = load(vec16, matrix, 32);
-        row2_f[4..8] = load(vec16, matrix, 40);
-        row2_i[4..8] = load(vec16, matrix, 32);
-        row1_f[4..8] = load(vec16, matrix, 24);
-        row0_i[0..4] = load(vec16, matrix, 0);
-        row2_f[0..4] = load(vec16, matrix, 40);
-        row0_i[4..8] = load(vec16, matrix, 0);
-        row1_f[0..4] = load(vec16, matrix, 24);
-        row1_i[0..4] = load(vec16, matrix, 16);
-    }
-    return slot {
-        row3_i[4..8] = load(vec16, matrix, 48);
-    }
-}
-
+/// Sets the viewport. The low nibble of `guard_band_factor` is the guard
+/// band multiplier and its bits from 8 the UV generation scale;
+/// `depth_and_w_scale` holds the depth scale and the W normalization.
 @rspq.command(1) fn setScreenSize(
     guard_band_factor: u32,
     screen_offset_xy: u32,
     screen_scale_xy: u32,
     depth_and_w_scale: u32,
 ) noreturn {
-    reg($s7) uvgen_scale: u32;
-    reg($s6) negative_guard_band: u32;
-    exact {
-        uvgen_scale = guard_band_factor >> 8;
-        store(u16, normalize_w_scale, depth_and_w_scale, 6);
-        guard_band_factor &= 0x0f;
-        negative_guard_band = -guard_band_factor;
-        store(u8, clipping_planes, negative_guard_band, 19);
-        store(u16, screen_uvgen_scale, uvgen_scale);
-        store(u8, clipping_planes, guard_band_factor, 7);
-        store(u8, clipping_planes, guard_band_factor, 3);
-        store(u8, clipping_planes, negative_guard_band, 15);
-        store(u32, screen_scale_offset, depth_and_w_scale, 4);
-        store(u32, screen_scale_offset, screen_scale_xy);
-    }
-    jump queue.commandLoop() slot {
-        store(u32, screen_scale_offset, screen_offset_xy, 8);
-    }
+    // The W normalization also lands in the scale's unused W lane.
+    store(u32, screen_scale_offset, screen_scale_xy);
+    store(u32, screen_scale_offset, depth_and_w_scale, 4);
+    store(u32, screen_scale_offset, screen_offset_xy, 8);
+    store(u16, normalize_w_scale, depth_and_w_scale, 6);
+    reg uvgen_scale: u32 = guard_band_factor >> 8;
+    store(u16, screen_uvgen_scale, uvgen_scale);
+    // The guard band is the W of the X and Y planes.
+    guard_band_factor &= 0x0f;
+    reg negative_guard_band: u32 = undefined;
+    negative_guard_band = -guard_band_factor;
+    store(u8, clipping_planes, guard_band_factor, 3);
+    store(u8, clipping_planes, guard_band_factor, 7);
+    store(u8, clipping_planes, negative_guard_band, 15);
+    store(u8, clipping_planes, negative_guard_band, 19);
+    tail queue.commandLoop();
 }
 
-
-@rspq.command(9) fn setFogState(enabled: u8) noreturn {
-    jump queue.commandLoop() slot {
-        store(u8, fog_store_offset, enabled);
-    }
+@rspq.command(9) fn setFogState(store_offset: u8) noreturn {
+    store(u8, fog_store_offset, store_offset);
+    tail queue.commandLoop();
 }
 
+/// Sets the ambient light or a light at `address`: its color, then its
+/// direction or position unless both words are zero.
 @rspq.command(5) fn setLight(
     address: dmem,
     rgba: u32,
@@ -1089,295 +272,1025 @@ fn loadCurrentMVPMat(
     direction1: u32,
 ) noreturn {
     store(u32, address, rgba);
-    if(direction0 != 0) {
-        store(u32, address, direction1, 12);
-        store(u32, address, direction0, 8);
-    }
-    tail queue.commandLoop() slot {
-        store(u32, address, rgba, 4);
-    }
+    store(u32, address, rgba, 4);
+    if (direction0 == 0) tail queue.commandLoop();
+    store(u32, address, direction0, 8);
+    store(u32, address, direction1, 12);
+    tail queue.commandLoop();
 }
 
-@rspq.command(6) fn setRenderMode(
-    culling: u8,
-    command: u32,
-) noreturn {
-    reg($s7) mipmap: u32 = load(u8, rdp_mode, 28);
+/// Sets the face culling and the RDP triangle command, which takes the
+/// current mipmap bits.
+@rspq.command(6) fn setRenderMode(culling: u8, command: u32) noreturn {
     store(u8, face_culling, culling);
+    reg mipmap: u32 = load(u8, rdp_mode, 28);
     mipmap &= 0x38;
     command |= mipmap;
-    jump queue.commandLoop() slot {
-        store(u32, triangle_command, command);
-    }
+    store(u32, triangle_command, command);
+    tail queue.commandLoop();
 }
 
-@rspq.command(7) fn setProjectionMatrix(rdram: u32) noreturn {
-    reg($t2) flags: u32;
-    reg($t0) size: u32 = undefined;
-    reg($t1) pitch: u32 = undefined;
-    reg($s0) source: u32;
-    reg($s4) destination: dmem = undefined;
-    exact {
-        flags = 12;
-        size = 63;
-        source = bitCast(rdram);
-    }
-    jump dma.exec(size, pitch, source, destination, flags) slot {
-        destination = dmem.addressOf(matrix_projection);
-    }
+/// Stores `value` at `address`, as a halfword when bit 15 is set.
+@rspq.command(3) fn setWord(address: dmem, value: u32) noreturn {
+    reg is_halfword: u32 = address & 0x8000;
+    // A word store replaces the halfword.
+    store(u16, address, value);
+    if (is_halfword != 0) tail queue.commandLoop();
+    store(u32, address, value);
+    tail queue.commandLoop();
 }
 
-@rspq.command(2) fn updateMatrixStack(
-    stack_control: i32,
-    matrix_address: u32,
-) noreturn {
-    reg($s7) multiply: i32;
-    reg($s6) only_move: i32;
-    reg($gp) command_end: dmem = undefined;
-    reg($s5) stack_pointer: i32;
-    reg($s3) segment_base: dmem;
-    reg($s4) dma_destination: dmem = undefined;
-    reg($s0) rdram: u32 = undefined;
-    reg($t0) dma_size: u32 = undefined;
-    reg($t1) dma_pitch: dmem = undefined;
-    reg($t2) dma_flags: u32 = undefined;
-    reg($s2) matrix_destination: dmem = undefined;
-    reg($at) address_mask: u32 = undefined;
-    reg($ra) return_address: fn() = undefined;
-    exact {
-        multiply = stack_control & 1;
-        only_move = stack_control & 2;
-        stack_control = load(i16, command_end, 0x99);
-        stack_pointer = load(i32, matrix_stack_pointer);
-        stack_pointer +%= stack_control;
-    }
-    if(only_move != 0) tail queue.commandLoop() slot {
-        store(i32, matrix_stack_pointer, stack_pointer);
-    }
-    exact {
-        segment_base = matrix_address >> 24;
-        segment_base = load(u32, segment_table + segment_base);
-        matrix_address +%= segment_base;
-    }
-    if(stack_control < 0) slot {
-        dma_destination = dmem.addressOf(matrix_mv);
-    } {
-        // Signed stack pointers and segmented addresses intentionally share
-        // this register, so reinterpret the bits without emitting a move.
-        matrix_address = bitCast(stack_pointer);
-    }
-    exact {
-        address_mask = 0xffffff;
-        dma_size = 63;
-        dma_flags = 12;
-    }
-    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags) slot {
-        rdram = matrix_address & address_mask;
-    }
-    if(multiply != 0) slot {
-        dma_pitch = dmem.addressOf(matrix_normal);
-    } {
-        rdram = bitCast(stack_pointer) -% 64;
-        dma_size = 63;
-        dma_flags = 12;
-        dma_destination = dmem.addressOf(clipping_buffer_result);
-        dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags);
-        segment_base = dmem.addressOf(clipping_buffer_result);
-        dma_destination = dmem.addressOf(matrix_mv);
-        multiplyMatrices(matrix_destination, segment_base, dma_destination) slot {
-            matrix_destination = dmem.addressOf(matrix_mv);
-        }
-    }
-    exact {
-        dma_size = 63;
-        dma_flags = -32756;
-    }
-    dma.exec(dma_size, dma_pitch, rdram, dma_destination, dma_flags) slot {
-        rdram = bitCast(stack_pointer);
-    }
-    normalizeMatrixVector(dma_destination, dma_pitch) slot {
-        matrix_destination = dmem.addressOf(matrix_mvp);
-    }
-    normalizeMatrixVector(dma_destination, dma_pitch) slot {
-        segment_base = dmem.addressOf(matrix_projection);
-    }
-    normalizeMatrixVector(dma_destination, dma_pitch);
-    exact {
-        return_address = code.addressOf(commandLoop);
-        jump multiplyMatrices(matrix_destination, segment_base, dma_destination) slot {
-            dma_destination = dmem.addressOf(matrix_mv);
-        }
-    }
+/// Writes two instruction words over this overlay's code in RDRAM.
+@rspq.command(13) fn patchCode(patch_address: u32, opcode_0: u32, opcode_1: u32) noreturn {
+    store(u32, resident_scratch, opcode_0);
+    store(u32, resident_scratch, opcode_1, 4);
+    reg pitch: u32 = undefined;
+    reg($s0) rdram: u32 = bitCast(patch_address);
+    tail dma.out(7, pitch, rdram, resident_scratch);
 }
 
-@rspq.command(3) fn setWord(
-    address: dmem,
-    value: u32,
-) noreturn {
-    reg($s7) is_halfword: u32;
-    is_halfword = address & 0x8000;
-    if(is_halfword != 0) tail queue.commandLoop() slot {
-        store(u16, address, value);
-    }
-    tail queue.commandLoop() slot {
-        store(u32, address, value);
-    }
-}
+// ---------------------------------------------------------------- clipping
 
-fn triangleClip() noreturn {
-    reg($s4) scratch: dmem = undefined;
+/// The clipping patch's load point, entered with a triangle to clip. Its
+/// first run loads the patch over itself and runs it; while loaded, the
+/// patch is what runs here.
+export fn _start(
+    reg($a0) vertex1: dmem,
+    reg($a1) vertex2: dmem,
+    reg($a2) vertex3: dmem,
+    reg($v0) cull_mode: i32,
+) align(8) noreturn {
     reg($ra) return_address: u32 = undefined;
-    exact {
-        export geometryTriangleClip:
-        store(u16, clipping_return_address, return_address);
-        geometry_RDPQ_Triangle_Send_End() slot {
-            store(u16, 0x92, scratch);
-        }
-        jump _start() slot {
-            scratch = code.addressOf(_start);
-        }
-    }
-}
-
-@rspq.command(10) extern fn syncTriangles() @rspq.commandSize(4) writes() noreturn;
-@rspq.command(12) extern fn drawTriangleSequence() @rspq.commandSize(8) writes() noreturn;
-
-@rspq.command(11) fn drawTriangleStrip(rdram: u32, count_and_dmem: i32) noreturn {
-    reg($ra) dma_busy: u32;
-    reg($t0) copy_size: i32;
-    reg($s4) dmem_pointer: i32;
-    reg($s2) dmem_end: i32;
-    reg($v0) face_culling_flag: u32;
-    reserved reg($v1) vertex_address: u32;
-    reg($a2) vertex2: u32 = undefined;
-    wait_for_previous_dma:
-    exact {
-        dma_busy = rsp.cp0.dmaBusy();
-        copy_size = count_and_dmem & 0xffff;
-        dmem_pointer = count_and_dmem >> 16;
-        if(dma_busy != 0) goto wait_for_previous_dma slot {
-            dmem_end = dmem_pointer +% copy_size;
-        }
-        rsp.cp0.write(0, dmem_pointer);
-        rsp.cp0.setDmaRdramAddress(rdram);
-        rsp.cp0.startDmaRead(copy_size);
-        dmem_end -%= 3;
-        dmem_pointer -%= 2;
-        do {
-            vertex_address = rsp.cp0.dmaBusy();
-        } while(vertex_address != 0);
-    strip_new:
-        face_culling_flag = load(u8, face_culling);
-        dmem_pointer +%= 2;
-    strip_next:
-        if(dmem_pointer == dmem_end) goto strip_end slot {
-            face_culling_flag ^= 1;
-        }
-        count_and_dmem = load(i16, bitCast(dmem_pointer), 4);
-        rdram = load(u16, bitCast(dmem_pointer), 2);
-        vertex2 = load(u16, bitCast(dmem_pointer));
-        count_and_dmem +%= vertex_buffer;
-        rdram +%= vertex_buffer;
-        vertex2 +%= vertex_buffer;
-        if(count_and_dmem < 0) goto strip_new slot {
-            dmem_pointer +%= 2;
-        }
-        jump geometry_RDPQ_Triangle_Send_Async() slot {
-            dma_busy = code.addressOf(strip_next);
-        }
-    strip_end:
-        if(dmem_end >= 0) jump queue.commandLoop() slot {
-            dma_busy = code.addressOf(commandLoop);
-        }
-    }
-}
-
-fn syncTrianglesImpl() noreturn {
-    reg($s7) clip_loaded: u32;
+    reg($s0) code_address: u32 = load(u32, clipping_code_address);
+    reg code_size: u32 = load(u16, clipping_code_size);
+    // Mark it loaded: the size's low byte is never zero.
+    store(u8, clipping_code_address, code_size);
+    code_size -%= 1;
+    reg pitch: u32 = undefined;
+    // IMEM addresses have bit 12 set, which selects IMEM for the DMA.
     reg($s4) target: dmem = undefined;
-    reg($t0) code_size: i32;
-    reg($t1) pitch: u32 = undefined;
-    reg($t2) dma_flags: u32 = undefined;
-    reg($s0) code_address: u32;
-    reg($ra) return_address: fn() = undefined;
-    exact {
-        export syncTriangles:
-        clip_loaded = load(u8, clipping_code_address);
-        if(clip_loaded == 0) jump geometry_RDPQ_Triangle_Send_End() slot {
-            target = code.addressOf(_start);
+    target = code.addressOf(_start);
+    // Run the patch once it is in place.
+    return_address = code.addressOf(_start);
+    jump dma.in(code_size, pitch, code_address, target);
+}
+
+// ----------------------------------------------------------------- vertices
+
+/// Transforms, lights, and projects vertices into the vertex buffer, two
+/// at a time. The low half of `buffer_size` is the input's byte size;
+/// `addresses` holds the DMEM input address in its high half and the
+/// first output vertex in its low half. The input is staged far enough
+/// past the output that writing a pair never overwrites unread input.
+@rspq.command(4) fn loadVertices(
+    buffer_size: u32,
+    rdram_vertices: u32,
+    addresses: u32,
+) noreturn {
+    reg($v00) vector_zero: vec16 = undefined;
+    reg($v30) powers: vec16 = undefined;
+    reg($v31) shifts: vec16 = undefined;
+    // Short-lived products, and results only the accumulator or the
+    // compare codes need.
+    reg($v29) scratch: vec16 = undefined;
+
+    reg($s4) input: dmem = undefined;
+    input = addresses >> 16;
+    reg($t0) copy_size: u32 = buffer_size & 0xffff;
+    reg input_end: dmem = input +% copy_size;
+    copy_size -%= 1;
+    resolveSegment(rdram_vertices);
+    reg($s0) rdram: u32 = rdram_vertices;
+    reg pitch: u32 = undefined;
+    dma.inAsync(copy_size, pitch, rdram, input);
+
+    // Every product below works on two vertices at once, one per half,
+    // so the matrices and constants are duplicated into both halves.
+    reg normal_matrix: [3]vec16 = undefined;
+    inline for (0..3) |row| {
+        normal_matrix[row][0..4] = load(vec16, matrix_normal, row * 8);
+        normal_matrix[row][4..8] = load(vec16, matrix_normal, row * 8);
+    }
+    reg mvp: [4]vec32 = undefined;
+    loadMatrix(mvp[0], mvp[1], mvp[2], mvp[3], matrix_mvp);
+    reg normal_mask: vec16 = undefined;
+    normal_mask[0..4] = load(vec16, normal_mask_shift, 0);
+    normal_mask[4..8] = load(vec16, normal_mask_shift, 0);
+    reg normal_shift: vec16 = undefined;
+    normal_shift[0..4] = load(vec16, normal_mask_shift, 8);
+    normal_shift[4..8] = load(vec16, normal_mask_shift, 8);
+    // The guard band multiplier, the W of the first clipping plane.
+    reg guard_band: vec16 = undefined;
+    guard_band[0..2] = load(vec16, clipping_planes, 0);
+    guard_band = vector_zero | guard_band.yyyyyyyy;
+    // The screen scale is 8.8: as 16.16 it is shifted right by 8. Lanes 3
+    // and 7 later hold each vertex's 1/W.
+    reg screen_size: vec32 = undefined;
+    screen_size.sint[0..4] = load(vec16, screen_scale_offset, 0);
+    screen_size.sint[4..8] = load(vec16, screen_scale_offset, 0);
+    screen_size.sfract = vmudl(vector_zero, shifts.WWWWWWWW);
+    screen_size.sint = vmadm(screen_size.sint, shifts.WWWWWWWW);
+    screen_size.sfract = vmadn(vector_zero, vector_zero);
+    reg screen_offset: vec16 = undefined;
+    screen_offset[0..4] = load(vec16, screen_scale_offset, 8);
+    screen_offset[4..8] = load(vec16, screen_scale_offset, 8);
+    reg fog_scale: vec16 = undefined;
+    fog_scale[0..4] = load(vec16, fog_scale_offset, 0);
+    fog_scale[6] = vectorMove(fog_scale[2]);
+    reg w_scale: vec16 = undefined;
+    w_scale[0..4] = load(vec16, normalize_w_scale, 0);
+    w_scale[4..8] = load(vec16, normalize_w_scale, 0);
+    // UV generation: the parameters in X Y and Z W, the color exposure in
+    // Z of the high half, and the screen UV scale in W.
+    reg uv_generation: vec16 = undefined;
+    uv_generation[4..8] = load(vec16, uv_generation_parameters, 0);
+    uv_generation[0..2] = load(vec16, uv_generation_parameters, 0);
+    uv_generation[2..4] = load(vec16, uv_generation_parameters, 0);
+    uv_generation[7] = load(vec16, screen_uvgen_scale, 0);
+
+    // Outputs alternate between the pair's two vertices; both advance by a
+    // pair at the top of the loop.
+    reg output_a: dmem = addresses & 0xffff;
+    reg output_b: dmem = output_a -% vertex_size;
+    output_a -%= vertex_pair_size;
+    reg light_end: dmem = load(u8, active_light_size);
+    light_end +%= directional_light_color;
+    reg unlit: u32 = load(u8, triangle_command);
+    reg base_tile_mask: u32 = load(u8, original_code_address);
+    reg fog_offset: u32 = load(u8, fog_store_offset);
+    reg effect: u32 = load(u16, vertex_effect);
+    dma.waitIdle();
+
+    reg position: vec16 = load(vec16, input, 0);
+    reg normal: vec16 = normal_mask & position.wwwwWWWW;
+    normal = vmudn(normal, normal_shift);
+    do {
+        // Unlit vertices take full light.
+        reg light_color: vec16 = vector_zero | fog_scale.zzzzzzzz;
+        reg base_tile: u32 = load(u8, input, input_base_tile);
+        base_tile &= base_tile_mask;
+        output_a +%= vertex_pair_size;
+        output_b +%= vertex_pair_size;
+
+        scratch = vmulf(normal_matrix[0], normal.xxxxXXXX);
+        scratch = vmacf(normal_matrix[1], normal.yyyyYYYY);
+        normal = vmacf(normal_matrix[2], normal.zzzzZZZZ);
+
+        acc = mvp[0] * position.xxxxXXXX;
+        acc += mvp[1] * position.yyyyYYYY;
+        acc += mvp[2] * position.zzzzZZZZ;
+        acc += mvp[3] * powers.WWWWWWWW;
+        reg clip: vec32 = acc;
+
+        // Point lights work in eye space and borrow the MVP registers.
+        reg eye_position_ready: u32 = 0;
+        // Each light's direction and kind load an iteration ahead.
+        reg light: dmem = directional_light_color;
+        reg direction: vec16 = undefined;
+        rsp.vector.loadPackedSigned(direction, light, light_direction);
+        reg is_point: u32 = load(u8, light, light_is_point);
+        if (unlit == 0) {
+            // The ambient color precedes the lights.
+            rsp.vector.loadPackedUnsigned(light_color, light, -8);
+            while (light != light_end) {
+                reg light_scale: vec16 = vmulf(normal, direction);
+                reg color: vec16 = undefined;
+                rsp.vector.loadPackedUnsigned(color, light, 0);
+                if (is_point != 0) {
+                    @branchHint(.cold);
+                    pointLight(light, light_scale, mvp[0], mvp[1], mvp[2], mvp[3], position, normal, eye_position_ready, scratch, vector_zero, powers, shifts);
+                }
+                // The color times each lane of the scaled direction,
+                // accumulated: a dot product without the summing stalls.
+                scratch = vmulu(color, light_scale.xxxxXXXX);
+                scratch = vmacu(color, light_scale.yyyyYYYY);
+                scratch = vmacu(color, light_scale.zzzzZZZZ);
+                light_color = vectorAdd(light_color, scratch);
+                light +%= light_size;
+                rsp.vector.loadPackedSigned(direction, light, light_direction);
+                is_point = load(u8, light, light_is_point);
+            }
         }
-        code_size = load(u16, clipping_code_size);
-        dma_flags = 0;
-        code_address = load(u32, original_code_address);
-        dma.exec(code_size, pitch, code_address, target, dma_flags) slot {
-            code_size -%= 1;
+        if (eye_position_ready != 0) {
+            @branchHint(.cold);
+            loadMatrix(mvp[0], mvp[1], mvp[2], mvp[3], matrix_mvp);
         }
+
+        // Clip codes: against W for trivial rejection, against the guard
+        // band for clipping. Each holds the pair's codes in its low and
+        // high nibbles.
+        reg plane_w: vec32 = undefined;
+        plane_w.sfract = vmudm(guard_band, clip.sfract.wwwwWWWW);
+        plane_w.sint = vmadh(guard_band, clip.sint.wwwwWWWW);
+        plane_w.sfract = vmadn(vector_zero, vector_zero);
+        scratch = vectorClipHigh(clip.sint, clip.sint.wwwwWWWW);
+        scratch = vectorClipLow(clip.sfract, clip.sfract.wwwwWWWW);
+        reg reject_codes: u32 = rsp.vector.getCompareCode();
+        scratch = vectorClipHigh(clip.sint, plane_w.sint);
+        scratch = vectorClipLow(clip.sfract, plane_w.sfract);
+        reg clip_codes: u32 = rsp.vector.getCompareCode();
+        reg clip_a: u32 = undefined;
+        packClipCodes(clip_a, clip_codes);
+        clip_a |= base_tile;
+        clip_codes >>= 4;
+        reg clip_b: u32 = undefined;
+        packClipCodes(clip_b, clip_codes);
+        clip_b |= base_tile;
+        reg reject_a: u32 = undefined;
+        packRejectCodes(reject_a, reject_codes);
+        reject_codes >>= 4;
+        reg reject_b: u32 = undefined;
+        packRejectCodes(reject_b, reject_codes);
+
+        reg color: vec16 = undefined;
+        rsp.vector.loadPackedUnsigned(color, input, input_color);
+        reg texture: vec16 = undefined;
+        texture[0..4] = load(vec16, input, input_texture);
+        color = vmulf(color, light_color);
+        color = vmudm(color, shifts.ZZZZZZZZ);
+        color = vmudh(color, uv_generation.ZZZZZZZZ);
+        rsp.vector.storePackedUnsigned(color, 0, output_a, vertex_color);
+        rsp.vector.storePackedUnsigned(color, 4, output_b, vertex_color);
+
+        clip.sfract = vmudl(clip.sfract, w_scale);
+        clip.sint = vmadm(clip.sint, w_scale);
+        clip.sfract = vmadn(vector_zero, vector_zero);
+        store(vec32, output_a, clip[0..4], vertex_clip_position);
+        store(vec32, output_b, clip[4..8], vertex_clip_position);
+
+        // 1/W of both vertices, chained through the reciprocal unit.
+        screen_size.sint[3] = vectorReciprocalHigh(clip.sint[3]);
+        screen_size.sfract[3] = vectorReciprocalLow(clip.sfract[3]);
+        screen_size.sint[3] = vectorReciprocalHigh(clip.sint[7]);
+        screen_size.sfract[7] = vectorReciprocalLow(clip.sfract[7]);
+        screen_size.sint[7] = vectorReciprocalHigh(vector_zero[7]);
+        store(vec16, output_a, screen_size.sint[3], vertex_inverse_w);
+        store(vec16, output_a, screen_size.sfract[3], vertex_inverse_w + 2);
+        store(vec16, output_b, screen_size.sint[7], vertex_inverse_w);
+        store(vec16, output_b, screen_size.sfract[7], vertex_inverse_w + 2);
+
+        // Fog: (Z + offset) * scale, as 1.0 minus it, below the limit.
+        reg fog: vec32 = undefined;
+        fog.sfract = vectorAddCarry(clip.sfract, fog_scale.yyyyyyyy);
+        fog.sint = vectorAdd(clip.sint, fog_scale.xxxxxxxx);
+        fog.sint = vmudh(fog.sint, fog_scale.wwwwwwww);
+        reg fog_value: vec16 = vectorSubtract(fog_scale, fog.sint.zzzzZZZZ);
+        fog_value = vmudn(fog_value, powers.ZZZZZZZZ);
+
+        // Project: position * 1/W * scale + offset.
+        clip = clip * screen_size.wwwwWWWW;
+        acc = clip * screen_size;
+        acc += screen_offset * powers.WWWWWWWW;
+        reg screen: vec16 = acc;
+
+        // Texture coordinates: S T of both vertices in lanes 0-3.
+        texture = vectorAddCarry(texture, uv_generation);
+        if (effect != 0) {
+            @branchHint(.cold);
+            sphericalTexture(texture, screen, screen_offset, normal, uv_generation, vector_zero);
+        }
+
+        // The next pair's position and normal.
+        input +%= input_pair_size;
+        position = load(vec16, input, 0);
+        normal = normal_mask & position.wwwwWWWW;
+        normal = vmudn(normal, normal_shift);
+
+        // The codes share the screen position's last halfword, and fog
+        // overwrites the alpha or S, so they follow those.
+        store(vec16, output_a, screen[0..4], 0);
+        store(vec16, output_b, screen[4..8], 0);
+        store(u8, output_a, clip_a, vertex_clip_flags);
+        store(u8, output_a, reject_a, vertex_reject_flags);
+        store(u8, output_b, clip_b, vertex_clip_flags);
+        store(u8, output_b, reject_b, vertex_reject_flags);
+        reg fog_a: dmem = output_a +% fog_offset;
+        reg fog_b: dmem = output_b +% fog_offset;
+        store(vec16, fog_a, fog_value[2], 0);
+        store(vec16, fog_b, fog_value[6], 0);
+
+        store(vec16, output_a, texture[0..2], vertex_texture);
+        store(vec16, output_b, texture[2..4], vertex_texture);
+    } while (input != input_end);
+    tail queue.commandLoop();
+}
+
+/// Loads a matrix with each row in both halves.
+fn loadMatrix(row0: vec32, row1: vec32, row2: vec32, row3: vec32, reg($at) matrix: dmem) {
+    row0[0..4] = load(vec32, matrix, 0);
+    row0[4..8] = load(vec32, matrix, 0);
+    row1[0..4] = load(vec32, matrix, 16);
+    row1[4..8] = load(vec32, matrix, 16);
+    row2[0..4] = load(vec32, matrix, 32);
+    row2[4..8] = load(vec32, matrix, 32);
+    row3[0..4] = load(vec32, matrix, 48);
+    row3[4..8] = load(vec32, matrix, 48);
+}
+
+/// Packs the X Y Z codes of one vertex's +planes (bits 0-2) and -planes
+/// (bits 8-10) into five bits; far Z is never clipped, only rejected.
+inline fn packClipCodes(result: u32, codes: u32) {
+    result = codes & 0x0307;
+    reg high: u32 = result >> 5;
+    result |= high;
+}
+
+/// Packs a vertex's rejection codes, inverted so that ORing three
+/// vertices' codes leaves a zero for a plane all of them are outside.
+inline fn packRejectCodes(result: u32, codes: u32) {
+    result = codes & 0x0707;
+    reg high: u32 = result >> 5;
+    result = result ~| high;
+}
+
+/// Lights both vertices by the point light at `light`, replacing
+/// `light_scale` with the light's direction scaled by its falloff. The
+/// vertices' eye-space positions are computed once per pair. Every vector
+/// register is in use here, so `eye_position`, `sum`, `to_light`, and
+/// `square` are the caller's MVP rows, which it reloads afterwards,
+/// `position` is overwritten, and products accumulate through `scratch`.
+inline fn pointLight(
+    light: dmem,
+    light_scale: vec16,
+    eye_position: vec32,
+    sum: vec32,
+    to_light: vec32,
+    square: vec32,
+    position: vec16,
+    normal: vec16,
+    eye_position_ready: u32,
+    scratch: vec16,
+    vector_zero: vec16,
+    powers: vec16,
+    shifts: vec16,
+) {
+    reg size: u32 = load(u16, light, light_point_size);
+    if (eye_position_ready == 0) {
+        loadMatrix(eye_position, sum, to_light, square, matrix_mv);
+        scratch = vmudn(eye_position.sfract, position.xxxxXXXX);
+        scratch = vmadh(eye_position.sint, position.xxxxXXXX);
+        scratch = vmadn(sum.sfract, position.yyyyYYYY);
+        scratch = vmadh(sum.sint, position.yyyyYYYY);
+        scratch = vmadn(to_light.sfract, position.zzzzZZZZ);
+        scratch = vmadh(to_light.sint, position.zzzzZZZZ);
+        eye_position.sfract = vmadn(square.sfract, powers.WWWWWWWW);
+        eye_position.sint = vmadh(square.sint, powers.WWWWWWWW);
+        // Down to the light positions' scale.
+        eye_position.sfract = vmudl(eye_position.sfract, shifts.wwwwwwww);
+        eye_position.sint = vmadm(eye_position.sint, shifts.wwwwwwww);
+        eye_position.sfract = vmadn(vector_zero, vector_zero);
+        eye_position_ready = 1;
+    }
+    // The top bit of the size ignores the normal.
+    reg ignore_normal: u32 = size >> 15;
+    size &= 0x7fff;
+
+    // The vector from the vertex to the light, its length, and the size
+    // as 16.16 in W.
+    to_light.sint[0..4] = load(vec16, light, light_point_position);
+    to_light.sint[4..8] = load(vec16, light, light_point_position);
+    to_light.sint = vmudm(to_light.sint, shifts.YYYYYYYY);
+    to_light.sfract = vmadn(vector_zero, vector_zero);
+    to_light = to_light - eye_position;
+    scratch = vmudl(to_light.sfract, to_light.sfract);
+    scratch = vmadm(to_light.sint, to_light.sfract);
+    square.sfract = vmadn(to_light.sfract, to_light.sint);
+    square.sint = vmadh(to_light.sint, to_light.sint);
+    sum = square + square.yyyyYYYY;
+    square += sum.zzzzZZZZ;
+    sum.sint[3] = size;
+    sum.sfract[3] = vectorMove(vector_zero[0]);
+
+    // 1/length of both vectors, then size/length as the falloff.
+    square.sint[0] = vectorReciprocalSquareRootHigh(square.sint[0]);
+    square.sfract[0] = vectorReciprocalSquareRootLow(square.sfract[0]);
+    square.sint[0] = vectorReciprocalSquareRootHigh(square.sint[4]);
+    square.sfract[4] = vectorReciprocalSquareRootLow(square.sfract[4]);
+    square.sint[4] = vectorReciprocalSquareRootHigh(vector_zero[0]);
+    scratch = vmudl(square.sfract, sum.sfract.wwwwwwww);
+    scratch = vmadm(square.sint, sum.sfract.wwwwwwww);
+    scratch = vmadn(square.sfract, sum.sint.wwwwwwww);
+    light_scale = vmadh(square.sint, sum.sint.wwwwwwww);
+    light_scale = vmulf(light_scale, light_scale);
+    if (ignore_normal == 0) {
+        // The normalized direction times the squared falloff, dotted with
+        // the normal by the caller. The extra shift moves the fraction
+        // into the integer so the product does not clamp.
+        square = square * shifts.WWWWWWWW;
+        scratch = vmudl(to_light.sfract, square.sfract.xxxxXXXX);
+        scratch = vmadm(to_light.sint, square.sfract.xxxxXXXX);
+        scratch = vmadn(to_light.sfract, square.sint.xxxxXXXX);
+        position = vmadh(to_light.sint, square.sint.xxxxXXXX);
+        position = vmulf(position, light_scale.xxxxXXXX);
+        light_scale = vmulf(position, normal);
+    } else {
+        // Size only: the caller's dot product sees just X.
+        light_scale[1] = vectorMove(vector_zero[0]);
+        light_scale[2] = vectorMove(vector_zero[0]);
+        light_scale[5] = vectorMove(vector_zero[0]);
+        light_scale[6] = vectorMove(vector_zero[0]);
+    }
+}
+
+/// Spherical environment mapping: texture coordinates from the normal,
+/// offset by the vertex's distance from the screen center so the
+/// reflection follows the view. Both vertices' S T end up in lanes 0-3.
+inline fn sphericalTexture(
+    texture: vec16,
+    screen: vec16,
+    screen_offset: vec16,
+    normal: vec16,
+    uv_generation: vec16,
+    vector_zero: vec16,
+) {
+    reg offset: vec16 = vectorCompareGreaterOrEqual(screen, vector_zero.xxxxxxxx);
+    offset = vectorSubtractCarry(offset, screen_offset);
+    offset = vectorCompareLessThan(offset, screen_offset);
+    texture = vmulf(normal, uv_generation);
+    // Undo the screen projection into a normalized factor, fade it as the
+    // normal turns from the camera, and scale it to the texture.
+    offset = vmudn(offset, uv_generation.WWWWWWWW);
+    offset = vmulf(offset, normal.zzzzZZZZ);
+    offset = vmulf(offset, uv_generation.xxxxxxxx);
+    texture = vectorAddCarry(texture, uv_generation.xxxxxxxx);
+    texture = vectorAddCarry(texture, offset);
+    // The second vertex's S T into lanes 2-3, where the caller stores it.
+    texture[2] = vectorMove(texture[4]);
+    texture[3] = vectorMove(texture[5]);
+}
+
+// ---------------------------------------------------------------- triangles
+
+// Each triangle's RDP command is built in one of two buffers at the start
+// of the clipping workspace, so one is written while the other's DMA runs.
+const triangle_buffer_size: u32 = 176;
+
+// W of the clip-space position, and 1/W, as integer and fraction.
+const vertex_w_integer: u32 = vertex_clip_position + 6;
+const vertex_w_fraction: u32 = vertex_clip_position + 14;
+const vertex_inverse_w_fraction: u32 = vertex_inverse_w + 2;
+
+/// Builds the RDP triangle for the buffered vertices `vertex1`-`vertex3`
+/// and starts its DMA. `cull_mode` is 0 to cull front faces, 1 for back
+/// faces, or 2 to keep both. Returns without drawing a trivially rejected
+/// or culled triangle; one that crosses the guard band goes to the clipping
+/// patch, which draws it and then returns here to the caller.
+///
+/// Strips, sequences, and the clipping patch keep values in $s1, $s2, $s4,
+/// $v0, and $v1 across this call, so it leaves them alone.
+pub export fn sendTriangle(
+    reg($a0) vertex1: dmem,
+    reg($a1) vertex2: dmem,
+    reg($a2) vertex3: dmem,
+    reg($v0) cull_mode: i32,
+) {
+    // Dispatcher constants: $v00 is zero and $v30 holds the powers of two
+    // from 128 down to 1.
+    reg($v00) vector_zero: vec16 = undefined;
+    reg($v30) powers: vec16 = undefined;
+    reserved reg($v1) sequence_step: u32 = undefined;
+
+    // ---------------------------------------------------- load and sort
+    // Each row holds X Y, then the vertex address in lane 3. The flags
+    // halfword has clip codes and the tile index in its high byte and
+    // inverted reject codes in its low byte.
+    reg vall1: vec16 = undefined;
+    reg vall2: vec16 = undefined;
+    reg vall3: vec16 = undefined;
+    vall1[3] = vertex1;
+    vall2[3] = vertex2;
+    vall1[0..2] = load(vec16, vertex1, 0);
+    vall2[0..2] = load(vec16, vertex2, 0);
+    vall3[0..2] = load(vec16, vertex3, 0);
+    reg flags: i32 = load(u16, vertex1, vertex_clip_flags);
+    reg negative_powers: vec16 = vectorSubtractCarry(vector_zero, powers);
+    reg vy1: vec16 = vall1.yyyyyyyy;
+    // Constant compares would need $v1.
+    reg all_inside: i32 = 0xff;
+    reg vy2: vec16 = vall2.yyyyyyyy;
+    reg flags2: i32 = load(u16, vertex2, vertex_clip_flags);
+    reg vy3: vec16 = vall3.yyyyyyyy;
+    vall3[3] = vertex3;
+    // A carrying add also clears VCO, so the first compare breaks Y ties
+    // the same way every time.
+    reg vk1: vec16 = vectorAddCarry(vector_zero, powers.WWWWWWWW);
+    reg flags3: i32 = load(u16, vertex3, vertex_clip_flags);
+    reg buffer_offset: u32 = load(u16, triangle_buffer_offset);
+
+    // Sort-of-three by Y: compare the keys, merge the rows, and remember
+    // each swap so the winding can be recovered.
+    reg vytmp1: vec16 = vectorCompareGreaterOrEqual(vy1, vy2);
+    flags |= flags2;
+    reg valltmp1: vec16 = vectorSelectByCompareCode(vall1, vall2);
+    flags |= flags3;
+    vy1 = vectorCompareLessThan(vy1, vy2);
+    reg swap1: i32 = rsp.vector.getCompareCode();
+    vall1 = vectorSelectByCompareCode(vall1, vall2);
+    // A plane all three vertices are outside leaves a zero in the low byte.
+    reg inside: i32 = flags & 0xff;
+    reg vhml_upper: vec16 = 0;
+    reg vytmp2: vec16 = vectorCompareGreaterOrEqual(vy1, vy3);
+    if (inside != all_inside) {
+        return;
+    }
+    // The tile index is in the top three bits.
+    reg tile: i32 = flags >> 13;
+    reg valltmp2: vec16 = vectorSelectByCompareCode(vall1, vall3);
+    reg command: i32 = load(i32, triangle_command);
+    vy1 = vectorCompareLessThan(vy1, vy3);
+    reg swap2: i32 = rsp.vector.getCompareCode();
+    vall1 = vectorSelectByCompareCode(vall1, vall3);
+    // A clip code means the triangle crosses the guard band.
+    reg clip_codes: i32 = flags & 0x1f00;
+    vy3 = vectorCompareGreaterOrEqual(vytmp1, vytmp2);
+    reg output: dmem = buffer_offset +% clipping_buffer_temporary;
+    vall3 = vectorSelectByCompareCode(valltmp1, valltmp2);
+    store(vec16, output, vy1[0], 6);
+    vy2 = vectorCompareLessThan(vytmp1, vytmp2);
+    reg swap3: i32 = rsp.vector.getCompareCode();
+    vall2 = vectorSelectByCompareCode(valltmp1, valltmp2);
+    // The face to cull: the parity of the sort's swaps, against `cull_mode`.
+    reg cull_face: i32 = swap1 ^ swap2;
+    if (clip_codes != 0) tail clipTriangle(vertex1, vertex2, vertex3, cull_mode);
+
+    // ------------------------------------------------ edges and normal
+    //   vhml = HX HY MX MY LX LY 0 NZf, with M and L in the temporaries.
+    reg vhml: vec16 = vectorSubtractCarry(vall3, vall1);
+    cull_face ^= swap3;
+    reg vm: vec16 = vectorSubtractCarry(vall2, vall1);
+    reg sorted1: dmem = undefined;
+    sorted1 = vall1[3];
+    reg vl: vec16 = vectorSubtractCarry(vall3, vall2);
+    reg sorted2: dmem = undefined;
+    sorted2 = vall2[3];
+    reg vx12: vec32 = undefined;
+    vx12.sfract[0] = vectorMove(vall1[0]);
+    cull_face &= 1;
+    vx12.sfract[2] = vectorMove(vall2[0]);
+    cull_face ^= cull_mode;
+    reg negative_my: vec16 = vectorSubtractCarry(vector_zero, vm.yyyyyyyy);
+    reg sorted3: dmem = undefined;
+    sorted3 = vall3[3];
+    // FY = floor(Y1) - Y1 as s15.16.
+    reg vfy: vec32 = undefined;
+    vfy.sfract = vectorShiftLeft8(vy1, 14);
+    store(vec16, output, vy2[0], 4);
+    vfy.sint = vectorShiftRightArithmetic(vy1, 2);
+    // The next triangle goes to the other buffer.
+    buffer_offset ^= triangle_buffer_size;
+    // NZ = MX * HY - HX * MY.
+    reg vnz: vec32 = undefined;
+    vnz.sfract = vmudh(vm, vhml.yyyyyyyy);
+    store(vec16, output, vy3[0], 2);
+    vnz.sfract = vmadh(vhml, negative_my);
+    store(vec16, output, vm[0..2], 8);
+    vnz.sint = readVectorAccumulatorHigh();
+    store(vec16, output, vl[0..2], 12);
+    vnz.sfract = readVectorAccumulatorMiddle();
+    vhml[2..6] = load(vec16, output, 8);
+    vfy.sfract = vectorSubtractCarry(vector_zero, vfy.sfract);
+    reg color_dmem: dmem = output +% 0x20;
+    vfy.sint = vectorSubtract(vfy.sint, vfy.sint);
+
+    // --------------------------------------------- slope reciprocals
+    //   slope = 1/HY -- 1/MY -- 1/LY -- -- 1/NZ
+    reg vw: vec32 = undefined;
+    reg vslope: vec32 = undefined;
+    vw.sfract[0] = load(vec16, sorted1, vertex_w_fraction);
+    vslope.sint[7] = vectorReciprocalHigh(vnz.sint[0]);
+    reg back_facing: i32 = undefined;
+    back_facing = vnz.sint[0];
+    vslope.sfract[7] = vectorReciprocalLow(vnz.sfract[0]);
+    vw.sfract[2] = load(vec16, sorted2, vertex_w_fraction);
+    vslope.sint[7] = vectorReciprocalHigh(vector_zero[0]);
+    vw.sfract[4] = load(vec16, sorted3, vertex_w_fraction);
+    vslope.sfract[0] = vectorReciprocal(vhml[1]);
+    back_facing = back_facing < 0;
+    vslope.sint[0] = vectorReciprocalHigh(vhml[1]);
+    vslope.sfract[2] = vectorReciprocal(vm[1]);
+    if (back_facing == cull_face) {
+        return;
+    }
+    vslope.sint[2] = vectorReciprocalHigh(vm[1]);
+    vw.sint[0] = load(vec16, sorted1, vertex_w_integer);
+    vslope.sfract[4] = vectorReciprocal(vl[1]);
+    vw.sint[2] = load(vec16, sorted2, vertex_w_integer);
+    vslope.sint[4] = vectorReciprocalHigh(vl[1]);
+    vw.sint[4] = load(vec16, sorted3, vertex_w_integer);
+
+    // One Newton-Raphson pass over NZ (32-bit) and HY/MY/LY (16-bit):
+    //   vhml_upper = 0 0 0 0 0 0 0 NZi, so vhml/vhml_upper form 32-bit X.
+    vhml[7] = vectorMove(vnz.sfract[0]);
+    reg left_major: i32 = back_facing ^ 1;
+    vhml_upper[7] = vectorMove(vnz.sint[0]);
+    left_major <<= 7;
+    // slope_m2 = -2 * R
+    reg vslope_m2: vec32 = undefined;
+    vslope_m2.sfract = vmudn(vslope.sfract, negative_powers.YYYYYYYY);
+    reg vattr3: vec16 = undefined;
+    rsp.vector.loadPackedUnsigned(vattr3, sorted3, vertex_color);
+    vslope_m2.sint = vmadh(vslope.sint, negative_powers.YYYYYYYY);
+    reg vattr1: vec16 = undefined;
+    rsp.vector.loadPackedUnsigned(vattr1, sorted1, vertex_color);
+    // Minimum W between lanes 0 and 2.
+    reg discard: vec16 = vectorSubtractCarry(vw.sfract, vw.sfract.zzzzzzzz);
+    reg vattr2: vec16 = undefined;
+    rsp.vector.loadPackedUnsigned(vattr2, sorted2, vertex_color);
+    vw.sint = vectorCompareLessThan(vw.sint, vw.sint.zzzzzzzz);
+    command |= left_major;
+    vw.sfract = vectorSelectByCompareCode(vw.sfract, vw.sfract.zzzzzzzz);
+    reg vinvw: vec32 = undefined;
+    vinvw.sfract[6] = load(vec16, sorted3, vertex_inverse_w_fraction);
+    // R * X/2 - 1
+    reg vtmp: vec32 = undefined;
+    vtmp.sfract = vmudl(vslope.sfract, vhml.yywwYYWW);
+    vinvw.sfract[4] = load(vec16, sorted1, vertex_inverse_w_fraction);
+    vtmp.sfract = vmadm(vslope.sint, vhml.yywwYYWW);
+    vinvw.sfract[5] = load(vec16, sorted2, vertex_inverse_w_fraction);
+    vtmp.sfract = vmadn(vslope.sfract, vhml_upper);
+    reg tex_dmem: dmem = command & 0x400;
+    vtmp.sint = vmadh(vslope.sint, vhml_upper);
+    tex_dmem >>>= 4;
+    vtmp.sfract = vmadn(vk1, negative_powers.WWWWWWWW);
+    reg negated_my: i32 = undefined;
+    negated_my = vhml[3];
+    vtmp.sint = vmadh(vk1, negative_powers.WWWWWWWW);
+    reg negated_hx: i32 = undefined;
+    negated_hx = vhml[0];
+    // Minimum W between lanes 0 and 4.
+    discard = vectorSubtractCarry(vw.sfract, vw.sfract.XXXXXXXX);
+    vinvw.sint[5] = load(vec16, sorted2, vertex_inverse_w);
+    vw.sint = vectorCompareLessThan(vw.sint, vw.sint.XXXXXXXX);
+    vinvw.sint[6] = load(vec16, sorted3, vertex_inverse_w);
+    vw.sfract = vectorSelectByCompareCode(vw.sfract, vw.sfract.XXXXXXXX);
+    vinvw.sint[4] = load(vec16, sorted1, vertex_inverse_w);
+    // X * (2 - R*X)
+    discard = vmudl(vtmp.sfract, vslope_m2.sfract);
+    tex_dmem +%= color_dmem;
+    discard = vmadm(vtmp.sint, vslope_m2.sfract);
+    reg z_dmem: dmem = command & 0x200;
+    vnz.sfract = vmadn(vtmp.sfract, vslope_m2.sint);
+    command |= tile;
+    vnz.sint = vmadh(vtmp.sint, vslope_m2.sint);
+    store(i16, output, command);
+
+    // ----------------------------------------- slopes and edge starts
+    reg($ra) return_address: i32 = undefined;
+    // Normalize 1/W by the minimum W into 0..1.
+    discard = vmudl(vinvw.sfract, vw.sfract.xxxxxxxx);
+    reg vtex1: vec16 = undefined;
+    vtex1[4..6] = load(vec16, sorted1, vertex_texture);
+    discard = vmadm(vinvw.sint, vw.sfract.xxxxxxxx);
+    reg vtex2: vec16 = undefined;
+    vtex2[4..6] = load(vec16, sorted2, vertex_texture);
+    vinvw.sfract = vmadn(vinvw.sfract, vw.sint.xxxxxxxx);
+    reg vtex3: vec16 = undefined;
+    vtex3[4..6] = load(vec16, sorted3, vertex_texture);
+    // slope = HX/HY -- MX/MY -- LX/LY
+    discard = vmudn(vnz.sfract, vhml);
+    negated_my = -negated_my;
+    discard = vmadh(vnz.sint, vhml);
+    negated_hx = -negated_hx;
+    vslope.sfract = readVectorAccumulatorMiddle();
+    vhml[3] = negated_my;
+    vslope.sint = readVectorAccumulatorHigh();
+    vhml[0] = negated_hx;
+    // An exact 1.0 would wrap to 0; one less is "almost 1".
+    vinvw.sfract = vectorSubtractCarry(vinvw.sfract, powers.WWWWWWWW);
+    // Merge only S/T (lanes 4 and 5) into the attributes later.
+    reg st_lanes: i32 = 0xcf;
+    // RGBA was loaded as 8.7; shift back to raw bytes, then add Z.
+    vattr1 = vectorShiftRightLogical(vattr1, 7);
+    vattr1[7] = load(vec16, sorted1, 4);
+    vattr2 = vectorShiftRightLogical(vattr2, 7);
+    rsp.vector.setCompareCode(st_lanes);
+    vattr3 = vectorShiftRightLogical(vattr3, 7);
+    vattr2[7] = load(vec16, sorted2, 4);
+    // VMULF takes 0.15 inputs.
+    vinvw.sfract = vectorShiftRightLogical(vinvw.sfract, 1);
+    vattr3[7] = load(vec16, sorted3, 4);
+    // XH and XM from Y1's fraction.
+    discard = vmudl(vslope.sfract, vfy.sfract.XXXXXXXX);
+    z_dmem >>>= 3;
+    discard = vmadm(vslope.sint, vfy.sfract.XXXXXXXX);
+    reg prim_size: i32 = command & 0x100;
+    reg vedges: vec32 = undefined;
+    vedges.sfract = vmadn(vslope.sfract, vfy.sint.XXXXXXXX);
+    reg dma_busy: u32 = rsp.cp0.dmaBusy();
+    vedges.sint = vmadh(vslope.sint, vfy.sint.XXXXXXXX);
+    store(vec16, output, vinvw.sfract[4..8], 16);
+    // S/T * 1/W
+    vtex1 = vmulf(vtex1, vinvw.sfract.xxxxXXXX);
+    vattr1[6] = load(vec16, output, 16);
+    vtex2 = vmulf(vtex2, vinvw.sfract.yyyyYYYY);
+    vattr2[6] = load(vec16, output, 18);
+    vtex3 = vmulf(vtex3, vinvw.sfract.zzzzZZZZ);
+    vattr3[6] = load(vec16, output, 20);
+    // X1, X2 as s15.16.
+    vx12.sint = vectorShiftRightArithmetic(vx12.sfract, 2);
+    // Only one triangle's DMA is in flight at a time: wait out the last.
+    while (dma_busy != 0) {
+        @branchHint(.cold);
+        dma_busy = rsp.cp0.dmaBusy();
+    }
+    reg syncfull: u32 = load(u8, rdp_syncfull_ongoing);
+    vx12.sfract = vectorShiftLeft8(vx12.sfract, 14);
+    prim_size >>>= 4;
+    vattr1 = vectorSelectByCompareCode(vattr1, vtex1);
+    z_dmem +%= tex_dmem;
+    vattr2 = vectorSelectByCompareCode(vattr2, vtex2);
+    store(vec16, output, vslope.sint[4], 12);
+    vattr3 = vectorSelectByCompareCode(vattr3, vtex3);
+    reg rdram: i32 = load(i32, rdp_current);
+    vedges.sfract = vectorAddCarry(vedges.sfract, vx12.sfract.xxxxxxxx);
+    store(vec16, output, vx12.sint[2], 8);
+    vedges.sint = vectorAdd(vedges.sint, vx12.sint.xxxxxxxx);
+    store(vec16, output, vslope.sfract[4], 14);
+    // Everything up to `rdram` is in RDRAM by now: let the RDP start on
+    // it, unless a full sync holds DP_END.
+    if (syncfull == 0) {
+        rsp.cp0.setRdpCommandEnd(rdram);
+    }
+    // Clear VCO/VCC for the subtractions below.
+    vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
+
+    // ------------------------------------------------------ attributes
+    // MA = A2 - A1, HA = A3 - A1 (saturating; S/T are s10.5).
+    reg vma: vec16 = vectorSubtract(vattr2, vattr1);
+    store(vec16, output, vx12.sfract[2], 10);
+    reg vha: vec16 = vectorSubtract(vattr3, vattr1);
+    prim_size +%= z_dmem;
+    // 1/NZ << 2 for the coefficient precision.
+    vnz.sfract = vmudn(vnz.sfract, powers.YYYYYYYY);
+    store(vec16, output, vslope.sint[2], 28);
+    vnz.sint = vmadh(vnz.sint, powers.YYYYYYYY);
+    store(vec16, output, vslope.sfract[2], 30);
+    // DX = MA * HY + HA * -MY
+    reg vdx: vec32 = undefined;
+    vdx.sfract = vmudh(vma, vhml.yyyyyyyy);
+    store(vec16, output, vedges.sint[2], 24);
+    vdx.sfract = vmadh(vha, vhml.wwwwwwww);
+    store(vec16, output, vedges.sfract[2], 26);
+    vdx.sfract = readVectorAccumulatorMiddle();
+    store(vec16, output, vedges.sint[0], 16);
+    vdx.sint = readVectorAccumulatorHigh();
+    store(vec16, output, vedges.sfract[0], 18);
+    // DY = HA * MX + MA * -HX
+    reg vdy: vec32 = undefined;
+    vdy.sfract = vmudh(vha, vhml.zzzzzzzz);
+    store(vec16, output, vslope.sint[0], 20);
+    vdy.sfract = vmadh(vma, vhml.xxxxxxxx);
+    store(vec16, output, vslope.sfract[0], 22);
+    vdy.sfract = readVectorAccumulatorMiddle();
+    rsp.cp0.setDmaMemoryAddress(output);
+    vdy.sint = readVectorAccumulatorHigh();
+    reg sentinel: i32 = load(i32, rdp_sentinel);
+    // DX * 1/NZ
+    discard = vmudl(vdx.sfract, vnz.sfract.WWWWWWWW);
+    prim_size = prim_size - output;
+    discard = vmadm(vdx.sint, vnz.sfract.WWWWWWWW);
+    output +%= prim_size;
+    vdx.sfract = vmadn(vdx.sfract, vnz.sint.WWWWWWWW);
+    rsp.cp0.setDmaRdramAddress(rdram);
+    vdx.sint = vmadh(vdx.sint, vnz.sint.WWWWWWWW);
+    store(u16, triangle_buffer_offset, buffer_offset);
+    // DY * 1/NZ
+    discard = vmudl(vdy.sfract, vnz.sfract.WWWWWWWW);
+    rdram += prim_size;
+    discard = vmadm(vdy.sint, vnz.sfract.WWWWWWWW);
+    reg buffer_full: i32 = undefined;
+    buffer_full = sentinel < rdram;
+    vdy.sfract = vmadn(vdy.sfract, vnz.sint.WWWWWWWW);
+    store(vec16, color_dmem, vdx.sfract[0..4], 24);
+    vdy.sint = vmadh(vdy.sint, vnz.sint.WWWWWWWW);
+    store(vec16, tex_dmem, vdx.sfract[4..8], 24);
+    // DE = DX * 1/HY + DY, continuing the DY accumulation.
+    discard = vmadl(vdx.sfract, vslope.sfract.xxxxxxxx);
+    store(vec16, color_dmem, vdx.sint[0..4], 8);
+    discard = vmadm(vdx.sint, vslope.sfract.xxxxxxxx);
+    store(vec16, tex_dmem, vdx.sint[4..8], 8);
+    reg vde: vec32 = undefined;
+    vde.sfract = vmadn(vdx.sfract, vslope.sint.xxxxxxxx);
+    store(vec16, color_dmem, vdy.sfract[0..4], 56);
+    vde.sint = vmadh(vdx.sint, vslope.sint.xxxxxxxx);
+    store(vec16, tex_dmem, vdy.sfract[4..8], 56);
+    if (buffer_full != 0) {
+        @branchHint(.cold);
+        // Swap to the other dynamic buffer; the DMA already started below
+        // targets the new one. rdpSetBuffer returns through $ra.
+        reg caller: i32 = return_address;
+        rdram = load(i32, rdp_buffers, 4);
+        reg previous: i32 = load(i32, rdp_buffers);
+        store(RdpBufferState.current, rdp_buffers, rdram);
+        store(RdpBufferState.previous, rdp_buffers, previous);
+        // Each buffer is 64 KiB.
+        reg new_sentinel: i32 = 0x10000;
+        new_sentinel += rdram;
+        reg start: i32 = rdram;
+        queue.rdpSetBuffer(rdram, start, new_sentinel);
+        rsp.cp0.setDmaRdramAddress(rdram);
+        rdram +%= prim_size;
+        return_address = caller;
+    }
+
+    // FINAL = A1 + DE * FY
+    discard = vmudh(vattr1, powers.WWWWWWWW);
+    store(vec16, color_dmem, vdy.sint[0..4], 40);
+    discard = vmadl(vde.sfract, vfy.sfract.XXXXXXXX);
+    store(vec16, tex_dmem, vdy.sint[4..8], 40);
+    discard = vmadm(vde.sint, vfy.sfract.XXXXXXXX);
+    store(vec16, color_dmem, vde.sfract[0..4], 48);
+    reg vfinal: vec32 = undefined;
+    vfinal.sfract = vmadn(vde.sfract, vfy.sint.XXXXXXXX);
+    store(vec16, tex_dmem, vde.sfract[4..8], 48);
+    vfinal.sint = vmadh(vde.sint, vfy.sint.XXXXXXXX);
+    store(vec16, color_dmem, vde.sint[0..4], 32);
+    // Pack the Z values so one store each writes them.
+    vdy.sfract[6] = vectorMove(vdy.sint[7]);
+    store(vec16, tex_dmem, vde.sint[4..8], 32);
+    vde.sfract[6] = vectorMove(vde.sint[7]);
+    store(u32, rdp_current, rdram);
+    reg vz: vec16 = undefined;
+    vz[1] = vectorMove(vfinal.sfract[7]);
+    store(vec16, color_dmem, vfinal.sfract[0..4], 16);
+    vz[0] = vectorMove(vfinal.sint[7]);
+    store(vec16, tex_dmem, vfinal.sfract[4..8], 16);
+    vz[3] = vectorMove(vdx.sfract[7]);
+    store(vec16, color_dmem, vfinal.sint[0..4], 0);
+    vz[2] = vectorMove(vdx.sint[7]);
+    store(vec16, tex_dmem, vfinal.sint[4..8], 0);
+    store(vec16, z_dmem, vde.sfract[6..8], 8);
+    store(vec16, z_dmem, vdy.sfract[6..8], 12);
+    prim_size -%= 1;
+    store(vec16, z_dmem, vz[0..4], 0);
+    return slot {
+        rsp.cp0.startDmaWrite(prim_size);
+    }
+}
+
+/// Waits for the last triangle's DMA, then hands everything up to
+/// `rdp_current` to the RDP. Both triangle buffers are free afterwards.
+pub export fn sendTrianglesEnd() {
+    waitForDma();
+    store(u16, triangle_buffer_offset, 0);
+    reg syncfull: u32 = load(u8, rdp_syncfull_ongoing);
+    reg current: u32 = load(u32, rdp_current);
+    // A full sync holds DP_END until it completes.
+    if (syncfull == 0) {
+        rsp.cp0.setRdpCommandEnd(current);
+    }
+}
+
+/// Hands a triangle that crosses the guard band to the clipping patch,
+/// which returns to the triangle's caller. The patch reuses both triangle
+/// buffers, so the last triangle's DMA must finish first.
+///
+/// The patch keeps $s1, $s2, $v0, $v1, $gp, and $k1, and restores $s4 from
+/// the scratch slot below; a host test checks its code. The jump is
+/// indirect because the compiler sees only the loader at `_start`, not
+/// the patch's own register use.
+export fn clipTriangle(
+    reg($a0) vertex1: dmem,
+    reg($a1) vertex2: dmem,
+    reg($a2) vertex3: dmem,
+    reg($v0) cull_mode: i32,
+) noreturn {
+    reg($ra) return_address: u32 = undefined;
+    reg($s4) caller_s4: u32 = undefined;
+    store(u16, clipping_return_address, return_address);
+    store(u16, resident_scratch, caller_s4, 18);
+    sendTrianglesEnd();
+    reg entry: u32 = code.addressOf(_start);
+    jump(entry);
+}
+
+/// Draws the triangle `vertex1`, then the vertices in the low and high
+/// halves of `vertices23`.
+@rspq.command(0) fn drawTriangle(vertex1: dmem, vertices23: u32) noreturn {
+    reg vertex3: dmem = vertices23 >> 16;
+    reg cull_mode: i32 = load(u8, face_culling);
+    // DMEM addresses ignore the high half, so the second word serves as
+    // the second vertex as it is.
+    sendTriangle(vertex1, vertices23, vertex3, cull_mode);
+    tail queue.commandLoop();
+}
+
+/// Draws triangle strips. The low half of `size_and_dmem` is the DMA size
+/// of the index list (bytes - 1) and its high half the DMEM address it is
+/// loaded to from `rdram`. Indices are byte offsets into the vertex
+/// buffer; triangle n uses indices n+1, n+2, and n. A negative index starts
+/// a new strip with it, and a negative DMEM address syncs at the end.
+@rspq.command(11) fn drawTriangleStrip(rdram: u32, size_and_dmem: u32) noreturn {
+    // Every value kept across a triangle is in a register the clipping
+    // patch preserves.
+    reg($s4) cursor: dmem = undefined;
+    reg($s2) last: dmem = undefined;
+    reg($s1) sync: i32 = bitCast(size_and_dmem);
+    reg($v0) cull_mode: i32 = undefined;
+    reserved reg($v1) sequence_step: u32 = undefined;
+    reg size: u32 = size_and_dmem & 0xffff;
+    cursor = size_and_dmem >> 16;
+    // Load the index list, programming the DMA directly: that needs the
+    // engine idle.
+    waitForDma();
+    rsp.cp0.setDmaMemoryAddress(cursor);
+    rsp.cp0.setDmaRdramAddress(rdram);
+    rsp.cp0.startDmaRead(size);
+    // The last triangle starts four bytes before the end.
+    last = cursor +% size;
+    last -%= 3;
+    waitForDma();
+
+    // Winding alternates along a strip; its first triangle is the
+    // opposite of `face_culling`.
+    cull_mode = load(u8, face_culling);
+    while (true) {
+        cull_mode ^= 1;
+        if (cursor == last) {
+            break;
+        }
+        reg($a0) vertex1: dmem = load(u16, cursor, 2);
+        reg($a1) vertex2: i32 = load(i16, cursor, 4);
+        reg($a2) vertex3: dmem = load(u16, cursor, 0);
+        cursor +%= 2;
+        if (vertex2 < 0) {
+            // The flagged index starts the next strip; the triangle that
+            // would join the strips is skipped.
+            cursor +%= 2;
+            cull_mode = load(u8, face_culling);
+            continue;
+        }
+        vertex1 +%= vertex_buffer;
+        vertex2 +%= vertex_buffer;
+        vertex3 +%= vertex_buffer;
+        sendTriangle(vertex1, vertex2, vertex3, cull_mode);
+    }
+    if (sync < 0) tail syncTriangles();
+    tail queue.commandLoop();
+}
+
+/// Waits until no DMA is pending or running.
+inline fn waitForDma() {
+    while (true) {
+        reg busy: u32 = rsp.cp0.dmaBusy();
+        if (busy == 0) {
+            break;
+        }
+    }
+}
+
+/// Waits for the last triangle and restores the code under the clipping
+/// patch if it is loaded.
+@rspq.command(10) fn syncTriangles() @rspq.commandSize(4) noreturn {
+    reg loaded: u32 = load(u8, clipping_code_address);
+    if (loaded != 0) {
+        reg($t0) size: u32 = load(u16, clipping_code_size);
+        size -%= 1;
+        reg pitch: u32 = undefined;
+        reg($s0) rdram: u32 = load(u32, original_code_address);
+        reg($s4) target: dmem = undefined;
+        target = code.addressOf(_start);
+        // sendTrianglesEnd waits for this DMA too.
+        dma.inAsync(size, pitch, rdram, target);
         store(u8, clipping_code_address, 0);
-        jump geometry_RDPQ_Triangle_Send_End() slot {
-            return_address = code.addressOf(commandLoop);
-        }
     }
+    sendTrianglesEnd();
+    tail queue.commandLoop();
 }
 
-fn drawTriangleSequenceImpl(
-    reg($a0) size_and_index: u32,
-    reg($a1) end_index: u32,
-) noreturn {
-    reg($s1) is_quad: u32;
-    reg($s4) base_vertex_end: u32;
-    reg($s2) base_vertex: u32;
-    reg($v0) face_culling_flag: u32;
-    reserved reg($v1) vertex_increment: u32;
-    reg($a2) vertex2: u32 = undefined;
-    reg($gp) command_end: dmem = undefined;
-    reg($ra) return_address: fn() = undefined;
-    exact {
-        export drawTriangleSequence:
-        is_quad = end_index >> 16;
-        base_vertex_end = end_index & 0xffff;
-        face_culling_flag = load(u8, face_culling);
-        base_vertex = size_and_index & 0xffff;
-        vertex_increment = is_quad +% 108;
-    sequence_next:
-        if(base_vertex == base_vertex_end) goto sequence_end slot {
-            size_and_index = base_vertex +% 72;
+/// Draws triangles from consecutive vertices: three at a time from `first`
+/// (the low half of `size_and_first`) up to `last`. When the high half of
+/// `last_and_quads` is a vertex size, the vertices are quads of four,
+/// drawn as two triangles in two passes with the winding flipped.
+@rspq.command(12) fn drawTriangleSequence(size_and_first: u32, last_and_quads: u32) noreturn {
+    // Every value kept across a triangle is in a register the clipping
+    // patch preserves.
+    reg($gp) next_command: dmem = undefined;
+    reg($s1) quad_step: u32 = last_and_quads >> 16;
+    reg($s4) last: dmem = last_and_quads & 0xffff;
+    reg($s2) base: dmem = size_and_first & 0xffff;
+    reg($v0) cull_mode: i32 = load(u8, face_culling);
+    reserved reg($v1) step: u32 = quad_step +% 108;
+    while (true) {
+        while (true) {
+            if (base == last) {
+                break;
+            }
+            reg($a0) vertex1: dmem = base +% vertex_pair_size;
+            reg($a1) vertex2: dmem = base +% vertex_size;
+            reg($a2) vertex3: dmem = base;
+            base +%= step;
+            sendTriangle(vertex1, vertex2, vertex3, cull_mode);
         }
-        vertex2 = bitCast(base_vertex);
-        end_index = base_vertex +% 36;
-        return_address = code.addressOf(sequence_next);
-        jump geometry_RDPQ_Triangle_Send_Async() slot {
-            base_vertex +%= vertex_increment;
+        if (quad_step == 0) {
+            break;
         }
-    sequence_end:
-        if(is_quad == 0) jump syncTriangles() slot {
-            return_address = code.addressOf(commandLoop);
-        }
-        base_vertex = load(u16, command_end, 0x9a);
-        face_culling_flag ^= 1;
-        base_vertex_end +%= 36;
-        base_vertex +%= 36;
-        goto sequence_next slot {
-            is_quad = 0;
-        }
+        // The second triangle of each quad: one vertex on, flipped.
+        quad_step = 0;
+        cull_mode ^= 1;
+        base = load(u16, next_command, command_buffer - 8 + 2);
+        base +%= vertex_size;
+        last +%= vertex_size;
     }
-}
-
-@rspq.command(13) fn patchCode(
-    patch_address: u32,
-    opcode_0: u32,
-    opcode_1: u32,
-) noreturn {
-    reg($t0) size: u32 = undefined;
-    reg($t1) pitch: u32 = undefined;
-    reg($s0) rdram: u32 = undefined;
-    reg($s4) scratch: dmem = undefined;
-    exact {
-        rdram = bitCast(patch_address);
-        scratch = 0x80;
-        store(u32, scratch, opcode_0);
-        store(u32, scratch, opcode_1, 4);
-    }
-    tail dma.out(size, pitch, rdram, scratch) slot {
-        size = 7;
-    }
+    tail syncTriangles();
 }

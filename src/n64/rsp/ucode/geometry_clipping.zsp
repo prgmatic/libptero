@@ -11,6 +11,10 @@
 // RGBA at 8, S T at 12, the clip-space position as 16.16 X Y Z W (integer
 // halves at 16, fractions at 24), and 1/W at 32.
 
+// Geometry's triangle sender, with the register contracts its build
+// inferred. Fan triangles never need clipping again.
+const geometry = import("geometry_overlay_api.zsp");
+
 bss {
     extern clipping_buffer_temporary: [256]u8;
     extern clipping_buffer_result: [288]u8;
@@ -29,8 +33,8 @@ const texture: u32 = 12;
 const clip_position: u32 = 16;
 const inverse_w: u32 = 32;
 
-// Geometry saves the strip's index pointer here before clipping; the patch
-// keeps the triangle's original clip flags next to it.
+// Geometry saves its caller's $s4 here before clipping, for the patch to
+// restore; the patch keeps the triangle's original clip flags next to it.
 const saved_indices: u32 = 18;
 const saved_flags: u32 = 20;
 
@@ -38,23 +42,6 @@ const saved_flags: u32 = 20;
 // vertex inside every plane and not trivially rejected.
 const tile_bits: u32 = 0xe000;
 const inside_codes: u32 = 0x00ff;
-
-/// Builds and sends an RDP triangle; returns without drawing a rejected
-/// or culled one. Fan triangles never need clipping again.
-extern fn geometry_RDPQ_Triangle_Send_Async(
-    reg($a0) vertex1: dmem,
-    reg($a1) vertex2: dmem,
-    reg($a2) vertex3: dmem,
-    reg($v0) cull_mode: u32,
-) writes(
-    $at, $a0, $a1, $a2, $a3, $t0, $t1, $t2, $t3, $t4, $t5, $t6, $s3, $s7, $sp, $ra,
-    $v01, $v02, $v03, $v04, $v05, $v06, $v07, $v08, $v09, $v10, $v11, $v12, $v13, $v14,
-    $v15, $v16, $v17, $v18, $v19, $v20, $v21, $v22, $v23, $v24, $v25, $v26, $v27, $v28,
-    $v29
-);
-
-/// Waits for the last triangle's DMA and hands it to the RDP.
-extern fn geometry_RDPQ_Triangle_Send_End() writes($at, $t0, $t1);
 
 /// Clips the triangle `vertex1`-`vertex2`-`vertex3` against the four side
 /// planes and the near plane, draws what remains, and returns to the
@@ -69,8 +56,10 @@ export fn _start(
     // Lane 7 of the dispatcher's shift constants is 1, and 256 after <<8.
     reg($v30) powers: vec16 = undefined;
     reg($v31) shifts: vec16 = undefined;
-    // Geometry's triangle sequences keep their vertex step here across a
-    // clip; this patch must not use it as a temporary.
+    // What geometry's strips and sequences keep across a clip: their loop
+    // state, and the sequence's vertex step. $s4 is restored on return.
+    reserved reg($s1) caller_s1: u32 = undefined;
+    reserved reg($s2) caller_s2: u32 = undefined;
     reserved reg($v1) sequence_step: u32 = undefined;
 
     // Each pass reads one buffer and writes the other; the triangle starts
@@ -174,16 +163,16 @@ export fn _start(
             reg($a0) fan_vertex1: dmem = clipping_buffer_result;
             reg($a1) fan_vertex2: dmem = newest - vertex_size;
             reg($a2) fan_vertex3: dmem = newest;
-            geometry_RDPQ_Triangle_Send_Async(fan_vertex1, fan_vertex2, fan_vertex3, cull_mode);
-            geometry_RDPQ_Triangle_Send_End();
+            geometry.sendTriangle(fan_vertex1, fan_vertex2, fan_vertex3, cull_mode);
+            geometry.sendTrianglesEnd();
             newest += vertex_size;
         } while (newest != end);
     }
 
-    // Resume geometry where it entered clipping, with the strip's index
-    // pointer back in place.
+    // Resume geometry where it entered clipping, with its caller's $s4
+    // (a 16-bit DMEM address or offset) back in place.
     reg return_address: u32 = load(u16, clipping_return_address);
-    reg($s4) indices: dmem = load(i16, resident_scratch, saved_indices);
+    reg($s4) caller_s4: dmem = load(u16, resident_scratch, saved_indices);
     jump(return_address);
 }
 

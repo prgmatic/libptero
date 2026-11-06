@@ -112,7 +112,7 @@ pub fn setUpGeometry(h: *Harness) !Session.Overlay {
         writeU16s(try s.bytes(matrix_stack + @as(u32, @intCast(slot)) * 64, 64), halves);
     }
     try writeState(s, overlay, u32, symbols.matrix_stack_pointer, matrix_stack);
-    try writeState(s, overlay, u16, symbols.vertex_effect_function, symbols.VertexFX_None);
+    try writeState(s, overlay, u16, symbols.vertex_effect, Encoder.vertexEffectCode(.none));
     var enter = try s.commands(8);
     try enter.overlayCommand(overlay, 3, 0x8000 | symbols.active_light_size, &.{0});
     try h.prepare(enter);
@@ -221,7 +221,7 @@ test "mesh crossing the near plane is clipped and still rasterized" {
     h.profile = &profile;
     const run = try runMesh(&h, crossing_near_plane);
     // The clip entry point and the swapped-in clipping payload both ran.
-    try std.testing.expect(profile.instructions[symbols.geometryTriangleClip / 4] > 0);
+    try std.testing.expect(profile.instructions[symbols.clipTriangle / 4] > 0);
     try std.testing.expect(profile.instructions[programs.geometry_clipping_symbols._start / 4] > 0);
     try std.testing.expect(run.triangles > 0);
     try std.testing.expect(run.triangles != triangle_count);
@@ -260,4 +260,58 @@ test "clipping preserves the registers geometry keeps across a clip" {
         if (written == 20) restores += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), restores);
+}
+
+const SequenceDraw = enum { sequence, quads, single_triangles, single_quads };
+
+fn vertexAddress(index: u32) u32 {
+    return symbols.vertex_buffer + index * 36;
+}
+
+/// Queues the triangle `first`, `first - 1`, `first - 2` the way a
+/// sequence draws it.
+fn queueTriangle(writer: *Session.CommandWriter, overlay: Session.Overlay, first: u32) !void {
+    try writer.overlayCommand(overlay, 0, @intCast(vertexAddress(first)), &.{vertexAddress(first - 2) << 16 | vertexAddress(first - 1)});
+}
+
+/// The RDP commands for the mesh's first twelve vertices drawn as
+/// triangles of three, or as quads of four, either by one sequence command
+/// or by single triangles.
+fn sequenceStream(draw: SequenceDraw) ![]u8 {
+    var h: Harness = undefined;
+    try h.init(std.testing.allocator);
+    defer h.deinit();
+    const s = &h.session;
+    const overlay = try setUpGeometry(&h);
+    var writer = try s.commands(256);
+    try queueScene(s, &writer, overlay, on_screen);
+    const load = Encoder.vertexLoadCommand(try placeMesh(s), 0, vertex_count);
+    try writer.overlayCommand(overlay, 4, @intCast(load.inline_argument), &load.arguments);
+    const quad_step: u32 = 36;
+    switch (draw) {
+        .sequence => try writer.overlayCommand(overlay, 12, @intCast(vertexAddress(0)), &.{vertexAddress(12)}),
+        .quads => try writer.overlayCommand(overlay, 12, @intCast(vertexAddress(0)), &.{quad_step << 16 | vertexAddress(12)}),
+        .single_triangles => for (0..4) |group| try queueTriangle(&writer, overlay, @intCast(group * 3 + 2)),
+        .single_quads => {
+            for (0..3) |group| try queueTriangle(&writer, overlay, @intCast(group * 4 + 2));
+            for (0..3) |group| try queueTriangle(&writer, overlay, @intCast(group * 4 + 3));
+        },
+    }
+    try writer.overlayCommand(overlay, 10, 0, &.{});
+    const start = h.rdp_bytes.written().len;
+    _ = try h.measure(writer);
+    return std.testing.allocator.dupe(u8, h.rdp_bytes.written()[start..]);
+}
+
+test "triangle sequences draw what the same single triangles draw" {
+    // drawTriangleSequence has no runtime encoder; this pins its order,
+    // including the second pass over quads.
+    for ([_][2]SequenceDraw{ .{ .sequence, .single_triangles }, .{ .quads, .single_quads } }) |pair| {
+        const drawn = try sequenceStream(pair[0]);
+        defer std.testing.allocator.free(drawn);
+        const expected = try sequenceStream(pair[1]);
+        defer std.testing.allocator.free(expected);
+        try std.testing.expect(countTriangles(drawn) > 0);
+        try std.testing.expectEqualSlices(u8, expected, drawn);
+    }
 }

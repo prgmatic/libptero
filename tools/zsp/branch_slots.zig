@@ -201,7 +201,7 @@ fn isLayoutOnly(item: Item) bool {
     };
 }
 
-fn labelIndex(items: []const Item, name: []const u8) ?usize {
+pub fn labelIndex(items: []const Item, name: []const u8) ?usize {
     for (items, 0..) |item, index| {
         if (item == .label and std.mem.eql(u8, item.label, name)) return index;
     }

@@ -448,7 +448,9 @@ declare storage before the code that dereferences it.
 ## Functions, calls, and modules
 
 Functions may be prefixed by `export`, `pub`, and/or `inline`, and may have the
-`noreturn` modifier:
+`noreturn` modifier. `align(n)`, also after the parameters, starts the
+function at a multiple of `n` bytes (a power of two from 4 to 4096), as for a
+DMA target:
 
 ```zig
 inline pub fn add(
@@ -626,10 +628,10 @@ jump(handler);
 ```
 
 A block that opens with `@branchHint(.cold);` marks its `if` (or a
-`while`'s entry test) as rarely taken. When the `if` has no `else` and sits
-in the function's own statement list, outside loops and blocks, its body
+`while`'s entry test) as rarely taken. When the `if` has no `else`, its body
 is placed after the function's return and jumps back, so the common path
-falls through without a taken branch:
+falls through without a taken branch. Inside a loop or labeled block the
+body must not `break` or `continue`; such bodies stay inline:
 
 ```zig
 while (dma_busy != 0) {
@@ -1060,6 +1062,13 @@ register a name while preventing the backend from silently using `$v1` as its
 temporary register.
 The same form may explicitly claim `$k1` in a non-returning command that uses
 the resident command-return register as application-defined state.
+`reserved` also keeps any other scalar register but `$zero` and `$at` for the
+whole function and every function it calls, as when code entered from
+elsewhere must leave its callers' registers alone:
+
+```zig
+reserved reg($s1) caller_state: u32 = undefined;
+```
 
 The `cp0` hardware namespace exposes named, value-returning register reads and
 register-agnostic writes. The destination of a read is the register allocated
@@ -1142,31 +1151,40 @@ than assembly text. Its passes run in order:
 
 1. Relocation folding merges `symbol + constant` address arithmetic into the
    memory operand.
-2. Dead-write removal drops register writes that are overwritten before any
+2. Repeated-constant removal drops an `addiu`/`ori` from `$zero` that sets a
+   register to the value it already holds in the same straight-line run, as
+   when consecutive vector loads from one label each materialize its address.
+3. Dead-write removal drops register writes that are overwritten before any
    read.
-3. Polling-loop folding tightens common CP0 busy-wait loops.
-4. Lane-encoding selection spells each VMOV/VRCP/VRSQ destination element
+4. Polling-loop folding tightens common CP0 busy-wait loops.
+5. Lane-encoding selection spells each VMOV/VRCP/VRSQ destination element
    (bit 3 is ignored by hardware) to avoid false dependences.
-5. List scheduling reorders each straight-line block together with the branch
-   that ends it and that branch's delay slot. A beam search (16 candidates,
+6. List scheduling reorders each straight-line block together with the branch
+   that ends it and that branch's delay slot. A beam search (32 candidates,
    windows of up to 64 instructions) scores orders with the RSP interpreter's
    calibrated timing model (`tools/rsp_interp/timing.zig`), so it accounts for
    load latency, vector result latency, and dual issue. Each window starts
    from the pipeline state left by the instructions that fall through into
    it, so results still in flight from the previous block count.
-6. Delay-slot filling moves an independent instruction into each remaining
+7. Delay-slot filling moves an independent instruction into each remaining
    branch slot when the timing model says the code around it does not get
    slower.
-7. Loop-exit slots: a backward branch whose slot is still empty takes the
+8. Loop-exit slots: a backward branch whose slot is still empty takes the
    first instruction after the loop when repeating it each iteration is
    harmless, such as `dma.exec`'s descriptor setup after its DMA-full poll.
    The loop body may branch forward within itself (an `if` in the loop);
    only its unconditional prefix counts as overwriting the moved result.
-8. Fall-through slots: a conditional branch whose slot is still empty takes
+9. Fall-through slots: a conditional branch whose slot is still empty takes
    one of the next few instructions when it has no side effects and what it
    writes is dead where the branch goes. Liveness comes from a bounded walk
    over the program, through jumps and into one level of calls; returns,
    indirect jumps, and unknown targets count as reads.
+10. Call continuations: a call followed by a jump to a local label,
+    `jal f; slot; j next; nop`, becomes `addiu $ra, $zero, %lo(next); j f;
+    slot`, so the callee returns straight to `next`, as at the end of a loop
+    body. Returning through the old `$ra` led to `next` as well; the slot
+    must leave `$ra` alone. Transfers to a lone `j target; nop` are first
+    sent to `target` directly, so the jump's own label may disappear.
 
 Dependences come from per-instruction effects: registers, the vector
 accumulator, VCO/VCC/VCE, the divide unit, memory, and IO. Partial vector

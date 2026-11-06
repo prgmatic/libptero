@@ -14,7 +14,7 @@ pub const Exemption = struct { kind: ?workloads.OverlayKind, index: u8, reason: 
 
 /// Handlers deliberately left to hardware tests or without runtime callers.
 pub const exemptions = [_]Exemption{
-    .{ .kind = .geometry, .index = 12, .reason = "drawTriangleSequence has no runtime encoder" },
+    .{ .kind = .geometry, .index = 12, .reason = "drawTriangleSequence has no runtime encoder; a geometry_workloads test compares it with single triangles" },
     .{ .kind = .geometry, .index = 13, .reason = "patchCode rewrites IMEM; covered by the hardware geometry tests" },
 };
 

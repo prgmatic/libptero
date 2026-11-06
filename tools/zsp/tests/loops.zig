@@ -273,13 +273,56 @@ test "cold if bodies are placed after the function and jump back" {
     );
 }
 
-test "cold bodies stay inline inside loops" {
+test "cold bodies inside loops move out of line with the loop's names in scope" {
+    try expectAsm(
+        \\fn test(reg($a0) count: u32) {
+        \\  while (count != 0) {
+        \\    reg step: u32 = 1;
+        \\    if (count == 2) {
+        \\      @branchHint(.cold);
+        \\      step = 2;
+        \\    }
+        \\    count -= step;
+        \\  }
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\test:
+        \\  beq $a0, $zero, LABEL_test_ifend_0
+        \\  nop
+        \\LABEL_test_dowhile_1:
+        \\  addiu $t0, $zero, 1
+        \\  addiu $v1, $zero, 2
+        \\  beq $a0, $v1, LABEL_test_ifcold_2
+        \\  nop
+        \\LABEL_test_ifend_2:
+        \\  sub $a0, $a0, $t0
+        \\  bne $a0, $zero, LABEL_test_dowhile_1
+        \\  nop
+        \\LABEL_test_dowhileend_1:
+        \\LABEL_test_ifend_0:
+        \\  jr $ra
+        \\  nop
+        \\LABEL_test_ifcold_2:
+        \\  addiu $t0, $zero, 2
+        \\  j LABEL_test_ifend_2
+        \\  nop
+        \\
+        \\
+    );
+}
+
+test "cold bodies that leave their loop stay inline" {
     try expectAsm(
         \\fn test(reg($a0) count: u32) {
         \\  while (count != 0) {
         \\    if (count == 2) {
         \\      @branchHint(.cold);
         \\      count = 9;
+        \\      break;
         \\    }
         \\    count -= 1;
         \\  }
@@ -297,6 +340,8 @@ test "cold bodies stay inline inside loops" {
         \\  bne $a0, $v1, LABEL_test_ifend_2
         \\  nop
         \\  addiu $a0, $zero, 9
+        \\  j LABEL_test_dowhileend_1
+        \\  nop
         \\LABEL_test_ifend_2:
         \\  addi $a0, $a0, -1
         \\  bne $a0, $zero, LABEL_test_dowhile_1

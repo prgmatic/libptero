@@ -47,9 +47,15 @@ test "optimizer hides scalar load latency with independent work" {
 
 test "optimizer pairs independent scalar and vector pipeline instructions" {
     try expectOptimizedAsm(
-        "  addiu $t0, $zero, 1\n  addiu $t1, $zero, 2\n  .word 0x4a0208d0 # vadd $v03, $v01, $v02\n",
-        "  addiu $t0, $zero, 1\n  .word 0x4a0208d0 # vadd $v03, $v01, $v02\n  addiu $t1, $zero, 2\n",
+        "  addiu $t0, $zero, 1\n  addiu $t1, $zero, 2\n  .word 0x4a0208d0 # vadd $v03, $v01, $v02\n  .word 0x4a020910 # vadd $v04, $v01, $v02\n",
+        "  addiu $t0, $zero, 1\n  .word 0x4a0208d0 # vadd $v03, $v01, $v02\n  addiu $t1, $zero, 2\n  .word 0x4a020910 # vadd $v04, $v01, $v02\n",
     );
+}
+
+test "optimizer keeps the source order when no other order is faster" {
+    // The second addiu already pairs with the vadd.
+    const assembly = "  addiu $t0, $zero, 1\n  addiu $t1, $zero, 2\n  .word 0x4a0208d0 # vadd $v03, $v01, $v02\n";
+    try expectOptimizedAsm(assembly, assembly);
 }
 
 test "optimizer preserves memory order and treats unknown asm as a barrier" {

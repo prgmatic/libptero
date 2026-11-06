@@ -70,9 +70,9 @@ pub fn init(self: *GeometryEncoder, renderer: *RdpRenderer) void {
     var state = rsp.overlayState(&self.geometry_overlay);
     const matrix_stack_pointer_offset = symbols.matrix_stack_pointer - state_start;
     std.mem.writeInt(u32, state[matrix_stack_pointer_offset..][0..4], physical(&self.matrix_stack), .big);
-    const vertex_effect_none = symbols.VertexFX_None;
-    const vertex_effect_function_offset = symbols.vertex_effect_function - state_start;
-    std.mem.writeInt(u16, state[vertex_effect_function_offset..][0..2], vertex_effect_none, .big);
+    const vertex_effect_none = vertexEffectCode(.none);
+    const vertex_effect_offset = symbols.vertex_effect - state_start;
+    std.mem.writeInt(u16, state[vertex_effect_offset..][0..2], vertex_effect_none, .big);
     rsp.writebackOverlayState(&self.geometry_overlay);
 
     // Enter the main overlay once while its lazy-code pointer is zero.
@@ -95,13 +95,13 @@ pub fn init(self: *GeometryEncoder, renderer: *RdpRenderer) void {
     rsp.writebackOverlayState(&self.geometry_overlay);
     @import("../hw/sp.zig").readDmem(u32, state_start + clipping_code_address_offset).* = clipping_address;
     @import("../hw/sp.zig").readDmem(u32, state_start + original_code_address_offset).* = original_address;
-    if (symbols.clipping_code_size != symbols.vertex_effect_function + @sizeOf(u16)) {
+    if (symbols.clipping_code_size != symbols.vertex_effect + @sizeOf(u16)) {
         @panic("geometry clipping metadata layout changed");
     }
     // Publish the adjacent halfwords with one aligned DMEM write. A lone
     // CPU halfword write to clipping_code_size was lost on N64 hardware,
     // leaving the restore DMA length at zero when clipping first ran.
-    @import("../hw/sp.zig").readDmem(u32, symbols.vertex_effect_function).* =
+    @import("../hw/sp.zig").readDmem(u32, symbols.vertex_effect).* =
         @as(u32, vertex_effect_none) << 16 | clipping_size;
 }
 
@@ -129,19 +129,34 @@ pub fn attachViewport(self: *GeometryEncoder, viewport: *const Viewport) void {
 /// live in RDRAM, given the RDRAM addresses of both overlays' text.
 pub const ClippingPatch = struct { size: u16, clipping_address: u32, original_address: u32 };
 
+/// Geometry code that runs while the clipping patch is loaded: the patch
+/// covers geometry's text from `_start` for its own length, so each of
+/// these must start before `_start` (and so end there) or after the patch.
+const clipping_survivors = .{
+    "sendTriangle",
+    "sendTrianglesEnd",
+    "clipTriangle",
+    "drawTriangle",
+    "drawTriangleStrip",
+    "drawTriangleSequence",
+    "syncTriangles",
+};
+
 pub fn clippingPatch(geometry_text_rdram: u32, clipping_text_rdram: u32) ClippingPatch {
     const symbols = rsp.programs.geometry_overlay_symbols;
     const clipping = rsp.programs.geometry_clipping;
-    // The build links the clipping patch at geometry's `_start`.
-    if (clipping.text_offset != symbols._start)
-        @panic("geometry clipping is not linked at geometry's _start");
-    // Geometry's triangle clip entry, strips, sequences, and sync stay
-    // resident while clipping is loaded.
-    if (symbols._start + clipping.text.len > symbols.geometryTriangleClip)
-        @panic("geometry clipping overwrites code that stays resident");
-    // Geometry marks the patch loaded with the low byte of its size.
-    if (clipping.text.len & 0xff == 0)
-        @panic("geometry clipping size cannot mark the patch loaded");
+    comptime {
+        // The build links the clipping patch at geometry's `_start`.
+        if (clipping.text_offset != symbols._start) @compileError("geometry clipping is not linked at geometry's _start");
+        // Geometry marks the patch loaded with the low byte of its size.
+        if (clipping.text.len & 0xff == 0) @compileError("geometry clipping size cannot mark the patch loaded");
+        const patch_end = symbols._start + clipping.text.len;
+        for (clipping_survivors) |name| {
+            const address = @field(symbols, name);
+            if (address >= symbols._start and address < patch_end)
+                @compileError("geometry's " ++ name ++ " lies under the clipping patch");
+        }
+    }
     return .{
         .size = @intCast(clipping.text.len),
         .clipping_address = clipping_text_rdram,
@@ -316,19 +331,24 @@ pub fn setPointLightAt(self: *GeometryEncoder, index: u8, color: Rgba32, positio
     }
 }
 
+/// The microcode's `vertex_effect` value: zero keeps the mesh UVs.
+pub fn vertexEffectCode(effect: VertexEffect) u16 {
+    return switch (effect) {
+        .none => 0,
+        .spherical => 1,
+    };
+}
+
 pub fn setVertexEffect(self: *GeometryEncoder, effect: VertexEffect) void {
     self.settleTriangles();
     self.vertex_effect = effect;
     const symbols = rsp.programs.geometry_overlay_symbols;
-    const function: u16 = switch (effect) {
-        .none => symbols.VertexFX_None,
-        .spherical => symbols.VertexFX_Spherical,
-    };
+    const code = vertexEffectCode(effect);
     const args: u32 = switch (effect) {
         .none => 0,
         .spherical => |size| @as(u32, size.width) * 16 << 16 | @as(u16, @bitCast(-@as(i16, size.height) * 16)),
     };
-    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, 0x8000 | symbols.vertex_effect_function, &.{function});
+    self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, 0x8000 | symbols.vertex_effect, &.{code});
     self.queue.writeOverlayCommandKnown(&self.geometry_overlay, 3, symbols.uv_generation_parameters, &.{args});
 }
 pub fn setFogRange(self: *GeometryEncoder, near: f32, far: f32) void {

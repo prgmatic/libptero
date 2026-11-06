@@ -466,7 +466,7 @@ test "vector declarations validate fixed registers and register pairs" {
     , error.RegisterAlreadyInUse);
 }
 
-test "automatic vector allocation reuses dead registers and keeps vec32 pairs contiguous" {
+test "automatic vector allocation keeps vec32 pairs contiguous and passes over just-freed registers" {
     try expectAsm(
         \\fn test() noreturn {
         \\  reg a: vec16 = 0;
@@ -480,9 +480,9 @@ test "automatic vector allocation reuses dead registers and keeps vec32 pairs co
         \\
         \\test:
         \\  .word 0x4a01086c # vxor $v01, $v01, $v01
-        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
         \\  .word 0x4a0210ac # vxor $v02, $v02, $v02
-        \\  .word 0x4a01086c # vxor $v01, $v01, $v01
+        \\  .word 0x4a0318ec # vxor $v03, $v03, $v03
+        \\  .word 0x4a04212c # vxor $v04, $v04, $v04
         \\
         \\
     );

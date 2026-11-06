@@ -24,12 +24,12 @@ test "inline for unrolls with a constant index and renames body locals" {
         \\  lw $t1, 0($t0)
         \\  addi $t1, $t1, 0
         \\  sw $t1, 16($t0)
-        \\  lw $t1, 4($t0)
-        \\  addi $t1, $t1, 1
-        \\  sw $t1, 20($t0)
-        \\  lw $t1, 8($t0)
-        \\  addi $t1, $t1, 2
-        \\  sw $t1, 24($t0)
+        \\  lw $t2, 4($t0)
+        \\  addi $t2, $t2, 1
+        \\  sw $t2, 20($t0)
+        \\  lw $t3, 8($t0)
+        \\  addi $t3, $t3, 2
+        \\  sw $t3, 24($t0)
         \\  jr $ra
         \\  nop
         \\
@@ -58,10 +58,10 @@ test "nested inline for keeps names unique and an empty range emits nothing" {
         \\test:
         \\  addiu $t1, $zero, 0
         \\  sw $t1, 0($t0)
-        \\  addiu $t1, $zero, 1
-        \\  sw $t1, 4($t0)
-        \\  addiu $t1, $zero, 2
-        \\  sw $t1, 8($t0)
+        \\  addiu $t2, $zero, 1
+        \\  sw $t2, 4($t0)
+        \\  addiu $t3, $zero, 2
+        \\  sw $t3, 8($t0)
         \\  addiu $t1, $zero, 3
         \\  sw $t1, 12($t0)
         \\  jr $ra

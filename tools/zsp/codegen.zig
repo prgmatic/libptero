@@ -108,6 +108,7 @@ fn needsReturn(function: ast.Function) bool {
 
 fn writeFunctionHeader(out: *Emitter, function: ast.Function) !void {
     if (!function.emit_label) return;
+    if (function.alignment > 4) try out.textFmt(".balign {d}", .{function.alignment});
     if (function.export_symbol or function.command_indices.len != 0) try out.textFmt(".globl {s}", .{function.name});
     try out.label(function.name);
 }

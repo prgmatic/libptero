@@ -237,7 +237,7 @@ fn geometryLightingApi() !void {
     try waitQueueTimeout(geometry_api_context.queue);
     try expectDmemWord(u32, geometry_symbols.directional_light_color + 24, 0);
     try expectDmemWord(u32, geometry_symbols.directional_light_color + 28, 0xffd8818f);
-    try expectDmemWord(u16, geometry_symbols.vertex_effect_function, geometry_symbols.VertexFX_Spherical);
+    try expectDmemWord(u16, geometry_symbols.vertex_effect, geometry.GeometryEncoder.vertexEffectCode(.{ .spherical = .{ .width = 32, .height = 64 } }));
     try expectDmemWord(u16, geometry_symbols.uv_generation_parameters, 0x0200);
     try expectDmemWord(u16, geometry_symbols.uv_generation_parameters + 2, 0xfc00);
     geometry_api_context.setVertexEffect(.none);
@@ -245,7 +245,7 @@ fn geometryLightingApi() !void {
     rsp.flush(geometry_api_context.queue);
     try waitQueueTimeout(geometry_api_context.queue);
     try expectDmemWord(u32, geometry_symbols.directional_light_color + 28, 0x00007f00);
-    try expectDmemWord(u16, geometry_symbols.vertex_effect_function, geometry_symbols.VertexFX_None);
+    try expectDmemWord(u16, geometry_symbols.vertex_effect, geometry.GeometryEncoder.vertexEffectCode(.none));
     rsp.unregisterOverlay(&geometry_api_context.geometry_overlay);
 }
 
@@ -257,17 +257,7 @@ fn geometryContextInitialization() !void {
     geometry_renderer.init(&geometry_runtime);
     geometry_api_context.init(&geometry_renderer);
 
-    const vertex_handler = blk: {
-        for (0..geometry_api_context.geometry_overlay.program.commandCount()) |metadata_index| {
-            const command = geometry_api_context.geometry_overlay.program.commandAt(metadata_index);
-            if (command.index == 4) break :blk command.handler_offset;
-        }
-        return error.MissingGeometryVertexCommand;
-    };
-    try testing.expectEqual(
-        vertex_handler + 0x2bc,
-        @import("n64").hw.sp.readDmem(u16, 0x3fc).*,
-    );
+    try expectDmemWord(u16, geometry_symbols.vertex_effect, geometry.GeometryEncoder.vertexEffectCode(.none));
     const clipping = rsp.programs.geometry_clipping;
     const clipping_start = rsp.programs.geometry_clipping_symbols._start;
     const clipping_size: u16 = @intCast(clipping.text.len - (clipping_start - clipping.text_offset));
@@ -1899,7 +1889,7 @@ fn geometryVertexTransform() !void {
     const mvp_offset = symbols.matrix_mvp - state_start;
     @memcpy(state[mvp_offset..][0..64], std.mem.sliceAsBytes(&identity));
     std.mem.writeInt(u32, state[symbols.triangle_command - state_start ..][0..4], 0x01000000, .big);
-    std.mem.writeInt(u16, state[symbols.vertex_effect_function - state_start ..][0..2], symbols.VertexFX_None, .big);
+    std.mem.writeInt(u16, state[symbols.vertex_effect - state_start ..][0..2], n64.graphics.GeometryEncoder.vertexEffectCode(.none), .big);
     rsp.writebackOverlayState(&geometry_overlay);
     for (0..4 * 36 / 4) |index| {
         @import("n64").hw.sp.readDmem(u32, vertex_buffer + @as(u32, @intCast(index * 4))).* = 0xdeadbeef;

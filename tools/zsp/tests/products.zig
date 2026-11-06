@@ -65,10 +65,10 @@ test "mixed-width and viewed products pick their partial multiplies" {
         \\  .word 0x4a031985 # vmudm $v06, $v03, $v03
         \\  .word 0x4a031986 # vmudn $v06, $v03, $v03
         \\  .word 0x4a031984 # vmudl $v06, $v03, $v03
-        \\  .word 0x4a0210c4 # vmudl $v03, $v02, $v02
-        \\  .word 0x4a0208cd # vmadm $v03, $v01, $v02
+        \\  .word 0x4a0211c4 # vmudl $v07, $v02, $v02
+        \\  .word 0x4a0209cd # vmadm $v07, $v01, $v02
         \\  .word 0x4a01114e # vmadn $v05, $v02, $v01
-        \\  .word 0x4a0108cf # vmadh $v03, $v01, $v01
+        \\  .word 0x4a0109cf # vmadh $v07, $v01, $v01
         \\  .word 0x4a0210c4 # vmudl $v03, $v02, $v02
         \\  .word 0x4a0208cd # vmadm $v03, $v01, $v02
         \\  .word 0x4a0110ce # vmadn $v03, $v02, $v01

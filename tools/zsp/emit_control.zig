@@ -542,12 +542,17 @@ pub fn writeColdIf(g: Gen, statement: *const Statement, rest: []const Statement)
     g.context.statement_position = end_position;
 }
 
-/// A cold body moves out of line only from the function's own statement
-/// list, outside loops and blocks, so every name it uses is still in scope
-/// where it is written.
+/// A cold body moves out of line unless the function falls through into
+/// the next one. Inside a loop or block it must not break out or continue,
+/// since those targets are not in scope where it is written.
 fn canDefer(g: Gen, branch: If) bool {
-    if (!branch.cold or branch.else_statements != null) return false;
-    return g.context.cold_blocks_allowed and g.context.block_depth == 0 and g.context.emission_loops.items.len == 0;
+    if (!branch.cold or branch.else_statements != null or !g.context.cold_blocks_allowed) return false;
+    if (g.context.block_depth == 0 and g.context.emission_loops.items.len == 0) return true;
+    return !@import("ast_walk.zig").any(branch.then_statements, {}, isLoopControl);
+}
+
+fn isLoopControl(_: void, statement: *const ast.Statement) bool {
+    return statement.* == .break_loop or statement.* == .continue_loop;
 }
 
 /// Branches to the body when the condition holds; the body is written by
@@ -558,16 +563,23 @@ fn writeDeferredIf(g: Gen, branch: If, label: usize) !void {
     try writeConditionBranchFalse(g, inverse, "ifcold", label, branch.delay_slot == null);
     try statements_.writeStructuredDelaySlot(g, branch.delay_slot);
     const position = g.context.statement_position;
-    try g.context.cold_blocks.append(g.context.allocator, .{ .statements = branch.then_statements, .position = position, .label = label });
+    const symbols = try g.context.allocator.dupe(Symbol, g.context.symbols.items);
+    errdefer g.context.allocator.free(symbols);
+    try g.context.cold_blocks.append(g.context.allocator, .{ .statements = branch.then_statements, .position = position, .label = label, .symbols = symbols });
     g.context.statement_position = position + analysis.countFlowStatements(branch.then_statements);
     try g.out.label(try g.localLabel("ifend", label));
 }
 
 /// The deferred cold bodies, after the function's last transfer.
 pub fn writeColdBlocks(g: Gen) !void {
-    for (g.context.cold_blocks.items) |block| {
+    // A cold body may defer another, so the list can grow while it is written.
+    var index: usize = 0;
+    while (index < g.context.cold_blocks.items.len) : (index += 1) {
+        const block = g.context.cold_blocks.items[index];
         try g.out.label(try g.localLabel("ifcold", block.label));
         g.context.statement_position = block.position;
+        g.context.symbols.clearRetainingCapacity();
+        try g.context.symbols.appendSlice(g.context.allocator, block.symbols);
         try writeScoped(g, block.statements);
         if (terminatesControlFlow(block.statements)) continue;
         try g.out.jump(.j, try g.localLabel("ifend", block.label));

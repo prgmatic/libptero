@@ -86,8 +86,11 @@ pub const Resident = struct {
 
 /// A linked overlay, for patches that replace part of its text.
 pub const Overlay = struct {
+    name: []const u8,
     resident: Resident,
     elf: *std.Build.Step.Compile,
+    /// The overlay's public functions, importable by a patch.
+    interface: std.Build.LazyPath,
 };
 
 pub const AssetBundle = struct {
@@ -265,12 +268,13 @@ pub const AssetBundle = struct {
         overlay_link.addArg(self.b.fmt("0x{x}", .{data_start}));
         const built = buildZsp(self, name, source, linker_script, resident.interface);
         self.addZspOutputs(name, built);
-        return .{ .resident = resident, .elf = built.elf };
+        return .{ .name = name, .resident = resident, .elf = built.elf, .interface = built.interface };
     }
 
     /// Text that replaces `overlay`'s from its `symbol` on while loaded. The
     /// patch runs on the overlay's state and sees its global symbols and
-    /// the resident's public ones; the CPU side loads and restores it.
+    /// the resident's public ones; the CPU side loads and restores it. The
+    /// overlay's public functions are importable as `<overlay name>_api.zsp`.
     pub fn addZspPatch(
         self: *AssetBundle,
         name: []const u8,
@@ -285,7 +289,11 @@ pub const AssetBundle = struct {
         patch_link.addArtifactArg(overlay.elf);
         patch_link.addArg(symbol);
         const linker_script = patch_link.addOutputFileArg(self.b.fmt("{s}.ld", .{name}));
-        self.addZspOutputs(name, buildZsp(self, name, source, linker_script, overlay.resident.interface));
+        const built = buildZspWith(self, name, source, linker_script, &.{
+            .{ .name = "resident_api.zsp", .file = overlay.resident.interface },
+            .{ .name = self.b.fmt("{s}_api.zsp", .{overlay.name}), .file = overlay.interface },
+        });
+        self.addZspOutputs(name, built);
     }
 
     fn addZspOutputs(self: *AssetBundle, name: []const u8, built: ZspBuild) void {
@@ -483,12 +491,26 @@ const ZspBuild = struct {
     symbols: std.Build.LazyPath,
 };
 
+/// A generated interface a ZSP program imports under `name`.
+const ModuleFile = struct { name: []const u8, file: std.Build.LazyPath };
+
 fn buildZsp(
     assets: *AssetBundle,
     name: []const u8,
     source: std.Build.LazyPath,
     linker_script: std.Build.LazyPath,
     resident_interface: ?std.Build.LazyPath,
+) ZspBuild {
+    const interface = resident_interface orelse return buildZspWith(assets, name, source, linker_script, &.{});
+    return buildZspWith(assets, name, source, linker_script, &.{.{ .name = "resident_api.zsp", .file = interface }});
+}
+
+fn buildZspWith(
+    assets: *AssetBundle,
+    name: []const u8,
+    source: std.Build.LazyPath,
+    linker_script: std.Build.LazyPath,
+    module_files: []const ModuleFile,
 ) ZspBuild {
     const b = assets.b;
     const zsp = b.addRunArtifact(assets.tools.zsp);
@@ -497,10 +519,10 @@ fn buildZsp(
     zsp.addDirectoryArg(assets.root.path(b, "src/n64/rsp/ucode"));
     zsp.addArg("--depfile");
     _ = zsp.addDepFileOutputArg(b.fmt("{s}.d", .{name}));
-    if (resident_interface) |interface| {
+    for (module_files) |module| {
         zsp.addArg("--module-file");
-        zsp.addArg("resident_api.zsp");
-        zsp.addFileArg(interface);
+        zsp.addArg(module.name);
+        zsp.addFileArg(module.file);
     }
     zsp.addArg("--interface");
     const interface = zsp.addOutputFileArg(b.fmt("{s}.zspi", .{name}));

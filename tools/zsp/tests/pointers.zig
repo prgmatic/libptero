@@ -28,14 +28,14 @@ test "pointer fields load and store with the field's type and offset" {
         \\test:
         \\  lh $t0, 1($a0)
         \\  sb $t0, 0($a0)
-        \\  lw $t0, 0($a1)
-        \\  sw $t0, 0($a1)
+        \\  lw $t1, 0($a1)
+        \\  sw $t1, 0($a1)
         \\  .word 0xc8c12000 # lqv $v01, 0($a2)
         \\  .word 0xc8c11800 # ldv $v01[0], 0($a2)
         \\  .word 0xe8c12000 # sqv $v01, 0($a2)
         \\  addi $a0, $a0, 7
-        \\  or $t1, $a0, $zero
-        \\  sw $t0, 3($t1)
+        \\  or $t0, $a0, $zero
+        \\  sw $t1, 3($t0)
         \\  jr $ra
         \\  nop
         \\

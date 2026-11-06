@@ -87,6 +87,7 @@ fn varDecl(scan: *Scan, statement: *const Statement, current: usize) !void {
         .data_type = decl.data_type,
         .fixed_reg = decl.reg,
         .fixed_vector_reg = decl.vector_reg,
+        .reserved = decl.is_reserved,
     });
     try scanOptionalValue(scan, decl.value, current);
     if (defined) try scan.lifetimes.write(decl.name, current);

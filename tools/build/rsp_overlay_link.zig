@@ -341,7 +341,9 @@ const PatchScript = struct {
     symbols: []const ExportedSymbol,
 
     /// Text only: DMEM sections and commands must stay empty, because a
-    /// patch is loaded into IMEM alone and runs on its parent's state.
+    /// patch is loaded into IMEM alone and runs on its parent's state. The
+    /// target only needs the DMA's 8-byte alignment, so the text's own
+    /// section alignment is lowered to match.
     fn write(self: PatchScript, writer: *std.Io.Writer) !void {
         try writer.print(
             \\OUTPUT_ARCH(mips)
@@ -353,7 +355,7 @@ const PatchScript = struct {
             \\}}
             \\
             \\SECTIONS {{
-            \\    .text 0x{x:0>4} : {{
+            \\    .text 0x{x:0>4} : SUBALIGN(8) {{
             \\        *(.text*)
             \\    }} > IMEM
             \\

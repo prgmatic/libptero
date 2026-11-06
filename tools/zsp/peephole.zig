@@ -1,5 +1,5 @@
-//! Local rewrites over the instruction IR: relocation folding, dead-write
-//! removal, CP0 polling loops, and transfer delay slots. Frozen (`exact`)
+//! Local rewrites over the instruction IR: relocation folding, repeated
+//! constants, dead-write removal, CP0 polling loops, and transfer delay slots. Frozen (`exact`)
 //! instructions and raw assembly are never moved, removed, or rewritten.
 const std = @import("std");
 const ir = @import("ir.zig");
@@ -109,6 +109,62 @@ fn scratchReadAfter(items: []const Item, start: usize) bool {
         if (item_effects.scalar_writes & bit != 0 or item_effects.isTransfer()) return false;
     }
     return false;
+}
+
+// ------------------------------------------------------- repeated constants
+
+/// Removes `addiu r, $zero, k` (or `ori`) while `r` still holds `k` from an
+/// earlier one in the same straight-line run, as when every vector load
+/// from a label rematerializes the label's address.
+pub fn removeRepeatedConstants(items: *Items) void {
+    var known: Constants = .{};
+    var index: usize = 0;
+    while (index < items.items.len) {
+        if (known.repeats(items.items, index)) {
+            _ = items.orderedRemove(index);
+            continue;
+        }
+        known.track(items.items, index);
+        index += 1;
+    }
+}
+
+/// The constant each scalar register holds, by the instruction that set it.
+const Constants = struct {
+    values: [32]?Inst = @splat(null),
+
+    fn repeats(self: *const Constants, items: []const Item, index: usize) bool {
+        const inst = rewritableAt(items, index) orelse return false;
+        if (!isConstant(inst)) return false;
+        const value = self.values[@intFromEnum(inst.rt)] orelse return false;
+        return sameInst(value, inst);
+    }
+
+    /// Labels join paths, and transfers leave after their delay slot, so
+    /// both forget every value.
+    fn track(self: *Constants, items: []const Item, index: usize) void {
+        const item = items[index];
+        if (item != .instruction) return self.forget();
+        self.apply(item.instruction);
+        if (index > 0 and schedule.hasDelaySlot(items[index - 1])) self.forget();
+    }
+
+    /// Forgets the registers `inst` writes, then records its constant.
+    fn apply(self: *Constants, inst: Inst) void {
+        const written = effects.of(inst).scalar_writes;
+        for (&self.values, 0..) |*value, register| {
+            if (written >> @intCast(register) & 1 != 0) value.* = null;
+        }
+        if (isConstant(inst)) self.values[@intFromEnum(inst.rt)] = inst;
+    }
+
+    fn forget(self: *Constants) void {
+        self.values = @splat(null);
+    }
+};
+
+fn isConstant(inst: Inst) bool {
+    return (inst.op == .addiu or inst.op == .ori) and inst.rs == .zero and inst.rt != .zero and inst.text == null;
 }
 
 // -------------------------------------------------------------- dead writes
@@ -374,6 +430,32 @@ test "relocations fold into the following memory operand" {
     try testing.expectEqual(ir.Reg.zero, folded.rs);
     // `$at` is read again, so the second address stays.
     try testing.expectEqual(ir.Op.addiu, list.items[1].instruction.op);
+}
+
+test "a register keeps a constant until it is written or control joins" {
+    var list = try listOf(testing.allocator, &.{
+        .{ .instruction = .{ .op = .addiu, .rt = .at, .symbol = "table" } },
+        .{ .instruction = .{ .op = .ldv, .vt = .v01, .rs = .at } },
+        .{ .instruction = .{ .op = .addiu, .rt = .at, .symbol = "table" } },
+        .{ .instruction = .{ .op = .ldv, .vt = .v02, .rs = .at, .imm = 1 } },
+        // Another constant replaces it.
+        .{ .instruction = .{ .op = .addiu, .rt = .at, .symbol = "other" } },
+        .{ .instruction = .{ .op = .addiu, .rt = .at, .symbol = "table" } },
+        // A label joins paths where `$at` may differ.
+        .{ .label = "join" },
+        .{ .instruction = .{ .op = .addiu, .rt = .at, .symbol = "table" } },
+        // So does the code after a transfer's delay slot.
+        .{ .instruction = .{ .op = .jal, .symbol = "callee" } },
+        .{ .instruction = .{ .op = .addiu, .rt = .at, .symbol = "table" } },
+        .{ .instruction = .{ .op = .addiu, .rt = .at, .symbol = "table" } },
+    });
+    defer list.deinit(testing.allocator);
+    removeRepeatedConstants(&list);
+    try testing.expectEqual(@as(usize, 10), list.items.len);
+    try testing.expectEqual(ir.Op.ldv, list.items[2].instruction.op);
+    try testing.expectEqualStrings("table", list.items[4].instruction.symbol.?);
+    // The delay slot's value does not survive the call; the copy after it stays.
+    try testing.expectEqual(ir.Op.addiu, list.items[9].instruction.op);
 }
 
 test "dead writes go unless state or memory makes them observable" {

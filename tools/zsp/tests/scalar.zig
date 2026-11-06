@@ -63,6 +63,46 @@ test "reserved scalar declarations claim the backend scratch register" {
     , error.BackendScratchRegisterUnavailable);
 }
 
+test "reserved registers stay clear for the whole function and its callees" {
+    // Without the reservation, `helper` would compute in `$t0`.
+    try expectAsm(
+        \\fn helper(value: u32) {
+        \\  reg doubled: u32 = value + value;
+        \\  rsp.cp0.setSpStatus(doubled);
+        \\}
+        \\export fn _start() noreturn {
+        \\  reserved reg($t0) kept: u32 = undefined;
+        \\  helper(5);
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\helper:
+        \\  add $t1, $a0, $a0
+        \\  mtc0 $t1, $4
+        \\  jr $ra
+        \\  nop
+        \\
+        \\.globl _start
+        \\_start:
+        \\  addiu $a0, $zero, 5
+        \\  jal helper
+        \\  nop
+        \\  break
+        \\
+        \\
+    );
+    try expectAsmError(
+        \\export fn _start() noreturn {
+        \\  reserved reg($at) kept: u32 = undefined;
+        \\  rsp.halt();
+        \\}
+    , error.InvalidReservedRegister);
+}
+
 test "CP0 intrinsics support values and explicit fixed registers" {
     try expectAsm(
         \\fn test(reg($t0) value: u32) noreturn {
@@ -567,13 +607,20 @@ test "internal functions let the compiler choose parameter registers" {
     , &.{ "  add $t6, $t6, $a0\n", "# vaddc $v09, $v09, $v09\n", "  jal scale\n" });
 }
 
-test "automatic scalar allocation reuses a register after its final use" {
+test "automatic scalar allocation reuses a register a few statements after its final use" {
+    // `second` passes over the just-freed `$t0`, so its definition need not
+    // wait for `first`'s last read; `third` reuses it.
     try expectAsm(
         \\fn test() noreturn {
         \\  reg first: u32 = 1;
         \\  first += 1;
         \\  reg second: u32 = 2;
         \\  second += 1;
+        \\  second += 1;
+        \\  second += 1;
+        \\  second += 1;
+        \\  reg third: u32 = 3;
+        \\  third += second;
         \\  rsp.halt();
         \\}
     ,
@@ -584,8 +631,13 @@ test "automatic scalar allocation reuses a register after its final use" {
         \\test:
         \\  addiu $t0, $zero, 1
         \\  addi $t0, $t0, 1
-        \\  addiu $t0, $zero, 2
-        \\  addi $t0, $t0, 1
+        \\  addiu $t1, $zero, 2
+        \\  addi $t1, $t1, 1
+        \\  addi $t1, $t1, 1
+        \\  addi $t1, $t1, 1
+        \\  addi $t1, $t1, 1
+        \\  addiu $t0, $zero, 3
+        \\  add $t0, $t0, $t1
         \\  break
         \\
         \\
@@ -619,7 +671,7 @@ test "automatic allocation preserves values across backward label edges" {
         \\  sub $t1, $t1, $t2
         \\  bne $t1, $zero, LABEL_test_loop_0
         \\  nop
-        \\  addiu $t0, $zero, 3
+        \\  addiu $t3, $zero, 3
         \\  break
         \\
         \\

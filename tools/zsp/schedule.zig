@@ -19,7 +19,7 @@ const Items = std.ArrayList(Item);
 const max_window = 64;
 
 /// Partial schedules kept at each step of the search.
-const beam_width = 16;
+const beam_width = 32;
 
 pub fn scheduleItems(allocator: std.mem.Allocator, items: *Items) !void {
     var start: usize = 0;
@@ -206,12 +206,25 @@ const Search = struct {
     tail: Tail,
     entry: timing.Pipeline = .{},
 
+    /// The best order the beam finds, unless the source order is as good:
+    /// the beam can drop a hand-arranged order on the way, and only a
+    /// better estimate is worth the change.
     fn run(self: *Search) ![]usize {
         var beam: std.ArrayList(State) = .empty;
         try beam.append(self.arena, try self.initialState());
         for (0..self.nodes.len) |step| beam = try self.advance(beam, step);
         for (beam.items) |*state| state.total = self.finish(state.*);
-        return bestFinal(beam.items).order;
+        const best = bestFinal(beam.items);
+        const source = try self.sourceOrder();
+        return if (finalBefore(best, source) and best.total < source.total) best.order else source.order;
+    }
+
+    /// Every node in index order: the body as written, then the transfer.
+    fn sourceOrder(self: *Search) !State {
+        var state = try self.initialState();
+        for (0..self.nodes.len) |index| state = try self.extend(state, index, index);
+        state.total = self.finish(state);
+        return state;
     }
 
     fn initialState(self: *Search) !State {

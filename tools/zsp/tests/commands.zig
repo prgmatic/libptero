@@ -365,3 +365,26 @@ test "discard parameters contribute to command size without defining symbols" {
         \\}
     , error.UnknownSymbol);
 }
+
+test "align starts a function at a byte boundary" {
+    try expectAsm(
+        \\export fn _start() align(8) noreturn {
+        \\  rsp.halt();
+        \\}
+    ,
+        \\.set noreorder
+        \\.set noat
+        \\.text
+        \\
+        \\.balign 8
+        \\.globl _start
+        \\_start:
+        \\  break
+        \\
+        \\
+    );
+    try expectParseError(
+        \\fn f() align(6) {
+        \\}
+    , .invalid_function_alignment, 1, 14);
+}

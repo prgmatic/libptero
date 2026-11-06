@@ -37,6 +37,9 @@ pub const ColdBlock = struct {
     statements: []const ast.Statement,
     position: usize,
     label: usize,
+    /// The names in scope at the `if`, which a nested body still uses
+    /// after its loop or block has ended.
+    symbols: []const Symbol,
 };
 
 /// A loop or labeled block that `break` and `continue` may target.
@@ -80,7 +83,8 @@ pub const FunctionContext = struct {
     expression_temporary_depth: usize = 0,
     /// Whether rarely run `if` bodies may be placed after the function.
     cold_blocks_allowed: bool = false,
-    /// Nested blocks being written; cold bodies move only from depth 0.
+    /// Nested blocks being written; cold bodies inside them move only when
+    /// they do not break out.
     block_depth: usize = 0,
     cold_blocks: std.ArrayList(ColdBlock) = .empty,
 
@@ -91,6 +95,7 @@ pub const FunctionContext = struct {
     pub fn deinit(self: *FunctionContext) void {
         self.symbols.deinit(self.allocator);
         self.emission_loops.deinit(self.allocator);
+        for (self.cold_blocks.items) |block| self.allocator.free(block.symbols);
         self.cold_blocks.deinit(self.allocator);
         self.lifetimes.deinit();
     }
@@ -223,11 +228,40 @@ pub const FunctionContext = struct {
         if (self.lifetimes.requiredRegister(name)) |reg| {
             if (self.checkRequiredRegister(name, reg)) |usable| return usable else |_| {}
         }
-        for (registers.alloc_scalar_registers) |reg| {
-            if (self.scalarCandidate(name, reg)) return reg;
-        }
+        if (self.firstFreeScalar(name, .rested)) |reg| return reg;
+        if (self.firstFreeScalar(name, .any)) |reg| return reg;
         self.reportLive(name, false);
         return error.OutOfFreeRegisters;
+    }
+
+    /// Which free registers a search accepts: `rested` ones were not just
+    /// freed (see `reuse_distance`).
+    const Freshness = enum { rested, any };
+
+    fn firstFreeScalar(self: *const FunctionContext, name: []const u8, freshness: Freshness) ?Register {
+        for (registers.alloc_scalar_registers) |reg| {
+            if (!self.scalarCandidate(name, reg)) continue;
+            if (freshness == .any or !self.recentlyFreed(name, .{ .scalar = reg })) return reg;
+        }
+        return null;
+    }
+
+    /// Statements after a value's last use during which its register is
+    /// passed over while another is free. Reusing it at once would make the
+    /// new value's definition wait for the old value's last reads, which
+    /// keeps the scheduler from overlapping them.
+    const reuse_distance = 4;
+
+    fn recentlyFreed(self: *const FunctionContext, name: []const u8, reg: union(enum) { scalar: Register, vector: VReg }) bool {
+        const first = self.firstLive(name);
+        for (self.symbols.items) |symbol| {
+            const holds = switch (reg) {
+                .scalar => |scalar| symbol.reg == scalar,
+                .vector => |vector| occupies(symbol, vector),
+            };
+            if (holds and symbol.last_use < first and first - symbol.last_use <= reuse_distance) return true;
+        }
+        return false;
     }
 
     /// Lists the values whose registers overlap `name`'s lifetime.
@@ -321,11 +355,18 @@ pub const FunctionContext = struct {
     pub fn allocVectorRegister(self: *const FunctionContext, data_type: DataType, name: []const u8) !VReg {
         if (!isVectorType(data_type)) return error.ExpectedVectorType;
         if (self.lifetimes.requiredVectorRegister(name)) |reg| return self.checkRequiredVector(data_type, name, reg);
-        for (registers.alloc_vector_registers) |reg| {
-            if (self.vectorCandidate(data_type, name, reg)) return reg;
-        }
+        if (self.firstFreeVector(data_type, name, .rested)) |reg| return reg;
+        if (self.firstFreeVector(data_type, name, .any)) |reg| return reg;
         self.reportLive(name, true);
         return error.OutOfFreeVectorRegisters;
+    }
+
+    fn firstFreeVector(self: *const FunctionContext, data_type: DataType, name: []const u8, freshness: Freshness) ?VReg {
+        for (registers.alloc_vector_registers) |reg| {
+            if (!self.vectorCandidate(data_type, name, reg)) continue;
+            if (freshness == .any or !self.vectorRecentlyFreed(data_type, name, reg)) return reg;
+        }
+        return null;
     }
 
     fn checkRequiredVector(self: *const FunctionContext, data_type: DataType, name: []const u8, reg: VReg) !VReg {
@@ -340,6 +381,13 @@ pub const FunctionContext = struct {
         if (data_type != .vec32) return true;
         const second = nextVectorRegister(reg) orelse return false;
         return @intFromEnum(second) < 29 and self.vectorFree(name, second);
+    }
+
+    fn vectorRecentlyFreed(self: *const FunctionContext, data_type: DataType, name: []const u8, reg: VReg) bool {
+        if (self.recentlyFreed(name, .{ .vector = reg })) return true;
+        if (data_type != .vec32) return false;
+        const second = nextVectorRegister(reg) orelse return false;
+        return self.recentlyFreed(name, .{ .vector = second });
     }
 
     fn vectorFree(self: *const FunctionContext, name: []const u8, reg: VReg) bool {
