@@ -275,16 +275,18 @@ fn addBuiltinRspProgramsTo(sdk: *Sdk, assets: *AssetBundle) void {
         0x0220,
         0x0220,
     );
-    assets.addZspOverlayWithStateStart(
+    const geometry = assets.addZspLinkedOverlay(
         "geometry_overlay",
         sdk.root.path(sdk.b, "src/n64/rsp/ucode/geometry_overlay.zsp"),
         resident,
         0x0230,
+        0x0a00,
     );
-    assets.addZspOverlayWithStateStart(
+    // Clipping replaces geometry's text from `_start` on while it is loaded.
+    assets.addZspPatch(
         "geometry_clipping",
         sdk.root.path(sdk.b, "src/n64/rsp/ucode/geometry_clipping.zsp"),
-        resident,
-        0x0230,
+        geometry,
+        "_start",
     );
 }

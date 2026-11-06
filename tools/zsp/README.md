@@ -1160,6 +1160,8 @@ than assembly text. Its passes run in order:
 7. Loop-exit slots: a backward branch whose slot is still empty takes the
    first instruction after the loop when repeating it each iteration is
    harmless, such as `dma.exec`'s descriptor setup after its DMA-full poll.
+   The loop body may branch forward within itself (an `if` in the loop);
+   only its unconditional prefix counts as overwriting the moved result.
 8. Fall-through slots: a conditional branch whose slot is still empty takes
    one of the next few instructions when it has no side effects and what it
    writes is dead where the branch goes. Liveness comes from a bounded walk

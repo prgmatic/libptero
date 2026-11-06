@@ -97,3 +97,10 @@ pub fn symbol(name: u32, value: u32, section: u16) [16]u8 {
     std.mem.writeInt(u16, bytes[14..16], section, .big);
     return bytes;
 }
+
+/// A global `Elf32_Sym` entry, as bytes.
+pub fn globalSymbol(name: u32, value: u32, section: u16) [16]u8 {
+    var bytes = symbol(name, value, section);
+    bytes[12] = @as(u8, elf.STB_GLOBAL) << 4;
+    return bytes;
+}

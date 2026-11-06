@@ -1,624 +1,361 @@
-// Geometry clipping overlay. The leading space places the DMA payload at the
-// main overlay loader address (0x18b0); payload instructions are the reference
-// clipping overlay bytes, with only absolute IMEM targets relocated.
-@rspq.command(0) fn _start() noreturn {
-    exact {
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm(".word 0x00000000");
-        asm("geometry_clipping_code_start:");
-        asm(".word 0xc8821801");
-        asm(".word 0xc8811800");
-        asm(".word 0xc8841803");
-        asm(".word 0xc8831802");
-        asm(".word 0x340b0de0");
-        asm(".word 0x34010348");
-        asm(".word 0xe9611800");
-        asm(".word 0xe9621801");
-        asm(".word 0xe9641803");
-        asm(".word 0xe9631802");
-        asm(".word 0xc8a11800");
-        asm(".word 0xc8a31802");
-        asm(".word 0xc8a21801");
-        asm(".word 0xc8a41803");
-        asm(".word 0x256b0024");
-        asm(".word 0x34090ee0");
-        asm(".word 0xe9631802");
-        asm(".word 0xe9641803");
-        asm(".word 0xe9621801");
-        asm(".word 0xe9611800");
-        asm(".word 0xc8c41803");
-        asm(".word 0xc8c11800");
-        asm(".word 0x340c0330");
-        asm(".word 0x256b0024");
-        asm(".word 0xc8c31802");
-        asm(".word 0xe9611800");
-        asm(".word 0x908e0006");
-        asm(".word 0xc8210803");
-        asm(".word 0xc8c21801");
-        asm(".word 0x240d0001");
-        asm(".word 0x3401ffff");
-        asm(".word 0xe9641803");
-        asm(".word 0x4b01006a");
-        asm(".word 0x48810b00");
-        asm(".word 0x48810f00");
-        asm(".word 0x34010330");
-        asm(".word 0x340a0de0");
-        asm(".word 0xe9621801");
-        asm(".word 0xc8221000");
-        asm(".word 0xa00e0094");
-        asm(".word 0x2408006c");
-        asm(".word 0xe9631802");
-        asm(".word 0x256b0024");
-        asm(".word 0x4b2200aa");
-        asm(".word 0x012a4826");
-        asm(".word 0x012a5026");
-        asm(".word 0x256effdc");
-        asm(".word 0xc9c41802");
-        asm(".word 0x012a4826");
-        asm(".word 0xc9c33801");
-        asm(".word 0x91cf0006");
-        asm(".word 0xc9c51803");
-        asm(".word 0x000a5825");
-        asm(".word 0xc9c41403");
-        asm(".word 0x0128c021");
-        asm(".word 0x00097025");
-        asm(".word 0x91d90006");
-        asm(".word 0xc9c83801");
-        asm(".word 0xc9c71803");
-        asm(".word 0x0019d827");
-        asm(".word 0x032fd026");
-        asm(".word 0xc9c61802");
-        asm(".word 0x034dd024");
-        asm(".word 0x036dd824");
-        asm(".word 0x13400064");
-        asm(".word 0xc9c61403");
-        asm(".word 0xc98e3000");
-        asm(".word 0x01ed7824");
-        asm(".word 0x11e00012");
-        asm(".word 0x00000000");
-        asm(".word 0x34010080");
-        asm(".word 0x4a072a95");
-        asm(".word 0xe82e1800");
-        asm(".word 0x4b0003ec");
-        asm(".word 0x4a062251");
-        asm(".word 0xc82e1c00");
-        asm(".word 0xe8241800");
-        asm(".word 0x4a07032a");
-        asm(".word 0xe8251801");
-        asm(".word 0x4a0602ea");
-        asm(".word 0xc82b1c00");
-        asm(".word 0x4bff7bc4");
-        asm(".word 0x4bff738d");
-        asm(".word 0xc82c1c01");
-        asm(".word 0x4a0003ce");
-        asm(".word 0x10000011");
-        asm(".word 0x4a081b55");
-        asm(".word 0x34010080");
-        asm(".word 0x4a0402ea");
-        asm(".word 0xe82e1800");
-        asm(".word 0x4b0003ec");
-        asm(".word 0x4a05032a");
-        asm(".word 0xc82e1c00");
-        asm(".word 0x4a053a95");
-        asm(".word 0xe8261800");
-        asm(".word 0x4a043251");
-        asm(".word 0x4bff7bc4");
-        asm(".word 0x4bff738d");
-        asm(".word 0x4a0003ce");
-        asm(".word 0xe8271801");
-        asm(".word 0x4a034355");
-        asm(".word 0xc82b1c00");
-        asm(".word 0xc82c1c01");
-        asm(".word 0x4a017bc4");
-        asm(".word 0x4a01738d");
-        asm(".word 0x4a0003ce");
-        asm(".word 0x4a0f6744");
-        asm(".word 0x4a0f5f4d");
-        asm(".word 0x4a0e644e");
-        asm(".word 0x4a0e5c0f");
-        asm(".word 0x4a718c54");
-        asm(".word 0x4a708410");
-        asm(".word 0x4ad18c54");
-        asm(".word 0x4ad08410");
-        asm(".word 0x4b918cd5");
-        asm(".word 0x4b908491");
-        asm(".word 0x4b1244b2");
-        asm(".word 0x4b1344f1");
-        asm(".word 0x4b0044b2");
-        asm(".word 0x4a139cd4");
-        asm(".word 0x4a129490");
-        asm(".word 0x4b119f44");
-        asm(".word 0x4b11974d");
-        asm(".word 0x4b109cce");
-        asm(".word 0x4b10948f");
-        asm(".word 0x481d9000");
-        asm(".word 0x13a00005");
-        asm(".word 0x00000000");
-        asm(".word 0x4bfe9760");
-        asm(".word 0x4b619ce7");
-        asm(".word 0x4b009763");
-        asm(".word 0x4a009ce7");
-        asm(".word 0x11e00008");
-        asm(".word 0x4b136b45");
-        asm(".word 0x4b135444");
-        asm(".word 0x4b134c0d");
-        asm(".word 0x4a00044e");
-        asm(".word 0x4bfe394e");
-        asm(".word 0x4bfe310f");
-        asm(".word 0x10000007");
-        asm(".word 0x4a0d40d4");
-        asm(".word 0x4b135444");
-        asm(".word 0x4b134c0d");
-        asm(".word 0x4a00044e");
-        asm(".word 0x4bfe294e");
-        asm(".word 0x4bfe210f");
-        asm(".word 0x4a0d18d4");
-        asm(".word 0x4a012a84");
-        asm(".word 0x4a01224d");
-        asm(".word 0x4a00028e");
-        asm(".word 0xe9641802");
-        asm(".word 0x4ae51305");
-        asm(".word 0x4ae412cf");
-        asm(".word 0x4a00030e");
-        asm(".word 0xe9633801");
-        asm(".word 0x4b6b4f65");
-        asm(".word 0x4b6c5764");
-        asm(".word 0xe9641403");
-        asm(".word 0x484f0800");
-        asm(".word 0xe9651803");
-        asm(".word 0x31ef0307");
-        asm(".word 0x000fe942");
-        asm(".word 0x01fd7825");
-        asm(".word 0xa16f0006");
-        asm(".word 0x256b0024");
-        asm(".word 0x4a0800ea");
-        asm(".word 0x4a07016a");
-        asm(".word 0x00197825");
-        asm(".word 0x13600007");
-        asm(".word 0x4a06012a");
-        asm(".word 0xe9633801");
-        asm(".word 0xa16f0006");
-        asm(".word 0xe9651803");
-        asm(".word 0xe9641403");
-        asm(".word 0xe9641802");
-        asm(".word 0x256b0024");
-        asm(".word 0x25ce0024");
-        asm(".word 0x15d8ff86");
-        asm(".word 0x016a4023");
-        asm(".word 0x11000013");
-        asm(".word 0x000d6840");
-        asm(".word 0x24010020");
-        asm(".word 0x15a1ff75");
-        asm(".word 0x258c0004");
-        asm(".word 0x34160ee0");
-        asm(".word 0x02c8a821");
-        asm(".word 0x0411000f");
-        asm(".word 0x26b5ffb8");
-        asm(".word 0x0411000d");
-        asm(".word 0x26d60048");
-        asm(".word 0x0411000b");
-        asm(".word 0x26d60048");
-        asm(".word 0x00162825");
-        asm(".word 0x34040ee0");
-        // jal geometry_RDPQ_Triangle_Send_Async (IMEM 0x1400)
-        asm(".word 0x0d000500");
-        asm(".word 0x26c60024");
-        // j geometry_RDPQ_Triangle_Send_End (IMEM 0x185c)
-        asm(".word 0x09000617");
-        // ori $ra, $zero, clipping continuation (IMEM 0x1b98)
-        asm(".word 0x341f1b98");
-        asm(".word 0x16d5fff7");
-        asm(".word 0x94010350");
-        asm(".word 0x00200008");
-        asm(".word 0x84140092");
-        asm(".word 0x34010310");
-        asm(".word 0xc8211800");
-        asm(".word 0xcac71802");
-        asm(".word 0x4bff0084");
-        asm(".word 0xcac81803");
-        asm(".word 0x94080094");
-        asm(".word 0xc8241801");
-        asm(".word 0x4bff084d");
-        asm(".word 0x4a00008e");
-        asm(".word 0x4b675972");
-        asm(".word 0x4b6859b1");
-        asm(".word 0x4b605972");
-        asm(".word 0x4bfe00ec");
-        asm(".word 0x4b664744");
-        asm(".word 0x4b663f4d");
-        asm(".word 0x4b65420e");
-        asm(".word 0x4b6539cf");
-        asm(".word 0x4a024744");
-        asm(".word 0x4a023f4d");
-        asm(".word 0x3108e000");
-        asm(".word 0x4a01420e");
-        asm(".word 0xeac60b11");
-        asm(".word 0x350800ff");
-        asm(".word 0x4a0139cf");
-        asm(".word 0xeac50b10");
-        asm(".word 0x4bfe21cf");
-        asm(".word 0xeac71800");
-        asm(".word 0xa6c80006");
-        asm(".word 0x03e00008");
-        asm(".word 0x26d6ffdc");
-        asm("geometry_clipping_code_end:");
+// Triangle clipping for the geometry overlay, after Tiny3D's clipping.rspl.
+//
+// Geometry loads this text over its own from `_start` on when a triangle
+// crosses a clipping plane, and restores its code on the next triangle
+// sync. The patch runs on geometry's state: a Sutherland-Hodgman pass per
+// plane clips the triangle into a polygon, which is drawn as a fan through
+// geometry's triangle sender.
+//
+// Clip vertices are 36 bytes: screen X Y Z at 0, clip flags at 6 (the
+// low five bits are outside-plane codes, the top three the tile index),
+// RGBA at 8, S T at 12, the clip-space position as 16.16 X Y Z W (integer
+// halves at 16, fractions at 24), and 1/W at 32.
+
+bss {
+    extern clipping_buffer_temporary: [256]u8;
+    extern clipping_buffer_result: [288]u8;
+    extern clipping_planes: [20]i8;
+    extern normalize_w_scale: [4]i16;
+    extern screen_scale_offset: [8]i16;
+    extern clipping_return_address: u16;
+    extern resident_scratch: [32]u8;
+}
+
+const vertex_size: u32 = 36;
+const triangle_size: u32 = 3 * vertex_size;
+const clip_flags: u32 = 6;
+const color: u32 = 8;
+const texture: u32 = 12;
+const clip_position: u32 = 16;
+const inverse_w: u32 = 32;
+
+// Geometry saves the strip's index pointer here before clipping; the patch
+// keeps the triangle's original clip flags next to it.
+const saved_indices: u32 = 18;
+const saved_flags: u32 = 20;
+
+// The tile index bits of a clip flags halfword, and the codes that mark a
+// vertex inside every plane and not trivially rejected.
+const tile_bits: u32 = 0xe000;
+const inside_codes: u32 = 0x00ff;
+
+/// Builds and sends an RDP triangle; returns without drawing a rejected
+/// or culled one. Fan triangles never need clipping again.
+extern fn geometry_RDPQ_Triangle_Send_Async(
+    reg($a0) vertex1: dmem,
+    reg($a1) vertex2: dmem,
+    reg($a2) vertex3: dmem,
+    reg($v0) cull_mode: u32,
+) writes(
+    $at, $a0, $a1, $a2, $a3, $t0, $t1, $t2, $t3, $t4, $t5, $t6, $s3, $s7, $sp, $ra,
+    $v01, $v02, $v03, $v04, $v05, $v06, $v07, $v08, $v09, $v10, $v11, $v12, $v13, $v14,
+    $v15, $v16, $v17, $v18, $v19, $v20, $v21, $v22, $v23, $v24, $v25, $v26, $v27, $v28,
+    $v29
+);
+
+/// Waits for the last triangle's DMA and hands it to the RDP.
+extern fn geometry_RDPQ_Triangle_Send_End() writes($at, $t0, $t1);
+
+/// Clips the triangle `vertex1`-`vertex2`-`vertex3` against the four side
+/// planes and the near plane, draws what remains, and returns to the
+/// address geometry saved.
+export fn _start(
+    reg($a0) vertex1: dmem,
+    reg($a1) vertex2: dmem,
+    reg($a2) vertex3: dmem,
+    reg($v0) cull_mode: u32,
+) noreturn {
+    reg($v00) vector_zero: vec16 = undefined;
+    // Lane 7 of the dispatcher's shift constants is 1, and 256 after <<8.
+    reg($v30) powers: vec16 = undefined;
+    reg($v31) shifts: vec16 = undefined;
+    // Geometry's triangle sequences keep their vertex step here across a
+    // clip; this patch must not use it as a temporary.
+    reserved reg($v1) sequence_step: u32 = undefined;
+
+    // Each pass reads one buffer and writes the other; the triangle starts
+    // in the temporary one, so after the five passes the result is in
+    // clipping_buffer_result.
+    reg write: dmem = clipping_buffer_temporary;
+    copyVertex(write, vertex1);
+    copyVertex(write, vertex2);
+    copyVertex(write, vertex3);
+    reg size: u32 = triangle_size;
+
+    reg original_flags: u32 = load(u8, vertex1, clip_flags);
+    store(u8, resident_scratch, original_flags, saved_flags);
+
+    // The W normalization, with 0.99998 in lanes 3 and 7 to clamp the
+    // intersection factor.
+    reg w_scale: vec16 = undefined;
+    w_scale[0] = load(vec16, normalize_w_scale, 6);
+    w_scale = vector_zero | w_scale.xxxxxxxx;
+    reg almost_one: u32 = 0xffff;
+    w_scale[3] = almost_one;
+    w_scale[7] = almost_one;
+    // The guard band factor is the first plane's W.
+    reg guard_band: vec16 = undefined;
+    guard_band[0..2] = load(vec16, clipping_planes, 0);
+    guard_band = vector_zero | guard_band.yyyyyyyy;
+
+    reg read_buffer: dmem = clipping_buffer_result;
+    reg write_buffer: dmem = clipping_buffer_temporary;
+    reg plane: dmem = clipping_planes;
+    reg plane_code: u32 = 1;
+    // One code bit per plane; the far plane's is not clipped against.
+    reg far_plane_code: u32 = 32;
+    clip: block {
+        planes: do {
+            // The polygon is closed: its last vertex precedes the first.
+            reg last: dmem = write - vertex_size;
+            reg last_position: vec32 = undefined;
+            reg last_color: vec16 = undefined;
+            reg last_flags: u32 = undefined;
+            loadClipVertex(last_position, last_color, last_flags, last);
+
+            reg swap: dmem = read_buffer;
+            read_buffer = write_buffer;
+            write_buffer = swap;
+            write = write_buffer;
+            reg read: dmem = read_buffer;
+            reg read_end: dmem = read_buffer + size;
+            edges: do {
+                reg position: vec32 = undefined;
+                reg vertex_color: vec16 = undefined;
+                reg flags: u32 = undefined;
+                loadClipVertex(position, vertex_color, flags, read);
+                reg crosses: u32 = flags ^ last_flags;
+                crosses &= plane_code;
+                reg inside: u32 = undefined;
+                inside = ~flags;
+                inside &= plane_code;
+
+                // An edge crossing the plane adds its intersection.
+                if (crosses != 0) {
+                    last_flags &= plane_code;
+                    intersect(
+                        last_position, last_color, last_flags,
+                        plane, position, vertex_color,
+                        w_scale, guard_band, vector_zero, powers, shifts,
+                    );
+                    storeClipVertex(write, last_position, last_color, last_flags);
+                    write += vertex_size;
+                }
+
+                last_position = position;
+                last_flags = flags;
+                last_color = vertex_color;
+                if (inside != 0) {
+                    storeClipVertex(write, last_position, last_color, last_flags);
+                    write += vertex_size;
+                }
+                read += vertex_size;
+            } while (read != read_end);
+
+            plane_code <<= 1;
+            size = write - write_buffer;
+            if (size == 0) {
+                break clip;
+            }
+            plane += 4;
+        } while (plane_code != far_plane_code);
+
+        // Draw the polygon as a fan around its first vertex, converting
+        // each vertex to screen space once.
+        reg end: dmem = size;
+        end += clipping_buffer_result;
+        reg second: dmem = dmem.addressOf(clipping_buffer_result, vertex_size);
+        toScreenSpace(clipping_buffer_result);
+        toScreenSpace(second);
+        reg newest: dmem = dmem.addressOf(clipping_buffer_result, 2 * vertex_size);
+        do {
+            toScreenSpace(newest);
+            // The sender takes its vertices in the registers it overwrites.
+            reg($a0) fan_vertex1: dmem = clipping_buffer_result;
+            reg($a1) fan_vertex2: dmem = newest - vertex_size;
+            reg($a2) fan_vertex3: dmem = newest;
+            geometry_RDPQ_Triangle_Send_Async(fan_vertex1, fan_vertex2, fan_vertex3, cull_mode);
+            geometry_RDPQ_Triangle_Send_End();
+            newest += vertex_size;
+        } while (newest != end);
     }
+
+    // Resume geometry where it entered clipping, with the strip's index
+    // pointer back in place.
+    reg return_address: u32 = load(u16, clipping_return_address);
+    reg($s4) indices: dmem = load(i16, resident_scratch, saved_indices);
+    jump(return_address);
+}
+
+/// Appends the part of a vertex clipping reads to `buffer`.
+inline fn copyVertex(buffer: dmem, vertex: dmem) {
+    reg parts: [4]vec16 = undefined;
+    inline for (0..4) |part| {
+        parts[part][0..4] = load(vec16, vertex, part * 8);
+    }
+    inline for (0..4) |part| {
+        store(vec16, buffer, parts[part][0..4], part * 8);
+    }
+    buffer += vertex_size;
+}
+
+/// Loads a clip vertex: its clip-space position with S T in lanes 4 and
+/// 5, its color, and its clip flags.
+inline fn loadClipVertex(position: vec32, vertex_color: vec16, flags: u32, vertex: dmem) {
+    position[0..4] = load(vec32, vertex, clip_position);
+    position.sint[4..6] = load(vec16, vertex, texture);
+    rsp.vector.loadPackedUnsigned(vertex_color, vertex, color);
+    flags = load(u8, vertex, clip_flags);
+}
+
+inline fn storeClipVertex(vertex: dmem, position: vec32, vertex_color: vec16, flags: u32) {
+    rsp.vector.storePackedUnsigned(vertex_color, 0, vertex, color);
+    store(vec16, vertex, position.sint[4..6], texture);
+    store(u8, vertex, flags, clip_flags);
+    store(vec32, vertex, position[0..4], clip_position);
+}
+
+/// Replaces `base` with the point where the edge from it to `target`
+/// crosses `plane`, interpolating position, S T, and color, and `code`
+/// with the new point's clip codes. A nonzero `code` on entry means `base`
+/// is the outside end; the interpolation then runs from `target` so both
+/// edges sharing a crossing compute the same point, leaving no gaps.
+inline fn intersect(
+    base: vec32,
+    base_color: vec16,
+    code: u32,
+    plane: dmem,
+    target: vec32,
+    target_color: vec16,
+    w_scale: vec16,
+    guard_band: vec16,
+    vector_zero: vec16,
+    powers: vec16,
+    shifts: vec16,
+) {
+    // The plane normal, as 16.16 with X Y Z W in both halves.
+    reg scratch: dmem = resident_scratch;
+    reg normal: vec32 = undefined;
+    rsp.vector.loadPackedSigned(normal.sint, plane, 0);
+    store(vec16, scratch, normal.sint[0..4]);
+    normal.sint[4..8] = load(vec16, scratch, 0);
+    normal.sfract = vector_zero ^ vector_zero;
+    // The ends, inside first in lanes 0-3 and outside in lanes 4-7.
+    reg ends: vec32 = undefined;
+    reg delta: vec32 = undefined;
+    reg color_delta: vec16 = undefined;
+    if (code != 0) {
+        delta = base - target;
+        ends = target;
+        store(vec32, scratch, base[0..4]);
+        color_delta = vectorSubtractCarry(base_color, target_color);
+    } else {
+        delta = target - base;
+        ends = base;
+        store(vec32, scratch, target[0..4]);
+        color_delta = vectorSubtractCarry(target_color, base_color);
+    }
+    ends[4..8] = load(vec32, scratch, 0);
+    // From signed bytes, then normalized like the positions' W.
+    normal.sfract = vmudl(normal.sfract, shifts.WWWWWWWW);
+    normal.sint = vmadm(normal.sint, shifts.WWWWWWWW);
+    normal.sfract = vmadn(vector_zero, vector_zero);
+    scaleByFraction(normal, normal, w_scale, vector_zero);
+
+    // Signed distances of both ends: X Y Z W dot products in lanes 0 and 4.
+    reg dot: vec32 = ends * normal;
+    dot += dot.yywwYYWW;
+    dot += dot.zzzzZZZZ;
+    // factor = inside / (inside - outside)
+    reg factor: vec32 = dot - dot.XXXXXXXX;
+    factor.sint[0] = vectorReciprocalHigh(factor.sint[0]);
+    factor.sfract[0] = vectorReciprocalLow(factor.sfract[0]);
+    factor.sint[0] = vectorReciprocalHigh(vector_zero[0]);
+    factor += factor;
+    factor = factor * dot.xxxxxxxx;
+
+    // Only the fraction is used: clamp it into 0 <= factor < 1.
+    reg whole: i32 = undefined;
+    whole = factor.sint[0];
+    if (whole != 0) {
+        reg discard: vec16 = vectorCompareLessThan(factor.sint, powers.WWWWWWWW);
+        factor.sfract = vectorSelectByCompareCode(factor.sfract, w_scale.wwwwwwww);
+        discard = vectorCompareGreaterOrEqual(factor.sint, vector_zero.xxxxxxxx);
+        factor.sfract = vectorSelectByCompareCode(factor.sfract, vector_zero);
+    }
+
+    // point = start + delta * factor, accumulating the start times one.
+    color_delta = vmudm(color_delta, factor.sfract.xxxxxxxx);
+    reg discard_product: vec16 = vmudl(delta.sfract, factor.sfract.xxxxxxxx);
+    discard_product = vmadm(delta.sint, factor.sfract.xxxxxxxx);
+    if (code != 0) {
+        base.sfract = vmadn(target.sfract, powers.WWWWWWWW);
+        base.sint = vmadh(target.sint, powers.WWWWWWWW);
+        base_color = vectorAddCarry(target_color, color_delta);
+    } else {
+        base.sfract = vmadn(base.sfract, powers.WWWWWWWW);
+        base.sint = vmadh(base.sint, powers.WWWWWWWW);
+        base_color = vectorAddCarry(base_color, color_delta);
+    }
+
+    // Clip codes of the new point against the guard band planes.
+    reg clip_base: vec32 = undefined;
+    scaleByFraction(clip_base, base, w_scale, vector_zero);
+    reg plane_w: vec32 = undefined;
+    plane_w.sfract = vmudm(guard_band, base.sfract.wwwwWWWW);
+    plane_w.sint = vmadh(guard_band, base.sint.wwwwWWWW);
+    plane_w.sfract = vmadn(vector_zero, vector_zero);
+    reg discard_clip: vec16 = vectorClipHigh(clip_base.sint, plane_w.sint.wwwwwwww);
+    discard_clip = vectorClipLow(clip_base.sfract, plane_w.sfract.wwwwwwww);
+    reg compare: u32 = rsp.vector.getCompareCode();
+    // Keep the X Y Z codes of both halves, packed into the low five bits.
+    code = compare & 0x0307;
+    reg high_codes: u32 = code >> 5;
+    code |= high_codes;
+}
+
+/// result = value * factor, with `factor` an unsigned fraction.
+inline fn scaleByFraction(result: vec32, value: vec32, factor: vec16, vector_zero: vec16) {
+    result.sfract = vmudl(value.sfract, factor);
+    result.sint = vmadm(value.sint, factor);
+    result.sfract = vmadn(vector_zero, vector_zero);
+}
+
+/// Projects a clipped vertex: stores 1/W, the screen position, and clip
+/// flags that keep the tile index and mark the vertex inside every plane,
+/// so drawing it never clips again. Geometry's triangle sender changes the
+/// constants, so they are reloaded for every vertex.
+fn toScreenSpace(vertex: dmem) {
+    reg($v00) vector_zero: vec16 = undefined;
+    reg($v30) powers: vec16 = undefined;
+    reg($v31) shifts: vec16 = undefined;
+    reg screen: dmem = screen_scale_offset;
+    reg screen_scale: vec32 = undefined;
+    screen_scale.sint[0..4] = load(vec16, screen, 0);
+    reg screen_offset: vec16 = undefined;
+    screen_offset[0..4] = load(vec16, screen, 8);
+    reg position: vec32 = undefined;
+    position[0..4] = load(vec32, vertex, clip_position);
+    // The scale is stored in 8.8.
+    screen_scale.sfract = vmudl(vector_zero, shifts.WWWWWWWW);
+    screen_scale.sint = vmadm(screen_scale.sint, shifts.WWWWWWWW);
+    screen_scale.sfract = vmadn(vector_zero, vector_zero);
+
+    reg inverse: vec32 = undefined;
+    inverse.sint[3] = vectorReciprocalHigh(position.sint[3]);
+    inverse.sfract[3] = vectorReciprocalLow(position.sfract[3]);
+    inverse.sint[3] = vectorReciprocalHigh(vector_zero[3]);
+    store(vec16, vertex, inverse.sint[3], inverse_w);
+    store(vec16, vertex, inverse.sfract[3], inverse_w + 2);
+
+    position = position * inverse.wwwwwwww;
+    position = position * screen_scale;
+    // Add the offset onto the accumulator.
+    position.sint = vmadh(screen_offset, powers.WWWWWWWW);
+    store(vec16, vertex, position.sint[0..4], 0);
+
+    reg flags: u32 = load(u16, resident_scratch, saved_flags);
+    flags &= tile_bits;
+    flags |= inside_codes;
+    store(u16, vertex, flags, clip_flags);
 }

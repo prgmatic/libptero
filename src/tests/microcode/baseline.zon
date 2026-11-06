@@ -8,6 +8,6 @@
         .{ .name = "vadpcm_stereo_batches", .instructions = 9906, .cycles = 9853, .digest = "bd75989fe114833b5b7488512ae71803" },
         .{ .name = "mixer_4voice", .instructions = 31090, .cycles = 34288, .digest = "a663ed14c2f1ce10679f76f83bfceb99" },
         .{ .name = "geometry_lit_mesh", .instructions = 17952, .cycles = 11892, .digest = "4474f43290444a1bda8410115cb64889" },
-        .{ .name = "geometry_clipped_mesh", .instructions = 18471, .cycles = 13050, .digest = "875b2e1f8e6dcb613bf0727a662021b3" },
+        .{ .name = "geometry_clipped_mesh", .instructions = 18449, .cycles = 13096, .digest = "875b2e1f8e6dcb613bf0727a662021b3" },
     },
 }

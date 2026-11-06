@@ -222,7 +222,42 @@ test "mesh crossing the near plane is clipped and still rasterized" {
     const run = try runMesh(&h, crossing_near_plane);
     // The clip entry point and the swapped-in clipping payload both ran.
     try std.testing.expect(profile.instructions[symbols.geometryTriangleClip / 4] > 0);
-    try std.testing.expect(profile.instructions[programs.geometry_clipping_symbols.geometry_clipping_code_start / 4] > 0);
+    try std.testing.expect(profile.instructions[programs.geometry_clipping_symbols._start / 4] > 0);
     try std.testing.expect(run.triangles > 0);
     try std.testing.expect(run.triangles != triangle_count);
+}
+
+/// The scalar register an RSP instruction writes, if any.
+fn writtenRegister(word: u32) ?u5 {
+    const opcode: u6 = @truncate(word >> 26);
+    const rs: u5 = @truncate(word >> 21);
+    const rt: u5 = @truncate(word >> 16);
+    const rd: u5 = @truncate(word >> 11);
+    return switch (opcode) {
+        0 => switch (@as(u6, @truncate(word))) {
+            8 => null, // jr
+            else => rd,
+        },
+        1 => if (rt & 0x10 != 0) 31 else null, // bltzal, bgezal
+        3 => 31, // jal
+        8...15, 32...39 => rt, // immediate arithmetic, loads
+        16, 18 => if (rs == 0 or rs == 2) rt else null, // mfc0, mfc2, cfc2
+        else => null,
+    };
+}
+
+test "clipping preserves the registers geometry keeps across a clip" {
+    // Strips and sequences resume after a clip with their culling flag
+    // ($v0), sequence step ($v1), loop state ($s1, $s2), and the queue's
+    // $gp and $k1; the patch restores $s4 itself as it returns.
+    const preserved = [_]u5{ 2, 3, 17, 18, 28, 27 };
+    const text = programs.geometry_clipping.text;
+    var restores: usize = 0;
+    var offset: usize = 0;
+    while (offset < text.len) : (offset += 4) {
+        const written = writtenRegister(std.mem.readInt(u32, text[offset..][0..4], .big)) orelse continue;
+        for (preserved) |register| try std.testing.expect(written != register);
+        if (written == 20) restores += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), restores);
 }

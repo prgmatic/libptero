@@ -132,21 +132,20 @@ pub const ClippingPatch = struct { size: u16, clipping_address: u32, original_ad
 pub fn clippingPatch(geometry_text_rdram: u32, clipping_text_rdram: u32) ClippingPatch {
     const symbols = rsp.programs.geometry_overlay_symbols;
     const clipping = rsp.programs.geometry_clipping;
-    const clipping_imem_start = symbols._start;
-    if (symbols.geometry_RDPQ_Triangle_Send_Async != 0x400 or
-        symbols.geometry_RDPQ_Triangle_Send_End != 0x85c or
-        clipping_imem_start != 0x880)
-    {
-        @panic("geometry clipping payload jump targets need relocation");
-    }
-    if (rsp.programs.geometry_clipping_symbols.geometry_clipping_code_start != clipping_imem_start)
-        @panic("geometry clipping overlays disagree on their linked IMEM target");
-    const clipping_payload_offset = clipping_imem_start - clipping.text_offset;
-    const geometry_restore_offset = clipping_imem_start - rsp.programs.geometry_overlay.text_offset;
+    // The build links the clipping patch at geometry's `_start`.
+    if (clipping.text_offset != symbols._start)
+        @panic("geometry clipping is not linked at geometry's _start");
+    // Geometry's triangle clip entry, strips, sequences, and sync stay
+    // resident while clipping is loaded.
+    if (symbols._start + clipping.text.len > symbols.geometryTriangleClip)
+        @panic("geometry clipping overwrites code that stays resident");
+    // Geometry marks the patch loaded with the low byte of its size.
+    if (clipping.text.len & 0xff == 0)
+        @panic("geometry clipping size cannot mark the patch loaded");
     return .{
-        .size = @intCast(clipping.text.len - clipping_payload_offset),
-        .clipping_address = clipping_text_rdram + clipping_payload_offset,
-        .original_address = geometry_text_rdram + geometry_restore_offset,
+        .size = @intCast(clipping.text.len),
+        .clipping_address = clipping_text_rdram,
+        .original_address = geometry_text_rdram + (symbols._start - rsp.programs.geometry_overlay.text_offset),
     };
 }
 

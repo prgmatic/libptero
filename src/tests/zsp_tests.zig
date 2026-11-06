@@ -149,7 +149,7 @@ fn geometryLinkedDmemMap() !void {
     try testing.expectEqual(@as(u16, 0x1000), symbols.clipping_buffer_result + 288);
     try testing.expectEqual(
         symbols._start,
-        rsp.programs.geometry_clipping_symbols.geometry_clipping_code_start,
+        rsp.programs.geometry_clipping_symbols._start,
     );
 }
 
@@ -269,7 +269,7 @@ fn geometryContextInitialization() !void {
         @import("n64").hw.sp.readDmem(u16, 0x3fc).*,
     );
     const clipping = rsp.programs.geometry_clipping;
-    const clipping_start = rsp.programs.geometry_clipping_symbols.geometry_clipping_code_start;
+    const clipping_start = rsp.programs.geometry_clipping_symbols._start;
     const clipping_size: u16 = @intCast(clipping.text.len - (clipping_start - clipping.text_offset));
     try testing.expectEqual(clipping_size, @import("n64").hw.sp.readDmem(u16, geometry_symbols.clipping_code_size).*);
     try testing.expect(clipping_size != 0);
@@ -1952,9 +1952,9 @@ fn geometryClippingSwap() !void {
     const clipping = zsp_programs.geometry_clipping;
     const symbols = rsp.programs.geometry_overlay_symbols;
     const clipping_symbols = rsp.programs.geometry_clipping_symbols;
-    const clipping_start = clipping_symbols.geometry_clipping_code_start;
+    const clipping_start = clipping_symbols._start;
     const payload_offset = clipping_start - clipping.text_offset;
-    const payload_len = clipping_symbols.geometry_clipping_code_end - clipping_start;
+    const payload_len = @as(u16, @intCast(clipping.text.len));
     const original_offset = clipping_start - zsp_programs.geometry_overlay.text_offset;
     const clipping_address: u32 = @truncate(
         @intFromPtr(clipping.text.ptr + payload_offset) & 0x00ffffff,
@@ -2298,7 +2298,7 @@ fn geometryClippedTriangle() !void {
     const clipping = zsp_programs.geometry_clipping;
     const symbols = rsp.programs.geometry_overlay_symbols;
     const clipping_symbols = rsp.programs.geometry_clipping_symbols;
-    const clipping_start = clipping_symbols.geometry_clipping_code_start;
+    const clipping_start = clipping_symbols._start;
     const payload_offset = clipping_start - clipping.text_offset;
     const original_offset = clipping_start - zsp_programs.geometry_overlay.text_offset;
     const clipping_address: u32 = @truncate(
@@ -2312,7 +2312,7 @@ fn geometryClippedTriangle() !void {
     const state_start = zsp_programs.geometry_overlay.state_offset;
     std.mem.writeInt(u32, state[symbols.triangle_command - state_start ..][0..4], 0x01000000, .big);
     state[symbols.face_culling - state_start] = 2;
-    std.mem.writeInt(u16, state[symbols.clipping_code_size - state_start ..][0..2], clipping_symbols.geometry_clipping_code_end - clipping_start, .big);
+    std.mem.writeInt(u16, state[symbols.clipping_code_size - state_start ..][0..2], @as(u16, @intCast(clipping.text.len)), .big);
     std.mem.writeInt(u32, state[symbols.clipping_code_address - state_start ..][0..4], clipping_address, .big);
     std.mem.writeInt(u32, state[symbols.original_code_address - state_start ..][0..4], original_address, .big);
     const vertex_base = symbols.vertex_buffer - state_start;

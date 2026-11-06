@@ -101,19 +101,58 @@ fn writesOnlyScalars(moving: effects.Effects) bool {
     return moving.scalar_writes != 0;
 }
 
-/// The registers in `registers` that straight-line `body` leaves unwritten,
-/// or null when the body or its closing `branch` reads one before the body
-/// writes it again.
+/// The registers in `registers` that `body` may leave unwritten, or null
+/// when the body or its closing `branch` may read one before the body
+/// writes it again. Transfers must stay inside the body.
 fn keptByLoop(body: []const Item, branch: Inst, registers: u32) ?u32 {
-    var pending = registers;
+    var scan: Scan = .{ .body = body, .pending = registers };
     for (body) |item| {
-        if (item != .instruction) return null;
-        const inst = effects.of(item.instruction);
-        if (inst.isTransfer() or inst.scalar_reads & pending != 0) return null;
-        pending &= ~inst.scalar_writes;
+        if (!scan.step(item)) return null;
     }
-    if (effects.of(branch).scalar_reads & pending != 0) return null;
-    return pending;
+    if (effects.of(branch).scalar_reads & scan.pending != 0) return null;
+    return scan.pending;
+}
+
+/// Walks a loop body. Writes count only on the straight prefix every
+/// iteration runs; past a label or a branch, paths differ.
+const Scan = struct {
+    body: []const Item,
+    pending: u32,
+    straight: bool = true,
+
+    fn step(self: *Scan, item: Item) bool {
+        switch (item) {
+            .label => self.straight = false,
+            .instruction => |inst| return self.visit(inst),
+            else => return false,
+        }
+        return true;
+    }
+
+    fn visit(self: *Scan, inst: Inst) bool {
+        const inst_effects = effects.of(inst);
+        if (inst_effects.scalar_reads & self.pending != 0) return false;
+        if (inst_effects.isTransfer()) {
+            if (!branchesWithin(self.body, inst)) return false;
+            self.straight = false;
+        }
+        if (self.straight) self.pending &= ~inst_effects.scalar_writes;
+        return true;
+    }
+};
+
+/// Whether `inst` is a jump or branch to a label in `body`.
+fn branchesWithin(body: []const Item, inst: Inst) bool {
+    const control = effects.of(inst).control;
+    if (control != .branch and control != .jump) return false;
+    return hasLabel(body, inst.symbol orelse return false);
+}
+
+fn hasLabel(body: []const Item, name: []const u8) bool {
+    for (body) |item| {
+        if (item == .label and std.mem.eql(u8, item.label, name)) return true;
+    }
+    return false;
 }
 
 fn unfrozen(items: []const Item, index: usize) ?Inst {
@@ -242,4 +281,48 @@ test "forward branches and missing exits leave the slot alone" {
     });
     defer unlabeled.deinit(testing.allocator);
     try testing.expect(unlabeled.items[2].instruction.isNop());
+}
+
+test "a loop with internal branches still fills its back-edge slot" {
+    var list = try run(&.{
+        .{ .label = "L" },
+        .{ .instruction = .{ .op = .beq, .rs = .t0, .symbol = "skip" } },
+        .{ .instruction = .{ .op = .nop } },
+        .{ .instruction = .{ .op = .addi, .rt = .t0, .rs = .t0, .imm = 36 } },
+        .{ .label = "skip" },
+        .{ .instruction = .{ .op = .addi, .rt = .t6, .rs = .t6, .imm = 36 } },
+        .{ .instruction = .{ .op = .bne, .rs = .t6, .rt = .t8, .symbol = "L" } },
+        .{ .instruction = .{ .op = .nop } },
+        .{ .instruction = .{ .op = .sub, .rd = .t1, .rs = .t0, .rt = .t3 } },
+    });
+    defer list.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 8), list.items.len);
+    try testing.expectEqual(ir.Op.sub, list.items[7].instruction.op);
+}
+
+test "exit work stays out of a loop whose branches leave it or read its result" {
+    var leaving = try run(&.{
+        .{ .label = "L" },
+        .{ .instruction = .{ .op = .beq, .rs = .t0, .symbol = "out" } },
+        .{ .instruction = .{ .op = .nop } },
+        .{ .instruction = .{ .op = .bne, .rs = .t6, .rt = .t8, .symbol = "L" } },
+        .{ .instruction = .{ .op = .nop } },
+        .{ .instruction = .{ .op = .sub, .rd = .t1, .rs = .t0, .rt = .t3 } },
+        .{ .label = "out" },
+    });
+    defer leaving.deinit(testing.allocator);
+    try testing.expectEqual(ir.Op.nop, leaving.items[4].instruction.op);
+    var reading = try run(&.{
+        .{ .label = "L" },
+        .{ .instruction = .{ .op = .beq, .rs = .t0, .symbol = "skip" } },
+        .{ .instruction = .{ .op = .nop } },
+        .{ .instruction = .{ .op = .addi, .rt = .t1, .rs = .t0, .imm = 4 } },
+        .{ .label = "skip" },
+        .{ .instruction = .{ .op = .sw, .rt = .t1, .rs = .zero } },
+        .{ .instruction = .{ .op = .bne, .rs = .t6, .rt = .t8, .symbol = "L" } },
+        .{ .instruction = .{ .op = .nop } },
+        .{ .instruction = .{ .op = .sub, .rd = .t1, .rs = .t0, .rt = .t3 } },
+    });
+    defer reading.deinit(testing.allocator);
+    try testing.expectEqual(ir.Op.nop, reading.items[7].instruction.op);
 }

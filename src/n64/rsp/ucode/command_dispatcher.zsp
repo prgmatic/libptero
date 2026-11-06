@@ -22,9 +22,9 @@ data {
     overlay_data_rdram: [16]u32;
     overlay_idmap: [16]u8;
     pointer_stack: [10]u32;
-    // Shared overlay scratch must remain at 0x80. Tiny3D's clipping overlay
-    // addresses this region through the resident RSPQ ABI.
-    resident_scratch: [32]u8;
+    // Scratch shared with overlays, at 0x80. Geometry and its clipping
+    // patch keep the strip index pointer and the tile index here.
+    pub resident_scratch: [32]u8;
     command_buffer_storage: [256]u8;
     pub rdp_mode: [8]u32;
     pub rdp_scissor_rect: [2]u32;

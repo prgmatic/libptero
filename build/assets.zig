@@ -84,6 +84,12 @@ pub const Resident = struct {
     interface: std.Build.LazyPath,
 };
 
+/// A linked overlay, for patches that replace part of its text.
+pub const Overlay = struct {
+    resident: Resident,
+    elf: *std.Build.Step.Compile,
+};
+
 pub const AssetBundle = struct {
     b: *std.Build,
     root: std.Build.LazyPath,
@@ -239,6 +245,18 @@ pub const AssetBundle = struct {
         state_start: u16,
         data_start: u16,
     ) void {
+        _ = self.addZspLinkedOverlay(name, source, resident, state_start, data_start);
+    }
+
+    /// Like `addZspOverlayWithLayout`, returning the overlay for `addZspPatch`.
+    pub fn addZspLinkedOverlay(
+        self: *AssetBundle,
+        name: []const u8,
+        source: std.Build.LazyPath,
+        resident: Resident,
+        state_start: u16,
+        data_start: u16,
+    ) Overlay {
         const overlay_link = self.b.addRunArtifact(self.tools.rsp_overlay_link);
         overlay_link.addArtifactArg(resident.elf);
         overlay_link.addFileArg(resident.interface);
@@ -246,6 +264,31 @@ pub const AssetBundle = struct {
         const linker_script = overlay_link.addOutputFileArg(self.b.fmt("{s}.ld", .{name}));
         overlay_link.addArg(self.b.fmt("0x{x}", .{data_start}));
         const built = buildZsp(self, name, source, linker_script, resident.interface);
+        self.addZspOutputs(name, built);
+        return .{ .resident = resident, .elf = built.elf };
+    }
+
+    /// Text that replaces `overlay`'s from its `symbol` on while loaded. The
+    /// patch runs on the overlay's state and sees its global symbols and
+    /// the resident's public ones; the CPU side loads and restores it.
+    pub fn addZspPatch(
+        self: *AssetBundle,
+        name: []const u8,
+        source: std.Build.LazyPath,
+        overlay: Overlay,
+        symbol: []const u8,
+    ) void {
+        const patch_link = self.b.addRunArtifact(self.tools.rsp_overlay_link);
+        patch_link.addArg("--patch");
+        patch_link.addArtifactArg(overlay.resident.elf);
+        patch_link.addFileArg(overlay.resident.interface);
+        patch_link.addArtifactArg(overlay.elf);
+        patch_link.addArg(symbol);
+        const linker_script = patch_link.addOutputFileArg(self.b.fmt("{s}.ld", .{name}));
+        self.addZspOutputs(name, buildZsp(self, name, source, linker_script, overlay.resident.interface));
+    }
+
+    fn addZspOutputs(self: *AssetBundle, name: []const u8, built: ZspBuild) void {
         self.asset_module.addGeneratedFile(name, built.rsp, 8);
         if (self.include_zsp_symbols) self.asset_module.addSource(self.b.fmt("{s}_symbols", .{name}), built.symbols);
     }
