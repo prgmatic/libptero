@@ -891,6 +891,16 @@ Handlers that consume a variable-length command directly from `$gp` can use
 `@rspq.commandSize(bytes)` to override the inferred size. The override must be a
 nonzero multiple of four and cannot be smaller than the declared parameters.
 
+Command slots can run an imported function directly, adding no instructions.
+Linking takes the target's symbol, signature, and `writes()` contract from its
+module, so nothing is declared twice:
+
+```zig
+const queue = import("resident_api.zsp");
+
+@rspq.command(21, 23) queue.commandLoop @rspq.commandSize(8);
+```
+
 ## Vector registers and basic operations
 
 Vector registers use two decimal digits (`$v00` through `$v31`) to distinguish

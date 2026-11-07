@@ -142,13 +142,33 @@ pub const Loader = struct {
         for (self.modules.items, 0..) |*module, module_index| {
             if (module_index != root) try self.prefixNames(module, module_index);
         }
-        for (self.modules.items, 0..) |module, module_index| {
-            for (module.functions) |function| try self.resolveCalls(module_index, function.statements);
-        }
+        for (0..self.modules.items.len) |module_index| try self.resolveModule(module_index);
         var flattened: std.ArrayList(ast.Function) = .empty;
         errdefer flattened.deinit(self.allocator);
         for (self.modules.items) |module| try flattened.appendSlice(self.allocator, module.functions);
         return flattened.toOwnedSlice(self.allocator);
+    }
+
+    /// Resolves a module's command targets and qualified references.
+    fn resolveModule(self: *Loader, module_index: usize) !void {
+        const functions = self.modules.items[module_index].functions;
+        for (functions) |*function| try self.resolveCommandTarget(module_index, function);
+        for (functions) |function| try self.resolveCalls(module_index, function.statements);
+    }
+
+    /// Copies an imported command target's symbol, signature, and contract.
+    fn resolveCommandTarget(self: *Loader, module_index: usize, function: *ast.Function) !void {
+        const target = function.command_target orelse return;
+        const target_module = try self.resolveImport(module_index, target.module.?);
+        const source = findSourceFunction(self.modules.items[target_module].functions, target.name) orelse return error.UnknownFunction;
+        if (!source.public) return error.PrivateFunction;
+        function.name = source.name;
+        function.no_return = source.no_return;
+        // Module arenas own every AST slice, so the entry can share them.
+        function.parameters = source.parameters;
+        function.has_clobber_contract = source.has_clobber_contract;
+        function.clobber_regs = source.clobber_regs;
+        function.clobber_vector_regs = source.clobber_vector_regs;
     }
 
     /// Emitted functions of imported modules get unique symbol names.
@@ -331,4 +351,45 @@ test "function addresses resolve through imports" {
     const target = functions[0].statements[0].var_decl.value.?.function_address;
     try std.testing.expect(target.module == null);
     try std.testing.expectEqualStrings(functions[1].name, target.name);
+}
+
+/// Links `root` (a source importing `queue.zsp`) and returns the result.
+fn linkWithQueue(a: std.mem.Allocator, temp: *std.testing.TmpDir, loader: *Loader, root: []const u8) ![]ast.Function {
+    const io = std.testing.io;
+    try temp.dir.writeFile(io, .{ .sub_path = "queue.zsp", .data = "pub extern fn loop() writes($t0) noreturn; extern fn hidden() noreturn;" });
+    try temp.dir.writeFile(io, .{ .sub_path = "root.zsp", .data = root });
+    const path = try temp.dir.realPathFileAlloc(io, "root.zsp", a);
+    defer a.free(path);
+    return loader.link(try loader.load(path));
+}
+
+test "command targets take an imported function's symbol and contract" {
+    const a = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var loader = Loader{ .allocator = a, .io = std.testing.io, .module_dir = null };
+    defer loader.deinit();
+    const functions = try linkWithQueue(a, &temp, &loader, "const queue = import(\"queue.zsp\"); @rspq.command(3, 4) queue.loop @rspq.commandSize(8);");
+    defer a.free(functions);
+    const entry = functions[0];
+    try std.testing.expectEqualStrings("loop", entry.name);
+    try std.testing.expect(entry.external and entry.no_return and entry.has_clobber_contract);
+    try std.testing.expectEqualSlices(ast.Register, &.{.t0}, entry.clobber_regs);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 4 }, entry.command_indices);
+    try std.testing.expectEqualSlices(u8, &.{8}, entry.command_sizes);
+}
+
+test "command targets must name a public imported function" {
+    const a = std.testing.allocator;
+    inline for (.{
+        .{ "const queue = import(\"queue.zsp\"); @rspq.command(3) queue.hidden;", error.PrivateFunction },
+        .{ "const queue = import(\"queue.zsp\"); @rspq.command(3) queue.missing;", error.UnknownFunction },
+        .{ "@rspq.command(3) other.loop;", error.UnknownModule },
+    }) |case| {
+        var temp = std.testing.tmpDir(.{});
+        defer temp.cleanup();
+        var loader = Loader{ .allocator = a, .io = std.testing.io, .module_dir = null };
+        defer loader.deinit();
+        try std.testing.expectError(case[1], linkWithQueue(a, &temp, &loader, case[0]));
+    }
 }

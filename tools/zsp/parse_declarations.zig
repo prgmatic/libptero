@@ -26,8 +26,44 @@ pub fn parseFunctionDeclaration(self: *Parser) !ast.Function {
     var prefixes: Prefixes = .{};
     var command_indices: std.ArrayList(u8) = .empty;
     errdefer command_indices.deinit(self.allocator);
-    while (!try parseFunctionPrefix(self, &prefixes, &command_indices)) {}
+    while (true) {
+        if (atCommandTarget(self, command_indices.items.len)) return parseCommandTarget(self, &command_indices);
+        if (try parseFunctionPrefix(self, &prefixes, &command_indices)) break;
+    }
     return parseFunction(self, prefixes, try command_indices.toOwnedSlice(self.allocator));
+}
+
+/// `module.name` after command attributes.
+fn atCommandTarget(self: *const Parser, command_count: usize) bool {
+    if (command_count == 0 or self.current.tag != .ident) return false;
+    const next = (self.peek(1) orelse return false)[0];
+    return next.tag == .dot;
+}
+
+/// `@rspq.command(...) @rspq.commandSize(n) queue.commandLoop;` points
+/// command-table entries at an imported function without declaring it again.
+fn parseCommandTarget(self: *Parser, command_indices: *std.ArrayList(u8)) !ast.Function {
+    const module = try self.expect(.ident);
+    _ = try self.expect(.dot);
+    const name = try self.expect(.ident);
+    var sizes: std.ArrayList(u8) = .empty;
+    errdefer sizes.deinit(self.allocator);
+    if (self.current.tag == .at) try parseRspqNumberAttribute(self, "commandSize", &sizes);
+    _ = try self.expect(.semicolon);
+    return .{
+        .name = name.text,
+        .source_name = name.text,
+        .export_symbol = false,
+        .public = false,
+        .inline_call = false,
+        .external = true,
+        .no_return = true,
+        .command_indices = try command_indices.toOwnedSlice(self.allocator),
+        .command_sizes = try sizes.toOwnedSlice(self.allocator),
+        .parameters = &.{},
+        .statements = &.{},
+        .command_target = .{ .module = module.text, .name = name.text },
+    };
 }
 
 /// Consumes one prefix or attribute; true once `fn` is consumed.

@@ -40,10 +40,9 @@ packed struct OverlayRdpBufferState {
 }
 
 
-// Libdragon deliberately maps these reserved command slots straight back to
-// the resident queue loop. An external command target represents that table
-// alias without adding any overlay instructions.
-@rspq.command(21, 23, 32, 33, 34, 35) extern fn commandLoop() @rspq.commandSize(8) writes() noreturn;
+// Reserved command slots run the resident queue loop directly, adding no
+// overlay instructions.
+@rspq.command(21, 23, 32, 33, 34, 35) queue.commandLoop @rspq.commandSize(8);
 
 data {
     command_staging_ptr: u32 = 0x00000a60;

@@ -29,6 +29,9 @@ pub const Function = struct {
     clobber_vector_regs: []const VectorRegister = &.{},
     parameters: []const Parameter,
     statements: []Statement,
+    /// Command-table entries that run an imported function. Linking copies
+    /// the target's symbol, parameters, and contract into this declaration.
+    command_target: ?FunctionRef = null,
 
     /// External and inline functions have no body of their own in the output.
     pub fn emitsBody(self: Function) bool {
