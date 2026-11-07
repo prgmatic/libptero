@@ -9,6 +9,8 @@
 const dma = import("resident_api.zsp");
 const queue = import("resident_api.zsp");
 const attributes = import("triangle_attributes.zsp");
+const math = import("geometry_math.zsp");
+const lighting = import("geometry_lighting.zsp");
 
 // A buffered vertex, ready for the triangle sender (36 bytes):
 //   0  screen X, Y (s13.2) and depth
@@ -42,9 +44,7 @@ const input_texture: u32 = 24;
 // for a directional light, or a position (s16 X Y Z) and a size for a
 // point light. The size's top bit ignores the vertex normal.
 const light_size: u32 = 16;
-const light_point_position: u32 = 8;
 const light_direction: u32 = 8;
-const light_point_size: u32 = 14;
 const light_is_point: u32 = 15;
 
 // The resident command buffer; $gp is the offset of the next command.
@@ -118,61 +118,6 @@ packed struct RdpBufferState {
 // ---------------------------------------------------------------- matrices
 
 /// output = left * right, for 4x4 16.16 matrices stored row by row as four
-/// integer halves followed by four fractions.
-fn multiplyMatrices(output: dmem, left_matrix: dmem, right_matrix: dmem) {
-    // Each left row fills both halves, so one chain yields two output rows.
-    reg left: [4]vec32 = undefined;
-    inline for (0..4) |row| {
-        left[row][0..4] = load(vec32, left_matrix, row * 16);
-        left[row][4..8] = load(vec32, left_matrix, row * 16);
-    }
-    // Right rows 0 and 1 share one pair, rows 2 and 3 the other.
-    reg right: [2]vec32 = undefined;
-    inline for (0..2) |pair| {
-        right[pair][0..4] = load(vec32, right_matrix, pair * 32);
-        right[pair][4..8] = load(vec32, right_matrix, pair * 32 + 16);
-    }
-    inline for (0..2) |pair| {
-        acc = left[0] * right[pair].halfLane(0);
-        inline for (1..4) |row| {
-            acc += left[row] * right[pair].halfLane(row);
-        }
-        reg rows: vec32 = acc;
-        store(vec32, output, rows[0..4], pair * 32);
-        store(vec32, output, rows[4..8], pair * 32 + 16);
-    }
-}
-
-/// Normalizes the X Y Z of the 16.16 row at `input` into fractions at
-/// `output`, then advances both to the next row.
-fn normalizeRow(input: dmem, output: dmem) {
-    reg($v00) vector_zero: vec16 = undefined;
-    reg($v30) powers: vec16 = undefined;
-    reg value: vec32 = undefined;
-    value[0..4] = load(vec32, input, 0);
-    input +%= 16;
-
-    reg square: vec32 = value * value;
-    reg sum: vec32 = square + square.yyyyYYYY;
-    square += sum.zzzzZZZZ;
-
-    // 1/sqrt(length squared), shifted down by 9 so the doubled fraction
-    // below cannot overflow.
-    reg inverse: vec32 = undefined;
-    inverse.sint[3] = vrsqh(square.sint[0]);
-    inverse.ufract[3] = vrsql(square.ufract[0]);
-    inverse.sint[3] = vrsqh(vector_zero[0]);
-    inverse.ufract = vmudl(inverse.ufract, powers.x);
-    inverse.sint = vmadm(inverse.sint, powers.x);
-    inverse.ufract = vmadn(vector_zero, vector_zero);
-
-    value = value * inverse.wwwwWWWW;
-    value.ufract = vadd(value.ufract, value.ufract);
-    store(vec16, output, value.ufract[0..4], 0);
-    output +%= 8;
-}
-
-/// Resolves a segmented RDRAM address: the top byte selects a segment
 /// table entry to add.
 inline fn resolveSegment(address: u32) {
     reg segment: u32 = address >> 24;
@@ -208,7 +153,7 @@ inline fn resolveSegment(address: u32) {
         rdram = bitCast(stack_pointer);
         rdram -%= matrix_bytes;
         dma.in(matrix_dma_size, pitch, rdram, clipping_buffer_result);
-        multiplyMatrices(matrix_mv, clipping_buffer_result, matrix_mv);
+        math.multiplyMatrices(matrix_mv, clipping_buffer_result, matrix_mv);
     }
     // Keep the result on the stack. Later DMAs queue behind this write, so
     // nothing needs to wait for it.
@@ -217,10 +162,10 @@ inline fn resolveSegment(address: u32) {
 
     reg row: dmem = matrix_mv;
     reg normal_row: dmem = matrix_normal;
-    normalizeRow(row, normal_row);
-    normalizeRow(row, normal_row);
-    normalizeRow(row, normal_row);
-    multiplyMatrices(matrix_mvp, matrix_projection, matrix_mv);
+    math.normalizeRow(row, normal_row);
+    math.normalizeRow(row, normal_row);
+    math.normalizeRow(row, normal_row);
+    math.multiplyMatrices(matrix_mvp, matrix_projection, matrix_mv);
     tail queue.commandLoop();
 }
 
@@ -373,7 +318,7 @@ export fn _start(
         normal_matrix[row][4..8] = load(vec16, matrix_normal, row * 8);
     }
     reg mvp: [4]vec32 = undefined;
-    loadMatrix(mvp, matrix_mvp);
+    math.loadMatrix(mvp, matrix_mvp);
     reg normal_mask: vec16 = undefined;
     normal_mask[0..4] = load(vec16, normal_mask_shift, 0);
     normal_mask[4..8] = load(vec16, normal_mask_shift, 0);
@@ -460,7 +405,8 @@ export fn _start(
                 light +%= light_size;
                 if (is_point != 0) {
                     @branchHint(.cold);
-                    pointLight(light, light_scale, mvp[0], mvp[1], mvp[2], mvp[3], position, normal, eye_position_ready, scratch, vector_zero, powers, shifts);
+                    reg mv: dmem = matrix_mv;
+                    lighting.pointLight(light -% light_size, mv, light_scale, mvp[0], mvp[1], mvp[2], mvp[3], position, normal, eye_position_ready, scratch, vector_zero, powers, shifts);
                 }
                 // The color times each lane of the scaled direction,
                 // accumulated: a dot product without the summing stalls.
@@ -474,7 +420,7 @@ export fn _start(
         }
         if (eye_position_ready != 0) {
             @branchHint(.cold);
-            loadMatrix(mvp, matrix_mvp);
+            math.loadMatrix(mvp, matrix_mvp);
         }
 
         // Clip codes: against W for trivial rejection, against the guard
@@ -503,14 +449,14 @@ export fn _start(
         color = vmudm(color, shifts.ZZZZZZZZ);
         store(vec32, output_a, clip[0..4], vertex_clip_position);
         store(vec32, output_b, clip[4..8], vertex_clip_position);
-        reg clip_a: u32 = packClipCodes(clip_codes);
+        reg clip_a: u32 = math.packClipCodes(clip_codes);
         clip_a |= base_tile;
         clip_codes >>= 4;
-        reg clip_b: u32 = packClipCodes(clip_codes);
+        reg clip_b: u32 = math.packClipCodes(clip_codes);
         clip_b |= base_tile;
-        reg reject_a: u32 = packRejectCodes(reject_codes);
+        reg reject_a: u32 = math.packRejectCodes(reject_codes);
         reject_codes >>= 4;
-        reg reject_b: u32 = packRejectCodes(reject_codes);
+        reg reject_b: u32 = math.packRejectCodes(reject_codes);
 
         // 1/W of both vertices, chained through the reciprocal unit.
         screen_size.sint[3] = vrcph(clip.sint[3]);
@@ -547,7 +493,7 @@ export fn _start(
         texture = vaddc(texture, uv_generation);
         if (effect != 0) {
             @branchHint(.cold);
-            sphericalTexture(texture, screen, screen_offset, normal, uv_generation, vector_zero);
+            lighting.sphericalTexture(texture, screen, screen_offset, normal, uv_generation, vector_zero);
         }
 
         // The next pair's normal.
@@ -571,147 +517,6 @@ export fn _start(
         store(vec16, output_b, texture[2..4], vertex_texture);
     } while (input != input_end);
     tail queue.commandLoop();
-}
-
-/// Loads a matrix with each row in both halves.
-fn loadMatrix(rows: [4]vec32, reg($at) matrix: dmem) {
-    inline for (0..4) |row| {
-        rows[row][0..4] = load(vec32, matrix, row * 16);
-        rows[row][4..8] = load(vec32, matrix, row * 16);
-    }
-}
-
-/// Packs the X Y Z codes of one vertex's +planes (bits 0-2) and -planes
-/// (bits 8-10) into five bits; far Z is never clipped, only rejected.
-inline fn packClipCodes(codes: u32) result: u32 {
-    result = codes & 0x0307;
-    reg high: u32 = result >> 5;
-    result |= high;
-}
-
-/// Packs a vertex's rejection codes, inverted so that ORing three
-/// vertices' codes leaves a zero for a plane all of them are outside.
-inline fn packRejectCodes(codes: u32) result: u32 {
-    result = codes & 0x0707;
-    reg high: u32 = result >> 5;
-    result = result ~| high;
-}
-
-/// Lights both vertices by the point light just before `next_light`, replacing
-/// `light_scale` with the light's direction scaled by its falloff. The
-/// vertices' eye-space positions are computed once per pair. Every vector
-/// register is in use here, so `eye_position`, `sum`, `to_light`, and
-/// `square` are the caller's MVP rows, which it reloads afterwards,
-/// `position` is overwritten, and products accumulate through `scratch`.
-inline fn pointLight(
-    next_light: dmem,
-    light_scale: vec16,
-    eye_position: vec32,
-    sum: vec32,
-    to_light: vec32,
-    square: vec32,
-    position: vec16,
-    normal: vec16,
-    eye_position_ready: u32,
-    scratch: vec16,
-    vector_zero: vec16,
-    powers: vec16,
-    shifts: vec16,
-) {
-    reg point: dmem = next_light -% light_size;
-    reg size: u32 = load(u16, point, light_point_size);
-    if (eye_position_ready == 0) {
-        loadMatrix(eye_position, sum, to_light, square, matrix_mv);
-        scratch = vmudn(eye_position.sfract, position.xxxxXXXX);
-        scratch = vmadh(eye_position.sint, position.xxxxXXXX);
-        scratch = vmadn(sum.sfract, position.yyyyYYYY);
-        scratch = vmadh(sum.sint, position.yyyyYYYY);
-        scratch = vmadn(to_light.sfract, position.zzzzZZZZ);
-        scratch = vmadh(to_light.sint, position.zzzzZZZZ);
-        eye_position.sfract = vmadn(square.sfract, powers.WWWWWWWW);
-        eye_position.sint = vmadh(square.sint, powers.WWWWWWWW);
-        // Down to the light positions' scale.
-        eye_position.sfract = vmudl(eye_position.sfract, shifts.wwwwwwww);
-        eye_position.sint = vmadm(eye_position.sint, shifts.wwwwwwww);
-        eye_position.sfract = vmadn(vector_zero, vector_zero);
-        eye_position_ready = 1;
-    }
-    // The top bit of the size ignores the normal.
-    reg ignore_normal: u32 = size >> 15;
-    size &= 0x7fff;
-
-    // The vector from the vertex to the light, its length, and the size
-    // as 16.16 in W.
-    to_light.sint[0..4] = load(vec16, point, light_point_position);
-    to_light.sint[4..8] = load(vec16, point, light_point_position);
-    to_light.sint = vmudm(to_light.sint, shifts.YYYYYYYY);
-    to_light.sfract = vmadn(vector_zero, vector_zero);
-    to_light = to_light - eye_position;
-    scratch = vmudl(to_light.sfract, to_light.sfract);
-    scratch = vmadm(to_light.sint, to_light.sfract);
-    square.sfract = vmadn(to_light.sfract, to_light.sint);
-    square.sint = vmadh(to_light.sint, to_light.sint);
-    sum = square + square.yyyyYYYY;
-    square += sum.zzzzZZZZ;
-    sum.sint[3] = size;
-    sum.sfract[3] = vector_zero[0];
-
-    // 1/length of both vectors, then size/length as the falloff.
-    square.sint[0] = vrsqh(square.sint[0]);
-    square.sfract[0] = vrsql(square.sfract[0]);
-    square.sint[0] = vrsqh(square.sint[4]);
-    square.sfract[4] = vrsql(square.sfract[4]);
-    square.sint[4] = vrsqh(vector_zero[0]);
-    scratch = vmudl(square.sfract, sum.sfract.wwwwwwww);
-    scratch = vmadm(square.sint, sum.sfract.wwwwwwww);
-    scratch = vmadn(square.sfract, sum.sint.wwwwwwww);
-    light_scale = vmadh(square.sint, sum.sint.wwwwwwww);
-    light_scale = vmulf(light_scale, light_scale);
-    if (ignore_normal == 0) {
-        // The normalized direction times the squared falloff, dotted with
-        // the normal by the caller. The extra shift moves the fraction
-        // into the integer so the product does not clamp.
-        square = square * shifts.WWWWWWWW;
-        scratch = vmudl(to_light.sfract, square.sfract.xxxxXXXX);
-        scratch = vmadm(to_light.sint, square.sfract.xxxxXXXX);
-        scratch = vmadn(to_light.sfract, square.sint.xxxxXXXX);
-        position = vmadh(to_light.sint, square.sint.xxxxXXXX);
-        position = vmulf(position, light_scale.xxxxXXXX);
-        light_scale = vmulf(position, normal);
-    } else {
-        // Size only: the caller's dot product sees just X.
-        light_scale[1] = vector_zero[0];
-        light_scale[2] = vector_zero[0];
-        light_scale[5] = vector_zero[0];
-        light_scale[6] = vector_zero[0];
-    }
-}
-
-/// Spherical environment mapping: texture coordinates from the normal,
-/// offset by the vertex's distance from the screen center so the
-/// reflection follows the view. Both vertices' S T end up in lanes 0-3.
-inline fn sphericalTexture(
-    texture: vec16,
-    screen: vec16,
-    screen_offset: vec16,
-    normal: vec16,
-    uv_generation: vec16,
-    vector_zero: vec16,
-) {
-    reg offset: vec16 = vge(screen, vector_zero.xxxxxxxx);
-    offset = vsubc(offset, screen_offset);
-    offset = vlt(offset, screen_offset);
-    texture = vmulf(normal, uv_generation);
-    // Undo the screen projection into a normalized factor, fade it as the
-    // normal turns from the camera, and scale it to the texture.
-    offset = vmudn(offset, uv_generation.WWWWWWWW);
-    offset = vmulf(offset, normal.zzzzZZZZ);
-    offset = vmulf(offset, uv_generation.xxxxxxxx);
-    texture = vaddc(texture, uv_generation.xxxxxxxx);
-    texture = vaddc(texture, offset);
-    // The second vertex's S T into lanes 2-3, where the caller stores it.
-    texture[2] = texture[4];
-    texture[3] = texture[5];
 }
 
 // ---------------------------------------------------------------- triangles

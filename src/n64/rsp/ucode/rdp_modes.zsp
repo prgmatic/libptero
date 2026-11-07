@@ -1,0 +1,463 @@
+// Render-mode state of the RDP overlay: scissor, other modes, blending,
+// fog, and combiners, the derived render mode, and the mode stack. The
+// commands here keep RDP mode state in `rdp_mode` coherent and emit the
+// RDP commands it implies. The mode stack, `mode_stack`, is part of the
+// overlay's saved state in rdp_overlay.zsp.
+const rdp = import("rdp.zsp");
+const queue = import("resident_api.zsp");
+
+enum RenderCycleType: u32 {
+    two_cycle = 0x10200000;
+    one_cycle = 0x10300000;
+}
+
+flags OtherModeLow: u32 {
+    antialias = 0x00000008;
+    cycle_one_enabled = 0x00000400;
+    cycle_two_enabled = 0x00004000;
+}
+
+flags OtherModeHigh: u32 {
+    pipeline_frozen = 0x00000008;
+}
+
+packed struct RdpModeState {
+    combiner_high: u32;
+    combiner_low: u32;
+    combiner_high_mask: u32;
+    combiner_low_mask: u32;
+    foreground_blend: u32;
+    background_blend: u32;
+    other_modes_high: u32;
+    other_modes_low: u32;
+}
+
+packed struct ScissorState {
+    first_word: u32;
+    second_word: u32;
+}
+
+data {
+    command_staging_ptr: u32 = 0x00000a60;
+    command_staging_ptr_padding: u32 = 0;
+    aa_blend_mask: u32 = 0xfffff3c0;
+    aa_blend_table: [4]u32 = .{ 0x00000200, 0x00000200, 0x00002000, 0x00000180 };
+    aa_blend_default: [2]u32 = .{ 0x00550040, 0x00550000 };
+    aa_blend_padding: u32 = 0;
+    comb0_mask: [2]u32 = .{ 0x00fffe00, 0xf003fe00 };
+    combiner_shade: [2]u32 = .{ 0x00887f10, 0x88fe793c };
+    combiner_shade_fog: [2]u32 = .{ 0x00887f10, 0x88fe7d3e };
+    combiner_tex_shade: [2]u32 = .{ 0x00121824, 0x8833ffff };
+    combiner_tex_shade_fog: [2]u32 = .{ 0x00127e24, 0x88fff3f9 };
+    combiner_mipmaps: [4]u32 = .{ 0x8026a000, 0x10009200, 0x8017fe00, 0x2003f400 };
+}
+
+bss {
+    extern rdp_mode: [8]u32;
+    extern rdp_scissor_rect: [2]u32;
+}
+
+fn writeSetScissor(
+    word0: u32,
+    word1: u32,
+) noreturn {
+    store(ScissorState.first_word, rdp_scissor_rect, word0);
+    reg modes_byte: i32 = load(i8, rdp_mode, 25);
+    modes_byte &= 0x20;
+    store(ScissorState.second_word, rdp_scissor_rect, word1);
+    if(modes_byte != 0) {
+        word1 -%= 0x1000;
+    }
+    jump rdp.write8(word0, word1);
+}
+
+@rspq.command(18) fn setScissorEx(
+    word0: u32,
+    word1: u32,
+) {
+    // Turn the overlay command id into the SET_SCISSOR opcode.
+    word0 ^= 0x3f000000;
+    writeSetScissor(word0, word1);
+    tail rdp.finalize();
+}
+
+fn sendOtherModes(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) {
+    // The staged command takes the SET_OTHER_MODES opcode in place of the
+    // overlay's flag byte at the top of `word0`.
+    rdp.write8(word0, word1);
+    reg staged_end: dmem = load(u32, command_staging_ptr);
+    reg opcode: u32 = 0xef;
+    store(u8, staged_end, opcode, -8);
+    tail finalizeOtherModes(word0, word1);
+}
+
+fn finalizeOtherModes(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) noreturn {
+    word0 = load(ScissorState.first_word, rdp_scissor_rect);
+    word1 = load(ScissorState.second_word, rdp_scissor_rect);
+    writeSetScissor(word0, word1);
+    tail rdp.finalize();
+}
+
+@rspq.command(47) fn setOtherModes(
+    word0: u32,
+    word1: u32,
+) noreturn {
+    store(RdpModeState.other_modes_high, rdp_mode, word0);
+    store(u8, rdp_mode, 0, 24);
+    store(RdpModeState.other_modes_low, rdp_mode, word1);
+    jump sendOtherModes(word0, word1);
+}
+
+@rspq.command(20) fn modifyOtherModes(
+    command: i32,
+    inverse_mask: u32,
+    value: u32,
+) {
+    reg updated: u32;
+    updated = load(u32, rdp_mode + command, 24);
+    updated &= inverse_mask;
+    updated |= value;
+    store(u32, rdp_mode + command, updated, 24);
+    command <<= 16;
+    if(command < 0) tail updateRenderMode() slot {
+        command = load(i32, rdp_mode, 24);
+    }
+    inverse_mask = load(RdpModeState.other_modes_low, rdp_mode);
+    tail sendOtherModes(command, inverse_mask);
+}
+
+fn updateRenderMode() {
+    reg comb_hi: u32 = undefined;
+    reg comb_lo: u32 = undefined;
+    reg som_hi: u32 = load(RdpModeState.other_modes_high, rdp_mode);
+    reg som_lo: u32 = undefined;
+    reg selected_combiner: dmem = undefined;
+    reg mode_frozen: u32;
+    mode_frozen = som_hi & OtherModeHigh.pipeline_frozen;
+    if(mode_frozen != 0) tail rdp.finalize() slot {
+        som_lo = load(RdpModeState.other_modes_low, rdp_mode);
+    }
+    reg fill_or_copy_cycle: u32;
+    fill_or_copy_cycle = som_hi << 10;
+    comb_hi = load(RdpModeState.combiner_high, rdp_mode);
+    if(fill_or_copy_cycle >= 0x80000000) {
+        reg fill_combiner_mask: u32 = 0xff000000;
+        comb_hi = som_hi | fill_combiner_mask;
+        reg copy_cycle_bit: u32 = 0x10000000;
+        comb_hi ^= copy_cycle_bit;
+        comb_lo = som_lo;
+        rdp.write8(comb_hi, comb_lo);
+        tail rdp.finalize();
+    }
+    comb_lo = load(RdpModeState.combiner_low, rdp_mode);
+    reg cycle_combiner_mask: u32;
+    store_combiner_2cycle: block {
+    combiner_1cycle: block {
+        if(comb_hi < 0x80000000) {
+            break combiner_1cycle;
+        }
+        reg invalid_cycle_flags: u32 = undefined;
+        invalid_cycle_flags = som_hi & 1;
+        if(invalid_cycle_flags != 0) tail queue.invalidCommand(0xc0040000);
+        break store_combiner_2cycle;
+    } exit slot {
+        cycle_combiner_mask = 0x04000000;
+    }
+    check_mipmap: block {
+        reg has_custom_combiner: u32;
+        has_custom_combiner = som_hi & cycle_combiner_mask;
+        reg comb_hi_no_id: u32 = undefined;
+        comb_hi_no_id = comb_hi << 8;
+        if(has_custom_combiner == 0) {
+            break check_mipmap;
+        }
+        comb_hi_no_id >>= 8;
+        reg combiner_word: u32 = load(u32, combiner_tex_shade);
+        fog_change: block {
+            check_fog_shade: block {
+                if(combiner_word != comb_hi_no_id) {
+                    break check_fog_shade slot {
+                        combiner_word = load(u32, combiner_tex_shade, 4);
+                    }
+                }
+                selected_combiner = combiner_tex_shade_fog;
+                if(combiner_word == comb_lo) {
+                    break fog_change;
+                }
+            }
+            combiner_word = load(u32, combiner_shade);
+            if(combiner_word != comb_hi_no_id) {
+                break check_mipmap slot {
+                    combiner_word = load(u32, combiner_shade, 4);
+                }
+            }
+            selected_combiner = combiner_shade_fog;
+            if(combiner_word != comb_lo) {
+                break check_mipmap;
+            }
+        }
+        comb_hi = load(u32, selected_combiner);
+        comb_lo = load(u32, selected_combiner, 4);
+    }
+    reg mipmap_offset: u32;
+    mipmap_offset = som_hi & 3;
+    if(mipmap_offset != 0) slot {
+        mipmap_offset <<= 3;
+    } {
+        reg combiner_high_mask: u32 = load(RdpModeState.combiner_high_mask, rdp_mode);
+        reg combiner_low_mask: u32 = load(RdpModeState.combiner_low_mask, rdp_mode);
+        comb_hi &= combiner_high_mask;
+        comb_lo &= combiner_low_mask;
+        reg mipmap_high_bits: u32 = load(u32, combiner_mipmaps + mipmap_offset, -8);
+        reg mipmap_low_bits: u32 = load(u32, combiner_mipmaps + mipmap_offset, -4);
+        comb_hi |= mipmap_high_bits;
+        comb_lo |= mipmap_low_bits;
+    } else {
+        store(u32, mode_combiner_1cycle, comb_hi);
+        store(u32, mode_combiner_1cycle, comb_lo, 4);
+        reg combiner_high_mask: u32 = load(u32, comb0_mask);
+        reg combiner_low_mask: u32 = load(u32, comb0_mask, 4);
+        comb_hi &= combiner_high_mask;
+        comb_lo &= combiner_low_mask;
+        reg lod_select_bit: u32;
+        lod_select_bit = som_hi >> 16 << 31;
+        comb_hi |= lod_select_bit;
+    }
+    }
+    store(u32, mode_combiner_2cycle, comb_hi);
+    store(u32, mode_combiner_2cycle, comb_lo, 4);
+
+    reg foreground_blend: u32 = load(RdpModeState.foreground_blend, rdp_mode);
+    reg background_blend: u32 = load(RdpModeState.background_blend, rdp_mode);
+    reg aa_requested: u32;
+    reg background_blending: u32;
+    background_blending = background_blend != 0;
+    aa_requested = som_lo & OtherModeLow.antialias;
+    if(background_blend == 0) {
+        if(aa_requested != 0) {
+            background_blend = som_hi & 4;
+            background_blend = load(u32, aa_blend_default + background_blend);
+            reg foreground_blend_mask: u32 = -16385;
+            foreground_blend &= foreground_blend_mask;
+        }
+    }
+    reg cycle_blend_mask: u32 = 0xccccc040;
+    reg blend_input_mask: u32 = 0x3333c040;
+    reg blend_1cycle: u32 = background_blend;
+    reg merged_blend: u32;
+    if(foreground_blend != 0) {
+        blend_1cycle = foreground_blend;
+    }
+    merged_blend = blend_1cycle & blend_input_mask;
+    blend_1cycle &= cycle_blend_mask;
+    if(foreground_blend != 0) {
+        if(background_blend != 0) {
+            foreground_blend &= cycle_blend_mask;
+            background_blend &= blend_input_mask;
+            merged_blend = foreground_blend | background_blend | 0x8000;
+        }
+    }
+
+    reg texture_filter_bits: u32;
+    texture_filter_bits = som_hi & 0x3e00;
+    reg yuv_filter_mode: u32 = 0x2000;
+    if(texture_filter_bits == yuv_filter_mode) slot {
+        texture_filter_bits = 0x0a00;
+    } {
+        som_hi |= texture_filter_bits;
+    }
+    reg blend_bits_high: u32;
+    blend_bits_high = merged_blend << 16;
+    reg combiner_with_blend: u32 = load(u32, mode_combiner_2cycle);
+    combiner_with_blend |= blend_bits_high;
+    selected_combiner = mode_combiner_2cycle;
+    reg cycle_type: u32 = RenderCycleType.two_cycle;
+    if(combiner_with_blend < 0x80000000) {
+        selected_combiner = mode_combiner_1cycle;
+        merged_blend = blend_1cycle;
+        cycle_type = RenderCycleType.one_cycle;
+    }
+    reg cycle_type_mask: u32 = 0xff300000;
+    som_hi |= cycle_type_mask;
+    som_hi ^= cycle_type;
+
+    reg aa_table_index: u32;
+    aa_table_index = som_lo & OtherModeLow.antialias;
+    reg background_blend_index: u32;
+    background_blend_index = background_blending << 2;
+    aa_table_index |= background_blend_index;
+    reg aa_mode_bits: u32 = load(u32, aa_blend_table + aa_table_index);
+    reg aa_mode_mask: u32 = load(u32, aa_blend_mask);
+    aa_mode_bits = (aa_mode_bits | merged_blend) & aa_mode_mask;
+    aa_mode_mask = ~aa_mode_mask;
+    som_lo &= aa_mode_mask;
+    som_lo |= aa_mode_bits;
+    reg copy_mode_flags: u32 = 0x2001;
+    reg active_copy_flags: u32;
+    active_copy_flags = som_lo & copy_mode_flags;
+    if(copy_mode_flags == active_copy_flags) {
+        som_lo |= 0x3000;
+        som_lo &= 0xfffffffc;
+    }
+    reg cycle_one_enabled: u32;
+    cycle_one_enabled = som_lo & OtherModeLow.cycle_one_enabled;
+    reg cycle_two_enabled: u32;
+    cycle_two_enabled = som_lo & OtherModeLow.cycle_two_enabled;
+    if(cycle_one_enabled == 0) {
+        som_lo |= 0x800;
+        if(cycle_two_enabled == 0) {
+            som_lo ^= 0x800;
+        }
+    }
+    comb_hi = load(u32, selected_combiner);
+    comb_lo = load(u32, selected_combiner, 4);
+    comb_hi = (comb_hi | 0xff000000) ^ 0x03000000;
+    reg saved_mode_byte: u32 = load(u8, rdp_mode, 24);
+    store(RdpModeState.other_modes_high, rdp_mode, som_hi);
+    store(RdpModeState.other_modes_low, rdp_mode, som_lo);
+    store(u8, rdp_mode, saved_mode_byte, 24);
+    rdp.write16(comb_hi, comb_lo, som_hi, som_lo);
+    tail rdp.finalize();
+}
+
+@rspq.command(24) fn setBlendingMode(command: u32, formula: u32) noreturn {
+    jump rdpSetBlendingMode(command, formula);
+}
+
+@rspq.command(25) fn setFogMode(command: u32, formula: u32) noreturn {
+    jump rdpSetFogMode(command, formula);
+}
+
+@rspq.command(27) fn setCombineMode1Pass(word0: u32, word1: u32, mask0: u32, mask1: u32) noreturn {
+    jump rdpSetCombineMode1Pass(word0, word1, mask0, mask1);
+}
+
+@rspq.command(5) fn setCombineMode2Pass(word0: u32, word1: u32) noreturn {
+    jump rdpSetCombineMode2Pass(word0, word1);
+}
+
+@rspq.command(4) fn resetMode(
+    comb_hi: u32,
+    comb_lo: u32,
+    som_hi: u32,
+    som_lo: u32,
+) {
+    reg previous_som_hi: u32 = load(RdpModeState.other_modes_high, rdp_mode);
+    reg freeze: u32;
+    freeze = previous_som_hi & OtherModeHigh.pipeline_frozen;
+    som_hi |= freeze;
+
+    reg mode: dmem = rdp_mode;
+    reg($v00) zero_mode: vec16 = 0;
+    store(vec16, mode, zero_mode);
+    store(vec16, mode, zero_mode, 16);
+    store(RdpModeState.other_modes_high, rdp_mode, som_hi);
+    store(RdpModeState.other_modes_low, rdp_mode, som_lo);
+
+    previous_som_hi ^= som_hi;
+    previous_som_hi <<= 10;
+    reg saved_comb_hi: u32;
+    reg saved_comb_lo: u32;
+    saved_comb_hi = comb_hi;
+    if(previous_som_hi >= 0x80000000) {
+        saved_comb_lo = comb_lo;
+        comb_hi = load(ScissorState.first_word, rdp_scissor_rect);
+        comb_lo = load(ScissorState.second_word, rdp_scissor_rect);
+        writeSetScissor(comb_hi, comb_lo);
+        comb_hi = saved_comb_hi;
+        comb_lo = saved_comb_lo;
+    }
+    jump setCombineMode1Pass(comb_hi, comb_lo, som_hi, som_lo);
+}
+
+@rspq.command(6) fn pushMode(_: u32) {
+    reg mode: dmem = rdp_mode;
+    reg stack: dmem = mode_stack;
+    reg mode0: vec16 = load(vec16, mode);
+    reg mode1: vec16 = load(vec16, mode, 16);
+    reg stack0: vec16 = load(vec16, stack);
+    reg stack1: vec16 = load(vec16, stack, 16);
+    reg stack2: vec16 = load(vec16, stack, 32);
+    reg stack3: vec16 = load(vec16, stack, 48);
+    store(vec16, stack, mode0);
+    store(vec16, stack, mode1, 16);
+    store(vec16, stack, stack0, 32);
+    store(vec16, stack, stack1, 48);
+    store(vec16, stack, stack2, 64);
+    store(vec16, stack, stack3, 80);
+}
+
+@rspq.command(7) fn popMode(scissor0: u32) {
+    reg stack: dmem = mode_stack;
+    reg mode: dmem = rdp_mode;
+    reg stack0: vec16 = load(vec16, stack);
+    reg stack1: vec16 = load(vec16, stack, 16);
+    reg stack2: vec16 = load(vec16, stack, 32);
+    reg stack3: vec16 = load(vec16, stack, 48);
+    reg stack4: vec16 = load(vec16, stack, 64);
+    reg stack5: vec16 = load(vec16, stack, 80);
+    store(vec16, mode, stack0);
+    store(vec16, mode, stack1, 16);
+    store(vec16, stack, stack2);
+    store(vec16, stack, stack3, 16);
+    store(vec16, stack, stack4, 32);
+    store(vec16, stack, stack5, 48);
+    scissor0 = load(ScissorState.first_word, rdp_scissor_rect);
+    reg scissor1: u32 = load(ScissorState.second_word, rdp_scissor_rect);
+    writeSetScissor(scissor0, scissor1);
+    tail updateRenderMode();
+}
+
+fn rdpSetBlendingMode(
+    reg($a0) command: u32,
+    reg($a1) formula: u32,
+) {
+    reg first_step: u32 = load(RdpModeState.foreground_blend, rdp_mode);
+    store(RdpModeState.background_blend, rdp_mode, formula);
+    if(formula != 0) {
+        first_step = formula;
+    }
+    first_step &= 0x8000;
+    if(first_step == 0) tail updateRenderMode();
+    tail rdpSetFogMode(command, formula);
+}
+
+fn rdpSetFogMode(
+    reg($a0) _: u32,
+    reg($a1) formula: u32,
+) {
+    store(RdpModeState.foreground_blend, rdp_mode, formula);
+    jump updateRenderMode();
+}
+
+fn rdpSetCombineMode1Pass(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+    reg($a2) mask0: u32,
+    reg($a3) mask1: u32,
+) {
+    reg high_bit: u32 = 0x80000000;
+    word0 ^= high_bit;
+    store(RdpModeState.combiner_high_mask, rdp_mode, mask0);
+    store(RdpModeState.combiner_low_mask, rdp_mode, mask1);
+    tail rdpSetCombineMode2Pass(word0, word1);
+}
+
+fn rdpSetCombineMode2Pass(
+    reg($a0) word0: u32,
+    reg($a1) word1: u32,
+) {
+    reg command_mask: u32 = 0x7f000000;
+    word0 |= command_mask;
+    command_mask = 0x03000000;
+    word0 ^= command_mask;
+    store(RdpModeState.combiner_high, rdp_mode, word0);
+    store(RdpModeState.combiner_low, rdp_mode, word1);
+    tail updateRenderMode();
+}

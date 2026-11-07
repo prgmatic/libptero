@@ -1,0 +1,87 @@
+// Matrix and clip-code helpers for the geometry overlay.
+
+/// integer halves followed by four fractions.
+pub fn multiplyMatrices(output: dmem, left_matrix: dmem, right_matrix: dmem) {
+    // Each left row fills both halves, so one chain yields two output rows.
+    reg left: [4]vec32 = undefined;
+    inline for (0..4) |row| {
+        left[row][0..4] = load(vec32, left_matrix, row * 16);
+        left[row][4..8] = load(vec32, left_matrix, row * 16);
+    }
+    // Right rows 0 and 1 share one pair, rows 2 and 3 the other.
+    reg right: [2]vec32 = undefined;
+    inline for (0..2) |pair| {
+        right[pair][0..4] = load(vec32, right_matrix, pair * 32);
+        right[pair][4..8] = load(vec32, right_matrix, pair * 32 + 16);
+    }
+    inline for (0..2) |pair| {
+        acc = left[0] * right[pair].halfLane(0);
+        inline for (1..4) |row| {
+            acc += left[row] * right[pair].halfLane(row);
+        }
+        reg rows: vec32 = acc;
+        store(vec32, output, rows[0..4], pair * 32);
+        store(vec32, output, rows[4..8], pair * 32 + 16);
+    }
+}
+
+/// Normalizes the X Y Z of the 16.16 row at `input` into fractions at
+/// `output`, then advances both to the next row.
+pub fn normalizeRow(input: dmem, output: dmem) {
+    reg($v00) vector_zero: vec16 = undefined;
+    reg($v30) powers: vec16 = undefined;
+    reg value: vec32 = undefined;
+    value[0..4] = load(vec32, input, 0);
+    input +%= 16;
+
+    reg square: vec32 = value * value;
+    reg sum: vec32 = square + square.yyyyYYYY;
+    square += sum.zzzzZZZZ;
+
+    // 1/sqrt(length squared), shifted down by 9 so the doubled fraction
+    // below cannot overflow.
+    reg inverse: vec32 = undefined;
+    inverse.sint[3] = vrsqh(square.sint[0]);
+    inverse.ufract[3] = vrsql(square.ufract[0]);
+    inverse.sint[3] = vrsqh(vector_zero[0]);
+    inverse.ufract = vmudl(inverse.ufract, powers.x);
+    inverse.sint = vmadm(inverse.sint, powers.x);
+    inverse.ufract = vmadn(vector_zero, vector_zero);
+
+    value = value * inverse.wwwwWWWW;
+    value.ufract = vadd(value.ufract, value.ufract);
+    store(vec16, output, value.ufract[0..4], 0);
+    output +%= 8;
+}
+
+/// Resolves a segmented RDRAM address: the top byte selects a segment
+
+/// Loads a matrix with each row in both halves.
+pub fn loadMatrix(rows: [4]vec32, reg($at) matrix: dmem) {
+    inline for (0..4) |row| {
+        rows[row][0..4] = load(vec32, matrix, row * 16);
+        rows[row][4..8] = load(vec32, matrix, row * 16);
+    }
+}
+
+/// Packs the X Y Z codes of one vertex's +planes (bits 0-2) and -planes
+/// (bits 8-10) into five bits; far Z is never clipped, only rejected.
+pub inline fn packClipCodes(codes: u32) result: u32 {
+    result = codes & 0x0307;
+    reg high: u32 = result >> 5;
+    result |= high;
+}
+
+/// Packs a vertex's rejection codes, inverted so that ORing three
+/// vertices' codes leaves a zero for a plane all of them are outside.
+pub inline fn packRejectCodes(codes: u32) result: u32 {
+    result = codes & 0x0707;
+    reg high: u32 = result >> 5;
+    result = result ~| high;
+}
+
+/// Lights both vertices by the point light just before `next_light`, replacing
+/// `light_scale` with the light's direction scaled by its falloff. The
+/// vertices' eye-space positions are computed once per pair. Every vector
+/// register is in use here, so `eye_position`, `sum`, `to_light`, and
+/// `square` are the caller's MVP rows, which it reloads afterwards,
