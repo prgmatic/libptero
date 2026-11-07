@@ -27,15 +27,28 @@ fn writeInlineCall(g: Gen, function: ast.Function, arguments: []const ast.ValueR
     var context = analysis.FunctionContext.init(caller.allocator, caller.label_prefix);
     defer context.deinit();
     context.next_label = caller.next_label;
-    context.clobbers = caller.clobbers;
-    context.functions = g.functions;
-    context.function_forbidden_scalar = caller.function_forbidden_scalar;
-    context.function_forbidden_vector = caller.function_forbidden_vector;
-    try reserveCallerSymbols(&context, caller);
-    try context.prepareLifetimes(g.functions, function.parameters, function.statements);
-    for (function.parameters, arguments) |parameter, argument| try bindInlineParameter(&context, caller, parameter, argument);
+    try prepareInlineContext(&context, caller, g.functions, function, arguments);
     try statements_.writeStatements(g.with(&context), function.statements);
     caller.next_label = context.next_label;
+}
+
+/// The context an inline body expands in: the caller's contract, its live
+/// registers reserved, and each parameter bound to its argument. Code
+/// generation and contract inference expand the same way.
+pub fn prepareInlineContext(
+    context: *analysis.FunctionContext,
+    caller: *const analysis.FunctionContext,
+    functions: []const ast.Function,
+    function: ast.Function,
+    arguments: []const ast.ValueRef,
+) !void {
+    context.clobbers = caller.clobbers;
+    context.functions = functions;
+    context.function_forbidden_scalar = caller.function_forbidden_scalar;
+    context.function_forbidden_vector = caller.function_forbidden_vector;
+    try reserveCallerSymbols(context, caller);
+    try context.prepareLifetimes(functions, function.parameters, function.statements);
+    for (function.parameters, arguments) |parameter, argument| try bindInlineParameter(context, caller, parameter, argument);
 }
 
 fn reserveCallerSymbols(context: *analysis.FunctionContext, caller: *const analysis.FunctionContext) !void {

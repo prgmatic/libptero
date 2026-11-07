@@ -1,0 +1,144 @@
+// The attribute stage of RDP triangle setup, shared by the RDP overlay's
+// triangle sender (rdp_triangle.zsp) and geometry's: shade, texture, and Z
+// coefficients from the sorted vertices' attributes, the remaining edge
+// stores, and the RDP DMA's addresses. Between the two stages the caller
+// swaps to the other dynamic buffer when `buffer_full` is set, and after
+// them it starts the DMA of `prim_size` bytes (minus one) in its return
+// slot.
+
+bss {
+    extern rdp_current: u32;
+    extern rdp_sentinel: u32;
+    extern rdp_buffers: [2]u32;
+}
+
+/// Coefficients up to DE, and whether the command overflows the buffer.
+/// `output` holds the command; `color_dmem`, `tex_dmem`, and `z_dmem` are
+/// where each coefficient block goes; `prim_size` plus `z_dmem` is the end of the
+/// command relative to `output` plus `output`, and leaves as the DMA size.
+/// `rdram` is `rdp_current` without its top byte, which this advances.
+pub inline fn writeAttributeSlopes(
+    output: dmem,
+    color_dmem: dmem,
+    tex_dmem: dmem,
+    z_dmem: dmem,
+    prim_size: i32,
+    rdram: i32,
+    buffer_full: i32,
+    vattr1: vec16,
+    vattr2: vec16,
+    vattr3: vec16,
+    vhml: vec16,
+    vnz: vec32,
+    vslope: vec32,
+    vedges: vec32,
+    vx12: vec32,
+    vfy: vec32,
+    vdx: vec32,
+    vdy: vec32,
+    vde: vec32,
+    discard: vec16,
+    powers: vec16,
+) {
+    // MA = A2 - A1, HA = A3 - A1 (saturating; S/T are s10.5).
+    reg vma: vec16 = vsub(vattr2, vattr1);
+    store(vec16, output, vx12.sfract[2], 10);
+    reg vha: vec16 = vsub(vattr3, vattr1);
+    prim_size +%= z_dmem;
+    // 1/NZ << 2 for the coefficient precision.
+    vnz.sfract = vmudn(vnz.sfract, powers.YYYYYYYY);
+    store(vec16, output, vslope.sint[2], 28);
+    vnz.sint = vmadh(vnz.sint, powers.YYYYYYYY);
+    store(vec16, output, vslope.sfract[2], 30);
+    // DX = MA * HY + HA * -MY
+    vdx.sfract = vmudh(vma, vhml.yyyyyyyy);
+    store(vec16, output, vedges.sint[2], 24);
+    vdx.sfract = vmadh(vha, vhml.wwwwwwww);
+    store(vec16, output, vedges.sfract[2], 26);
+    vdx.sfract = accumulator(.middle);
+    store(vec16, output, vedges.sint[0], 16);
+    vdx.sint = accumulator(.high);
+    store(vec16, output, vedges.sfract[0], 18);
+    // DY = HA * MX + MA * -HX
+    vdy.sfract = vmudh(vha, vhml.zzzzzzzz);
+    store(vec16, output, vslope.sint[0], 20);
+    vdy.sfract = vmadh(vma, vhml.xxxxxxxx);
+    store(vec16, output, vslope.sfract[0], 22);
+    vdy.sfract = accumulator(.middle);
+    rsp.cp0.setDmaMemoryAddress(output);
+    vdy.sint = accumulator(.high);
+    reg sentinel: i32 = load(i32, rdp_sentinel);
+    // DX * 1/NZ
+    discard = vmudl(vdx.sfract, vnz.sfract.WWWWWWWW);
+    prim_size = prim_size - output;
+    discard = vmadm(vdx.sint, vnz.sfract.WWWWWWWW);
+    output +%= prim_size;
+    vdx.sfract = vmadn(vdx.sfract, vnz.sint.WWWWWWWW);
+    rsp.cp0.setDmaRdramAddress(rdram);
+    vdx.sint = vmadh(vdx.sint, vnz.sint.WWWWWWWW);
+    // DY * 1/NZ
+    discard = vmudl(vdy.sfract, vnz.sfract.WWWWWWWW);
+    rdram += prim_size;
+    discard = vmadm(vdy.sint, vnz.sfract.WWWWWWWW);
+    buffer_full = sentinel < rdram;
+    vdy.sfract = vmadn(vdy.sfract, vnz.sint.WWWWWWWW);
+    store(vec16, color_dmem, vdx.sfract[0..4], 24);
+    vdy.sint = vmadh(vdy.sint, vnz.sint.WWWWWWWW);
+    store(vec16, tex_dmem, vdx.sfract[4..8], 24);
+    // DE = DX * 1/HY + DY, continuing the DY accumulation.
+    discard = vmadl(vdx.sfract, vslope.sfract.xxxxxxxx);
+    store(vec16, color_dmem, vdx.sint[0..4], 8);
+    discard = vmadm(vdx.sint, vslope.sfract.xxxxxxxx);
+    store(vec16, tex_dmem, vdx.sint[4..8], 8);
+    vde.sfract = vmadn(vdx.sfract, vslope.sint.xxxxxxxx);
+    store(vec16, color_dmem, vdy.sfract[0..4], 56);
+    vde.sint = vmadh(vdx.sint, vslope.sint.xxxxxxxx);
+    store(vec16, tex_dmem, vdy.sfract[4..8], 56);
+}
+
+/// FINAL = A1 + DE * FY, and the Z coefficients.
+pub inline fn writeFinalAttributes(
+    color_dmem: dmem,
+    tex_dmem: dmem,
+    z_dmem: dmem,
+    prim_size: i32,
+    rdram: i32,
+    vattr1: vec16,
+    vdx: vec32,
+    vdy: vec32,
+    vde: vec32,
+    vfy: vec32,
+    discard: vec16,
+    powers: vec16,
+) {
+    // FINAL = A1 + DE * FY
+    discard = vmudh(vattr1, powers.WWWWWWWW);
+    store(vec16, color_dmem, vdy.sint[0..4], 40);
+    discard = vmadl(vde.sfract, vfy.sfract.XXXXXXXX);
+    store(vec16, tex_dmem, vdy.sint[4..8], 40);
+    discard = vmadm(vde.sint, vfy.sfract.XXXXXXXX);
+    store(vec16, color_dmem, vde.sfract[0..4], 48);
+    reg vfinal: vec32 = undefined;
+    vfinal.sfract = vmadn(vde.sfract, vfy.sint.XXXXXXXX);
+    store(vec16, tex_dmem, vde.sfract[4..8], 48);
+    vfinal.sint = vmadh(vde.sint, vfy.sint.XXXXXXXX);
+    store(vec16, color_dmem, vde.sint[0..4], 32);
+    // Pack the Z values so one store each writes them.
+    vdy.sfract[6] = vdy.sint[7];
+    store(vec16, tex_dmem, vde.sint[4..8], 32);
+    vde.sfract[6] = vde.sint[7];
+    store(u32, rdp_current, rdram);
+    reg vz: vec16 = undefined;
+    vz[1] = vfinal.sfract[7];
+    store(vec16, color_dmem, vfinal.sfract[0..4], 16);
+    vz[0] = vfinal.sint[7];
+    store(vec16, tex_dmem, vfinal.sfract[4..8], 16);
+    vz[3] = vdx.sfract[7];
+    store(vec16, color_dmem, vfinal.sint[0..4], 0);
+    vz[2] = vdx.sint[7];
+    store(vec16, tex_dmem, vfinal.sint[4..8], 0);
+    store(vec16, z_dmem, vde.sfract[6..8], 8);
+    store(vec16, z_dmem, vdy.sfract[6..8], 12);
+    prim_size -%= 1;
+    store(vec16, z_dmem, vz[0..4], 0);
+}

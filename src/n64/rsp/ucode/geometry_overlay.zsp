@@ -8,6 +8,7 @@
 // `_start` when first needed and restored by syncTriangles.
 const dma = import("resident_api.zsp");
 const queue = import("resident_api.zsp");
+const attributes = import("triangle_attributes.zsp");
 
 // A buffered vertex, ready for the triangle sender (36 bytes):
 //   0  screen X, Y (s13.2) and depth
@@ -1006,65 +1007,12 @@ pub export fn sendTriangle(
     vector_zero = vsubc(vector_zero, vector_zero);
 
     // ------------------------------------------------------ attributes
-    // MA = A2 - A1, HA = A3 - A1 (saturating; S/T are s10.5).
-    reg vma: vec16 = vsub(vattr2, vattr1);
-    store(vec16, output, vx12.sfract[2], 10);
-    reg vha: vec16 = vsub(vattr3, vattr1);
-    prim_size +%= z_dmem;
-    // 1/NZ << 2 for the coefficient precision.
-    vnz.sfract = vmudn(vnz.sfract, powers.YYYYYYYY);
-    store(vec16, output, vslope.sint[2], 28);
-    vnz.sint = vmadh(vnz.sint, powers.YYYYYYYY);
-    store(vec16, output, vslope.sfract[2], 30);
-    // DX = MA * HY + HA * -MY
-    reg vdx: vec32 = undefined;
-    vdx.sfract = vmudh(vma, vhml.yyyyyyyy);
-    store(vec16, output, vedges.sint[2], 24);
-    vdx.sfract = vmadh(vha, vhml.wwwwwwww);
-    store(vec16, output, vedges.sfract[2], 26);
-    vdx.sfract = accumulator(.middle);
-    store(vec16, output, vedges.sint[0], 16);
-    vdx.sint = accumulator(.high);
-    store(vec16, output, vedges.sfract[0], 18);
-    // DY = HA * MX + MA * -HX
-    reg vdy: vec32 = undefined;
-    vdy.sfract = vmudh(vha, vhml.zzzzzzzz);
-    store(vec16, output, vslope.sint[0], 20);
-    vdy.sfract = vmadh(vma, vhml.xxxxxxxx);
-    store(vec16, output, vslope.sfract[0], 22);
-    vdy.sfract = accumulator(.middle);
-    rsp.cp0.setDmaMemoryAddress(output);
-    vdy.sint = accumulator(.high);
-    reg sentinel: i32 = load(i32, rdp_sentinel);
-    // DX * 1/NZ
-    discard = vmudl(vdx.sfract, vnz.sfract.WWWWWWWW);
-    prim_size = prim_size - output;
-    discard = vmadm(vdx.sint, vnz.sfract.WWWWWWWW);
-    output +%= prim_size;
-    vdx.sfract = vmadn(vdx.sfract, vnz.sint.WWWWWWWW);
-    rsp.cp0.setDmaRdramAddress(rdram);
-    vdx.sint = vmadh(vdx.sint, vnz.sint.WWWWWWWW);
-    store(u16, triangle_buffer_offset, buffer_offset);
-    // DY * 1/NZ
-    discard = vmudl(vdy.sfract, vnz.sfract.WWWWWWWW);
-    rdram += prim_size;
-    discard = vmadm(vdy.sint, vnz.sfract.WWWWWWWW);
     reg buffer_full: i32 = undefined;
-    buffer_full = sentinel < rdram;
-    vdy.sfract = vmadn(vdy.sfract, vnz.sint.WWWWWWWW);
-    store(vec16, color_dmem, vdx.sfract[0..4], 24);
-    vdy.sint = vmadh(vdy.sint, vnz.sint.WWWWWWWW);
-    store(vec16, tex_dmem, vdx.sfract[4..8], 24);
-    // DE = DX * 1/HY + DY, continuing the DY accumulation.
-    discard = vmadl(vdx.sfract, vslope.sfract.xxxxxxxx);
-    store(vec16, color_dmem, vdx.sint[0..4], 8);
-    discard = vmadm(vdx.sint, vslope.sfract.xxxxxxxx);
-    store(vec16, tex_dmem, vdx.sint[4..8], 8);
+    reg vdx: vec32 = undefined;
+    reg vdy: vec32 = undefined;
     reg vde: vec32 = undefined;
-    vde.sfract = vmadn(vdx.sfract, vslope.sint.xxxxxxxx);
-    store(vec16, color_dmem, vdy.sfract[0..4], 56);
-    vde.sint = vmadh(vdx.sint, vslope.sint.xxxxxxxx);
-    store(vec16, tex_dmem, vdy.sfract[4..8], 56);
+    attributes.writeAttributeSlopes(output, color_dmem, tex_dmem, z_dmem, prim_size, rdram, buffer_full, vattr1, vattr2, vattr3, vhml, vnz, vslope, vedges, vx12, vfy, vdx, vdy, vde, discard, powers);
+    store(u16, triangle_buffer_offset, buffer_offset);
     if (buffer_full != 0) {
         @branchHint(.cold);
         // Swap to the other dynamic buffer; the DMA already started below
@@ -1084,36 +1032,7 @@ pub export fn sendTriangle(
         return_address = caller;
     }
 
-    // FINAL = A1 + DE * FY
-    discard = vmudh(vattr1, powers.WWWWWWWW);
-    store(vec16, color_dmem, vdy.sint[0..4], 40);
-    discard = vmadl(vde.sfract, vfy.sfract.XXXXXXXX);
-    store(vec16, tex_dmem, vdy.sint[4..8], 40);
-    discard = vmadm(vde.sint, vfy.sfract.XXXXXXXX);
-    store(vec16, color_dmem, vde.sfract[0..4], 48);
-    reg vfinal: vec32 = undefined;
-    vfinal.sfract = vmadn(vde.sfract, vfy.sint.XXXXXXXX);
-    store(vec16, tex_dmem, vde.sfract[4..8], 48);
-    vfinal.sint = vmadh(vde.sint, vfy.sint.XXXXXXXX);
-    store(vec16, color_dmem, vde.sint[0..4], 32);
-    // Pack the Z values so one store each writes them.
-    vdy.sfract[6] = vdy.sint[7];
-    store(vec16, tex_dmem, vde.sint[4..8], 32);
-    vde.sfract[6] = vde.sint[7];
-    store(u32, rdp_current, rdram);
-    reg vz: vec16 = undefined;
-    vz[1] = vfinal.sfract[7];
-    store(vec16, color_dmem, vfinal.sfract[0..4], 16);
-    vz[0] = vfinal.sint[7];
-    store(vec16, tex_dmem, vfinal.sfract[4..8], 16);
-    vz[3] = vdx.sfract[7];
-    store(vec16, color_dmem, vfinal.sint[0..4], 0);
-    vz[2] = vdx.sint[7];
-    store(vec16, tex_dmem, vfinal.sint[4..8], 0);
-    store(vec16, z_dmem, vde.sfract[6..8], 8);
-    store(vec16, z_dmem, vdy.sfract[6..8], 12);
-    prim_size -%= 1;
-    store(vec16, z_dmem, vz[0..4], 0);
+    attributes.writeFinalAttributes(color_dmem, tex_dmem, z_dmem, prim_size, rdram, vattr1, vdx, vdy, vde, vfy, discard, powers);
     return slot {
         rsp.cp0.startDmaWrite(prim_size);
     }

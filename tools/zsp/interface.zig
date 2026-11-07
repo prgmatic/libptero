@@ -58,3 +58,30 @@ fn writeRegisterList(writer: *Writer, scalar: u32, vector: u32) !void {
         separator = ", ";
     }
 }
+
+test "inline calls contribute their expansion's registers, not their parameters'" {
+    const allocator = std.testing.allocator;
+    var parser = try @import("parser.zig").Parser.init(allocator,
+        \\inline fn bump(a: u32, b: u32, c: u32, d: u32, e: u32) {
+        \\  reg t: u32 = a + b;
+        \\  e += t;
+        \\  d -%= 1;
+        \\}
+        \\pub export fn entry() {
+        \\  reg a: u32 = load(u32, 0);
+        \\  reg b: u32 = load(u32, 4);
+        \\  reg c: u32 = load(u32, 8);
+        \\  reg d: u32 = load(u32, 12);
+        \\  reg e: u32 = load(u32, 16);
+        \\  bump(a, b, c, d, e);
+        \\  store(u32, 0, e);
+        \\  store(u32, 4, d);
+        \\}
+    );
+    const functions = try parser.parse();
+    defer ast.freeFunctions(allocator, functions);
+    var output = std.Io.Writer.Allocating.init(allocator);
+    defer output.deinit();
+    try writeInterface(allocator, &output.writer, functions, null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "writes($t0, $t1, $t2, $t3, $t4, $t5);") != null);
+}

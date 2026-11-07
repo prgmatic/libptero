@@ -162,6 +162,8 @@ const Analysis = struct {
 
     /// Adds argument setup and automatic allocations to a function's writes.
     fn simulate(self: *Analysis, function: ast.Function, index: usize, previous: *const FunctionClobberRegistry) !void {
+        // Inline bodies are simulated where they expand, in their callers.
+        if (function.inline_call) return;
         var function_context = self.context(function);
         defer function_context.deinit();
         function_context.clobbers = previous;
@@ -397,7 +399,8 @@ const simulators = blk: {
     var table = std.EnumArray(Tag, Simulator).initFill(&ignoreStatement);
     table.set(.var_decl, &simulateDeclaration);
     table.set(.assignment, &simulateAssignment);
-    for ([_]Tag{ .goto, .conditional_goto, .conditional_direct_goto, .break_loop, .call }) |tag| table.set(tag, &simulateDelay);
+    for ([_]Tag{ .goto, .conditional_goto, .conditional_direct_goto, .break_loop }) |tag| table.set(tag, &simulateDelay);
+    table.set(.call, &simulateCall);
     table.set(.do_while_loop, &simulateDoWhile);
     table.set(.if_statement, &simulateIf);
     table.set(.labeled_block, &simulateBlock);
@@ -410,6 +413,26 @@ fn ignoreStatement(_: *Simulation, _: *const Statement) !void {}
 
 fn simulateDelay(simulation: *Simulation, statement: *const Statement) !void {
     try simulation.optional(ast_walk.delaySlot(statement));
+}
+
+/// An inline call expands in the caller: its temporaries take the
+/// caller's registers, so they join the caller's writes.
+fn simulateCall(simulation: *Simulation, statement: *const Statement) !void {
+    const call = statement.call;
+    const function = inlineTarget(simulation.context.functions, call) orelse return simulateDelay(simulation, statement);
+    var child = FunctionContext.init(simulation.context.allocator, function.name);
+    defer child.deinit();
+    child.diagnostic = simulation.context.diagnostic;
+    try @import("emit_calls.zig").prepareInlineContext(&child, simulation.context, simulation.context.functions, function, call.arguments);
+    var nested: Simulation = .{ .context = &child, .clobber = simulation.clobber };
+    try nested.statements(function.statements);
+    try simulation.optional(call.delay_slot);
+}
+
+fn inlineTarget(functions: []const ast.Function, call: ast.Call) ?ast.Function {
+    if (call.module != null) return null;
+    const function = call_requirements.findFunction(functions, call.name) orelse return null;
+    return if (function.inline_call and function.parameters.len == call.arguments.len) function else null;
 }
 
 fn simulateDoWhile(simulation: *Simulation, statement: *const Statement) !void {
