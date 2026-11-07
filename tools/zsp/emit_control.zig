@@ -191,7 +191,7 @@ pub fn writeConditionalDirectGoto(g: Gen, statement: *const Statement) !void {
     var setup: Setup = .{};
     if (branch.typed) {
         const start = g.out.items.items.len;
-        try calls.writeFunctionArguments(g, try common.findFunction(g, branch.target.name), branch.arguments, true);
+        try calls.writeFunctionArguments(g, try common.findFunction(g, branch.target.name), branch.arguments, true, branch.delay_slot);
         try setup.take(&g.out.items, start);
     }
     const condition_start = g.out.items.items.len;

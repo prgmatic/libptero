@@ -15,7 +15,7 @@ const Tail = @FieldType(ast.Builtin, "tail");
 pub fn writeCall(g: Gen, call: ast.Call) anyerror!void {
     try common.expectLocal(call.module);
     const function = try common.findFunction(g, call.name);
-    try writeFunctionArguments(g, function, call.arguments, true);
+    try writeFunctionArguments(g, function, call.arguments, true, call.delay_slot);
     if (function.inline_call) return writeInlineCall(g, function, call.arguments);
     try g.out.jump(.jal, call.name);
     try statements_.writeDelaySlot(g, call.delay_slot);
@@ -122,7 +122,7 @@ pub fn writeContinuationPair(g: Gen, call: ast.Call, following: Tail) !void {
     if (callee.inline_call or continuation.parameters.len != 0) return error.InvalidContinuationCall;
     g.advance(2);
     if (isOmittedTail(g, following.target.name)) return writeCall(g, call);
-    try writeFunctionArguments(g, callee, call.arguments, true);
+    try writeFunctionArguments(g, callee, call.arguments, true, null);
     try g.out.jump(.j, call.name);
     try g.out.immediateSymbol(.addiu, .ra, .zero, following.target.name, 0);
 }
@@ -139,10 +139,12 @@ const max_arguments = 64;
 
 /// Moves register arguments into the callee's parameter registers as a
 /// parallel assignment, then materializes constants and checks types.
-pub fn writeFunctionArguments(g: Gen, function: ast.Function, arguments: []const ast.ValueRef, allow_signedness_change: bool) !void {
+/// `delay_slot` runs after these moves and before the callee, so an
+/// argument it assigns must already live in its parameter register.
+pub fn writeFunctionArguments(g: Gen, function: ast.Function, arguments: []const ast.ValueRef, allow_signedness_change: bool, delay_slot: ?[]const Statement) !void {
     if (arguments.len != function.parameters.len) return error.FunctionArgumentCountMismatch;
     if (arguments.len > max_arguments) return error.TooManyFunctionArguments;
-    var moves = try collectMoves(g, function, arguments);
+    var moves = try collectMoves(g, function, arguments, delay_slot);
     try emitParallelMoves(g, &moves);
     for (arguments, function.parameters) |argument, parameter| {
         if (function.bindsArgument(parameter)) continue;
@@ -179,15 +181,25 @@ const Moves = struct {
     }
 };
 
-fn collectMoves(g: Gen, function: ast.Function, arguments: []const ast.ValueRef) !Moves {
+fn collectMoves(g: Gen, function: ast.Function, arguments: []const ast.ValueRef, delay_slot: ?[]const Statement) !Moves {
     var moves: Moves = .{};
     for (arguments, function.parameters, 0..) |argument, parameter, index| {
         if (function.bindsArgument(parameter)) continue;
         const source = try movedSource(g, argument, parameter) orelse continue;
         if (parameterIsWritten(g, function, index)) return error.FunctionArgumentRegisterMismatch;
+        if (slotAssigns(delay_slot, common.refName(argument).?)) return error.DelaySlotAssignsMovedArgument;
         moves.add(.{ .destination = parameter.reg.?, .source = source });
     }
     return moves;
+}
+
+/// Whether a delay slot assigns `name`.
+fn slotAssigns(delay_slot: ?[]const Statement, name: []const u8) bool {
+    const statements = delay_slot orelse return false;
+    for (statements) |statement| {
+        if (statement == .assignment and std.mem.eql(u8, statement.assignment.destination, name)) return true;
+    }
+    return false;
 }
 
 /// The register a scalar argument must be copied from, if any.

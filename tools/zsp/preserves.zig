@@ -15,7 +15,8 @@ const Masks = struct { scalar: u32 = 0, vector: u32 = 0 };
 
 /// Prepends a reserved declaration for each register `target` keeps.
 pub fn apply(allocator: std.mem.Allocator, function: *ast.Function, target: ast.Function) !void {
-    if (target.external and !target.has_clobber_contract) return error.PreservedFunctionHasNoContract;
+    // A local function's contract is inferred only during code generation.
+    if (!target.has_clobber_contract) return error.PreservedFunctionHasNoContract;
     var kept = keptRegisters(target);
     const pinned = pinnedRegisters(function.*);
     kept.scalar &= ~pinned.scalar;

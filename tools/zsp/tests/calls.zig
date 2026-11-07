@@ -769,3 +769,17 @@ test "inline expansions keep caller values and may reuse caller names" {
         \\
     );
 }
+
+test "a delay slot cannot assign an argument that needs a move" {
+    try expectAsmError(
+        \\fn sink(reg($a0) w: u32, reg($a1) c: u32) noreturn { store(u32, 0x10, w); rsp.halt(); }
+        \\fn test(reg($a0) first: u32, reg($a1) c: u32) noreturn {
+        \\  reg w: u32 = undefined;
+        \\  store(u32, 0x20, first);
+        \\  if (c == 3) tail sink(w, c) slot {
+        \\    w = 0xf7000000;
+        \\  }
+        \\  rsp.halt();
+        \\}
+    , error.DelaySlotAssignsMovedArgument);
+}

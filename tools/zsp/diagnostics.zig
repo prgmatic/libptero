@@ -45,6 +45,8 @@ const error_hints = std.StaticStringMap([]const u8).initComptime(.{
     .{ "PinnedRegisterClobberedByCall", "a value live across this call uses a written register; declare an accurate writes() contract or shorten the live range" },
     .{ "PinnedRegisterClobberedByExternalCall", "a value live across this call uses a written register; declare an accurate writes() contract or shorten the live range" },
     .{ "AutomaticRegisterClobberedByCall", "a value live across this call uses a written register; declare an accurate writes() contract or shorten the live range" },
+    .{ "PreservedFunctionHasNoContract", "preserves() needs a function with a writes() contract, such as one imported from a generated interface" },
+    .{ "DelaySlotAssignsMovedArgument", "a delay slot assigns an argument that must be moved into its parameter register before the transfer; assign it before the transfer, or pin it to the parameter register" },
     .{ "FunctionArgumentCountMismatch", "transfer argument count does not match the target function signature" },
     .{ "FunctionArgumentTypeMismatch", "transfer argument type does not match the target function signature" },
     .{ "ConditionalTailArgumentConflict", "a conditional tail call's argument setup conflicts with its condition; compute the condition into another register or pass fewer arguments" },

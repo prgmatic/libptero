@@ -201,7 +201,7 @@ inline fn resolveSegment(address: u32) {
         matrix_address = bitCast(stack_pointer);
     }
     reg pitch: u32 = undefined;
-    reg($s0) rdram: u32 = matrix_address & 0xffffff;
+    reg rdram: u32 = matrix_address & 0xffffff;
     dma.in(matrix_dma_size, pitch, rdram, matrix_mv);
     if (multiply != 0) {
         rdram = bitCast(stack_pointer);
@@ -225,7 +225,7 @@ inline fn resolveSegment(address: u32) {
 
 @rspq.command(7) fn setProjectionMatrix(rdram: u32) noreturn {
     reg pitch: u32 = undefined;
-    reg($s0) source: u32 = bitCast(rdram);
+    reg source: u32 = bitCast(rdram);
     tail dma.in(63, pitch, source, matrix_projection);
 }
 
@@ -304,7 +304,7 @@ inline fn resolveSegment(address: u32) {
     store(u32, resident_scratch, opcode_0);
     store(u32, resident_scratch, opcode_1, 4);
     reg pitch: u32 = undefined;
-    reg($s0) rdram: u32 = bitCast(patch_address);
+    reg rdram: u32 = bitCast(patch_address);
     tail dma.out(7, pitch, rdram, resident_scratch);
 }
 
@@ -312,11 +312,12 @@ inline fn resolveSegment(address: u32) {
 
 /// The clipping patch's load point, entered with a triangle to clip. Its
 /// first run loads the patch over itself and runs it; while loaded, the
-/// patch is what runs here.
+/// patch is what runs here. Beyond what `sendTriangle` may write, it uses
+/// only the $s0 and $s4 the DMA needs, which `clipTriangle` saved.
 export fn _start(
-    reg($a0) vertex1: dmem,
-    reg($a1) vertex2: dmem,
-    reg($a2) vertex3: dmem,
+    vertex1: dmem,
+    vertex2: dmem,
+    vertex3: dmem,
     reg($v0) cull_mode: i32,
 ) align(8) noreturn {
     reg($ra) return_address: u32 = undefined;
@@ -355,11 +356,11 @@ export fn _start(
 
     reg($s4) input: dmem = undefined;
     input = addresses >> 16;
-    reg($t0) copy_size: u32 = buffer_size & 0xffff;
+    reg copy_size: u32 = buffer_size & 0xffff;
     reg input_end: dmem = input +% copy_size;
     copy_size -%= 1;
     resolveSegment(rdram_vertices);
-    reg($s0) rdram: u32 = rdram_vertices;
+    reg rdram: u32 = rdram_vertices;
     reg pitch: u32 = undefined;
     dma.inAsync(copy_size, pitch, rdram, input);
 
@@ -730,16 +731,15 @@ const vertex_inverse_w_fraction: u32 = vertex_inverse_w + 2;
 /// Strips, sequences, and the clipping patch keep values in $s1, $s2, $s4,
 /// $v0, and $v1 across this call, so it leaves them alone.
 pub export fn sendTriangle(
-    reg($a0) vertex1: dmem,
-    reg($a1) vertex2: dmem,
-    reg($a2) vertex3: dmem,
+    vertex1: dmem,
+    vertex2: dmem,
+    vertex3: dmem,
     reg($v0) cull_mode: i32,
 ) {
     // Dispatcher constants: $v00 is zero and $v30 holds the powers of two
     // from 128 down to 1.
     reg($v00) vector_zero: vec16 = undefined;
     reg($v30) powers: vec16 = undefined;
-    reserved reg($v1) sequence_step: u32 = undefined;
 
     // ---------------------------------------------------- load and sort
     // Each row holds X Y, then the vertex address in lane 3. The flags
@@ -756,8 +756,6 @@ pub export fn sendTriangle(
     reg flags: i32 = load(u16, vertex1, vertex_clip_flags);
     reg negative_powers: vec16 = vsubc(vector_zero, powers);
     reg vy1: vec16 = vall1.yyyyyyyy;
-    // Constant compares would need $v1.
-    reg all_inside: i32 = 0xff;
     reg vy2: vec16 = vall2.yyyyyyyy;
     reg flags2: i32 = load(u16, vertex2, vertex_clip_flags);
     reg vy3: vec16 = vall3.yyyyyyyy;
@@ -781,7 +779,7 @@ pub export fn sendTriangle(
     reg inside: i32 = flags & 0xff;
     reg vhml_upper: vec16 = 0;
     reg vytmp2: vec16 = vge(vy1, vy3);
-    if (inside != all_inside) {
+    if (inside != 0xff) {
         return;
     }
     // The tile index is in the top three bits.
@@ -1137,19 +1135,24 @@ pub export fn sendTrianglesEnd() {
 /// buffers, so the last triangle's DMA must finish first.
 ///
 /// The jump is indirect because the compiler sees only the loader at
-/// `_start`, not the patch. The patch is compiled to keep every register
-/// `sendTriangle` keeps (`preserves(geometry.sendTriangle)`); it restores
-/// $s4 from the scratch slot below.
+/// `_start`, not the patch. The loader and the patch are compiled to keep
+/// every register `sendTriangle` keeps (`preserves`), except $s0, $s3,
+/// and $s4: they need those, so this saves them in scratch slots the
+/// patch restores from.
 export fn clipTriangle(
-    reg($a0) vertex1: dmem,
-    reg($a1) vertex2: dmem,
-    reg($a2) vertex3: dmem,
+    vertex1: dmem,
+    vertex2: dmem,
+    vertex3: dmem,
     reg($v0) cull_mode: i32,
 ) noreturn {
     reg($ra) return_address: u32 = undefined;
+    reg($s0) caller_s0: u32 = undefined;
+    reg($s3) caller_s3: u32 = undefined;
     reg($s4) caller_s4: u32 = undefined;
     store(u16, clipping_return_address, return_address);
     store(u16, resident_scratch, caller_s4, 18);
+    store(u32, resident_scratch, caller_s0, 24);
+    store(u32, resident_scratch, caller_s3, 28);
     sendTrianglesEnd();
     reg entry: u32 = code.addressOf(_start);
     jump(entry);
@@ -1172,13 +1175,10 @@ export fn clipTriangle(
 /// buffer; triangle n uses indices n+1, n+2, and n. A negative index starts
 /// a new strip with it, and a negative DMEM address syncs at the end.
 @rspq.command(11) fn drawTriangleStrip(rdram: u32, size_and_dmem: u32) noreturn {
-    // Every value kept across a triangle is in a register the clipping
-    // patch preserves.
-    reg($s4) cursor: dmem = undefined;
-    reg($s2) last: dmem = undefined;
-    reg($s1) sync: i32 = bitCast(size_and_dmem);
-    reg($v0) cull_mode: i32 = undefined;
-    reserved reg($v1) sequence_step: u32 = undefined;
+    reg cursor: dmem = undefined;
+    reg last: dmem = undefined;
+    reg sync: i32 = bitCast(size_and_dmem);
+    reg cull_mode: i32 = undefined;
     reg size: u32 = size_and_dmem & 0xffff;
     cursor = size_and_dmem >> 16;
     // Load the index list, programming the DMA directly: that needs the
@@ -1200,9 +1200,9 @@ export fn clipTriangle(
         if (cursor == last) {
             break;
         }
-        reg($a0) vertex1: dmem = load(u16, cursor, 2);
-        reg($a1) vertex2: i32 = load(i16, cursor, 4);
-        reg($a2) vertex3: dmem = load(u16, cursor, 0);
+        reg vertex1: dmem = load(u16, cursor, 2);
+        reg vertex2: i32 = load(i16, cursor, 4);
+        reg vertex3: dmem = load(u16, cursor, 0);
         cursor +%= 2;
         if (vertex2 < 0) {
             // The flagged index starts the next strip; the triangle that
@@ -1235,10 +1235,10 @@ inline fn waitForDma() {
 @rspq.command(10) fn syncTriangles() @rspq.commandSize(4) noreturn {
     reg loaded: u32 = load(u8, clipping_code_address);
     if (loaded != 0) {
-        reg($t0) size: u32 = load(u16, clipping_code_size);
+        reg size: u32 = load(u16, clipping_code_size);
         size -%= 1;
         reg pitch: u32 = undefined;
-        reg($s0) rdram: u32 = load(u32, original_code_address);
+        reg rdram: u32 = load(u32, original_code_address);
         reg($s4) target: dmem = undefined;
         target = code.addressOf(_start);
         // sendTrianglesEnd waits for this DMA too.
@@ -1257,19 +1257,19 @@ inline fn waitForDma() {
     // Every value kept across a triangle is in a register the clipping
     // patch preserves.
     reg($gp) next_command: dmem = undefined;
-    reg($s1) quad_step: u32 = last_and_quads >> 16;
-    reg($s4) last: dmem = last_and_quads & 0xffff;
-    reg($s2) base: dmem = size_and_first & 0xffff;
-    reg($v0) cull_mode: i32 = load(u8, face_culling);
-    reserved reg($v1) step: u32 = quad_step +% 108;
+    reg quad_step: u32 = last_and_quads >> 16;
+    reg last: dmem = last_and_quads & 0xffff;
+    reg base: dmem = size_and_first & 0xffff;
+    reg cull_mode: i32 = load(u8, face_culling);
+    reg step: u32 = quad_step +% 108;
     while (true) {
         while (true) {
             if (base == last) {
                 break;
             }
-            reg($a0) vertex1: dmem = base +% vertex_pair_size;
-            reg($a1) vertex2: dmem = base +% vertex_size;
-            reg($a2) vertex3: dmem = base;
+            reg vertex1: dmem = base +% vertex_pair_size;
+            reg vertex2: dmem = base +% vertex_size;
+            reg vertex3: dmem = base;
             base +%= step;
             sendTriangle(vertex1, vertex2, vertex3, cull_mode);
         }

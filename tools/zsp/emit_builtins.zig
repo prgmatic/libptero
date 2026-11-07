@@ -62,7 +62,7 @@ fn returnFromFunction(g: Gen, builtin: Builtin) !void {
 fn directGoto(g: Gen, builtin: Builtin) !void {
     const branch = builtin.direct_goto;
     try common.expectLocal(branch.target.module);
-    if (branch.typed) try calls.writeFunctionArguments(g, try common.findFunction(g, branch.target.name), branch.arguments, true);
+    if (branch.typed) try calls.writeFunctionArguments(g, try common.findFunction(g, branch.target.name), branch.arguments, true, branch.delay_slot);
     try g.out.jump(if (branch.encoding == .jump) .j else .b, branch.target.name);
     try statements_.writeDelaySlot(g, branch.delay_slot);
 }
@@ -74,7 +74,7 @@ fn tail(g: Gen, builtin: Builtin) !void {
     try common.expectLocal(transfer.target.module);
     const function = try common.findFunction(g, transfer.target.name);
     if (function.inline_call) return error.CannotTailInlineFunction;
-    try calls.writeFunctionArguments(g, function, transfer.arguments, true);
+    try calls.writeFunctionArguments(g, function, transfer.arguments, true, transfer.delay_slot);
     if (!calls.isOmittedTail(g, transfer.target.name)) {
         try g.out.jump(.j, transfer.target.name);
         return statements_.writeDelaySlot(g, transfer.delay_slot);

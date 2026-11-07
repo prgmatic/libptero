@@ -33,11 +33,11 @@ const texture: u32 = 12;
 const clip_position: u32 = 16;
 const inverse_w: u32 = 32;
 
-// Geometry saves its caller's $s4 here before clipping, for the patch to
-// restore; the patch keeps the triangle's original clip flags next to it.
+// Geometry saves its caller's $s4, $s0, and $s3 here before clipping, for
+// the patch to restore; the patch keeps the triangle's original clip flags
+// next to them.
 const saved_indices: u32 = 18;
 const saved_flags: u32 = 20;
-// The patch saves its caller's $s0 and $s3 here and restores them.
 const saved_s0: u32 = 24;
 const saved_s3: u32 = 28;
 
@@ -51,14 +51,17 @@ const inside_codes: u32 = 0x00ff;
 /// address geometry saved. It finishes geometry's `sendTriangle` call, so
 /// it keeps every register that function keeps, the strips' and sequences'
 /// loop state among them. The fan loop needs registers that survive
-/// `sendTriangle` too, so it borrows $s0 and $s3 and restores them, with
-/// the $s4 that drawing overwrites.
+/// `sendTriangle` too, so it borrows $s0 and $s3, which geometry saved with
+/// the $s4 that drawing overwrites, and restores all three.
 export fn _start(
-    reg($a0) vertex1: dmem,
-    reg($a1) vertex2: dmem,
-    reg($a2) vertex3: dmem,
+    vertex1: dmem,
+    vertex2: dmem,
+    vertex3: dmem,
     reg($v0) cull_mode: u32,
 ) preserves(geometry.sendTriangle) noreturn {
+    // Borrowed; restored from geometry's saved values on return.
+    reg($s0) borrowed_s0: u32 = undefined;
+    reg($s3) borrowed_s3: u32 = undefined;
     reg($v00) vector_zero: vec16 = undefined;
     // Lane 7 of the dispatcher's shift constants is 1, and 256 after <<8.
     reg($v30) powers: vec16 = undefined;
@@ -66,11 +69,6 @@ export fn _start(
     // Each pass reads one buffer and writes the other; the triangle starts
     // in the temporary one, so after the five passes the result is in
     // clipping_buffer_result.
-    reg($s0) entry_s0: u32 = undefined;
-    store(u32, resident_scratch, entry_s0, saved_s0);
-    reg($s3) entry_s3: u32 = undefined;
-    store(u32, resident_scratch, entry_s3, saved_s3);
-
     reg write: dmem = clipping_buffer_temporary;
     copyVertex(write, vertex1);
     copyVertex(write, vertex2);
