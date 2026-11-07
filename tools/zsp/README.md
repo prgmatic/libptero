@@ -23,10 +23,13 @@ optimization hints.
 
 ## Compiler stages
 
-Parsing. `parser.zig` owns parser state, symbol tables, token helpers, and
-shared grammar metadata. `parse_declarations.zig` parses functions,
-parameters, register and constant declarations, compile-time enums and flags,
-imports, packed structs, and storage blocks. `parse_statements.zig`,
+Parsing. `parser.zig` owns parser state, symbol tables, and token helpers;
+`parse_errors.zig` holds the error codes and messages and `parse_names.zig`
+the spellings of registers, types, and operations. `parse_functions.zig`
+parses function declarations, command attributes and targets, and modifiers.
+`parse_declarations.zig` parses parameters, register and constant
+declarations, compile-time enums and flags, imports, packed structs, and
+storage blocks. `parse_statements.zig`,
 `parse_values.zig`, `parse_builtins.zig`, and `parse_memory.zig` handle
 statements, expressions, `rsp.*` builtins, and memory operands. The parser
 produces the source AST and a statement source map; `ast_walk.zig` gives
@@ -49,7 +52,9 @@ injected writers, `main.zig` only connects it to the process, and
 `options.zig` parses arguments without IO. `root.zig` exposes the
 programmatic API. `modules.zig` loads and links modules, retaining source
 locations and owning each module's parsed allocations through
-`source.Program`, which releases partial ASTs on parse failure. `rspq.zig`
+`source.Program`, which releases partial ASTs on parse failure; linking also
+resolves imported command targets and, through `preserves.zig`, turns
+`preserves(...)` into reserved registers. `rspq.zig`
 validates command indices, encoded sizes, and parameter ABI bindings; its
 `CommandAnalysis` is what emission uses for the command table.
 `compiler.zig` runs the shared compilation and explain pipeline, including the

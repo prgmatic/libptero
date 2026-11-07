@@ -43,6 +43,9 @@ test {
     _ = @import("schedule.zig");
     _ = @import("ir_deps.zig");
     _ = @import("interface.zig");
+    _ = @import("parse_errors.zig");
+    _ = @import("parse_names.zig");
+    _ = @import("parse_functions.zig");
     _ = @import("emit_builtins.zig");
     _ = @import("registers.zig");
     _ = @import("diagnostics.zig");
