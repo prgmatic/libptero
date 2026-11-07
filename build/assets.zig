@@ -275,12 +275,15 @@ pub const AssetBundle = struct {
     /// patch runs on the overlay's state and sees its global symbols and
     /// the resident's public ones; the CPU side loads and restores it. The
     /// overlay's public functions are importable as `<overlay name>_api.zsp`.
+    /// `kept` names the overlay's functions that run while the patch is
+    /// loaded; linking fails if the patch covers one.
     pub fn addZspPatch(
         self: *AssetBundle,
         name: []const u8,
         source: std.Build.LazyPath,
         overlay: Overlay,
         symbol: []const u8,
+        kept: []const []const u8,
     ) void {
         const patch_link = self.b.addRunArtifact(self.tools.rsp_overlay_link);
         patch_link.addArg("--patch");
@@ -289,6 +292,7 @@ pub const AssetBundle = struct {
         patch_link.addArtifactArg(overlay.elf);
         patch_link.addArg(symbol);
         const linker_script = patch_link.addOutputFileArg(self.b.fmt("{s}.ld", .{name}));
+        for (kept) |function| patch_link.addArg(function);
         const built = buildZspWith(self, name, source, linker_script, &.{
             .{ .name = "resident_api.zsp", .file = overlay.resident.interface },
             .{ .name = self.b.fmt("{s}_api.zsp", .{overlay.name}), .file = overlay.interface },

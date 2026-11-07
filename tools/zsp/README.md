@@ -536,6 +536,24 @@ clip = twice(clip);
 Only inline functions return values, `return value;` must be the body's last
 statement, and a call is the whole initializer or right-hand side.
 
+`preserves(module.function)` after the parameters declares that a function
+finishes a call to `function` on its behalf, as the geometry clipping patch
+finishes geometry's triangle sender. Linking reserves every register that
+`function`'s `writes()` contract leaves untouched for the whole function: the
+allocator avoids them, and a callee that writes one is an error. Registers the
+function pins itself, as parameters or declarations, stay its responsibility,
+which is how it restores one it borrows:
+
+```zig
+export fn _start(reg($a0) vertex: dmem) preserves(geometry.sendTriangle) noreturn {
+    reg($s0) entry_s0: u32 = undefined;
+    store(u32, scratch, entry_s0);   // borrowed: saved here, restored below
+    // ...
+    reg($s0) exit_s0: u32 = load(u32, scratch);
+    jump(return_address);
+}
+```
+
 Function pointers use structural lowered signatures. Unpinned types use the
 same default argument registers, and exceptional registers can be explicit:
 

@@ -110,6 +110,7 @@ fn isIdent(tok: token.Token, text: []const u8) bool {
 /// `align(n)`, and `@rspq.commandSize(...)`.
 const Modifiers = struct {
     no_return: bool = false,
+    preserves: ?ast.FunctionRef = null,
     alignment: u16 = 4,
     has_clobber_contract: bool = false,
     command_sizes: std.ArrayList(u8) = .empty,
@@ -156,6 +157,7 @@ fn parseFunction(self: *Parser, prefixes: Prefixes, command_indices: []const u8)
         .external = prefixes.@"extern",
         .no_return = modifiers.no_return,
         .alignment = modifiers.alignment,
+        .preserves = modifiers.preserves,
         .command_indices = command_indices,
         .command_sizes = try modifiers.command_sizes.toOwnedSlice(self.allocator),
         .has_clobber_contract = modifiers.has_clobber_contract,
@@ -180,20 +182,38 @@ fn parseFunctionBody(self: *Parser, prefixes: Prefixes) ![]ast.Statement {
 fn parseModifier(self: *Parser, modifiers: *Modifiers) !void {
     if (self.current.tag == .at) return parseRspqNumberAttribute(self, "commandSize", &modifiers.command_sizes);
     const modifier = try self.expect(.ident);
-    if (std.mem.eql(u8, modifier.text, "noreturn")) {
-        modifiers.no_return = true;
-        return;
-    }
-    if (std.mem.eql(u8, modifier.text, "align")) return parseAlignment(self, modifiers);
-    if (!std.mem.eql(u8, modifier.text, "writes")) return self.fail(modifier, .unsupported_function_modifier);
+    const parse = modifier_parsers.get(modifier.text) orelse return self.fail(modifier, .unsupported_function_modifier);
+    return parse(self, modifiers, modifier);
+}
+
+const ModifierParser = *const fn (*Parser, *Modifiers, token.Token) anyerror!void;
+const modifier_parsers = std.StaticStringMap(ModifierParser).initComptime(.{
+    .{ "noreturn", parseNoReturn },
+    .{ "align", parseAlignment },
+    .{ "preserves", parsePreserves },
+    .{ "writes", parseWrites },
+});
+
+fn parseNoReturn(_: *Parser, modifiers: *Modifiers, _: token.Token) !void {
+    modifiers.no_return = true;
+}
+
+fn parseWrites(self: *Parser, modifiers: *Modifiers, modifier: token.Token) !void {
     if (modifiers.has_clobber_contract) return self.fail(modifier, .duplicate_clobber_contract);
     modifiers.has_clobber_contract = true;
     try parseClobberContract(self, modifiers);
 }
 
+/// `preserves(module.function)`.
+fn parsePreserves(self: *Parser, modifiers: *Modifiers, _: token.Token) !void {
+    _ = try self.expect(.l_paren);
+    modifiers.preserves = try self.parseFunctionReference();
+    _ = try self.expect(.r_paren);
+}
+
 /// `align(n)`: the function starts at a multiple of `n` bytes, a power of
 /// two from 4 (every instruction's alignment) to 4096.
-fn parseAlignment(self: *Parser, modifiers: *Modifiers) !void {
+fn parseAlignment(self: *Parser, modifiers: *Modifiers, _: token.Token) !void {
     _ = try self.expect(.l_paren);
     const value_token = try self.expect(.number);
     const value = try self.parseNumberValue(value_token);

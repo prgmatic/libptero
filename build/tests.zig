@@ -271,6 +271,7 @@ pub fn addZspPrograms(b: *std.Build, sdk: *Sdk) ZspPrograms {
         sdk.root.path(b, "src/n64/rsp/ucode/geometry_clipping.zsp"),
         geometry,
         "_start",
+        &@import("sdk.zig").geometry_clipping_kept,
     );
 
     var module_source_bytes: std.ArrayList(u8) = .empty;

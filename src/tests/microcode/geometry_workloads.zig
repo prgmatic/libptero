@@ -247,19 +247,18 @@ fn writtenRegister(word: u32) ?u5 {
 }
 
 test "clipping preserves the registers geometry keeps across a clip" {
-    // Strips and sequences resume after a clip with their culling flag
-    // ($v0), sequence step ($v1), loop state ($s1, $s2), and the queue's
-    // $gp and $k1; the patch restores $s4 itself as it returns.
-    const preserved = [_]u5{ 2, 3, 17, 18, 28, 27 };
+    // `preserves(geometry.sendTriangle)` makes the patch keep every
+    // register the triangle sender keeps; this checks the linked text as a
+    // backstop. Strips and sequences resume with their culling flag ($v0),
+    // sequence step ($v1), and loop state ($s1, $s2), the queue with $gp
+    // and $k1. The patch restores $s0, $s3, and $s4 itself.
+    const preserved = [_]u5{ 2, 3, 7, 17, 18, 21, 22, 23, 27, 28 };
     const text = programs.geometry_clipping.text;
-    var restores: usize = 0;
     var offset: usize = 0;
     while (offset < text.len) : (offset += 4) {
         const written = writtenRegister(std.mem.readInt(u32, text[offset..][0..4], .big)) orelse continue;
         for (preserved) |register| try std.testing.expect(written != register);
-        if (written == 20) restores += 1;
     }
-    try std.testing.expectEqual(@as(usize, 1), restores);
 }
 
 const SequenceDraw = enum { sequence, quads, single_triangles, single_quads };

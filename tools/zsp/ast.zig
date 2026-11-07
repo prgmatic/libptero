@@ -32,6 +32,8 @@ pub const Function = struct {
     /// Command-table entries that run an imported function. Linking copies
     /// the target's symbol, parameters, and contract into this declaration.
     command_target: ?FunctionRef = null,
+    /// `preserves(module.function)`: keep every register that function keeps.
+    preserves: ?FunctionRef = null,
 
     /// External and inline functions have no body of their own in the output.
     pub fn emitsBody(self: Function) bool {

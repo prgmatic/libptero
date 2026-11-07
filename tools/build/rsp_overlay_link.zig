@@ -6,7 +6,7 @@ const overlay_data_start = 0x0a00;
 
 pub const usage =
     \\usage: rsp_overlay_link <resident.elf> <resident.zspi> <state_start> <output.ld> [data_start]
-    \\       rsp_overlay_link --patch <resident.elf> <resident.zspi> <parent.elf> <symbol> <output.ld>
+    \\       rsp_overlay_link --patch <resident.elf> <resident.zspi> <parent.elf> <symbol> <output.ld> [<kept>...]
     \\
 ;
 
@@ -31,7 +31,7 @@ fn failureMessage(buffer: []u8, err: anyerror) []const u8 {
 }
 
 fn run(io: std.Io, alloc: std.mem.Allocator, args: []const []const u8) !void {
-    if (args.len == 6 and std.mem.eql(u8, args[0], "--patch")) return linkPatch(io, alloc, args[1..]);
+    if (args.len >= 6 and std.mem.eql(u8, args[0], "--patch")) return linkPatch(io, alloc, args[1..]);
     if (args.len != 4 and args.len != 5) return error.InvalidArguments;
     return linkOverlay(io, alloc, args);
 }
@@ -58,7 +58,8 @@ fn linkOverlay(io: std.Io, alloc: std.mem.Allocator, args: []const []const u8) !
 /// A patch replaces part of a parent overlay's text while that overlay is
 /// loaded: its text starts at `symbol` in the parent, it has no DMEM
 /// contents of its own, and it sees the resident's public symbols and the
-/// parent's global ones.
+/// parent's global ones. Each `kept` parent function runs while the patch
+/// is loaded, so the link fails if the patch's text covers its start.
 fn linkPatch(io: std.Io, alloc: std.mem.Allocator, args: []const []const u8) !void {
     const resident_elf = try readAll(io, alloc, args[0]);
     defer alloc.free(resident_elf);
@@ -73,7 +74,21 @@ fn linkPatch(io: std.Io, alloc: std.mem.Allocator, args: []const []const u8) !vo
     defer alloc.free(parent);
     const symbols = try mergeSymbols(alloc, resident, parent);
     defer alloc.free(symbols);
-    try writeScript(io, args[4], PatchScript{ .text_start = @intCast(target), .symbols = symbols });
+    const kept = try keptSymbols(alloc, parent_elf, parent_header, args[5..]);
+    defer alloc.free(kept);
+    try writeScript(io, args[4], PatchScript{ .text_start = @intCast(target), .symbols = symbols, .kept = kept });
+}
+
+/// The parent's addresses of the functions a patch must not cover.
+fn keptSymbols(alloc: std.mem.Allocator, elf: []const u8, header: std.elf.Header, names: []const []const u8) ![]ExportedSymbol {
+    const kept = try alloc.alloc(ExportedSymbol, names.len);
+    errdefer alloc.free(kept);
+    for (kept, names) |*symbol, name| {
+        const value = (try symbolValue(elf, header, name)) orelse return error.MissingKeptSymbol;
+        if (!isImem(value)) return error.InvalidKeptSymbol;
+        symbol.* = .{ .name = name, .value = value };
+    }
+    return kept;
 }
 
 const Layout = struct { state_start: u16, data_start: u16 };
@@ -339,6 +354,7 @@ const OverlayScript = struct {
 const PatchScript = struct {
     text_start: u16,
     symbols: []const ExportedSymbol,
+    kept: []const ExportedSymbol = &.{},
 
     /// Text only: DMEM sections and commands must stay empty, because a
     /// patch is loaded into IMEM alone and runs on its parent's state. The
@@ -377,6 +393,14 @@ const PatchScript = struct {
             \\
         , .{ self.text_start, imem_end - self.text_start, self.text_start });
         try writeProvides(writer, self.symbols);
+        for (self.kept) |symbol| try writeKeptAssertion(writer, self.text_start, symbol);
+    }
+
+    fn writeKeptAssertion(writer: *std.Io.Writer, text_start: u16, symbol: ExportedSymbol) !void {
+        try writer.print(
+            "ASSERT(0x{x} < 0x{x} || 0x{x} >= ADDR(.text) + SIZEOF(.text), \"the patch covers {s}, which runs while it is loaded\")\n",
+            .{ symbol.value, text_start, symbol.value, symbol.name },
+        );
     }
 };
 
@@ -648,9 +672,12 @@ test "a patch links at its parent's symbol and sees the parent's globals" {
     const output = try files.path("patch.ld");
     defer std.testing.allocator.free(output);
 
-    try runArgs(&.{ "--patch", resident, interface, parent, "_start", output });
+    try runArgs(&.{ "--patch", resident, interface, parent, "_start", output, "send" });
     const script = try files.read("patch.ld");
     defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "ASSERT(0x1400 < 0x1880 || 0x1400 >= ADDR(.text) + SIZEOF(.text), \"the patch covers send, which runs while it is loaded\")") != null);
+    try std.testing.expectError(error.MissingKeptSymbol, runArgs(&.{ "--patch", resident, interface, parent, "_start", output, "absent" }));
+    try std.testing.expectError(error.InvalidKeptSymbol, runArgs(&.{ "--patch", resident, interface, parent, "_start", output, "planes" }));
     try std.testing.expect(std.mem.indexOf(u8, script, ".text 0x1880") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "ASSERT(SIZEOF(.data) == 0") != null);
     for ([_][]const u8{ "PROVIDE(send = 0x1400);", "PROVIDE(planes = 0x330);", "PROVIDE(commandLoop = 0x1100);" }) |line| {

@@ -288,5 +288,19 @@ fn addBuiltinRspProgramsTo(sdk: *Sdk, assets: *AssetBundle) void {
         sdk.root.path(sdk.b, "src/n64/rsp/ucode/geometry_clipping.zsp"),
         geometry,
         "_start",
+        &geometry_clipping_kept,
     );
 }
+
+/// Geometry code that runs while the clipping patch is loaded: what the
+/// patch calls, its hand-off, and the commands that may arrive before the
+/// next triangle sync restores geometry.
+pub const geometry_clipping_kept = [_][]const u8{
+    "sendTriangle",
+    "sendTrianglesEnd",
+    "clipTriangle",
+    "drawTriangle",
+    "drawTriangleStrip",
+    "drawTriangleSequence",
+    "syncTriangles",
+};

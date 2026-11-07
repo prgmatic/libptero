@@ -153,7 +153,18 @@ pub const Loader = struct {
     fn resolveModule(self: *Loader, module_index: usize) !void {
         const functions = self.modules.items[module_index].functions;
         for (functions) |*function| try self.resolveCommandTarget(module_index, function);
+        for (functions) |*function| try self.resolvePreserves(module_index, function);
         for (functions) |function| try self.resolveCalls(module_index, function.statements);
+    }
+
+    /// Reserves the registers a `preserves(...)` target keeps.
+    fn resolvePreserves(self: *Loader, module_index: usize, function: *ast.Function) !void {
+        const target = function.preserves orelse return;
+        const target_module = if (target.module) |alias| try self.resolveImport(module_index, alias) else module_index;
+        const source = findSourceFunction(self.modules.items[target_module].functions, target.name) orelse return error.UnknownFunction;
+        if (target.module != null and !source.public) return error.PrivateFunction;
+        const arena = self.modules.items[module_index].program.arena.allocator();
+        try @import("preserves.zig").apply(arena, function, source.*);
     }
 
     /// Copies an imported command target's symbol, signature, and contract.
@@ -392,4 +403,56 @@ test "command targets must name a public imported function" {
         defer loader.deinit();
         try std.testing.expectError(case[1], linkWithQueue(a, &temp, &loader, case[0]));
     }
+}
+
+/// Links and compiles `root` against a `lib.zsp` whose `keep` writes only
+/// $t0, $t1, and $v01.
+fn compileWithKeep(a: std.mem.Allocator, root: []const u8) ![]u8 {
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.writeFile(io, .{ .sub_path = "lib.zsp", .data = "pub extern fn keep() writes($t0, $t1, $v01) noreturn; pub extern fn clobber() writes($s5);" });
+    try temp.dir.writeFile(io, .{ .sub_path = "root.zsp", .data = root });
+    const path = try temp.dir.realPathFileAlloc(io, "root.zsp", a);
+    defer a.free(path);
+    var loader = Loader{ .allocator = a, .io = io, .module_dir = null };
+    defer loader.deinit();
+    const functions = try loader.link(try loader.load(path));
+    defer a.free(functions);
+    const result = try @import("compiler.zig").compile(a, functions, .{ .optimize = false }, null);
+    return result.assembly;
+}
+
+test "preserves limits automatic registers to what the target writes" {
+    const a = std.testing.allocator;
+    const assembly = try compileWithKeep(a,
+        \\const lib = import("lib.zsp");
+        \\export fn entry(reg($a0) x: u32) preserves(lib.keep) noreturn {
+        \\  reg y: u32 = x + 1;
+        \\  rsp.cp0.setSpStatus(y);
+        \\  reg($s4) restored: u32 = y;
+        \\  rsp.halt();
+        \\}
+    );
+    defer a.free(assembly);
+    // $t0 is the only register `keep` writes that `y` can take; the
+    // explicitly pinned $s4 stays the function's own.
+    try std.testing.expect(std.mem.indexOf(u8, assembly, "addi $t0, $a0, 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, assembly, "or $s4, $t0, $zero") != null);
+}
+
+test "preserves rejects callees that write a kept register" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.PinnedRegisterClobberedByExternalCall, compileWithKeep(a,
+        \\const lib = import("lib.zsp");
+        \\export fn entry() preserves(lib.keep) noreturn {
+        \\  lib.clobber();
+        \\  rsp.halt();
+        \\}
+    ));
+    try std.testing.expectError(error.PreservedFunctionHasNoContract, compileWithKeep(a,
+        \\const lib = import("lib.zsp");
+        \\extern fn unknown();
+        \\export fn entry() preserves(unknown) noreturn { rsp.halt(); }
+    ));
 }

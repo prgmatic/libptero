@@ -129,33 +129,15 @@ pub fn attachViewport(self: *GeometryEncoder, viewport: *const Viewport) void {
 /// live in RDRAM, given the RDRAM addresses of both overlays' text.
 pub const ClippingPatch = struct { size: u16, clipping_address: u32, original_address: u32 };
 
-/// Geometry code that runs while the clipping patch is loaded: the patch
-/// covers geometry's text from `_start` for its own length, so each of
-/// these must start before `_start` (and so end there) or after the patch.
-const clipping_survivors = .{
-    "sendTriangle",
-    "sendTrianglesEnd",
-    "clipTriangle",
-    "drawTriangle",
-    "drawTriangleStrip",
-    "drawTriangleSequence",
-    "syncTriangles",
-};
-
 pub fn clippingPatch(geometry_text_rdram: u32, clipping_text_rdram: u32) ClippingPatch {
     const symbols = rsp.programs.geometry_overlay_symbols;
     const clipping = rsp.programs.geometry_clipping;
+    // The build links the patch at geometry's `_start` and checks that it
+    // leaves the code running beside it uncovered (build/sdk.zig).
     comptime {
-        // The build links the clipping patch at geometry's `_start`.
         if (clipping.text_offset != symbols._start) @compileError("geometry clipping is not linked at geometry's _start");
         // Geometry marks the patch loaded with the low byte of its size.
         if (clipping.text.len & 0xff == 0) @compileError("geometry clipping size cannot mark the patch loaded");
-        const patch_end = symbols._start + clipping.text.len;
-        for (clipping_survivors) |name| {
-            const address = @field(symbols, name);
-            if (address >= symbols._start and address < patch_end)
-                @compileError("geometry's " ++ name ++ " lies under the clipping patch");
-        }
     }
     return .{
         .size = @intCast(clipping.text.len),

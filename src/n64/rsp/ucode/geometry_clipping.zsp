@@ -37,6 +37,9 @@ const inverse_w: u32 = 32;
 // restore; the patch keeps the triangle's original clip flags next to it.
 const saved_indices: u32 = 18;
 const saved_flags: u32 = 20;
+// The patch saves its caller's $s0 and $s3 here and restores them.
+const saved_s0: u32 = 24;
+const saved_s3: u32 = 28;
 
 // The tile index bits of a clip flags halfword, and the codes that mark a
 // vertex inside every plane and not trivially rejected.
@@ -45,26 +48,29 @@ const inside_codes: u32 = 0x00ff;
 
 /// Clips the triangle `vertex1`-`vertex2`-`vertex3` against the four side
 /// planes and the near plane, draws what remains, and returns to the
-/// address geometry saved.
+/// address geometry saved. It finishes geometry's `sendTriangle` call, so
+/// it keeps every register that function keeps, the strips' and sequences'
+/// loop state among them. The fan loop needs registers that survive
+/// `sendTriangle` too, so it borrows $s0 and $s3 and restores them, with
+/// the $s4 that drawing overwrites.
 export fn _start(
     reg($a0) vertex1: dmem,
     reg($a1) vertex2: dmem,
     reg($a2) vertex3: dmem,
     reg($v0) cull_mode: u32,
-) noreturn {
+) preserves(geometry.sendTriangle) noreturn {
     reg($v00) vector_zero: vec16 = undefined;
     // Lane 7 of the dispatcher's shift constants is 1, and 256 after <<8.
     reg($v30) powers: vec16 = undefined;
     reg($v31) shifts: vec16 = undefined;
-    // What geometry's strips and sequences keep across a clip: their loop
-    // state, and the sequence's vertex step. $s4 is restored on return.
-    reserved reg($s1) caller_s1: u32 = undefined;
-    reserved reg($s2) caller_s2: u32 = undefined;
-    reserved reg($v1) sequence_step: u32 = undefined;
-
     // Each pass reads one buffer and writes the other; the triangle starts
     // in the temporary one, so after the five passes the result is in
     // clipping_buffer_result.
+    reg($s0) entry_s0: u32 = undefined;
+    store(u32, resident_scratch, entry_s0, saved_s0);
+    reg($s3) entry_s3: u32 = undefined;
+    store(u32, resident_scratch, entry_s3, saved_s3);
+
     reg write: dmem = clipping_buffer_temporary;
     copyVertex(write, vertex1);
     copyVertex(write, vertex2);
@@ -169,9 +175,11 @@ export fn _start(
         } while (newest != end);
     }
 
-    // Resume geometry where it entered clipping, with its caller's $s4
-    // (a 16-bit DMEM address or offset) back in place.
+    // Resume geometry where it entered clipping, with its caller's $s0,
+    // $s3, and $s4 (a 16-bit DMEM address or offset) back in place.
     reg return_address: u32 = load(u16, clipping_return_address);
+    reg($s0) exit_s0: u32 = load(u32, resident_scratch, saved_s0);
+    reg($s3) exit_s3: u32 = load(u32, resident_scratch, saved_s3);
     reg($s4) caller_s4: dmem = load(u16, resident_scratch, saved_indices);
     jump(return_address);
 }

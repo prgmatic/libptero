@@ -1136,10 +1136,10 @@ pub export fn sendTrianglesEnd() {
 /// which returns to the triangle's caller. The patch reuses both triangle
 /// buffers, so the last triangle's DMA must finish first.
 ///
-/// The patch keeps $s1, $s2, $v0, $v1, $gp, and $k1, and restores $s4 from
-/// the scratch slot below; a host test checks its code. The jump is
-/// indirect because the compiler sees only the loader at `_start`, not
-/// the patch's own register use.
+/// The jump is indirect because the compiler sees only the loader at
+/// `_start`, not the patch. The patch is compiled to keep every register
+/// `sendTriangle` keeps (`preserves(geometry.sendTriangle)`); it restores
+/// $s4 from the scratch slot below.
 export fn clipTriangle(
     reg($a0) vertex1: dmem,
     reg($a1) vertex2: dmem,
