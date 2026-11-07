@@ -237,12 +237,12 @@ inline fn intersect(
         delta = base - target;
         ends = target;
         store(vec32, scratch, base[0..4]);
-        color_delta = vectorSubtractCarry(base_color, target_color);
+        color_delta = vsubc(base_color, target_color);
     } else {
         delta = target - base;
         ends = base;
         store(vec32, scratch, target[0..4]);
-        color_delta = vectorSubtractCarry(target_color, base_color);
+        color_delta = vsubc(target_color, base_color);
     }
     ends[4..8] = load(vec32, scratch, 0);
     // From signed bytes, then normalized like the positions' W.
@@ -257,9 +257,9 @@ inline fn intersect(
     dot += dot.zzzzZZZZ;
     // factor = inside / (inside - outside)
     reg factor: vec32 = dot - dot.XXXXXXXX;
-    factor.sint[0] = vectorReciprocalHigh(factor.sint[0]);
-    factor.sfract[0] = vectorReciprocalLow(factor.sfract[0]);
-    factor.sint[0] = vectorReciprocalHigh(vector_zero[0]);
+    factor.sint[0] = vrcph(factor.sint[0]);
+    factor.sfract[0] = vrcpl(factor.sfract[0]);
+    factor.sint[0] = vrcph(vector_zero[0]);
     factor += factor;
     factor = factor * dot.xxxxxxxx;
 
@@ -267,10 +267,10 @@ inline fn intersect(
     reg whole: i32 = undefined;
     whole = factor.sint[0];
     if (whole != 0) {
-        reg discard: vec16 = vectorCompareLessThan(factor.sint, powers.WWWWWWWW);
-        factor.sfract = vectorSelectByCompareCode(factor.sfract, w_scale.wwwwwwww);
-        discard = vectorCompareGreaterOrEqual(factor.sint, vector_zero.xxxxxxxx);
-        factor.sfract = vectorSelectByCompareCode(factor.sfract, vector_zero);
+        reg discard: vec16 = vlt(factor.sint, powers.WWWWWWWW);
+        factor.sfract = vmrg(factor.sfract, w_scale.wwwwwwww);
+        discard = vge(factor.sint, vector_zero.xxxxxxxx);
+        factor.sfract = vmrg(factor.sfract, vector_zero);
     }
 
     // point = start + delta * factor, accumulating the start times one.
@@ -280,11 +280,11 @@ inline fn intersect(
     if (code != 0) {
         base.sfract = vmadn(target.sfract, powers.WWWWWWWW);
         base.sint = vmadh(target.sint, powers.WWWWWWWW);
-        base_color = vectorAddCarry(target_color, color_delta);
+        base_color = vaddc(target_color, color_delta);
     } else {
         base.sfract = vmadn(base.sfract, powers.WWWWWWWW);
         base.sint = vmadh(base.sint, powers.WWWWWWWW);
-        base_color = vectorAddCarry(base_color, color_delta);
+        base_color = vaddc(base_color, color_delta);
     }
 
     // Clip codes of the new point against the guard band planes.
@@ -293,8 +293,8 @@ inline fn intersect(
     plane_w.sfract = vmudm(guard_band, base.sfract.wwwwWWWW);
     plane_w.sint = vmadh(guard_band, base.sint.wwwwWWWW);
     plane_w.sfract = vmadn(vector_zero, vector_zero);
-    reg discard_clip: vec16 = vectorClipHigh(clip_base.sint, plane_w.sint.wwwwwwww);
-    discard_clip = vectorClipLow(clip_base.sfract, plane_w.sfract.wwwwwwww);
+    reg discard_clip: vec16 = vch(clip_base.sint, plane_w.sint.wwwwwwww);
+    discard_clip = vcl(clip_base.sfract, plane_w.sfract.wwwwwwww);
     reg compare: u32 = rsp.vector.getCompareCode();
     // Keep the X Y Z codes of both halves, packed into the low five bits.
     code = compare & 0x0307;
@@ -330,9 +330,9 @@ fn toScreenSpace(vertex: dmem) {
     screen_scale.sfract = vmadn(vector_zero, vector_zero);
 
     reg inverse: vec32 = undefined;
-    inverse.sint[3] = vectorReciprocalHigh(position.sint[3]);
-    inverse.sfract[3] = vectorReciprocalLow(position.sfract[3]);
-    inverse.sint[3] = vectorReciprocalHigh(vector_zero[3]);
+    inverse.sint[3] = vrcph(position.sint[3]);
+    inverse.sfract[3] = vrcpl(position.sfract[3]);
+    inverse.sint[3] = vrcph(vector_zero[3]);
     store(vec16, vertex, inverse.sint[3], inverse_w);
     store(vec16, vertex, inverse.sfract[3], inverse_w + 2);
 

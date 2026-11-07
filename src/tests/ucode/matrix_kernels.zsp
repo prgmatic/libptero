@@ -176,13 +176,13 @@ fn handNormalize(
         inverse_f = vmadn(value_f, value_i.xyzwXYZW);
         input +%= 16;
         inverse_i = vmadh(value_i, value_i.xyzwXYZW);
-        sum_f = vectorAddCarry(inverse_f, inverse_f.yyyyYYYY);
-        sum_i = vectorAdd(inverse_i, inverse_i.yyyyYYYY);
-        inverse_f = vectorAddCarry(inverse_f, sum_f.zzzzZZZZ);
-        inverse_i = vectorAdd(inverse_i, sum_i.zzzzZZZZ);
-        inverse_i[3] = vectorReciprocalSquareRootHigh(inverse_i[0]);
-        inverse_f[3] = vectorReciprocalSquareRootLow(inverse_f[0]);
-        inverse_i[3] = vectorReciprocalSquareRootHigh(vector_zero[0]);
+        sum_f = vaddc(inverse_f, inverse_f.yyyyYYYY);
+        sum_i = vadd(inverse_i, inverse_i.yyyyYYYY);
+        inverse_f = vaddc(inverse_f, sum_f.zzzzZZZZ);
+        inverse_i = vadd(inverse_i, sum_i.zzzzZZZZ);
+        inverse_i[3] = vrsqh(inverse_i[0]);
+        inverse_f[3] = vrsql(inverse_f[0]);
+        inverse_i[3] = vrsqh(vector_zero[0]);
         inverse_f = vmudl(inverse_f, shift_constants.x);
         inverse_i = vmadm(inverse_i, shift_constants.x);
         inverse_f = vmadn(vector_zero, vector_zero);
@@ -190,7 +190,7 @@ fn handNormalize(
         accumulator_scratch = vmadm(value_i, inverse_f.wwwwWWWW);
         value_f = vmadn(value_f, inverse_i.wwwwWWWW);
         value_i = vmadh(value_i, inverse_i.wwwwWWWW);
-        value_f = vectorAdd(value_f, value_f.xyzwXYZW);
+        value_f = vadd(value_f, value_f.xyzwXYZW);
         store(vec16, output, value_f[0..4], 0);
     }
     return slot {
@@ -216,15 +216,15 @@ fn plainNormalize(
 
     // The inverse square root of the length squared, then scaled down.
     reg inverse: vec32 = undefined;
-    inverse.sint[3] = vectorReciprocalSquareRootHigh(square.sint[0]);
-    inverse.ufract[3] = vectorReciprocalSquareRootLow(square.ufract[0]);
-    inverse.sint[3] = vectorReciprocalSquareRootHigh(vector_zero[0]);
+    inverse.sint[3] = vrsqh(square.sint[0]);
+    inverse.ufract[3] = vrsql(square.ufract[0]);
+    inverse.sint[3] = vrsqh(vector_zero[0]);
     inverse.ufract = vmudl(inverse.ufract, shift_constants.x);
     inverse.sint = vmadm(inverse.sint, shift_constants.x);
     inverse.ufract = vmadn(vector_zero, vector_zero);
 
     value = value * inverse.wwwwWWWW;
-    value.ufract = vectorAdd(value.ufract, value.ufract);
+    value.ufract = vadd(value.ufract, value.ufract);
     store(vec16, output, value.ufract[0..4], 0);
     output +%= 8;
 }

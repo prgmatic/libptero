@@ -4,7 +4,6 @@ const token = @import("token.zig");
 const Parser = @import("parser.zig").Parser;
 const binaryPrecedence = @import("parser.zig").binaryPrecedence;
 const cp0NamedReadRegister = @import("parser.zig").cp0NamedReadRegister;
-const explicitAccumulatorPart = @import("parser.zig").explicitAccumulatorPart;
 const isUnaryVectorOp = @import("parser.zig").isUnaryVectorOp;
 const parseAccumulatorPart = @import("parser.zig").parseAccumulatorPart;
 const parseSwizzle = @import("parser.zig").parseSwizzle;
@@ -51,7 +50,6 @@ pub fn parseNamedValue(self: *Parser) anyerror!ast.Value {
 }
 
 pub fn parseVectorOrReferenceValue(self: *Parser) anyerror!ast.Value {
-    if (explicitAccumulatorPart(self.current.text) != null) return self.parseAccumulatorValue();
     if (parseVectorOp(self.current.text) != null) return self.parseVectorOperationValue();
     return valueFromRef(try self.parseValueRef());
 }
@@ -153,15 +151,13 @@ pub fn parseLoadValue(self: *Parser) anyerror!ast.Value {
     } };
 }
 
+/// `accumulator(.high)`, `accumulator(.middle)`, or `accumulator(.low)`.
 pub fn parseAccumulatorValue(self: *Parser) anyerror!ast.Value {
-    const operation = try self.expect(.ident);
+    _ = try self.expect(.ident);
     _ = try self.expect(.l_paren);
-    const part = explicitAccumulatorPart(operation.text) orelse blk: {
-        _ = try self.expect(.dot);
-        const part_token = try self.expect(.ident);
-        break :blk parseAccumulatorPart(part_token.text) orelse
-            return self.fail(part_token, .invalid_accumulator_part);
-    };
+    _ = try self.expect(.dot);
+    const part_token = try self.expect(.ident);
+    const part = parseAccumulatorPart(part_token.text) orelse return self.fail(part_token, .invalid_accumulator_part);
     _ = try self.expect(.r_paren);
     return .{ .accumulator_read = part };
 }

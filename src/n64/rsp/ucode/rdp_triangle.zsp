@@ -68,21 +68,21 @@ pub fn sendAsync(
 
     // Sort-of-three by Y: compare the keys, merge the rows, and remember
     // each swap so the winding can be recovered.
-    reg vytmp1: vec16 = vectorCompareGreaterOrEqual(vy1, vy2);
-    reg valltmp1: vec16 = vectorSelectByCompareCode(vall1, vall2);
-    vy1 = vectorCompareLessThan(vy1, vy2);
+    reg vytmp1: vec16 = vge(vy1, vy2);
+    reg valltmp1: vec16 = vmrg(vall1, vall2);
+    vy1 = vlt(vy1, vy2);
     reg swap1: i32 = rsp.vector.getCompareCode();
-    vall1 = vectorSelectByCompareCode(vall1, vall2);
-    reg vytmp2: vec16 = vectorCompareGreaterOrEqual(vy1, vy3);
-    reg valltmp2: vec16 = vectorSelectByCompareCode(vall1, vall3);
-    vy1 = vectorCompareLessThan(vy1, vy3);
+    vall1 = vmrg(vall1, vall2);
+    reg vytmp2: vec16 = vge(vy1, vy3);
+    reg valltmp2: vec16 = vmrg(vall1, vall3);
+    vy1 = vlt(vy1, vy3);
     reg swap2: i32 = rsp.vector.getCompareCode();
-    vall1 = vectorSelectByCompareCode(vall1, vall3);
-    vy3 = vectorCompareGreaterOrEqual(vytmp1, vytmp2);
-    vall3 = vectorSelectByCompareCode(valltmp1, valltmp2);
-    vy2 = vectorCompareLessThan(vytmp1, vytmp2);
+    vall1 = vmrg(vall1, vall3);
+    vy3 = vge(vytmp1, vytmp2);
+    vall3 = vmrg(valltmp1, valltmp2);
+    vy2 = vlt(vytmp1, vytmp2);
     reg swap3: i32 = rsp.vector.getCompareCode();
-    vall2 = vectorSelectByCompareCode(valltmp1, valltmp2);
+    vall2 = vmrg(valltmp1, valltmp2);
 
     // ------------------------------------------------- reject and clip
     // The clip-flag halfword has clip flags in its high byte and inverted
@@ -104,9 +104,9 @@ pub fn sendAsync(
 
     // ------------------------------------------------ edges and normal
     //   vhml = HX HY MX MY LX LY 0 NZf, with M and L in the temporaries.
-    reg vhml: vec16 = vectorSubtractCarry(vall3, vall1);
-    reg vm: vec16 = vectorSubtractCarry(vall2, vall1);
-    reg vl: vec16 = vectorSubtractCarry(vall3, vall2);
+    reg vhml: vec16 = vsubc(vall3, vall1);
+    reg vm: vec16 = vsubc(vall2, vall1);
+    reg vl: vec16 = vsubc(vall3, vall2);
     reg sorted1: dmem = undefined;
     reg sorted2: dmem = undefined;
     reg sorted3: dmem = undefined;
@@ -114,15 +114,15 @@ pub fn sendAsync(
     sorted2 = vall2[3];
     sorted3 = vall3[3];
     reg vx12: vec32 = undefined;
-    vx12.sfract[0] = vectorMove(vall1[0]);
-    vx12.sfract[2] = vectorMove(vall2[0]);
+    vx12.sfract[0] = vall1[0];
+    vx12.sfract[2] = vall2[0];
     command |= mipmap_bits;
     // The face to cull: the parity of the sort's swaps, against `cull_mode`.
     reg cull_face: i32 = swap1 ^ swap2;
     cull_face ^= swap3;
     cull_face &= 1;
     cull_face ^= cull_mode;
-    reg negative_my: vec16 = vectorSubtractCarry(vector_zero, vm.yyyyyyyy);
+    reg negative_my: vec16 = vsubc(vector_zero, vm.yyyyyyyy);
     // FY = floor(Y1) - Y1 as s15.16.
     reg vfy: vec32 = undefined;
     vfy.sfract = vectorShiftLeft8(vy1, 14);
@@ -134,44 +134,44 @@ pub fn sendAsync(
     store(vec16, output, vy3[0], 2);
     vnz.sfract = vmadh(vhml, negative_my);
     store(vec16, output, vm[0..2], 8);
-    vnz.sint = readVectorAccumulatorHigh();
+    vnz.sint = accumulator(.high);
     store(vec16, output, vl[0..2], 12);
-    vnz.sfract = readVectorAccumulatorMiddle();
+    vnz.sfract = accumulator(.middle);
     vhml[2..6] = load(vec16, output, 8);
-    vfy.sfract = vectorSubtractCarry(vector_zero, vfy.sfract);
+    vfy.sfract = vsubc(vector_zero, vfy.sfract);
     reg color_dmem: dmem = output +% 0x20;
-    vfy.sint = vectorSubtract(vfy.sint, vfy.sint);
+    vfy.sint = vsub(vfy.sint, vfy.sint);
 
     // --------------------------------------------- slope reciprocals
     //   slope = 1/HY -- 1/MY -- 1/LY -- -- 1/NZ
     reg vw: vec32 = undefined;
     reg vslope: vec32 = undefined;
     vw.sfract[0] = load(vec16, sorted1, 18);
-    vslope.sint[7] = vectorReciprocalHigh(vnz.sint[0]);
+    vslope.sint[7] = vrcph(vnz.sint[0]);
     reg back_facing: i32 = undefined;
     back_facing = vnz.sint[0];
-    vslope.sfract[7] = vectorReciprocalLow(vnz.sfract[0]);
+    vslope.sfract[7] = vrcpl(vnz.sfract[0]);
     vw.sfract[2] = load(vec16, sorted2, 18);
-    vslope.sint[7] = vectorReciprocalHigh(vector_zero[0]);
+    vslope.sint[7] = vrcph(vector_zero[0]);
     vw.sfract[4] = load(vec16, sorted3, 18);
-    vslope.sfract[0] = vectorReciprocal(vhml[1]);
+    vslope.sfract[0] = vrcp(vhml[1]);
     back_facing = back_facing < 0;
-    vslope.sint[0] = vectorReciprocalHigh(vhml[1]);
+    vslope.sint[0] = vrcph(vhml[1]);
     if (back_facing == cull_face) tail cull() slot {
-        vslope.sfract[2] = vectorReciprocal(vm[1]);
+        vslope.sfract[2] = vrcp(vm[1]);
     }
-    vslope.sint[2] = vectorReciprocalHigh(vm[1]);
+    vslope.sint[2] = vrcph(vm[1]);
     vw.sint[0] = load(vec16, sorted1, 16);
-    vslope.sfract[4] = vectorReciprocal(vl[1]);
+    vslope.sfract[4] = vrcp(vl[1]);
     vw.sint[2] = load(vec16, sorted2, 16);
-    vslope.sint[4] = vectorReciprocalHigh(vl[1]);
+    vslope.sint[4] = vrcph(vl[1]);
     vw.sint[4] = load(vec16, sorted3, 16);
 
     // One Newton-Raphson pass over NZ (32-bit) and HY/MY/LY (16-bit):
     //   vhml_upper = 0 0 0 0 0 0 0 NZi, so vhml/vhml_upper form 32-bit X.
-    vhml[7] = vectorMove(vnz.sfract[0]);
+    vhml[7] = vnz.sfract[0];
     reg left_major: i32 = back_facing ^ 1;
-    vhml_upper[7] = vectorMove(vnz.sint[0]);
+    vhml_upper[7] = vnz.sint[0];
     left_major <<= 7;
     // slope_m2 = -2 * R
     reg vslope_m2: vec32 = undefined;
@@ -182,12 +182,12 @@ pub fn sendAsync(
     reg vattr1: vec16 = undefined;
     rsp.vector.loadPackedUnsigned(vattr1, sorted1, 8);
     // Minimum W between lanes 0 and 2.
-    reg discard: vec16 = vectorSubtractCarry(vw.sfract, vw.sfract.zzzzzzzz);
+    reg discard: vec16 = vsubc(vw.sfract, vw.sfract.zzzzzzzz);
     reg vattr2: vec16 = undefined;
     rsp.vector.loadPackedUnsigned(vattr2, sorted2, 8);
-    vw.sint = vectorCompareLessThan(vw.sint, vw.sint.zzzzzzzz);
+    vw.sint = vlt(vw.sint, vw.sint.zzzzzzzz);
     command |= left_major;
-    vw.sfract = vectorSelectByCompareCode(vw.sfract, vw.sfract.zzzzzzzz);
+    vw.sfract = vmrg(vw.sfract, vw.sfract.zzzzzzzz);
     reg vinvw: vec32 = undefined;
     vinvw.sfract[6] = load(vec16, sorted3, 22);
     // R * X/2 - 1
@@ -207,11 +207,11 @@ pub fn sendAsync(
     reg negated_hx: i32 = undefined;
     negated_hx = vhml[0];
     // Minimum W between lanes 0 and 4.
-    discard = vectorSubtractCarry(vw.sfract, vw.sfract.XXXXXXXX);
+    discard = vsubc(vw.sfract, vw.sfract.XXXXXXXX);
     vinvw.sint[5] = load(vec16, sorted2, 20);
-    vw.sint = vectorCompareLessThan(vw.sint, vw.sint.XXXXXXXX);
+    vw.sint = vlt(vw.sint, vw.sint.XXXXXXXX);
     vinvw.sint[6] = load(vec16, sorted3, 20);
-    vw.sfract = vectorSelectByCompareCode(vw.sfract, vw.sfract.XXXXXXXX);
+    vw.sfract = vmrg(vw.sfract, vw.sfract.XXXXXXXX);
     vinvw.sint[4] = load(vec16, sorted1, 20);
     // X * (2 - R*X)
     discard = vmudl(vtmp.sfract, vslope_m2.sfract);
@@ -239,13 +239,13 @@ pub fn sendAsync(
     negated_hx = -negated_hx;
     discard = vmadh(vnz.sint, vhml);
     vhml[3] = negated_my;
-    vslope.sfract = readVectorAccumulatorMiddle();
+    vslope.sfract = accumulator(.middle);
     vhml[0] = negated_hx;
-    vslope.sint = readVectorAccumulatorHigh();
+    vslope.sint = accumulator(.high);
     // Merge only S/T (lanes 4 and 5) into the attributes later.
     reg st_lanes: i32 = 0xcf;
     // An exact 1.0 would wrap to 0; one less is "almost 1".
-    vinvw.sfract = vectorSubtractCarry(vinvw.sfract, powers.WWWWWWWW);
+    vinvw.sfract = vsubc(vinvw.sfract, powers.WWWWWWWW);
     reg vtex3: vec16 = undefined;
     vtex3[4..6] = load(vec16, sorted3, 12);
     // RGBA was loaded as 8.7; shift back to raw bytes, then add Z.
@@ -285,15 +285,15 @@ pub fn sendAsync(
     reg syncfull: u32 = load(u8, rdp_syncfull_ongoing);
     vx12.sfract = vectorShiftLeft8(vx12.sfract, 14);
     prim_size >>>= 4;
-    vattr1 = vectorSelectByCompareCode(vattr1, vtex1);
+    vattr1 = vmrg(vattr1, vtex1);
     prim_size +%= z_dmem;
-    vattr2 = vectorSelectByCompareCode(vattr2, vtex2);
+    vattr2 = vmrg(vattr2, vtex2);
     store(vec16, output, vslope.sint[4], 12);
-    vattr3 = vectorSelectByCompareCode(vattr3, vtex3);
+    vattr3 = vmrg(vattr3, vtex3);
     reg rdram: i32 = load(i32, rdp_current);
-    vedges.sfract = vectorAddCarry(vedges.sfract, vx12.sfract.xxxxxxxx);
+    vedges.sfract = vaddc(vedges.sfract, vx12.sfract.xxxxxxxx);
     store(vec16, output, vx12.sint[2], 8);
-    vedges.sint = vectorAdd(vedges.sint, vx12.sint.xxxxxxxx);
+    vedges.sint = vadd(vedges.sint, vx12.sint.xxxxxxxx);
     store(vec16, output, vslope.sfract[4], 14);
     // Everything up to `rdram` is in RDRAM by now: let the RDP start on
     // it, unless a full sync holds DP_END.
@@ -301,13 +301,13 @@ pub fn sendAsync(
         rsp.cp0.setRdpCommandEnd(rdram);
     }
     // Clear VCO/VCC for the subtractions below.
-    vector_zero = vectorSubtractCarry(vector_zero, vector_zero);
+    vector_zero = vsubc(vector_zero, vector_zero);
 
     // ------------------------------------------------------ attributes
     // MA = A2 - A1, HA = A3 - A1 (saturating; S/T are s10.5).
-    reg vma: vec16 = vectorSubtract(vattr2, vattr1);
+    reg vma: vec16 = vsub(vattr2, vattr1);
     store(vec16, output, vx12.sfract[2], 10);
-    reg vha: vec16 = vectorSubtract(vattr3, vattr1);
+    reg vha: vec16 = vsub(vattr3, vattr1);
     prim_size = prim_size - output;
     // 1/NZ << 2 for the coefficient precision.
     vnz.sfract = vmudn(vnz.sfract, powers.YYYYYYYY);
@@ -320,9 +320,9 @@ pub fn sendAsync(
     store(vec16, output, vedges.sint[2], 24);
     vdx.sfract = vmadh(vha, vhml.wwwwwwww);
     store(vec16, output, vedges.sfract[2], 26);
-    vdx.sfract = readVectorAccumulatorMiddle();
+    vdx.sfract = accumulator(.middle);
     store(vec16, output, vedges.sint[0], 16);
-    vdx.sint = readVectorAccumulatorHigh();
+    vdx.sint = accumulator(.high);
     store(vec16, output, vedges.sfract[0], 18);
     // DY = HA * MX + MA * -HX
     reg vdy: vec32 = undefined;
@@ -330,9 +330,9 @@ pub fn sendAsync(
     store(vec16, output, vslope.sint[0], 20);
     vdy.sfract = vmadh(vma, vhml.xxxxxxxx);
     store(vec16, output, vslope.sfract[0], 22);
-    vdy.sfract = readVectorAccumulatorMiddle();
+    vdy.sfract = accumulator(.middle);
     reg sentinel: i32 = load(i32, rdp_sentinel);
-    vdy.sint = readVectorAccumulatorHigh();
+    vdy.sint = accumulator(.high);
     // The top byte of the RDRAM pointer is not part of the address.
     rdram <<= 8;
     rdram >>>= 8;
@@ -394,18 +394,18 @@ pub fn sendAsync(
     vfinal.sint = vmadh(vde.sint, vfy.sint.XXXXXXXX);
     store(vec16, color_dmem, vde.sint[0..4], 32);
     // Pack the Z values so one store each writes them.
-    vdy.sfract[6] = vectorMove(vdy.sint[7]);
+    vdy.sfract[6] = vdy.sint[7];
     store(vec16, tex_dmem, vde.sint[4..8], 32);
-    vde.sfract[6] = vectorMove(vde.sint[7]);
+    vde.sfract[6] = vde.sint[7];
     store(u32, rdp_current, rdram);
     reg vz: vec16 = undefined;
-    vz[1] = vectorMove(vfinal.sfract[7]);
+    vz[1] = vfinal.sfract[7];
     store(vec16, color_dmem, vfinal.sfract[0..4], 16);
-    vz[0] = vectorMove(vfinal.sint[7]);
+    vz[0] = vfinal.sint[7];
     store(vec16, tex_dmem, vfinal.sfract[4..8], 16);
-    vz[3] = vectorMove(vdx.sfract[7]);
+    vz[3] = vdx.sfract[7];
     store(vec16, color_dmem, vfinal.sint[0..4], 0);
-    vz[2] = vectorMove(vdx.sint[7]);
+    vz[2] = vdx.sint[7];
     store(vec16, tex_dmem, vfinal.sint[4..8], 0);
     store(vec16, z_dmem, vde.sfract[6..8], 8);
     store(vec16, z_dmem, vdy.sfract[6..8], 12);

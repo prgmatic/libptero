@@ -1014,6 +1014,7 @@ The supported multiply families are:
   `vmadn`, `vmadh`.
 - Accumulator reads: `accumulator(.high)`, `accumulator(.middle)`, and
   `accumulator(.low)`.
+- Reciprocals: `vrcp`, `vrcpl`, `vrcph`, `vrsq`, `vrsql`, `vrsqh`.
 
 Operand widths, typed views, destination views, and swizzle placement are
 validated according to the selected instruction.
@@ -1029,33 +1030,23 @@ merged = vmrg(if_true, if_false);
 These map directly to RSP vector instructions; they are not scalar booleans or
 general structured conditions.
 
-More explicit aliases are available for code that should describe the vector
-unit state it manipulates:
+Operators, products, and lane assignment are the readable layer; an explicit
+vector instruction is always written as its RSP mnemonic, the name every RSP
+reference uses, so each operation has one spelling:
 
 ```zig
-sum = vectorAdd(left, right);
-difference = vectorSubtract(left, right);
-sum = vectorAddCarry(left, right);
-difference = vectorSubtractCarry(left, right);
-mask = vectorCompareLessThan(left, right);
-mask = vectorCompareEqual(left, right);
-mask = vectorCompareNotEqual(left, right);
-mask = vectorCompareGreaterOrEqual(left, right);
-clip = vectorClipHigh(value, boundary);
-clip = vectorClipLow(value, boundary);
-merged = vectorSelectByCompareCode(if_true, if_false);
-
-high = readVectorAccumulatorHigh();
-middle = readVectorAccumulatorMiddle();
-low = readVectorAccumulatorLow();
-result[0] = vectorReciprocal(source[0]);
-result[0] = vectorReciprocalLow(source[0]);
-result[0] = vectorReciprocalHigh(source[0]);
-destination[3] = vectorMove(source[6]);
+sum = vadd(left, right);          // saturating; `left + right` wraps (VADDC)
+difference = vsubc(left, right);
+mask = vlt(left, right);
+clip = vch(value, boundary);
+merged = vmrg(if_true, if_false);
+result[0] = vrcp(source[0]);
+result[0] = vrsqh(source[0]);
+destination[3] = source[6];       // VMOV
 ```
 
-`vectorMove` and a plain lane-to-lane assignment both emit `VMOV`;
-assigning a scalar register to a vector lane emits `MTC2`.
+A plain lane-to-lane assignment emits `VMOV`; assigning a scalar register to
+a vector lane emits `MTC2`.
 
 The vector control registers use their full hardware names. Reads return a
 scalar value and writes consume one:

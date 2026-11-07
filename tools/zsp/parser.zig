@@ -781,38 +781,11 @@ pub fn parseVectorView(text: []const u8) ?ast.VectorView {
     return null;
 }
 
+/// A vector instruction by its RSP mnemonic, such as `vsubc` or `vrsqh`.
 pub fn parseVectorOp(text: []const u8) ?ast.VectorOp {
-    const aliases = .{
-        .{ "vectorAdd", ast.VectorOp.vadd },
-        .{ "vectorSubtract", ast.VectorOp.vsub },
-        .{ "vectorAddCarry", ast.VectorOp.vaddc },
-        .{ "vectorSubtractCarry", ast.VectorOp.vsubc },
-        .{ "vectorCompareLessThan", ast.VectorOp.vlt },
-        .{ "vectorCompareEqual", ast.VectorOp.veq },
-        .{ "vectorCompareNotEqual", ast.VectorOp.vne },
-        .{ "vectorCompareGreaterOrEqual", ast.VectorOp.vge },
-        .{ "vectorClipHigh", ast.VectorOp.vch },
-        .{ "vectorClipLow", ast.VectorOp.vcl },
-        .{ "vectorSelectByCompareCode", ast.VectorOp.vmrg },
-        .{ "vectorReciprocal", ast.VectorOp.vrcp },
-        .{ "vectorReciprocalLow", ast.VectorOp.vrcpl },
-        .{ "vectorReciprocalHigh", ast.VectorOp.vrcph },
-        .{ "vectorReciprocalSquareRoot", ast.VectorOp.vrsq },
-        .{ "vectorReciprocalSquareRootLow", ast.VectorOp.vrsql },
-        .{ "vectorReciprocalSquareRootHigh", ast.VectorOp.vrsqh },
-        .{ "vectorMove", ast.VectorOp.vmov },
-    };
-    inline for (aliases) |alias| if (std.mem.eql(u8, text, alias[0])) return alias[1];
     inline for (std.meta.fields(ast.VectorOp)) |field| {
         if (std.mem.eql(u8, text, field.name)) return @enumFromInt(field.value);
     }
-    return null;
-}
-
-pub fn explicitAccumulatorPart(text: []const u8) ?ast.AccumulatorPart {
-    if (std.mem.eql(u8, text, "readVectorAccumulatorHigh")) return .high;
-    if (std.mem.eql(u8, text, "readVectorAccumulatorMiddle")) return .middle;
-    if (std.mem.eql(u8, text, "readVectorAccumulatorLow")) return .low;
     return null;
 }
 

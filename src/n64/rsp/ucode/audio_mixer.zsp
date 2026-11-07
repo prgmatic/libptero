@@ -426,10 +426,10 @@ inline fn resampleStereo16(position: u32, step: u32, ticks: i32, column: dmem, c
 /// through VCO, so the adds keep their order: alternating the two sides
 /// gives each add time for the previous one's result.
 inline fn sumLanes(left_sum: vec16, left_lanes: vec16, right_sum: vec16, right_lanes: vec16) {
-    left_sum = vectorAdd(left_lanes, left_lanes.yywwYYWW);
-    right_sum = vectorAdd(right_lanes, right_lanes.yywwYYWW);
-    left_sum = vectorAdd(left_sum, left_sum.zzzzZZZZ);
-    right_sum = vectorAdd(right_sum, right_sum.zzzzZZZZ);
-    left_sum = vectorAdd(left_sum, left_sum.XXXXXXXX);
-    right_sum = vectorAdd(right_sum, right_sum.XXXXXXXX);
+    left_sum = vadd(left_lanes, left_lanes.yywwYYWW);
+    right_sum = vadd(right_lanes, right_lanes.yywwYYWW);
+    left_sum = vadd(left_sum, left_sum.zzzzZZZZ);
+    right_sum = vadd(right_sum, right_sum.zzzzZZZZ);
+    left_sum = vadd(left_sum, left_sum.XXXXXXXX);
+    right_sum = vadd(right_sum, right_sum.XXXXXXXX);
 }

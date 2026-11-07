@@ -90,7 +90,7 @@ const builtin_values = std.StaticStringMap(void).initComptime(.{
 
 fn isBuiltinValue(text: []const u8) bool {
     if (builtin_values.has(text)) return true;
-    return parser_mod.parseVectorOp(text) != null or parser_mod.explicitAccumulatorPart(text) != null;
+    return parser_mod.parseVectorOp(text) != null;
 }
 
 /// The call `f(args..., destination)`.

@@ -79,7 +79,7 @@ export fn _start() noreturn {
 
     // Matrix normalisation uses the corresponding reciprocal-square-root ROM.
     reg($v24) reciprocal_sqrt_result: vec16 = 0;
-    reciprocal_sqrt_result[0] = vectorReciprocalSquareRoot(a[0]);
+    reciprocal_sqrt_result[0] = vrsq(a[0]);
     store(vec16, input, reciprocal_sqrt_result, 0x210);
 
     reg($v19) unsigned_bytes: vec16 = loadVectorBytesUnsigned(input, 0);

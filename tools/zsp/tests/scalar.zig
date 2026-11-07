@@ -463,7 +463,7 @@ test "register declarations infer intrinsic initializer types" {
         \\  reg($t0) mask = 255;
         \\  reg($t1) status = rsp.cp0.read(4);
         \\  reg($t2) ordered = signedLessThan(left, right);
-        \\  reg($v01) accumulator = readVectorAccumulatorHigh();
+        \\  reg($v01) high = accumulator(.high);
         \\  rsp.halt();
         \\}
     ,

@@ -211,6 +211,10 @@ test "parity spellings are no longer accepted" {
     try expectSyntaxRejected("fn test(reg($t0) p: dmem) { reg($v01) v: vec16 = undefined; store(vec64, p, v, 0); }");
     try expectRejected("fn test(reg($t0) p: dmem) { reg($v01) v: vec16 = loadVectorWords(p, 0); }");
     try expectSyntaxRejected("bss { t: u32; } fn test(reg($t0) i: u32) { reg a: u32 = load(u32, i, t); }");
+    // Vector instructions use their RSP mnemonics only.
+    try expectRejected("fn test() { reg($v01) a: vec16 = undefined; a = vectorSubtractCarry(a, a); }");
+    try expectRejected("fn test() { reg($v01) a: vec16 = readVectorAccumulatorHigh(); }");
+    try expectRejected("fn test() { reg($v01) a: vec16 = undefined; a[0] = vectorMove(a[1]); }");
 }
 
 test "not of a constant folds in values and constant expressions" {

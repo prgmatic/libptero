@@ -236,23 +236,23 @@ test "explicit vector shift names preserve vec32 views" {
     );
 }
 
-test "explicit vector operation names preserve RSP encodings" {
+test "vector instruction mnemonics preserve RSP encodings" {
     try expectAsm(
         \\fn test() noreturn {
         \\  reg($v01) left: vec16 = undefined;
         \\  reg($v02) right: vec16 = undefined;
         \\  reg($v03) result: vec16 = undefined;
-        \\  result = vectorAdd(left, right);
-        \\  result = vectorSubtract(left, right);
-        \\  result = vectorAddCarry(left, right);
-        \\  result = vectorSubtractCarry(left, right);
-        \\  result = vectorCompareLessThan(left, right);
-        \\  result = vectorCompareEqual(left, right);
-        \\  result = vectorCompareNotEqual(left, right);
-        \\  result = vectorCompareGreaterOrEqual(left, right);
-        \\  result = vectorClipHigh(left, right);
-        \\  result = vectorClipLow(left, right);
-        \\  result = vectorSelectByCompareCode(left, right);
+        \\  result = vadd(left, right);
+        \\  result = vsub(left, right);
+        \\  result = vaddc(left, right);
+        \\  result = vsubc(left, right);
+        \\  result = vlt(left, right);
+        \\  result = veq(left, right);
+        \\  result = vne(left, right);
+        \\  result = vge(left, right);
+        \\  result = vch(left, right);
+        \\  result = vcl(left, right);
+        \\  result = vmrg(left, right);
         \\  rsp.halt();
         \\}
     ,
@@ -278,17 +278,17 @@ test "explicit vector operation names preserve RSP encodings" {
     );
 }
 
-test "explicit accumulator and reciprocal names preserve RSP encodings" {
+test "accumulator reads and reciprocal mnemonics preserve RSP encodings" {
     try expectAsm(
         \\fn test() noreturn {
-        \\  reg($v18) high: vec16 = readVectorAccumulatorHigh();
-        \\  reg($v19) middle: vec16 = readVectorAccumulatorMiddle();
+        \\  reg($v18) high: vec16 = accumulator(.high);
+        \\  reg($v19) middle: vec16 = accumulator(.middle);
         \\  reg($v20) reciprocal_high: vec16 = undefined;
         \\  reg($v21) reciprocal_low: vec16 = undefined;
         \\  reg($v24) source: vec16 = undefined;
-        \\  reciprocal_high[7] = vectorReciprocalHigh(high[0]);
-        \\  reciprocal_low[7] = vectorReciprocalLow(middle[0]);
-        \\  reciprocal_low[0] = vectorReciprocal(source[1]);
+        \\  reciprocal_high[7] = vrcph(high[0]);
+        \\  reciprocal_low[7] = vrcpl(middle[0]);
+        \\  reciprocal_low[0] = vrcp(source[1]);
         \\  rsp.halt();
         \\}
     ,
@@ -316,7 +316,7 @@ test "vector lane moves and reciprocal operations emit exact RSP encodings" {
         \\  reg($v03) reciprocal: vec16 = 0;
         \\  reg($v04) input: vec16 = 0;
         \\  destination[3] = source[6];
-        \\  destination[0] = vectorMove(source[0]);
+        \\  destination[0] = source[0];
         \\  reciprocal[0] = vrcph(input[5]);
         \\  reciprocal[1] = vrcpl(input[4]);
         \\  reciprocal[2] = vrcp(input[3]);
@@ -609,9 +609,9 @@ test "reciprocal square root lane operations emit exact RSP encodings" {
         \\fn test() noreturn {
         \\  reg($v01) high: vec16 = undefined;
         \\  reg($v02) low: vec16 = undefined;
-        \\  high[3] = vectorReciprocalSquareRootHigh(high[0]);
-        \\  low[3] = vectorReciprocalSquareRootLow(low[0]);
-        \\  high[3] = vectorReciprocalSquareRoot(high[0]);
+        \\  high[3] = vrsqh(high[0]);
+        \\  low[3] = vrsql(low[0]);
+        \\  high[3] = vrsq(high[0]);
         \\}
     ,
         \\.set noreorder
