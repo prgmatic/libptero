@@ -12,8 +12,9 @@ pub const Options = struct {
     device_index: u32 = 0,
     ares: []const u8 = "ares",
     timeout_ms: u32 = 30_000,
-    startup_timeout_ms: u32 = 1000,
-    test_timeout_ms: u32 = 200,
+    /// Test-mode deadlines; null selects the target's default.
+    startup_timeout_ms: ?u32 = null,
+    test_timeout_ms: ?u32 = null,
     power_delay_ms: u32 = 1500,
     keep_on: bool = false,
     save: Save = .none,
@@ -21,6 +22,18 @@ pub const Options = struct {
     ha_url: ?[]const u8 = null,
     ha_entity: ?[]const u8 = null,
     ha_token_file: ?[]const u8 = null,
+
+    /// Time a `--test` run may take before its first test starts. ares needs
+    /// seconds to open its window and load the ROM.
+    pub fn startupTimeout(self: Options) u32 {
+        return self.startup_timeout_ms orelse if (self.target == .ares) 20_000 else 1000;
+    }
+
+    /// Time each test may take. Emulated RSP/RDP work runs far slower than
+    /// the console.
+    pub fn testTimeout(self: Options) u32 {
+        return self.test_timeout_ms orelse if (self.target == .ares) 10_000 else 200;
+    }
 
     pub fn validate(self: Options) !void {
         if (self.action == .help) return;
@@ -108,6 +121,18 @@ fn numericOrEnum(o: *Options, key: []const u8, value: []const u8) !void {
         }
     }
     try enumOption(o, key, value);
+}
+
+test "test deadlines default per target and accept overrides" {
+    const hardware = try parse(&.{ "--test", "rom.z64" }, .{});
+    try std.testing.expectEqual(@as(u32, 1000), hardware.startupTimeout());
+    try std.testing.expectEqual(@as(u32, 200), hardware.testTimeout());
+    const emulator = try parse(&.{ "--target", "ares", "--test", "rom.z64" }, .{});
+    try std.testing.expectEqual(@as(u32, 20_000), emulator.startupTimeout());
+    try std.testing.expectEqual(@as(u32, 10_000), emulator.testTimeout());
+    const custom = try parse(&.{ "--target", "ares", "--startup-timeout-ms", "5", "--test-timeout-ms", "6", "rom.z64" }, .{});
+    try std.testing.expectEqual(@as(u32, 5), custom.startupTimeout());
+    try std.testing.expectEqual(@as(u32, 6), custom.testTimeout());
 }
 fn enumOption(o: *Options, key: []const u8, value: []const u8) !void {
     if (std.mem.eql(u8, key, "--target")) {

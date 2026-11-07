@@ -11,9 +11,9 @@ pub const Monitor = struct {
         const timeout: ?u32 = switch (o.mode) {
             .interactive => null,
             .wait => o.timeout_ms,
-            .tests => o.startup_timeout_ms,
+            .tests => o.startupTimeout(),
         };
-        return .{ .mode = o.mode, .deadline = if (timeout) |t| now + t else null, .test_timeout_ms = o.test_timeout_ms };
+        return .{ .mode = o.mode, .deadline = if (timeout) |t| now + t else null, .test_timeout_ms = o.testTimeout() };
     }
     pub fn feed(self: *Monitor, bytes: []const u8, now: i64) !?protocol.Completion {
         const before = self.parser.test_starts;

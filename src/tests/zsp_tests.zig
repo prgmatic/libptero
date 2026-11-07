@@ -540,7 +540,9 @@ fn rdpBufferCommands() !void {
     rdp_queue.writeOverlayCommand(&rdp_overlay, 38, 0, &.{0});
     rdp_queue.writeOverlayCommand(&rdp_overlay, 39, 0, &.{0});
     rdp_queue.writeOverlayCommand(&rdp_overlay, 36, 0, &.{ 0, 0, 0 });
-    rdp_queue.writeOverlayCommand(&rdp_overlay, 26, 0, &.{});
+    // Wait for the RDP to go idle. ares keeps DP command-busy set until a
+    // SYNC_FULL, which this buffer never sends, so emulated runs skip it.
+    if (n64.debug.current_backend != .is_viewer) rdp_queue.writeOverlayCommand(&rdp_overlay, 26, 0, &.{});
     rsp.flush(&rdp_queue);
     if (!rsp.waitTimeout(&rdp_queue, 100_000_000)) return error.RspSignalTimeout;
 

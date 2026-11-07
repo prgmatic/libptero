@@ -66,10 +66,12 @@ also accept their older completion records when reading saved logs.
 The default interactive mode relays output until completion or Ctrl-C. A normal
 ares window close also ends an interactive run. `--wait` requires completion
 within `--timeout-ms` (30 seconds by default); `--test` requires completion and
-uses a one-second startup deadline plus 200 ms per test. A `[Run] ` prefix at
-the start of a line refreshes the test deadline before its trailing newline.
-Diagnostic output does not extend it. Override the startup deadline for slower
-emulator startup, for example `--startup-timeout-ms 10000`.
+ignores `--timeout-ms`: on hardware it uses a one-second startup deadline plus
+200 ms per test, and on ares 20 seconds plus 10 seconds per test, since the
+emulator takes seconds to start and runs RSP/RDP work slower than the console.
+A `[Run] ` prefix at the start of a line refreshes the test deadline before its
+trailing newline. Diagnostic output does not extend it. Override either with
+`--startup-timeout-ms` and `--test-timeout-ms`.
 
 Exit codes are 0 for successful completion, 1 for a reported ROM failure, 2 for
 upload/protocol/timeout/power failures, and 130 for interruption. A child exiting
