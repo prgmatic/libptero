@@ -9,6 +9,7 @@ const tests = [_]runner.Test{} ++
     @import("zsp_tests.zig").tests ++
     @import("rsp_tests.zig").tests ++
     @import("rsp_calibration_tests.zig").tests ++
+    @import("rsp_dma_order_tests.zig").tests ++
     @import("rom_tests.zig").tests ++
     @import("asset_loading_tests.zig").tests ++
     @import("audio_vadpcm_tests.zig").tests ++

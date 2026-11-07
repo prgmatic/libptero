@@ -16,6 +16,7 @@ tolerance of the recorded baseline.
 | --- | --- |
 | `Machine.zig` | Architectural state, delay slots, `step`/`run`, program loading |
 | `scalar.zig`, `cop0.zig` | Scalar ISA; SP DMA/status and RDP command registers |
+| `dma.zig` | DMA queue, calibrated transfer costs, and hazard detection |
 | `vu_*.zig`, `vector*.zig` | Vector unit: compute ops, divide unit, loads/stores |
 | `timing.zig` | Dual-issue/stall cycle estimate, calibrated on hardware |
 | `Profile.zig` | Per-instruction costs attributed to IMEM symbols |
@@ -77,10 +78,20 @@ and captured RDP bytes.
   LWC2/SWC2 form. Semantics follow ares (hardware-validated). LWV is rejected.
   The standalone ZSP programs' hardware expectations, the VADPCM reference
   decoder, and the hardware test ROM cross-check this.
-- **COP0:** SP DMA (count/skip, DMEM/IMEM) completes when its length register
-  is written, so DMA busy/full read zero. SP_STATUS pairs, signals, the
-  semaphore, and BREAK interrupts are modeled. DPC_CLOCK reads the estimated
-  cycle count.
+- **COP0:** SP DMA (count/skip, DMEM/IMEM) queues like hardware: one
+  transfer in flight and one pending, each finishing a calibrated number of
+  cycles after it starts (`dma.zig`, fitted to the `dma_*` benchmarks).
+  DMA busy/full reflect the queue, so wait loops cost what they cost on the
+  console. Bytes move when a transfer completes, in issue order; a halt or
+  break completes the rest, as the CPU would observe. SP_STATUS pairs,
+  signals, the semaphore, and BREAK interrupts are modeled. DPC_CLOCK reads
+  the estimated cycle count.
+- **DMA hazards:** a load, store, or instruction fetch that touches RSP
+  memory an unfinished transfer fills, or a store to memory one is still
+  reading, stops the run with `error.DmaHazard`; `Machine.hazard` records the
+  PC, address, and transfer direction. Starting a third transfer while two
+  are queued returns `error.DmaQueueFull`. The check is conservative: it
+  treats a transfer's whole range as busy until it completes.
 - **RDP:** always ready. Commands are captured at DP_END, not rasterized.
 
 ## Timing
@@ -124,8 +135,8 @@ tests (see `AGENTS.md`), copy the printed
 
 ## Known gaps
 
-- DMA and RDP timing/asynchrony are not modeled; code that races DMA
-  completion behaves as if every transfer finished instantly.
+- RDP timing is not modeled. DMA costs ignore RDRAM contention with the CPU
+  and RDP, so on a busy console transfers take longer than estimated.
 - Profiles key costs by IMEM address only. When overlays or the clipping
   payload swap code at the same addresses, attribution uses the symbols the
   caller supplies for that range.

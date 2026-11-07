@@ -209,10 +209,10 @@ inline fn resolveSegment(address: u32) {
         dma.in(matrix_dma_size, pitch, rdram, clipping_buffer_result);
         multiplyMatrices(matrix_mv, clipping_buffer_result, matrix_mv);
     }
-    // Keep the result on the stack. The write must finish here: an
-    // asynchronous one broke posed models on hardware.
+    // Keep the result on the stack. Later DMAs queue behind this write, so
+    // nothing needs to wait for it.
     rdram = bitCast(stack_pointer);
-    dma.out(matrix_dma_size, pitch, rdram, matrix_mv);
+    dma.outAsync(matrix_dma_size, pitch, rdram, matrix_mv);
 
     reg row: dmem = matrix_mv;
     reg normal_row: dmem = matrix_normal;

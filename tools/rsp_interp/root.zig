@@ -22,6 +22,7 @@ test {
     _ = @import("vector_memory.zig");
     _ = @import("fields.zig");
     _ = @import("cop0.zig");
+    _ = @import("dma.zig");
     _ = @import("scalar.zig");
     _ = @import("timing.zig");
     _ = @import("encode.zig");

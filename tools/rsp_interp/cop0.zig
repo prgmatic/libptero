@@ -1,22 +1,17 @@
 //! COP0: SP DMA/status registers (0-7) and RDP command registers (8-15).
 //!
-//! DMA completes synchronously when its length register is written, so busy
-//! and full always read as zero. RDP commands are consumed immediately when
-//! DP_END is written and are forwarded to `Machine.rdp_output`.
+//! Writing a DMA length register queues the transfer on `Machine.dma`
+//! (see dma.zig); busy and full report that queue, and the bytes move when
+//! the transfer completes. RDP commands are consumed immediately when DP_END
+//! is written and are forwarded to `Machine.rdp_output`.
 const std = @import("std");
 const Machine = @import("Machine.zig");
 const fields = @import("fields.zig");
+const dma_engine = @import("dma.zig");
 
 const Error = Machine.Error;
 
-pub const Dma = struct {
-    /// DMEM/IMEM byte address; bit 12 selects IMEM.
-    mem_address: u13 = 0,
-    dram_address: u24 = 0,
-    length: u12 = 0,
-    count: u8 = 0,
-    skip: u12 = 0,
-};
+pub const Dma = dma_engine.Descriptor;
 
 pub const Sp = struct {
     pending: Dma = .{},
@@ -71,7 +66,7 @@ const Writer = *const fn (*Machine, u32) Error!void;
 
 const readers = [16]Reader{
     readMemAddress, readDramAddress, readLength,      readLength,
-    readSpStatus,   readZero,        readZero,        readSemaphore,
+    readSpStatus,   readDmaFull,     readDmaBusy,     readSemaphore,
     readDpStart,    readDpEnd,       readDpCurrent,   readDpStatus,
     readDpClock,    readZero,        readZero,        readZero,
 };
@@ -88,6 +83,14 @@ fn readZero(_: *Machine) u32 {
 }
 
 fn ignore(_: *Machine, _: u32) Error!void {}
+
+fn readDmaFull(m: *Machine) u32 {
+    return @intFromBool(m.dma.full());
+}
+
+fn readDmaBusy(m: *Machine) u32 {
+    return @intFromBool(m.dma.busy());
+}
 
 fn readMemAddress(m: *Machine) u32 {
     return m.sp.current.mem_address;
@@ -106,6 +109,8 @@ fn readSpStatus(m: *Machine) u32 {
     var value: u32 = @as(u32, m.sp.signals) << 7;
     value |= @intFromBool(m.sp.halted);
     value |= @as(u32, @intFromBool(m.sp.broken)) << 1;
+    value |= @as(u32, @intFromBool(m.dma.busy())) << 2;
+    value |= @as(u32, @intFromBool(m.dma.full())) << 3;
     value |= @as(u32, @intFromBool(m.sp.single_step)) << 5;
     return value | @as(u32, @intFromBool(m.sp.interrupt_on_break)) << 6;
 }
@@ -144,13 +149,23 @@ fn writeWriteLength(m: *Machine, value: u32) Error!void {
     return transfer(m, .to_rdram);
 }
 
-const Direction = enum { to_rsp, to_rdram };
+const Direction = dma_engine.Direction;
 
+/// Queues the programmed transfer. RDRAM bounds are checked now so a bad
+/// address faults at the instruction that started it.
 fn transfer(m: *Machine, direction: Direction) Error!void {
-    var dma = m.sp.pending;
-    const row_len = @as(usize, dma.length) + 8;
-    for (0..@as(usize, dma.count) + 1) |_| {
-        try copyRow(m, &dma, row_len, direction);
+    const dma = m.sp.pending;
+    const span = @as(usize, dma.rows() - 1) * (@as(usize, dma.rowBytes()) + dma.skip) + dma.rowBytes();
+    _ = try m.rdramSlice(dma.dram_address, span);
+    try m.dma.push(dma, direction, m.pipeline.cycles);
+}
+
+/// Moves the bytes of a finished transfer and latches its final registers.
+pub fn complete(m: *Machine, finished: dma_engine.Transfer) void {
+    var dma = finished.descriptor;
+    const row_len = dma.rowBytes();
+    for (0..dma.rows()) |_| {
+        copyRow(m, &dma, row_len, finished.direction);
         dma.dram_address +%= dma.skip;
     }
     dma.length = 0xff8;
@@ -158,8 +173,8 @@ fn transfer(m: *Machine, direction: Direction) Error!void {
     m.sp.current = dma;
 }
 
-fn copyRow(m: *Machine, dma: *Dma, row_len: usize, direction: Direction) Error!void {
-    const rdram = try m.rdramSlice(dma.dram_address, row_len);
+fn copyRow(m: *Machine, dma: *Dma, row_len: usize, direction: Direction) void {
+    const rdram = m.rdramSlice(dma.dram_address, row_len) catch unreachable;
     for (rdram) |*byte| {
         const local = rspMemory(m, dma.mem_address);
         if (direction == .to_rsp) local.* = byte.* else byte.* = local.*;
@@ -266,6 +281,8 @@ test "SP DMA copies rows with count and skip in both directions" {
     try write(&m, 1, 0x8);
     // Two rows of eight bytes, skipping eight bytes between rows.
     try write(&m, 2, (8 << 20) | (1 << 12) | 7);
+    try testing.expectEqual(@as(u32, 1), read(&m, 6));
+    m.drainDma();
     try testing.expectEqualSlices(u8, rdram[8..16], m.dmem[0x100..0x108]);
     try testing.expectEqualSlices(u8, rdram[24..32], m.dmem[0x108..0x110]);
     try testing.expectEqual(@as(u32, 0x110), read(&m, 0));
@@ -277,6 +294,7 @@ test "SP DMA copies rows with count and skip in both directions" {
     try write(&m, 0, 0x1000);
     try write(&m, 1, 0x30);
     try write(&m, 3, 7);
+    m.drainDma();
     try testing.expectEqualSlices(u8, &(@as([8]u8, @splat(0xaa))), rdram[0x30..0x38]);
     try write(&m, 1, 0x40);
     try testing.expectError(error.RdramOutOfBounds, write(&m, 2, 7));

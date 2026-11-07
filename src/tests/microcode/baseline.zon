@@ -1,13 +1,13 @@
 .{
     .tolerance_percent = 2,
     .workloads = .{
-        .{ .name = "dispatcher", .instructions = 1914, .cycles = 2182, .digest = "0b968d31d91b12c4322e5aba9edb1e9b" },
-        .{ .name = "rdp_state", .instructions = 3725, .cycles = 4407, .digest = "05877b5578bf8bd176f53407a6d83657" },
-        .{ .name = "rdp", .instructions = 4925, .cycles = 4816, .digest = "937c61eee11e44e0810a3665b4c2209c" },
-        .{ .name = "vadpcm_mono", .instructions = 4457, .cycles = 4427, .digest = "d060f75275d4e6a8ecba40d1328fc326" },
-        .{ .name = "vadpcm_stereo_batches", .instructions = 9900, .cycles = 9559, .digest = "bd75989fe114833b5b7488512ae71803" },
-        .{ .name = "mixer_4voice", .instructions = 30973, .cycles = 34123, .digest = "e62d1c5ea7cb6e353bebd1932a848044" },
-        .{ .name = "geometry_lit_mesh", .instructions = 17838, .cycles = 11957, .digest = "4474f43290444a1bda8410115cb64889" },
-        .{ .name = "geometry_clipped_mesh", .instructions = 18343, .cycles = 13186, .digest = "875b2e1f8e6dcb613bf0727a662021b3" },
+        .{ .name = "dispatcher", .instructions = 2118, .cycles = 2539, .digest = "0b968d31d91b12c4322e5aba9edb1e9b" },
+        .{ .name = "rdp_state", .instructions = 5509, .cycles = 7529, .digest = "05877b5578bf8bd176f53407a6d83657" },
+        .{ .name = "rdp", .instructions = 5531, .cycles = 5878, .digest = "937c61eee11e44e0810a3665b4c2209c" },
+        .{ .name = "vadpcm_mono", .instructions = 4813, .cycles = 5050, .digest = "d060f75275d4e6a8ecba40d1328fc326" },
+        .{ .name = "vadpcm_stereo_batches", .instructions = 10416, .cycles = 10462, .digest = "bd75989fe114833b5b7488512ae71803" },
+        .{ .name = "mixer_4voice", .instructions = 32333, .cycles = 36503, .digest = "e62d1c5ea7cb6e353bebd1932a848044" },
+        .{ .name = "geometry_lit_mesh", .instructions = 17966, .cycles = 12088, .digest = "4474f43290444a1bda8410115cb64889" },
+        .{ .name = "geometry_clipped_mesh", .instructions = 18666, .cycles = 13696, .digest = "875b2e1f8e6dcb613bf0727a662021b3" },
     },
 }

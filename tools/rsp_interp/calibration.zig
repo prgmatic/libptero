@@ -7,10 +7,14 @@
 //! `measured` holds results from an SC64-connected N64 (recorded 2026-11-04);
 //! the host test fails when the timing model drifts from them by more than
 //! `tolerance_percent`, except for documented `model_gap` entries.
-const encode = @import("encode.zig");
+pub const encode = @import("encode.zig");
 
 pub const iterations = 64;
 pub const result_offset = 0;
+/// DMEM word holding the RDRAM address of a `rdram_bytes` scratch buffer the
+/// DMA benchmarks transfer to and from.
+pub const rdram_slot = 0x200;
+pub const rdram_bytes = 4096;
 pub const tolerance_percent = 10;
 
 pub const Benchmark = struct {
@@ -28,11 +32,34 @@ const t0 = 8;
 const t1 = 9;
 const t2 = 10;
 const counter = 15;
+const rdram_reg = 11;
 const start_clock = 24;
 const end_clock = 25;
 
 fn vaddc(vd: u5, vs: u5, vt: u5) u32 {
     return encode.vectorOp(0x14, vd, vs, vt, 0);
+}
+
+const dma_buffer = 0x400;
+
+/// One DMA of `rows` rows of `row_bytes` (RDRAM pitch `pitch`) between the
+/// scratch buffer and DMEM, then a wait for the engine to go idle.
+fn dmaRoundTrip(comptime write: bool, comptime row_bytes: u16, comptime rows: u16, comptime pitch: u16) []const u32 {
+    @setEvalBranchQuota(20_000);
+    const skip: u32 = pitch - row_bytes;
+    const descriptor: u32 = skip << 20 | @as(u32, rows - 1) << 12 | (row_bytes - 1);
+    return &.{
+        encode.lw(rdram_reg, 0, rdram_slot),
+        encode.ori(t0, 0, dma_buffer),
+        encode.cop0Move(true, t0, 0),
+        encode.cop0Move(true, rdram_reg, 1),
+        encode.immediate(0x0f, 0, t1, @truncate(descriptor >> 16)),
+        encode.ori(t1, t1, @truncate(descriptor)),
+        encode.cop0Move(true, t1, if (write) 3 else 2),
+        encode.cop0Move(false, t2, 6),
+        encode.bne(t2, 0, -2),
+        encode.nop,
+    };
 }
 
 fn repeat(comptime count: usize, comptime words: []const u32) []const u32 {
@@ -43,6 +70,7 @@ fn repeat(comptime count: usize, comptime words: []const u32) []const u32 {
 
 /// Wraps `body` in a counted loop bracketed by DPC_CLOCK reads.
 fn program(comptime body: []const u32) []align(8) const u32 {
+    @setEvalBranchQuota(20_000);
     const prologue = [_]u32{ encode.cop0Move(false, start_clock, 12), encode.ori(counter, 0, iterations) };
     const loop_back: i16 = -@as(i16, @intCast(body.len + 2));
     const epilogue = [_]u32{
@@ -98,6 +126,17 @@ pub const all = [_]Benchmark{
     .{ .name = "add_pair_gap_then_store_pair", .text = program(repeat(4, &.{ vaddc(10, 8, 9), vaddc(14, 7, 9), encode.nop, encode.nop, encode.nop, sdv(10, 2), sdv(14, 3) })), .measured = 1600 },
     .{ .name = "add_then_store_twice", .text = program(repeat(4, &.{ vaddc(10, 8, 9), sdv(10, 2), sdv(10, 3) })), .measured = 1600 },
     .{ .name = "add_then_store_then_scalar", .text = program(repeat(4, &.{ vaddc(10, 8, 9), sdv(10, 2), encode.addiu(t0, 0, 1) })), .measured = 1600 },
+    // DMA cost: each loop issues one transfer and waits for it.
+    .{ .name = "dma_read_8", .text = program(dmaRoundTrip(false, 8, 1, 8)), .measured = 2384 },
+    .{ .name = "dma_read_64", .text = program(dmaRoundTrip(false, 64, 1, 64)), .measured = 2741 },
+    .{ .name = "dma_read_512", .text = program(dmaRoundTrip(false, 512, 1, 512)), .measured = 7534 },
+    .{ .name = "dma_read_2048", .text = program(dmaRoundTrip(false, 2048, 1, 2048)), .measured = 22422 },
+    .{ .name = "dma_write_8", .text = program(dmaRoundTrip(true, 8, 1, 8)), .measured = 1926 },
+    .{ .name = "dma_write_64", .text = program(dmaRoundTrip(true, 64, 1, 64)), .measured = 2278 },
+    .{ .name = "dma_write_512", .text = program(dmaRoundTrip(true, 512, 1, 512)), .measured = 7014 },
+    .{ .name = "dma_write_2048", .text = program(dmaRoundTrip(true, 2048, 1, 2048)), .measured = 21250 },
+    .{ .name = "dma_read_rows_8x64", .text = program(dmaRoundTrip(false, 64, 8, 128)), .measured = 9356 },
+    .{ .name = "dma_write_rows_8x64", .text = program(dmaRoundTrip(true, 64, 8, 128)), .measured = 7914 },
     .{ .name = "mac_then_store", .text = program(repeat(4, &.{ mac(0x0e, 10, 8, 9), mac(0x0f, 14, 7, 9), encode.vectorStore(.sdv, 10, 0, 0, 2), encode.vectorStore(.sdv, 14, 0, 0, 3) })), .measured = 2368, .model_gap = "a store waiting for one of two just-issued vector results delays the next instruction more than modeled" },
 };
 
@@ -118,7 +157,8 @@ const Machine = @import("Machine.zig");
 
 /// Runs a benchmark in the interpreter and returns its self-timed cycles.
 pub fn estimate(benchmark: Benchmark) !u32 {
-    var machine = Machine.init(&.{});
+    var rdram: [rdram_bytes]u8 = @splat(0);
+    var machine = Machine.init(&rdram);
     for (benchmark.text, 0..) |word, index| std.mem.writeInt(u32, machine.imem[index * 4 ..][0..4], word, .big);
     machine.start(0);
     const result = try machine.run(1_000_000);

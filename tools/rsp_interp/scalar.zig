@@ -132,36 +132,44 @@ fn lui(m: *Machine, op: u32) Error!void {
 }
 
 fn lb(m: *Machine, op: u32) Error!void {
+    m.touch(effectiveAddress(m, op), @sizeOf(u8), .load);
     const value: i8 = @bitCast(m.readDmem(u8, effectiveAddress(m, op)));
     m.setReg(fields.rt(op), @bitCast(@as(i32, value)));
 }
 
 fn lh(m: *Machine, op: u32) Error!void {
+    m.touch(effectiveAddress(m, op), @sizeOf(u16), .load);
     const value: i16 = @bitCast(m.readDmem(u16, effectiveAddress(m, op)));
     m.setReg(fields.rt(op), @bitCast(@as(i32, value)));
 }
 
 fn lw(m: *Machine, op: u32) Error!void {
+    m.touch(effectiveAddress(m, op), @sizeOf(u32), .load);
     m.setReg(fields.rt(op), m.readDmem(u32, effectiveAddress(m, op)));
 }
 
 fn lbu(m: *Machine, op: u32) Error!void {
+    m.touch(effectiveAddress(m, op), @sizeOf(u8), .load);
     m.setReg(fields.rt(op), m.readDmem(u8, effectiveAddress(m, op)));
 }
 
 fn lhu(m: *Machine, op: u32) Error!void {
+    m.touch(effectiveAddress(m, op), @sizeOf(u16), .load);
     m.setReg(fields.rt(op), m.readDmem(u16, effectiveAddress(m, op)));
 }
 
 fn sb(m: *Machine, op: u32) Error!void {
+    m.touch(effectiveAddress(m, op), @sizeOf(u8), .store);
     m.writeDmem(u8, effectiveAddress(m, op), @truncate(rt(m, op)));
 }
 
 fn sh(m: *Machine, op: u32) Error!void {
+    m.touch(effectiveAddress(m, op), @sizeOf(u16), .store);
     m.writeDmem(u16, effectiveAddress(m, op), @truncate(rt(m, op)));
 }
 
 fn sw(m: *Machine, op: u32) Error!void {
+    m.touch(effectiveAddress(m, op), @sizeOf(u32), .store);
     m.writeDmem(u32, effectiveAddress(m, op), rt(m, op));
 }
 

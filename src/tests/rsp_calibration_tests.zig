@@ -12,8 +12,11 @@ pub const tests = [_]runner.Test{
     .{ .name = "RSP calibration: microbenchmark cycles", .run = measure },
 };
 
+var dma_scratch: [calibration.rdram_bytes]u8 align(16) = undefined;
+
 fn measure() !void {
     inline for (calibration.all) |benchmark| {
+        n64.hw.sp.readDmem(u32, calibration.rdram_slot).* = n64.cpu.physicalAddress(@intFromPtr(&dma_scratch));
         rsp.runProgram(.{ .text = @ptrCast(benchmark.text) });
         var remaining: u32 = 1_000_000;
         while (!rsp.isBroke()) : (remaining -= 1) {

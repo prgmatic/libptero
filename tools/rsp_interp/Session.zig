@@ -167,6 +167,9 @@ fn miniatureResident(text: *[64]u8) Program {
         encode.cop0Move(true, 16, 1),
         encode.ori(8, 0, 7),
         encode.cop0Move(true, 8, 2),
+        encode.cop0Move(false, 10, 6), // wait for the DMA
+        encode.bne(10, 0, -2),
+        encode.nop,
         encode.lw(9, 0, 0x40),
         encode.sw(9, 0, 0x10),
         encode.brk,

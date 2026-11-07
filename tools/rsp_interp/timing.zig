@@ -177,10 +177,16 @@ fn cop0(op: u32) Info {
     return .{ .dest = gpr(fields.rt(op)), .latency = latency.control_move, .load = true };
 }
 
+/// VRCP*, VMOV, VRSQ*, and VNOP (0x30-0x37) use the vs field as the
+/// destination lane, not as a source register.
+fn isLaneOp(op: u32) bool {
+    return fields.funct(op) & 0x38 == 0x30;
+}
+
 fn cop2(op: u32) Info {
     if (op >> 25 & 1 != 0) return .{
         .unit = .vector,
-        .sources = .{ vpr(fields.vs(op)), vpr(fields.vt(op)) },
+        .sources = .{ if (isLaneOp(op)) none else vpr(fields.vs(op)), vpr(fields.vt(op)) },
         .dest = vpr(fields.vd(op)),
         .latency = latency.vector,
         .writes_flags = true,
@@ -283,4 +289,13 @@ test "classification covers every operand form" {
     try testing.expect(classify(encode.cop2Move(.ctc2, 8, 1, 0)).store);
     try testing.expectEqual(Unit.scalar, classify(0x4c00_0000).unit);
     try testing.expect(classify(encode.vectorOp(0x14, 1, 2, 3, 0)).writes_flags);
+}
+
+test "lane ops read only vt" {
+    // vmov $v2[0], $v3[0] encodes destination lane 4 in the vs field.
+    const vmov = 0x4a00_0000 | 1 << 25 | 3 << 16 | 4 << 11 | 2 << 6 | 0x33;
+    const vadd_into_v4 = 0x4a00_0000 | 1 << 25 | 9 << 16 | 9 << 11 | 4 << 6 | 0x10;
+    try std.testing.expectEqual(@as(u8, 0), resultLatency(vadd_into_v4, vmov));
+    const vadd_into_v3 = 0x4a00_0000 | 1 << 25 | 9 << 16 | 9 << 11 | 3 << 6 | 0x10;
+    try std.testing.expectEqual(@as(u8, latency.vector), resultLatency(vadd_into_v3, vmov));
 }

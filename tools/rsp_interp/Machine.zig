@@ -4,6 +4,7 @@
 const std = @import("std");
 const Program = @import("rsp_abi").Program;
 const cop0 = @import("cop0.zig");
+pub const dma_engine = @import("dma.zig");
 const scalar = @import("scalar.zig");
 const timing = @import("timing.zig");
 const VuState = @import("vu_state.zig").State;
@@ -20,6 +21,11 @@ pub const Error = error{
     RdramOutOfBounds,
     RdpOutputFailed,
     Halted,
+    /// Microcode touched RSP memory an unfinished DMA reads or fills; see
+    /// `Machine.hazard`.
+    DmaHazard,
+    /// A DMA was started while one was already pending.
+    DmaQueueFull,
 };
 
 pub const Stop = enum { broke, halted, instruction_limit };
@@ -40,6 +46,9 @@ jump_target: ?u32 = null,
 vu: VuState = .{},
 sp: cop0.Sp = .{},
 dp: cop0.Dp = .{},
+dma: dma_engine.Queue = .{},
+/// The first DMA hazard found, reported as `error.DmaHazard`.
+hazard: ?dma_engine.Hazard = null,
 /// Big-endian RDRAM visible to SP DMA and RDP command fetches.
 rdram: []u8,
 /// Receives RDP command bytes submitted through DP_START/DP_END.
@@ -81,9 +90,12 @@ pub fn start(self: *Machine, pc: u32) void {
 
 pub fn step(self: *Machine) Error!void {
     if (self.sp.halted) return error.Halted;
+    self.retireDma();
+    self.touch(0x1000 | self.pc, 4, .fetch);
     const op = std.mem.readInt(u32, self.imem[self.pc..][0..4], .big);
     self.jump_target = null;
     try scalar.execute(self, op);
+    if (self.hazard != null) return error.DmaHazard;
     const cycles_before = self.pipeline.cycles;
     self.pipeline.issue(op, self.jump_target != null);
     if (self.profile) |profile| profile.record(self.pc, self.pipeline.cycles - cycles_before);
@@ -95,9 +107,34 @@ pub fn step(self: *Machine) Error!void {
 pub fn run(self: *Machine, limit: u64) Error!RunResult {
     for (0..limit) |_| {
         try self.step();
-        if (self.sp.halted) return self.result(if (self.sp.broken) .broke else .halted);
+        if (self.sp.halted) {
+            // Transfers keep running after a halt; the CPU sees their results.
+            self.drainDma();
+            return self.result(if (self.sp.broken) .broke else .halted);
+        }
     }
     return self.result(.instruction_limit);
+}
+
+fn retireDma(self: *Machine) void {
+    while (self.dma.popFinished(self.pipeline.cycles)) |finished| cop0.complete(self, finished);
+}
+
+/// Completes every queued transfer at once, as when the CPU waits for idle.
+pub fn drainDma(self: *Machine) void {
+    while (self.dma.popFront()) |finished| cop0.complete(self, finished);
+}
+
+/// Records a hazard when microcode accesses `len` bytes of RSP memory at
+/// `address` (bit 12 selects IMEM) that an unfinished transfer covers.
+pub fn touch(self: *Machine, address: u32, len: u32, access: dma_engine.Access) void {
+    if (!self.dma.busy() or self.hazard != null) return;
+    for (0..len) |index| {
+        const byte_address = (address & 0x1000) | ((address +% @as(u32, @intCast(index))) & address_mask);
+        const transfer = self.dma.conflict(byte_address, access) orelse continue;
+        self.hazard = .{ .pc = self.pc, .address = byte_address, .access = access, .direction = transfer.direction };
+        return;
+    }
 }
 
 fn result(self: *const Machine, stop: Stop) RunResult {
@@ -194,4 +231,54 @@ test "programs load into IMEM, DMEM, and persistent state" {
     try testing.expectEqual(@as(u32, 0x10), machine.pc);
     try testing.expect(machine.sp.halted);
     try testing.expectError(error.Halted, machine.step());
+}
+
+fn loadWords(machine: *Machine, words: []const u32) void {
+    for (words, 0..) |word, index| std.mem.writeInt(u32, machine.imem[index * 4 ..][0..4], word, .big);
+}
+
+test "reading a DMA destination before the transfer finishes is a hazard" {
+    const encode = @import("encode.zig");
+    var rdram: [64]u8 = @splat(7);
+    var machine = Machine.init(&rdram);
+    loadWords(&machine, &.{
+        encode.ori(8, 0, 0x100),
+        encode.cop0Move(true, 8, 0),
+        encode.cop0Move(true, 0, 1),
+        encode.ori(9, 0, 7),
+        encode.cop0Move(true, 9, 2),
+        encode.lw(10, 0, 0x104),
+        encode.brk,
+    });
+    machine.start(0);
+    try testing.expectError(error.DmaHazard, machine.run(16));
+    const hazard = machine.hazard.?;
+    try testing.expectEqual(@as(u32, 0x14), hazard.pc);
+    try testing.expectEqual(@as(u32, 0x104), hazard.address);
+    try testing.expectEqual(dma_engine.Direction.to_rsp, hazard.direction);
+}
+
+test "waiting for DMA busy avoids the hazard and a third transfer overflows" {
+    const encode = @import("encode.zig");
+    var rdram: [64]u8 = @splat(7);
+    var machine = Machine.init(&rdram);
+    loadWords(&machine, &.{
+        encode.ori(8, 0, 0x100),
+        encode.cop0Move(true, 8, 0),
+        encode.cop0Move(true, 0, 1),
+        encode.ori(9, 0, 7),
+        encode.cop0Move(true, 9, 2),
+        encode.cop0Move(false, 11, 6),
+        encode.bne(11, 0, -2),
+        encode.nop,
+        encode.lw(10, 0, 0x104),
+        encode.cop0Move(true, 9, 2),
+        encode.cop0Move(true, 9, 2),
+        encode.cop0Move(true, 9, 2),
+        encode.brk,
+    });
+    machine.start(0);
+    try testing.expectError(error.DmaQueueFull, machine.run(200));
+    try testing.expectEqual(@as(u32, 0x0707_0707), machine.gpr[10]);
+    try testing.expect(machine.pipeline.cycles > dma_engine.cost(.to_rsp, .{}));
 }

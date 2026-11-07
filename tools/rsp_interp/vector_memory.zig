@@ -20,10 +20,12 @@ const Access = struct {
     }
 
     fn read(self: Access, address: u32) u8 {
+        self.m.touch(address & 0xfff, 1, .load);
         return self.m.dmemByte(address);
     }
 
     fn write(self: Access, address: u32, value: u8) void {
+        self.m.touch(address & 0xfff, 1, .store);
         self.m.setDmemByte(address, value);
     }
 
