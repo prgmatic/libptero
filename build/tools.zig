@@ -45,7 +45,7 @@ pub fn build(b: *std.Build, root: std.Build.LazyPath) Tools {
         .srcmap = addTool(b, root, "srcmap", "tools/n64srcmap/main.zig", &.{
             .{ .name = "srcmap_format", .module = srcmap_format },
         }),
-        .elf_pack = addTool(b, root, "elf_pack", "tools/build/elf_pack.zig", &.{}),
+        .elf_pack = addTool(b, root, "elf_pack", "tools/build/elf_pack/main.zig", &.{}),
         .rsp_pack = addTool(b, root, "rsp_pack", "tools/build/rsp_pack/main.zig", &.{}),
         .rsp_overlay_link = addTool(b, root, "rsp_overlay_link", "tools/build/rsp_overlay_link.zig", &.{}),
         .ipl3_cat = addTool(b, root, "ipl3_cat", "tools/build/ipl3_cat.zig", &.{}),

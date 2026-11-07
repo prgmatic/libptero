@@ -200,7 +200,7 @@ pub fn addToolTests(b: *std.Build, coverage: bool, coverage_runtime: ?[]const u8
     inline for (.{
         .{ "audio-compiler-tests", "tools/audio_compiler/root.zig" },
         .{ "rom-assets-tests", "tools/rom_assets/root.zig" },
-        .{ "elf-pack-tests", "tools/build/elf_pack.zig" },
+        .{ "elf-pack-tests", "tools/build/elf_pack/root.zig" },
         .{ "png-decoder-tests", "tools/imgparse/png.zig" },
         .{ "runtime-host-tests", "src/n64/n64.zig" },
         .{ "asset-options-tests", "build/assets.zig" },
