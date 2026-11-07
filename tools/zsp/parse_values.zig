@@ -224,11 +224,12 @@ pub fn parseFunctionReference(self: *Parser) !ast.FunctionRef {
 }
 
 pub fn parseScalarExpression(self: *Parser, minimum_precedence: u4) !ast.Value {
-    var lhs = if (try self.eat(.l_paren)) blk: {
-        const grouped = try self.parseScalarExpression(0);
-        _ = try self.expect(.r_paren);
-        break :blk grouped;
-    } else try self.parseValue();
+    return continueScalarExpression(self, try parseScalarOperand(self), minimum_precedence);
+}
+
+/// Applies the binary operators that follow an already parsed `first`.
+pub fn continueScalarExpression(self: *Parser, first: ast.Value, minimum_precedence: u4) anyerror!ast.Value {
+    var lhs = first;
 
     while (binaryPrecedence(self.current.tag)) |precedence| {
         if (precedence < minimum_precedence) break;
@@ -237,6 +238,25 @@ pub fn parseScalarExpression(self: *Parser, minimum_precedence: u4) !ast.Value {
         lhs = try combine(self, operator, lhs, op, try self.parseScalarExpression(precedence + 1));
     }
     return lhs;
+}
+
+/// A parenthesized expression, a negated operand (`-x` is `0 - x`), or a value.
+fn parseScalarOperand(self: *Parser) anyerror!ast.Value {
+    if (try self.eat(.l_paren)) {
+        const grouped = try self.parseScalarExpression(0);
+        _ = try self.expect(.r_paren);
+        return grouped;
+    }
+    if (self.current.tag == .minus and !nextIsNumber(self)) {
+        const operator = try self.expect(.minus);
+        return combine(self, operator, .{ .number = 0 }, .sub, try parseScalarOperand(self));
+    }
+    return self.parseValue();
+}
+
+fn nextIsNumber(self: *const Parser) bool {
+    const next = (self.peek(1) orelse return false)[0];
+    return next.tag == .number;
 }
 
 /// `lhs op rhs`, folded when both sides are literals.

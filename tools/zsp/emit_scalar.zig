@@ -343,6 +343,7 @@ fn writeScalarExpression(g: Gen, destination: Symbol, destination_reg: Register,
     if (!analysis.isPureScalarExpression(.{ .scalar_expression = @constCast(expression) })) {
         return error.SideEffectsNotAllowedInScalarExpression;
     }
+    if (isNegation(expression)) return writeNegatedExpression(g, destination, destination_reg, expression.rhs);
     if (needsRhsTemporary(expression, destination)) return writeExpressionWithTemporary(g, destination, destination_reg, expression);
     const self: ast.Value = .{ .ident = destination.name };
     if (expression.lhs == .scalar_expression or expression.lhs == .number) {
@@ -350,6 +351,17 @@ fn writeScalarExpression(g: Gen, destination: Symbol, destination_reg: Register,
         return writeBinary(g, destination, destination_reg, self, expression.op, expression.rhs);
     }
     return writeBinary(g, destination, destination_reg, expression.lhs, expression.op, expression.rhs);
+}
+
+/// `-x` parses as `0 - x`.
+fn isNegation(expression: *const ast.ScalarExpression) bool {
+    return expression.lhs == .number and expression.lhs.number == 0 and expression.op == .sub;
+}
+
+fn writeNegatedExpression(g: Gen, destination: Symbol, destination_reg: Register, operand: ast.Value) anyerror!void {
+    if (operand != .scalar_expression) return writeNegate(g, destination, destination_reg, operand);
+    try writeScalarExpression(g, destination, destination_reg, operand.scalar_expression);
+    return writeNegate(g, destination, destination_reg, .{ .ident = destination.name });
 }
 
 fn writeExpressionWithTemporary(g: Gen, destination: Symbol, destination_reg: Register, expression: *const ast.ScalarExpression) !void {

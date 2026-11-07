@@ -249,8 +249,7 @@ inline fn resolveSegment(address: u32) {
     store(u16, screen_uvgen_scale, uvgen_scale);
     // The guard band is the W of the X and Y planes.
     guard_band_factor &= 0x0f;
-    reg negative_guard_band: u32 = undefined;
-    negative_guard_band = -guard_band_factor;
+    reg negative_guard_band: u32 = -guard_band_factor;
     store(u8, clipping_planes, guard_band_factor, 3);
     store(u8, clipping_planes, guard_band_factor, 7);
     store(u8, clipping_planes, negative_guard_band, 15);
@@ -372,7 +371,7 @@ export fn _start(
         normal_matrix[row][4..8] = load(vec16, matrix_normal, row * 8);
     }
     reg mvp: [4]vec32 = undefined;
-    loadMatrix(mvp[0], mvp[1], mvp[2], mvp[3], matrix_mvp);
+    loadMatrix(mvp, matrix_mvp);
     reg normal_mask: vec16 = undefined;
     normal_mask[0..4] = load(vec16, normal_mask_shift, 0);
     normal_mask[4..8] = load(vec16, normal_mask_shift, 0);
@@ -473,7 +472,7 @@ export fn _start(
         }
         if (eye_position_ready != 0) {
             @branchHint(.cold);
-            loadMatrix(mvp[0], mvp[1], mvp[2], mvp[3], matrix_mvp);
+            loadMatrix(mvp, matrix_mvp);
         }
 
         // Clip codes: against W for trivial rejection, against the guard
@@ -489,18 +488,14 @@ export fn _start(
         scratch = vectorClipHigh(clip.sint, plane_w.sint);
         scratch = vectorClipLow(clip.sfract, plane_w.sfract);
         reg clip_codes: u32 = rsp.vector.getCompareCode();
-        reg clip_a: u32 = undefined;
-        packClipCodes(clip_a, clip_codes);
+        reg clip_a: u32 = packClipCodes(clip_codes);
         clip_a |= base_tile;
         clip_codes >>= 4;
-        reg clip_b: u32 = undefined;
-        packClipCodes(clip_b, clip_codes);
+        reg clip_b: u32 = packClipCodes(clip_codes);
         clip_b |= base_tile;
-        reg reject_a: u32 = undefined;
-        packRejectCodes(reject_a, reject_codes);
+        reg reject_a: u32 = packRejectCodes(reject_codes);
         reject_codes >>= 4;
-        reg reject_b: u32 = undefined;
-        packRejectCodes(reject_b, reject_codes);
+        reg reject_b: u32 = packRejectCodes(reject_codes);
 
         reg color: vec16 = undefined;
         rsp.vector.loadPackedUnsigned(color, input, input_color);
@@ -576,20 +571,16 @@ export fn _start(
 }
 
 /// Loads a matrix with each row in both halves.
-fn loadMatrix(row0: vec32, row1: vec32, row2: vec32, row3: vec32, reg($at) matrix: dmem) {
-    row0[0..4] = load(vec32, matrix, 0);
-    row0[4..8] = load(vec32, matrix, 0);
-    row1[0..4] = load(vec32, matrix, 16);
-    row1[4..8] = load(vec32, matrix, 16);
-    row2[0..4] = load(vec32, matrix, 32);
-    row2[4..8] = load(vec32, matrix, 32);
-    row3[0..4] = load(vec32, matrix, 48);
-    row3[4..8] = load(vec32, matrix, 48);
+fn loadMatrix(rows: [4]vec32, reg($at) matrix: dmem) {
+    inline for (0..4) |row| {
+        rows[row][0..4] = load(vec32, matrix, row * 16);
+        rows[row][4..8] = load(vec32, matrix, row * 16);
+    }
 }
 
 /// Packs the X Y Z codes of one vertex's +planes (bits 0-2) and -planes
 /// (bits 8-10) into five bits; far Z is never clipped, only rejected.
-inline fn packClipCodes(result: u32, codes: u32) {
+inline fn packClipCodes(codes: u32) result: u32 {
     result = codes & 0x0307;
     reg high: u32 = result >> 5;
     result |= high;
@@ -597,7 +588,7 @@ inline fn packClipCodes(result: u32, codes: u32) {
 
 /// Packs a vertex's rejection codes, inverted so that ORing three
 /// vertices' codes leaves a zero for a plane all of them are outside.
-inline fn packRejectCodes(result: u32, codes: u32) {
+inline fn packRejectCodes(codes: u32) result: u32 {
     result = codes & 0x0707;
     reg high: u32 = result >> 5;
     result = result ~| high;

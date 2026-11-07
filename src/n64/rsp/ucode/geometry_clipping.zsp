@@ -249,7 +249,7 @@ inline fn intersect(
     normal.sfract = vmudl(normal.sfract, shifts.WWWWWWWW);
     normal.sint = vmadm(normal.sint, shifts.WWWWWWWW);
     normal.sfract = vmadn(vector_zero, vector_zero);
-    scaleByFraction(normal, normal, w_scale, vector_zero);
+    normal = scaleByFraction(normal, w_scale, vector_zero);
 
     // Signed distances of both ends: X Y Z W dot products in lanes 0 and 4.
     reg dot: vec32 = ends * normal;
@@ -288,8 +288,7 @@ inline fn intersect(
     }
 
     // Clip codes of the new point against the guard band planes.
-    reg clip_base: vec32 = undefined;
-    scaleByFraction(clip_base, base, w_scale, vector_zero);
+    reg clip_base: vec32 = scaleByFraction(base, w_scale, vector_zero);
     reg plane_w: vec32 = undefined;
     plane_w.sfract = vmudm(guard_band, base.sfract.wwwwWWWW);
     plane_w.sint = vmadh(guard_band, base.sint.wwwwWWWW);
@@ -304,7 +303,7 @@ inline fn intersect(
 }
 
 /// result = value * factor, with `factor` an unsigned fraction.
-inline fn scaleByFraction(result: vec32, value: vec32, factor: vec16, vector_zero: vec16) {
+inline fn scaleByFraction(value: vec32, factor: vec16, vector_zero: vec16) result: vec32 {
     result.sfract = vmudl(value.sfract, factor);
     result.sint = vmadm(value.sint, factor);
     result.sfract = vmadn(vector_zero, vector_zero);

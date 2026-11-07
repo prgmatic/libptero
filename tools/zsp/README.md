@@ -37,8 +37,10 @@ ordinary AST: `parse_comptime.zig` evaluates constant expressions, unrolls
 `inline for`, and splits register arrays into one register per element;
 `parse_products.zig` lowers vector products and the `acc` accumulator;
 `parse_lanes.zig` lowers lane-range transfers; `parse_pointers.zig` turns
-typed-pointer dereferences into loads and stores; and `parse_loops.zig`
-attaches `while` continue expressions. The lexer-level substitutions that
+typed-pointer dereferences into loads and stores; `parse_loops.zig`
+attaches `while` continue expressions; `parse_arguments.zig` hoists
+expression arguments into temporaries; and `parse_returns.zig` turns inline
+return values into a result parameter bound to the caller's destination. The lexer-level substitutions that
 make this work (unrolled indices, per-iteration names, and array elements)
 live in `Parser.advance`.
 
@@ -290,6 +292,7 @@ value = left ~| right;
 value = ~value;
 value = -value;
 flag = left < right; // normalized to 0 or 1
+reg delta: i32 = -(left + right); // negation applies to any operand
 ```
 
 The corresponding non-compound operators are `+`, `+%`, `-`, `-%`, `*`, `/`,
@@ -481,6 +484,15 @@ address is taken. There the first four unpinned scalar parameters use `$a0`
 through `$a3`, and other parameters, including all vector ones, must specify
 a register.
 
+Arguments may be expressions: `helper(base + 16, -offset)` evaluates each
+expression argument into a temporary just before the statement making the
+call, so the callee still receives a register.
+
+A register array parameter, `rows: [4]vec32`, takes one parameter per
+element (`rows[0]` to `rows[3]`); callers pass a register array of that
+length by name, or the elements individually. Pinned, `reg($v04) rows:
+[2]vec16` occupies consecutive registers.
+
 Calls remain stackless. A storage label passed as an argument passes its
 DMEM address. Scalar input arguments are moved into the callee's
 registers when allocation cannot place them there directly; moves that form a
@@ -500,6 +512,29 @@ and the expansion's temporaries avoid every caller register still in use. A pinn
 argument in that register. Other functions use the repository's stackless
 fixed-register calling convention. `export` emits a
 global assembly symbol, while `pub` permits access from another ZSP module.
+
+Inline functions may return a value. `T` after the parameters makes the
+final statement `return value;` assign the caller's destination; a named
+result, `name: T`, is assigned directly in the body, so the value is built in
+the caller's register without a copy:
+
+```zig
+inline fn packCodes(codes: u32) result: u32 {
+    result = codes & 0x0307;
+    reg high: u32 = result >> 5;
+    result |= high;
+}
+
+inline fn twice(x: u32) u32 {
+    return x + x;
+}
+
+reg clip: u32 = packCodes(codes);   // declares `clip`, then expands
+clip = twice(clip);
+```
+
+Only inline functions return values, `return value;` must be the body's last
+statement, and a call is the whole initializer or right-hand side.
 
 Function pointers use structural lowered signatures. Unpinned types use the
 same default argument registers, and exceptional registers can be explicit:
@@ -565,7 +600,9 @@ unknown modules/functions, and duplicate import aliases are rejected.
 ## Control flow
 
 Structured conditions support `==`, `!=`, `<`, `<=`, `>`, and `>=`, with
-signedness taken from the left register. `while (true)` and
+signedness taken from the left register. An `if` or `else` body is a block
+or one statement, so `if (done == 0) return;` and `else if` chains need no
+braces. `while (true)` and
 `do { } while (true)` loop until a transfer leaves them:
 
 ```zig
@@ -1205,8 +1242,11 @@ take no more cycles.
 
 ## Current limitations
 
+Statement keywords such as `packed`, `state`, and `data` are contextual:
+`state = 0;` assigns a variable of that name.
+
 Notable omissions include general scalar multiplication/division, casts,
-ternary expressions, general vector shifts, general-purpose annotations, and
+ternary expressions, value returns from non-inline functions, general vector shifts, general-purpose annotations, and
 macros. Register-array indices and `inline for` bounds must be constants;
 typed-pointer fields cannot be arrays. Selected unaligned and transposed transfers are supported through the
 explicit `rsp.vector.*` operations described above.

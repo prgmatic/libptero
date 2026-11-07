@@ -16,6 +16,15 @@ pub const Parser = struct {
     type_symbols: std.ArrayList(TypeSymbol) = .empty,
     /// Whether the block just parsed opened with `@branchHint(.cold)`.
     last_block_cold: bool = false,
+    /// Temporaries for expression arguments, emitted before their statement.
+    hoisted_arguments: std.ArrayList(ast.Statement) = .empty,
+    /// Calls that fill a declaration from an inline function's result.
+    trailing_statements: std.ArrayList(ast.Statement) = .empty,
+    /// The result parameter of the inline function being parsed.
+    inline_result: ?@import("parse_returns.zig").Result = null,
+    returned_value: bool = false,
+    /// Nesting of statement blocks; a function body is depth 1.
+    block_depth: u32 = 0,
     /// Every name declared in the current function.
     function_names: std.StringHashMapUnmanaged(void) = .empty,
     compile_time_members: std.ArrayList(CompileTimeMember) = .empty,
@@ -136,6 +145,8 @@ pub const Parser = struct {
         self.generated_names.deinit(self.allocator);
         self.iterations.deinit(self.allocator);
         self.function_names.deinit(self.allocator);
+        self.hoisted_arguments.deinit(self.allocator);
+        self.trailing_statements.deinit(self.allocator);
     }
 
     pub fn appendFunction(self: *Parser, functions: *std.ArrayList(ast.Function), parsed: ast.Function) !void {
@@ -178,6 +189,8 @@ pub const Parser = struct {
     }
 
     pub fn parseBlockStatements(self: *Parser) anyerror![]ast.Statement {
+        self.block_depth += 1;
+        defer self.block_depth -= 1;
         const scope = self.type_symbols.items.len;
         defer self.type_symbols.shrinkRetainingCapacity(scope);
         var list: StatementList = .{};
@@ -189,6 +202,22 @@ pub const Parser = struct {
         while (!try self.eat(.r_brace)) try self.parseStatementInto(&list);
         self.accumulator.closeList(&list);
         self.last_block_cold = cold;
+        return self.finishStatements(&list);
+    }
+
+    /// The single statement of an unbraced `if`/`else` body, as a block.
+    pub fn parseSingleStatementBlock(self: *Parser) anyerror![]ast.Statement {
+        self.block_depth += 1;
+        defer self.block_depth -= 1;
+        const scope = self.type_symbols.items.len;
+        defer self.type_symbols.shrinkRetainingCapacity(scope);
+        var list: StatementList = .{};
+        defer list.locations.deinit(self.allocator);
+        const renames = self.substitutions.items.len;
+        defer self.restoreSubstitutions(renames);
+        try self.parseStatementInto(&list);
+        self.accumulator.closeList(&list);
+        self.last_block_cold = false;
         return self.finishStatements(&list);
     }
 
@@ -217,7 +246,14 @@ pub const Parser = struct {
     pub fn parseStatementInto(self: *Parser, list: *StatementList) anyerror!void {
         const location: ast.SourceLocation = .{ .line = self.current.line, .column = self.current.column };
         if (try @import("parse_comptime.zig").parseExpandingStatement(self, list, location)) return;
-        try @import("parse_products.zig").appendStatement(self, list, try self.parseStatement(), location);
+        const hoisted = self.hoisted_arguments.items.len;
+        const trailing = self.trailing_statements.items.len;
+        const statement = try self.parseStatement();
+        for (self.hoisted_arguments.items[hoisted..]) |argument| try @import("parse_products.zig").appendStatement(self, list, argument, location);
+        self.hoisted_arguments.shrinkRetainingCapacity(hoisted);
+        try @import("parse_products.zig").appendStatement(self, list, statement, location);
+        for (self.trailing_statements.items[trailing..]) |call| try @import("parse_products.zig").appendStatement(self, list, call, location);
+        self.trailing_statements.shrinkRetainingCapacity(trailing);
     }
 
     pub fn finishStatements(self: *Parser, list: *StatementList) ![]ast.Statement {
@@ -264,7 +300,7 @@ pub const Parser = struct {
         var arguments: std.ArrayList(ast.ValueRef) = .empty;
         errdefer arguments.deinit(self.allocator);
         if (!try self.eat(.r_paren)) while (true) {
-            try arguments.append(self.allocator, try self.parseValueRef());
+            try @import("parse_arguments.zig").appendArgument(self, &arguments);
             if (try self.listEnds(.r_paren)) break;
         };
         return arguments.toOwnedSlice(self.allocator);
@@ -594,6 +630,9 @@ pub const ErrorType = enum {
     invalid_hardware_register,
     duplicate_clobber_contract,
     invalid_function_alignment,
+    return_value_requires_inline,
+    return_value_not_last,
+    missing_return_value,
     duplicate_compile_time_type,
     duplicate_compile_time_member,
     expected_unsigned_scalar_type,
@@ -656,6 +695,9 @@ const error_strings = std.EnumArray(ErrorType, []const u8).init(.{
     .invalid_hardware_register = "hardware register index must be between 0 and 15",
     .duplicate_clobber_contract = "function has more than one clobber contract",
     .invalid_function_alignment = "function alignment must be a power of two from 4 to 4096",
+    .return_value_requires_inline = "only inline functions return values",
+    .return_value_not_last = "`return value;` must be the last statement of the function body",
+    .missing_return_value = "function with a return type must end with `return value;`",
     .duplicate_compile_time_type = "duplicate compile-time type",
     .duplicate_compile_time_member = "duplicate compile-time member",
     .expected_unsigned_scalar_type = "expected unsigned scalar type",

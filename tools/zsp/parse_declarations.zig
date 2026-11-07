@@ -93,14 +93,24 @@ fn parseFunction(self: *Parser, prefixes: Prefixes, command_indices: []const u8)
     defer self.type_symbols.shrinkRetainingCapacity(function_scope);
     const name = try self.expect(.ident);
     _ = try self.expect(.l_paren);
-    const parameters = try parseParameters(self);
+    var parameters = try parseParameters(self);
     errdefer self.allocator.free(parameters.items);
+    const returns = @import("parse_returns.zig");
+    if (try returns.parseReturnType(self, prefixes.@"inline")) |return_type| {
+        const result = try returns.resultParameter(self, name.text, return_type);
+        parameters.items = try self.allocator.realloc(parameters.items, parameters.items.len + 1);
+        parameters.items[parameters.items.len - 1] = result;
+        self.inline_result = .{ .name = result.name, .data_type = return_type.data_type, .named = return_type.name != null };
+    }
+    defer self.inline_result = null;
+    self.returned_value = false;
     var modifiers: Modifiers = .{};
     errdefer modifiers.deinit(self.allocator);
     while (self.current.tag == .ident or self.current.tag == .at) try parseModifier(self, &modifiers);
     const internal = !prefixes.@"export" and !prefixes.@"extern" and command_indices.len == 0;
     try applyDefaultParameterRegisters(self, parameters.items, parameters.first_unpinned, internal);
     const statements = try parseFunctionBody(self, prefixes);
+    try returns.checkReturned(self, name);
     return .{
         .name = name.text,
         .source_name = name.text,
@@ -187,17 +197,60 @@ pub fn parseParameters(self: *Parser) !ParsedParameters {
     errdefer parameters.deinit(self.allocator);
     var first_unpinned: ?token.Token = null;
     if (!try self.eat(.r_paren)) while (true) {
-        try parameters.append(self.allocator, try parseParameter(self, &first_unpinned));
+        try parseParameter(self, &parameters, &first_unpinned);
         if (try self.listEnds(.r_paren)) break;
     };
     return .{ .items = try parameters.toOwnedSlice(self.allocator), .first_unpinned = first_unpinned };
 }
 
-fn parseParameter(self: *Parser, first_unpinned: *?token.Token) !ast.Parameter {
+fn parseParameter(self: *Parser, parameters: *std.ArrayList(ast.Parameter), first_unpinned: *?token.Token) !void {
     const register_token = try parseRegisterAttribute(self);
     const name = try self.expect(.ident);
     if (register_token == null and first_unpinned.* == null) first_unpinned.* = name;
     _ = try self.expect(.colon);
+    if (self.current.tag == .l_bracket) return parseArrayParameter(self, parameters, name, register_token);
+    try parameters.append(self.allocator, try parseScalarParameter(self, name, register_token));
+}
+
+/// `rows: [n]T` takes one parameter per element, named `rows[i]`; a
+/// caller passes a register array of the same length by name. A pinned
+/// vector array occupies consecutive registers from the one named.
+fn parseArrayParameter(self: *Parser, parameters: *std.ArrayList(ast.Parameter), name: token.Token, register_token: ?token.Token) !void {
+    const shape = try parseArrayShape(self);
+    const binding = try optionalBinding(self, register_token, shape.data_type);
+    if (register_token != null and binding.vector_reg == null) return self.fail(register_token.?, .expected_vector_register);
+    // Known before the next token lexes, which may index it.
+    try self.type_symbols.append(self.allocator, .{ .name = name.text, .data_type = shape.data_type, .array_len = shape.len });
+    for (0..shape.len) |index| {
+        const element = try self.elementName(name.text, index);
+        try self.addTypeSymbol(element, shape.data_type);
+        const vector_reg = try elementRegister(self, binding.vector_reg, shape.data_type, index, register_token);
+        try parameters.append(self.allocator, .{ .name = element, .data_type = shape.data_type, .reg = null, .vector_reg = vector_reg });
+    }
+}
+
+const ArrayShape = struct { len: usize, data_type: ast.DataType };
+
+/// `[n]T` with a length from 1 to 32.
+fn parseArrayShape(self: *Parser) !ArrayShape {
+    _ = try self.expect(.l_bracket);
+    const len_token = self.current;
+    const len = try @import("parse_comptime.zig").parseConstExpression(self);
+    if (len <= 0 or len > 32) return self.fail(len_token, .invalid_array_length);
+    _ = try self.expect(.r_bracket);
+    return .{ .len = @intCast(len), .data_type = try self.parseDataType(try self.expect(.ident)) };
+}
+
+/// Element `index` of a pinned vector array; a `vec32` takes two registers.
+fn elementRegister(self: *Parser, first: ?ast.VectorRegister, data_type: ast.DataType, index: usize, register_token: ?token.Token) !?ast.VectorRegister {
+    const base = first orelse return null;
+    const width: usize = if (data_type == .vec32) 2 else 1;
+    const number = @intFromEnum(base) + index * width;
+    if (number > 31) return self.fail(register_token.?, .expected_vector_register);
+    return @enumFromInt(number);
+}
+
+fn parseScalarParameter(self: *Parser, name: token.Token, register_token: ?token.Token) !ast.Parameter {
     const declared = try parseValueType(self);
     const data_type = declared.data_type.?;
     const binding = try optionalBinding(self, register_token, data_type);
@@ -266,7 +319,7 @@ const ResolvedType = struct {
     function_type: ?ast.FunctionType = null,
     pointee: ?Parser.Pointee = null,
 };
-const Initializer = struct { value: ?ast.Value = null, undefined: bool = false };
+const Initializer = struct { value: ?ast.Value = null, undefined: bool = false, call: bool = false };
 
 /// `reg($t0) name: type = value;` after the `reg` keyword. The type may
 /// be omitted when the initializer determines it.
@@ -275,7 +328,10 @@ pub fn parseRegDecl(self: *Parser) !ast.VarDecl {
     const name = try self.declaredName(try self.expect(.ident));
     const declared: DeclaredType = if (try self.eat(.colon)) try parseDeclaredType(self) else .{};
     const initializer = try parseInitializer(self);
-    _ = try self.expect(.semicolon);
+    if (initializer.call) {
+        // `reg y: T = f(x);` declares `y`, then calls `f(x, y)`.
+        try self.trailing_statements.append(self.allocator, try @import("parse_returns.zig").parseValueCall(self, name.text));
+    } else _ = try self.expect(.semicolon);
     const resolved = try resolveType(self, name, declared, initializer.value);
     try checkPointee(self, name, resolved.pointee, initializer.value);
     const binding = try optionalBinding(self, register_token, resolved.data_type);
@@ -360,6 +416,7 @@ fn parseFunctionTypeParameter(self: *Parser, type_name: token.Token, index: usiz
 /// `= value`, `= undefined`, or nothing.
 fn parseInitializer(self: *Parser) !Initializer {
     if (!try self.eat(.equal)) return .{};
+    if (@import("parse_returns.zig").atValueCall(self)) return .{ .call = true };
     if (!self.atKeyword("undefined")) return .{ .value = try self.parseScalarExpression(0) };
     _ = try self.expect(.ident);
     return .{ .undefined = true };

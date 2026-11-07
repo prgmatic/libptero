@@ -59,6 +59,18 @@ pub fn expectSyntaxRejected(source: []const u8) !void {
     return error.ExpectedSyntaxError;
 }
 
+/// Rejected while parsing or compiling. Spellings that parse as calls to
+/// value-returning functions fail when the call does not resolve.
+pub fn expectRejected(source: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var parser = try parser_mod.Parser.init(arena.allocator(), source);
+    const functions = parser.parse() catch return;
+    var output = std.Io.Writer.Allocating.init(arena.allocator());
+    codegen.write(arena.allocator(), &output.writer, functions) catch return;
+    return error.ExpectedRejection;
+}
+
 pub fn expectOptimizedAsm(input: []const u8, expected: []const u8) !void {
     var output = std.Io.Writer.Allocating.init(testing.allocator);
     defer output.deinit();

@@ -787,8 +787,7 @@ fn rdpSetCombineMode2Pass(
     // Libdragon compares its zero-based data end against 0x500. Libptero's
     // corresponding overlay DMEM coordinate is shifted by 0x800.
     if(overlay_data_end > 0x0d00) tail queue.invalidCommand(0xc0090000);
-    reg flags: i32 = undefined;
-    flags = -32756;
+    reg flags: i32 = -32756;
     clearZBackup(overlay_data_end, flags, temporary);
 
     dmem = 1280;

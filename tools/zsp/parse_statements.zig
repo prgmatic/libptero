@@ -11,8 +11,21 @@ pub fn parseStatement(self: *Parser) anyerror!ast.Statement {
     if (self.current.tag == .dot) {
         if (try self.parseNamespaceStatement(first)) |statement| return statement;
     }
-    if (early_statement_parsers.get(first.text)) |parse_statement| return parse_statement(self, first);
+    if (!continuesAssignment(self.current.tag)) {
+        if (early_statement_parsers.get(first.text)) |parse_statement| return parse_statement(self, first);
+    }
     return self.parseLabelOrStatement(first);
+}
+
+/// Statement keywords are contextual: `packed = x;` or `state[i] = 0;`
+/// assigns to a variable that happens to share a keyword's name.
+fn continuesAssignment(tag: token.Tag) bool {
+    return switch (tag) {
+        .equal, .plus_equal, .plus_percent_equal, .minus_equal, .minus_percent_equal, .star_equal, .slash_equal => true,
+        .ampersand_equal, .pipe_equal, .caret_equal, .nor_equal, .shift_left_equal, .shift_right_equal, .logical_shift_right_equal => true,
+        .l_bracket => true,
+        else => false,
+    };
 }
 
 pub fn parseNamespaceStatement(self: *Parser, first: token.Token) !?ast.Statement {
@@ -24,7 +37,9 @@ pub fn parseNamespaceStatement(self: *Parser, first: token.Token) !?ast.Statemen
 
 pub fn parseLabelOrStatement(self: *Parser, first: token.Token) anyerror!ast.Statement {
     if (try self.eat(.colon)) return self.parseLabeledStatement(first);
-    if (late_statement_parsers.get(first.text)) |parse_statement| return parse_statement(self, first);
+    if (!continuesAssignment(self.current.tag)) {
+        if (late_statement_parsers.get(first.text)) |parse_statement| return parse_statement(self, first);
+    }
     return self.parseAssignmentOrCall(first);
 }
 
@@ -128,6 +143,7 @@ pub fn parseTailKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
 }
 
 pub fn parseReturnKeyword(self: *Parser, _: token.Token) anyerror!ast.Statement {
+    if (self.current.tag != .semicolon and !self.atKeyword("slot")) return @import("parse_returns.zig").parseReturnValue(self);
     return .{ .builtin = .{ .return_from_function = try self.parseOptionalDelaySlot() } };
 }
 
@@ -209,6 +225,12 @@ fn parseContinueExpression(self: *Parser) !?[]ast.Statement {
 }
 
 /// `{ ... }`
+/// A braced block, or one statement: `if (done) return;`, `else if (...)`.
+fn parseBody(self: *Parser) ![]ast.Statement {
+    if (self.current.tag == .l_brace) return parseBraced(self);
+    return self.parseSingleStatementBlock();
+}
+
 fn parseBraced(self: *Parser) ![]ast.Statement {
     _ = try self.expect(.l_brace);
     return self.parseBlockStatements();
@@ -283,9 +305,9 @@ fn parseConditionalGoto(self: *Parser, condition: ast.Condition) !ast.Statement 
 
 fn parseIfStatement(self: *Parser, condition: ast.Condition) !ast.Statement {
     const delay_slot = if (try self.eatKeyword("slot")) try parseBraced(self) else null;
-    const then_statements = try parseBraced(self);
+    const then_statements = try parseBody(self);
     const cold = self.last_block_cold;
-    const else_statements = if (try self.eatKeyword("else")) try parseBraced(self) else null;
+    const else_statements = if (try self.eatKeyword("else")) try parseBody(self) else null;
     return .{ .if_statement = .{
         .condition = condition,
         .delay_slot = delay_slot,
@@ -382,8 +404,21 @@ fn parseDestination(self: *Parser, first: token.Token) !Destination {
     return .{ .name = first.text, .lane = access.lane, .lane_count = access.lane_count, .view = access.view };
 }
 
-/// `= -x;`, `= ~x;`, `= expression;`, or `= a < b;`.
+/// A whole register (not a lane or view) assigned an inline function's result.
+fn receivesValueCall(self: *const Parser, destination: Destination) bool {
+    if (destination.lane != null or destination.view != null) return false;
+    return @import("parse_returns.zig").atValueCall(self);
+}
+
+/// `name = value;` after the `=`.
+pub fn parseAssignedValueTo(self: *Parser, name: []const u8) !ast.Statement {
+    return parseAssignedValue(self, .{ .name = name });
+}
+
+/// `= -x;`, `= ~x;`, `= expression;`, `= a < b;`, or `= f(x);` calling an
+/// inline function that returns a value.
 fn parseAssignedValue(self: *Parser, destination: Destination) !ast.Statement {
+    if (receivesValueCall(self, destination)) return @import("parse_returns.zig").parseValueCall(self, destination.name);
     if (try self.eat(.minus)) return finishAssignment(self, destination, valueFromRef(try self.parseValueRef()), .negate, null);
     if (try self.eat(.tilde)) return finishAssignment(self, destination, valueFromRef(try self.parseValueRef()), .bit_not, null);
     const lhs = try self.parseScalarExpression(0);

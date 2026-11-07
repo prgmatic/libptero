@@ -17,6 +17,7 @@ test {
     _ = @import("tests/products.zig");
     _ = @import("tests/pointers.zig");
     _ = @import("tests/loops.zig");
+    _ = @import("tests/surface.zig");
     _ = @import("ir.zig");
     _ = @import("ir_print.zig");
     _ = @import("ir_parse.zig");

@@ -5,6 +5,7 @@ const support = @import("support.zig");
 const expectAsm = support.expectAsm;
 const expectRejectedWith = support.expectRejectedWith;
 const expectSyntaxRejected = support.expectSyntaxRejected;
+const expectRejected = support.expectRejected;
 
 test "inline for unrolls with a constant index and renames body locals" {
     try expectAsm(
@@ -202,13 +203,13 @@ test "lane ranges must name a supported transfer" {
 }
 
 test "parity spellings are no longer accepted" {
-    try expectSyntaxRejected("fn test() { reg a: u32 = scalar.zero(); }");
-    try expectSyntaxRejected("fn test() { reg a: u32 = scalar.unsigned(4); }");
+    try expectRejected("fn test() { reg a: u32 = scalar.zero(); }");
+    try expectRejected("fn test() { reg a: u32 = scalar.unsigned(4); }");
     try expectSyntaxRejected("bss { b: u32; } fn test() { reg a: dmem = dmem.addressOfUnsigned(b); }");
     try expectSyntaxRejected("fn test() { reg a: u32 = code.addressOfUnsigned(test); }");
     try expectSyntaxRejected("fn test(reg($t0) p: dmem) { reg($v01) v: vec16 = undefined; rsp.vector.load64(v, 0, p, 0); }");
     try expectSyntaxRejected("fn test(reg($t0) p: dmem) { reg($v01) v: vec16 = undefined; store(vec64, p, v, 0); }");
-    try expectSyntaxRejected("fn test(reg($t0) p: dmem) { reg($v01) v: vec16 = loadVectorWords(p, 0); }");
+    try expectRejected("fn test(reg($t0) p: dmem) { reg($v01) v: vec16 = loadVectorWords(p, 0); }");
     try expectSyntaxRejected("bss { t: u32; } fn test(reg($t0) i: u32) { reg a: u32 = load(u32, i, t); }");
 }
 
