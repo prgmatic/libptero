@@ -7,7 +7,7 @@
         .{ .name = "vadpcm_mono", .instructions = 4813, .cycles = 5050, .digest = "d060f75275d4e6a8ecba40d1328fc326" },
         .{ .name = "vadpcm_stereo_batches", .instructions = 10416, .cycles = 10462, .digest = "bd75989fe114833b5b7488512ae71803" },
         .{ .name = "mixer_4voice", .instructions = 32333, .cycles = 36503, .digest = "e62d1c5ea7cb6e353bebd1932a848044" },
-        .{ .name = "geometry_lit_mesh", .instructions = 17966, .cycles = 12088, .digest = "4474f43290444a1bda8410115cb64889" },
-        .{ .name = "geometry_clipped_mesh", .instructions = 18674, .cycles = 13696, .digest = "875b2e1f8e6dcb613bf0727a662021b3" },
+        .{ .name = "geometry_lit_mesh", .instructions = 17930, .cycles = 11962, .digest = "4474f43290444a1bda8410115cb64889" },
+        .{ .name = "geometry_clipped_mesh", .instructions = 18638, .cycles = 13570, .digest = "875b2e1f8e6dcb613bf0727a662021b3" },
     },
 }

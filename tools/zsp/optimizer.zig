@@ -2,7 +2,8 @@
 //! folding, repeated constants, dead-write removal, CP0 polling loops,
 //! lane-op encodings, list scheduling, delay-slot filling, loop-exit and
 //! fall-through delay slots, and call continuations. See `peephole.zig`, `schedule.zig`,
-//! `loop_slots.zig`, `branch_slots.zig`, and `call_continuations.zig`.
+//! `loop_slots.zig`, `branch_slots.zig`, `cold_slots.zig`, and
+//! `call_continuations.zig`.
 const std = @import("std");
 const ir_parse = @import("ir_parse.zig");
 const ir_print = @import("ir_print.zig");
@@ -22,6 +23,7 @@ pub fn optimize(out: *Emitter) !void {
     peephole.fillDelaySlots(&out.items);
     @import("loop_slots.zig").fillLoopExitSlots(&out.items);
     @import("branch_slots.zig").fillFromFallthrough(&out.items);
+    @import("cold_slots.zig").fillFromRejoiningColdBlocks(&out.items);
     @import("call_continuations.zig").continueAtJumps(&out.items);
 }
 

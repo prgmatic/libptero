@@ -456,6 +456,7 @@ export fn _start(
                 reg light_scale: vec16 = vmulf(normal, direction);
                 reg color: vec16 = undefined;
                 rsp.vector.loadPackedUnsigned(color, light, 0);
+                light +%= light_size;
                 if (is_point != 0) {
                     @branchHint(.cold);
                     pointLight(light, light_scale, mvp[0], mvp[1], mvp[2], mvp[3], position, normal, eye_position_ready, scratch, vector_zero, powers, shifts);
@@ -466,7 +467,6 @@ export fn _start(
                 scratch = vmacu(color, light_scale.yyyyYYYY);
                 scratch = vmacu(color, light_scale.zzzzZZZZ);
                 light_color = vadd(light_color, scratch);
-                light +%= light_size;
                 rsp.vector.loadPackedSigned(direction, light, light_direction);
                 is_point = load(u8, light, light_is_point);
             }
@@ -478,9 +478,13 @@ export fn _start(
 
         // Clip codes: against W for trivial rejection, against the guard
         // band for clipping. Each holds the pair's codes in its low and
-        // high nibbles.
+        // high nibbles. The color, normalization, and fog steps between
+        // them are ordered to keep the vector unit busy, and the next
+        // pair's position loads early.
         reg plane_w: vec32 = undefined;
         plane_w.sfract = vmudm(guard_band, clip.sfract.wwwwWWWW);
+        reg color: vec16 = undefined;
+        rsp.vector.loadPackedUnsigned(color, input, input_color);
         plane_w.sint = vmadh(guard_band, clip.sint.wwwwWWWW);
         plane_w.sfract = vmadn(vector_zero, vector_zero);
         scratch = vch(clip.sint, clip.sint.wwwwWWWW);
@@ -488,7 +492,16 @@ export fn _start(
         reg reject_codes: u32 = rsp.vector.getCompareCode();
         scratch = vch(clip.sint, plane_w.sint);
         scratch = vcl(clip.sfract, plane_w.sfract);
+        color = vmulf(color, light_color);
+        // The position is done with: the lights and the transform used it.
+        position = load(vec16, input, input_pair_size);
+        clip.sfract = vmudl(clip.sfract, w_scale);
         reg clip_codes: u32 = rsp.vector.getCompareCode();
+        clip.sint = vmadm(clip.sint, w_scale);
+        clip.sfract = vmadn(vector_zero, vector_zero);
+        color = vmudm(color, shifts.ZZZZZZZZ);
+        store(vec32, output_a, clip[0..4], vertex_clip_position);
+        store(vec32, output_b, clip[4..8], vertex_clip_position);
         reg clip_a: u32 = packClipCodes(clip_codes);
         clip_a |= base_tile;
         clip_codes >>= 4;
@@ -498,46 +511,36 @@ export fn _start(
         reject_codes >>= 4;
         reg reject_b: u32 = packRejectCodes(reject_codes);
 
-        reg color: vec16 = undefined;
-        rsp.vector.loadPackedUnsigned(color, input, input_color);
-        reg texture: vec16 = undefined;
-        texture[0..4] = load(vec16, input, input_texture);
-        color = vmulf(color, light_color);
-        color = vmudm(color, shifts.ZZZZZZZZ);
-        color = vmudh(color, uv_generation.ZZZZZZZZ);
-        rsp.vector.storePackedUnsigned(color, 0, output_a, vertex_color);
-        rsp.vector.storePackedUnsigned(color, 4, output_b, vertex_color);
-
-        clip.sfract = vmudl(clip.sfract, w_scale);
-        clip.sint = vmadm(clip.sint, w_scale);
-        clip.sfract = vmadn(vector_zero, vector_zero);
-        store(vec32, output_a, clip[0..4], vertex_clip_position);
-        store(vec32, output_b, clip[4..8], vertex_clip_position);
-
         // 1/W of both vertices, chained through the reciprocal unit.
         screen_size.sint[3] = vrcph(clip.sint[3]);
         screen_size.sfract[3] = vrcpl(clip.sfract[3]);
         screen_size.sint[3] = vrcph(clip.sint[7]);
         screen_size.sfract[7] = vrcpl(clip.sfract[7]);
         screen_size.sint[7] = vrcph(vector_zero[7]);
-        store(vec16, output_a, screen_size.sint[3], vertex_inverse_w);
-        store(vec16, output_a, screen_size.sfract[3], vertex_inverse_w + 2);
-        store(vec16, output_b, screen_size.sint[7], vertex_inverse_w);
-        store(vec16, output_b, screen_size.sfract[7], vertex_inverse_w + 2);
+        color = vmudh(color, uv_generation.ZZZZZZZZ);
 
         // Fog: (Z + offset) * scale, as 1.0 minus it, below the limit.
         reg fog: vec32 = undefined;
         fog.sfract = vaddc(clip.sfract, fog_scale.yyyyyyyy);
         fog.sint = vadd(clip.sint, fog_scale.xxxxxxxx);
-        fog.sint = vmudh(fog.sint, fog_scale.wwwwwwww);
-        reg fog_value: vec16 = vsub(fog_scale, fog.sint.zzzzZZZZ);
-        fog_value = vmudn(fog_value, powers.ZZZZZZZZ);
 
         // Project: position * 1/W * scale + offset.
         clip = clip * screen_size.wwwwWWWW;
+        rsp.vector.storePackedUnsigned(color, 0, output_a, vertex_color);
+        store(vec16, output_a, screen_size.sint[3], vertex_inverse_w);
+        store(vec16, output_a, screen_size.sfract[3], vertex_inverse_w + 2);
+        store(vec16, output_b, screen_size.sint[7], vertex_inverse_w);
+        store(vec16, output_b, screen_size.sfract[7], vertex_inverse_w + 2);
+        fog.sint = vmudh(fog.sint, fog_scale.wwwwwwww);
+        rsp.vector.storePackedUnsigned(color, 4, output_b, vertex_color);
         acc = clip * screen_size;
         acc += screen_offset * powers.WWWWWWWW;
         reg screen: vec16 = acc;
+        reg fog_value: vec16 = vsub(fog_scale, fog.sint.zzzzZZZZ);
+        reg texture: vec16 = undefined;
+        texture[0..4] = load(vec16, input, input_texture);
+        input +%= input_pair_size;
+        fog_value = vmudn(fog_value, powers.ZZZZZZZZ);
 
         // Texture coordinates: S T of both vertices in lanes 0-3.
         texture = vaddc(texture, uv_generation);
@@ -546,9 +549,7 @@ export fn _start(
             sphericalTexture(texture, screen, screen_offset, normal, uv_generation, vector_zero);
         }
 
-        // The next pair's position and normal.
-        input +%= input_pair_size;
-        position = load(vec16, input, 0);
+        // The next pair's normal.
         normal = normal_mask & position.wwwwWWWW;
         normal = vmudn(normal, normal_shift);
 
@@ -595,14 +596,14 @@ inline fn packRejectCodes(codes: u32) result: u32 {
     result = result ~| high;
 }
 
-/// Lights both vertices by the point light at `light`, replacing
+/// Lights both vertices by the point light just before `next_light`, replacing
 /// `light_scale` with the light's direction scaled by its falloff. The
 /// vertices' eye-space positions are computed once per pair. Every vector
 /// register is in use here, so `eye_position`, `sum`, `to_light`, and
 /// `square` are the caller's MVP rows, which it reloads afterwards,
 /// `position` is overwritten, and products accumulate through `scratch`.
 inline fn pointLight(
-    light: dmem,
+    next_light: dmem,
     light_scale: vec16,
     eye_position: vec32,
     sum: vec32,
@@ -616,7 +617,8 @@ inline fn pointLight(
     powers: vec16,
     shifts: vec16,
 ) {
-    reg size: u32 = load(u16, light, light_point_size);
+    reg point: dmem = next_light -% light_size;
+    reg size: u32 = load(u16, point, light_point_size);
     if (eye_position_ready == 0) {
         loadMatrix(eye_position, sum, to_light, square, matrix_mv);
         scratch = vmudn(eye_position.sfract, position.xxxxXXXX);
@@ -639,8 +641,8 @@ inline fn pointLight(
 
     // The vector from the vertex to the light, its length, and the size
     // as 16.16 in W.
-    to_light.sint[0..4] = load(vec16, light, light_point_position);
-    to_light.sint[4..8] = load(vec16, light, light_point_position);
+    to_light.sint[0..4] = load(vec16, point, light_point_position);
+    to_light.sint[4..8] = load(vec16, point, light_point_position);
     to_light.sint = vmudm(to_light.sint, shifts.YYYYYYYY);
     to_light.sfract = vmadn(vector_zero, vector_zero);
     to_light = to_light - eye_position;

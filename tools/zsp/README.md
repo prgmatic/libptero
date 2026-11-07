@@ -1217,8 +1217,8 @@ than assembly text. Its passes run in order:
 5. Lane-encoding selection spells each VMOV/VRCP/VRSQ destination element
    (bit 3 is ignored by hardware) to avoid false dependences.
 6. List scheduling reorders each straight-line block together with the branch
-   that ends it and that branch's delay slot. A beam search (32 candidates,
-   windows of up to 64 instructions) scores orders with the RSP interpreter's
+   that ends it and that branch's delay slot. A beam search (64 candidates,
+   windows of up to 96 instructions) scores orders with the RSP interpreter's
    calibrated timing model (`tools/rsp_interp/timing.zig`), so it accounts for
    load latency, vector result latency, and dual issue. Each window starts
    from the pipeline state left by the instructions that fall through into
@@ -1236,7 +1236,12 @@ than assembly text. Its passes run in order:
    writes is dead where the branch goes. Liveness comes from a bounded walk
    over the program, through jumps and into one level of calls; returns,
    indirect jumps, and unknown targets count as reads.
-10. Call continuations: a call followed by a jump to a local label,
+10. Cold-block slots: a branch to an out-of-line cold block that jumps back
+    to the label right after the slot takes the first instruction after that
+    label when only the cold block reaches it and the block (including
+    straight-line callees) neither reads nor writes what the instruction
+    writes, nor writes what it reads, nor stores memory a load could see.
+11. Call continuations: a call followed by a jump to a local label,
     `jal f; slot; j next; nop`, becomes `addiu $ra, $zero, %lo(next); j f;
     slot`, so the callee returns straight to `next`, as at the end of a loop
     body. Returning through the old `$ra` led to `next` as well; the slot

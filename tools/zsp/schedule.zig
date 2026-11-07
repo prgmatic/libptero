@@ -16,10 +16,10 @@ const Item = ir.Item;
 const Items = std.ArrayList(Item);
 
 /// Runs are scheduled in windows of at most this many instructions.
-const max_window = 64;
+const max_window = 96;
 
 /// Partial schedules kept at each step of the search.
-const beam_width = 32;
+const beam_width = 64;
 
 pub fn scheduleItems(allocator: std.mem.Allocator, items: *Items) !void {
     var start: usize = 0;
