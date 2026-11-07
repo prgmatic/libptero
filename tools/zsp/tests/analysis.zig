@@ -65,6 +65,33 @@ test "automatic vector allocation reports exhaustion" {
     try testing.expectEqualStrings("$v01", diagnostic.live[0].reg);
 }
 
+/// The diagnostic of a vector allocation failure in `source`.
+fn vectorFailure(source: []const u8, diagnostic: *codegen.Diagnostic) !void {
+    var parser = try parser_mod.Parser.init(testing.allocator, source);
+    const functions = try parser.parse();
+    defer ast.freeFunctions(testing.allocator, functions);
+    var output = std.Io.Writer.Allocating.init(testing.allocator);
+    defer output.deinit();
+    try testing.expectError(error.OutOfFreeVectorRegisters, codegen.writeWithDiagnostic(testing.allocator, &output.writer, functions, diagnostic));
+}
+
+test "vector exhaustion names registers that calls or pins block" {
+    var source_writer = std.Io.Writer.Allocating.init(testing.allocator);
+    defer source_writer.deinit();
+    const writer = &source_writer.writer;
+    try writer.writeAll("fn clobber() writes($v10) {}\nfn test() {\n  reg($v28) pinned: vec16 = 0;\n");
+    for (0..27) |index| try writer.print("  reg value_{d}: vec16 = 0;\n", .{index});
+    try writer.writeAll("  clobber();\n");
+    for (1..27) |index| try writer.print("  value_0 += value_{d};\n", .{index});
+    try writer.writeAll("  value_0 += pinned;\n}\n");
+    var diagnostic: codegen.Diagnostic = .{};
+    try vectorFailure(source_writer.written(), &diagnostic);
+    try testing.expect(diagnostic.vector);
+    try testing.expectEqual(@as(usize, 1), diagnostic.blocked_count);
+    try testing.expectEqualStrings("$v10", diagnostic.blocked[0].reg);
+    try testing.expectEqual(@import("../explain.zig").Diagnostic.BlockReason.call_writes, diagnostic.blocked[0].reason);
+}
+
 test "automatic values live across calls avoid inferred clobbers" {
     try expectAsm(
         \\fn consume(reg($t0) input: u32) {

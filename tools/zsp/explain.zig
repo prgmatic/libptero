@@ -17,9 +17,35 @@ pub const Diagnostic = struct {
     live: [max_live]LiveValue = undefined,
     live_count: usize = 0,
     live_total: usize = 0,
+    /// Free registers the failed value still could not use, and why.
+    blocked: [32]Blocked = undefined,
+    blocked_count: usize = 0,
+    /// The failure was for a vector value.
+    vector: bool = false,
 
-    pub const max_live = 12;
+    /// Enough for every vector register, so a vector failure lists them all.
+    pub const max_live = 32;
     pub const LiveValue = struct { name: []const u8, reg: []const u8 };
+    pub const BlockReason = enum {
+        /// A call made while the value is live writes the register.
+        call_writes,
+        /// A pinned value that overlaps this one needs the register.
+        pinned,
+
+        fn text(self: BlockReason) []const u8 {
+            return switch (self) {
+                .call_writes => "written by a call",
+                .pinned => "pinned",
+            };
+        }
+    };
+    pub const Blocked = struct { reg: []const u8, reason: BlockReason };
+
+    pub fn recordBlocked(self: *Diagnostic, reg: []const u8, reason: BlockReason) void {
+        if (self.blocked_count == self.blocked.len) return;
+        self.blocked[self.blocked_count] = .{ .reg = reg, .reason = reason };
+        self.blocked_count += 1;
+    }
 
     pub fn recordLive(self: *Diagnostic, name: []const u8, reg: []const u8) void {
         if (self.live_count < max_live) {
@@ -37,6 +63,18 @@ pub const Diagnostic = struct {
             try writer.print("{s} {s} in {s}", .{ if (index == 0) "" else ",", value.name, value.reg });
         }
         if (self.live_total > self.live_count) try writer.print(" (+{d} more)", .{self.live_total - self.live_count});
+        try writer.writeByte('\n');
+        try self.writeBlocked(writer);
+        if (self.vector) try writer.writeAll("  automatic vectors use $v01-$v28; $v00 and $v29-$v31 must be pinned\n");
+    }
+
+    /// `  also unavailable: $v13 (written by a call), $v29 (pinned)`
+    fn writeBlocked(self: *const Diagnostic, writer: *std.Io.Writer) !void {
+        if (self.blocked_count == 0) return;
+        try writer.writeAll("  also unavailable:");
+        for (self.blocked[0..self.blocked_count], 0..) |entry, index| {
+            try writer.print("{s} {s} ({s})", .{ if (index == 0) "" else ",", entry.reg, entry.reason.text() });
+        }
         try writer.writeByte('\n');
     }
 
@@ -61,9 +99,14 @@ test "allocation failures list the values occupying registers" {
     try diagnostic.writeLive(&writer);
     try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
     for (0..Diagnostic.max_live + 2) |_| diagnostic.recordLive("x", "$t0");
-    try diagnostic.writeLive(&writer);
-    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "  14 live values: x in $t0, x in $t0"));
-    try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), " (+2 more)\n"));
+    diagnostic.recordBlocked("$v13", .call_writes);
+    diagnostic.recordBlocked("$v29", .pinned);
+    diagnostic.vector = true;
+    var large: [1024]u8 = undefined;
+    var large_writer = std.Io.Writer.fixed(&large);
+    try diagnostic.writeLive(&large_writer);
+    try std.testing.expect(std.mem.startsWith(u8, large_writer.buffered(), "  34 live values: x in $t0, x in $t0"));
+    try std.testing.expect(std.mem.endsWith(u8, large_writer.buffered(), " (+2 more)\n  also unavailable: $v13 (written by a call), $v29 (pinned)\n  automatic vectors use $v01-$v28; $v00 and $v29-$v31 must be pinned\n"));
 }
 
 pub const ExplainAllocation = struct {

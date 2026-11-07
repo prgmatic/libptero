@@ -18,13 +18,23 @@ pub const ReturnType = struct { name: ?[]const u8 = null, data_type: ast.DataTyp
 /// `T` or `name: T` after an inline function's parameters. Other functions
 /// return nothing; their callers pass values in registers.
 pub fn parseReturnType(self: *Parser, inline_call: bool) !?ReturnType {
-    if (self.current.tag != .ident) return null;
-    const named = namedResultAhead(self);
-    if (!named and parser_mod.parseDataTypeName(self.current.text) == null) return null;
+    if (!atReturnType(self)) return null;
     if (!inline_call) return self.fail(self.current, .return_value_requires_inline);
-    const name: ?[]const u8 = if (named) (try self.expect(.ident)).text else null;
-    if (named) _ = try self.expect(.colon);
+    const name = try parseResultName(self);
     return .{ .name = name, .data_type = try self.parseDataType(try self.expect(.ident)) };
+}
+
+/// A data type name, or `name:` naming the result.
+fn atReturnType(self: *const Parser) bool {
+    if (self.current.tag != .ident) return false;
+    return namedResultAhead(self) or parser_mod.parseDataTypeName(self.current.text) != null;
+}
+
+fn parseResultName(self: *Parser) !?[]const u8 {
+    if (!namedResultAhead(self)) return null;
+    const name = try self.expect(.ident);
+    _ = try self.expect(.colon);
+    return name.text;
 }
 
 fn namedResultAhead(self: *const Parser) bool {

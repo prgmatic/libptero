@@ -274,6 +274,24 @@ pub const FunctionContext = struct {
             const reg = registerName(symbol, vector) orelse continue;
             diagnostic.recordLive(symbol.name, reg);
         }
+        diagnostic.vector = vector;
+        if (vector) self.reportBlockedVectors(diagnostic, name);
+    }
+
+    /// Allocatable vector registers no live value holds that `name` still
+    /// cannot take.
+    fn reportBlockedVectors(self: *const FunctionContext, diagnostic: *@import("explain.zig").Diagnostic, name: []const u8) void {
+        for (registers.alloc_vector_registers) |reg| {
+            if (self.vectorLifetimeConflicts(name, reg)) continue;
+            const reason = self.vectorBlockReason(name, reg) orelse continue;
+            diagnostic.recordBlocked(registers.vectorDollarName(reg), reason);
+        }
+    }
+
+    fn vectorBlockReason(self: *const FunctionContext, name: []const u8, reg: VReg) ?@import("explain.zig").Diagnostic.BlockReason {
+        if (self.functionForbidsVector(reg) or self.lifetimes.vectorRegisterForbidden(name, reg)) return .call_writes;
+        if (self.lifetimes.pinnedOverlaps(name, .{ .vector = reg })) return .pinned;
+        return null;
     }
 
     fn registerName(symbol: Symbol, vector: bool) ?[]const u8 {

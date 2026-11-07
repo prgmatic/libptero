@@ -38,7 +38,7 @@ const error_hints = std.StaticStringMap([]const u8).initComptime(.{
     .{ "AnalysisCapacityExceeded", "function exceeds compiler analysis capacity; split it into smaller functions" },
     .{ "OutOfFreeRegisters", "scalar register allocation failed; shorten overlapping live ranges, split the expression, or pin fewer locals" },
     .{ "OutOfFreeRegistersInExpression", "scalar register allocation failed; shorten overlapping live ranges, split the expression, or pin fewer locals" },
-    .{ "OutOfFreeVectorRegisters", "vector register allocation failed; shorten overlapping vector live ranges or pin fewer vectors" },
+    .{ "OutOfFreeVectorRegisters", "no vector register is free for this value (vector values never spill); end a listed value's live range earlier, reuse one for this temporary, or avoid the unavailable registers" },
     .{ "RegisterAlreadyInUse", "explicit register lifetimes overlap; remove one pin or move a declaration past the other value's last use" },
     .{ "RegisterReadBeforeAssignment", "register may be read before every control-flow path assigns it; initialize it or assign it in every path" },
     .{ "PinnedRegisterOverwrittenByCallArgument", "a live pinned value overlaps a call argument register; move the value, shorten its lifetime, or change the parameter register" },
